@@ -34,6 +34,9 @@ class Position:
     p_posterior: float
     edge: float
     entered_at: str
+    # Token IDs for CLOB orderbook queries (exit VWMP refresh)
+    token_id: str = ""
+    no_token_id: str = ""
     # Attribution (CLAUDE.md mandatory)
     edge_source: str = ""
     discovery_mode: str = ""

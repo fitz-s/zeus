@@ -17,6 +17,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from src.config import settings
 from src.execution.day0_capture import run_day0_capture
+from src.execution.harvester import run_harvester
 from src.execution.monitor import run_monitor
 from src.execution.opening_hunt import run_opening_hunt
 from src.execution.update_reaction import run_update_reaction
@@ -53,10 +54,8 @@ def _day0_capture_cycle():
 def _harvester_cycle():
     """Detect settlements, generate calibration pairs. Spec §8.1."""
     try:
-        logger.info("Harvester cycle starting...")
-        # TODO: Poll Gamma API for recently settled markets
-        # For each settled market: harvest_settlement() → calibration pairs + P&L
-        logger.info("Harvester cycle complete")
+        result = run_harvester()
+        logger.info("Harvester: %s", result)
     except Exception as e:
         logger.error("Harvester failed: %s", e, exc_info=True)
 

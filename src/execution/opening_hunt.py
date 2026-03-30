@@ -244,6 +244,8 @@ def _process_market(
                 entry_price=result.fill_price or edge.entry_price,
                 p_posterior=edge.p_posterior, edge=edge.edge,
                 entered_at=datetime.now(timezone.utc).isoformat(),
+                token_id=tokens["token_id"],
+                no_token_id=tokens["no_token_id"],
                 edge_source="opening_inertia",
                 discovery_mode="opening_hunt",
                 market_hours_open=market["hours_since_open"],

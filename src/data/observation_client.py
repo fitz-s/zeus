@@ -38,11 +38,10 @@ def get_current_observation(city: City) -> Optional[dict]:
         if result is not None:
             return result
 
-    # European cities: Meteostat. Spec §1.3 Priority 3.
-    if city.settlement_unit == "C":
-        result = _fetch_meteostat(city)
-        if result is not None:
-            return result
+    # All cities fallback: Open-Meteo hourly (free, no API key).
+    result = _fetch_openmeteo_hourly(city)
+    if result is not None:
+        return result
 
     logger.warning("No observation source available for %s", city.name)
     return None
@@ -94,47 +93,52 @@ def _fetch_iem_asos(city: City) -> Optional[dict]:
         return None
 
 
-def _fetch_meteostat(city: City) -> Optional[dict]:
-    """Fetch latest observation from Meteostat. Spec §1.3: Priority 3 (Europe)."""
-    try:
-        # Use the free JSON endpoint for latest station data
-        now = datetime.now(timezone.utc)
-        date_str = now.strftime("%Y-%m-%d")
+def _fetch_openmeteo_hourly(city: City) -> Optional[dict]:
+    """Fetch today's hourly observations from Open-Meteo. Free, no API key.
 
+    Uses Open-Meteo's forecast API with past_hours to get recent observations.
+    Works for all cities (US and Europe). Returns °C for European, °F for US.
+    """
+    try:
+        temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
         resp = httpx.get(
-            f"https://meteostat.p.rapidapi.com/stations/hourly",
+            "https://api.open-meteo.com/v1/forecast",
             params={
-                "station": "03772",  # London Heathrow as default
-                "start": date_str,
-                "end": date_str,
-            },
-            headers={
-                "X-RapidAPI-Key": "placeholder",  # TODO: resolve from keychain
+                "latitude": city.lat,
+                "longitude": city.lon,
+                "hourly": "temperature_2m",
+                "temperature_unit": temp_unit,
+                "past_hours": 24,
+                "forecast_hours": 0,
             },
             timeout=15.0,
         )
-
-        if resp.status_code != 200:
-            return None
-
+        resp.raise_for_status()
         data = resp.json()
-        hourly = data.get("data", [])
-        if not hourly:
-            return None
 
-        # Get max temp so far today
-        temps = [h["temp"] for h in hourly if h.get("temp") is not None]
+        hourly = data.get("hourly", {})
+        temps = hourly.get("temperature_2m", [])
+        times = hourly.get("time", [])
+
         if not temps:
             return None
 
+        # Filter out None values
+        valid = [(t, tm) for t, tm in zip(temps, times) if t is not None]
+        if not valid:
+            return None
+
+        temp_values = [v[0] for v in valid]
+        last_time = valid[-1][1]
+
         return {
-            "high_so_far": max(temps),
-            "current_temp": temps[-1],
-            "source": "meteostat",
-            "observation_time": hourly[-1].get("time", ""),
-            "unit": "C",
+            "high_so_far": max(temp_values),
+            "current_temp": temp_values[-1],
+            "source": "openmeteo_hourly",
+            "observation_time": last_time,
+            "unit": city.settlement_unit,
         }
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
-        logger.warning("Meteostat fetch failed for %s: %s", city.name, e)
+        logger.warning("Open-Meteo hourly fetch failed for %s: %s", city.name, e)
         return None

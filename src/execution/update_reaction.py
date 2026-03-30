@@ -74,14 +74,16 @@ def _check_exits(conn, portfolio: PortfolioState) -> int:
     # Iterate over a copy since we may remove positions
     for pos in list(portfolio.positions):
         try:
-            # Refresh current market price via VWMP when possible
+            # Refresh current market price via VWMP using stored token_id
             current_p_market = pos.entry_price  # Default to entry price
-            try:
-                bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(pos.market_id)
-                fresh_vwmp = (bid * ask_sz + ask * bid_sz) / (bid_sz + ask_sz) if (bid_sz + ask_sz) > 0 else pos.entry_price
-                current_p_market = fresh_vwmp if pos.direction == "buy_yes" else (1.0 - fresh_vwmp)
-            except Exception:
-                logger.warning("Could not refresh VWMP for %s — using entry price", pos.trade_id)
+            tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+            if tid:
+                try:
+                    bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
+                    from src.strategy.market_fusion import vwmp
+                    current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
+                except Exception as e:
+                    logger.warning("VWMP refresh failed for %s: %s", pos.trade_id, e)
 
             # TODO: Recompute p_posterior from fresh ENS + calibration
             # For now, use stored posterior (conservative — edge direction preserved)
