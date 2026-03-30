@@ -145,6 +145,19 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     conn.close()
 
     summary["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    # 5. Observability: status summary + control plane
+    try:
+        from src.observability.status_summary import write_status
+        write_status(summary)
+    except Exception as e:
+        logger.warning("Status summary write failed: %s", e)
+    try:
+        from src.control.control_plane import process_commands
+        process_commands()
+    except Exception as e:
+        logger.warning("Control plane processing failed: %s", e)
+
     logger.info("Cycle %s: %d monitors, %d exits, %d candidates, %d trades",
                 mode.value, summary["monitors"], summary["exits"],
                 summary["candidates"], summary["trades"])
