@@ -186,6 +186,17 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
         );
 
+        -- Decision chain: every cycle's artifacts (Blueprint v2 §3)
+        CREATE TABLE IF NOT EXISTS decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
+
         -- ETL tables: Rainstorm data validated and imported
 
         -- Ladder backfill: 5 models × 7 leads per settlement
