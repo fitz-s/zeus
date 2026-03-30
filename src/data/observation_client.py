@@ -1,11 +1,9 @@
 """Real-time observation client for Day0 signal.
 
 Spec §1.3 priority:
-  Priority 1: WU API (if available)
-  Priority 2: IEM ASOS real-time + calibrated offset
-  Priority 3: Meteostat hourly (Europe)
-
-ASOS→WU offset calibration data not migrated yet — using 0.0 offset with warning.
+  Priority 1: WU API (settlement authority)
+  Priority 2: IEM ASOS real-time (US cities)
+  Priority 3: Open-Meteo hourly (all cities, free fallback)
 """
 
 import logging
@@ -18,11 +16,13 @@ from src.config import City
 
 logger = logging.getLogger(__name__)
 
+# WU API (settlement authority — spec §1.3 Priority 1)
+# Public weather.com v3 API key (not a secret)
+WU_API_KEY = "6532d6454b8aa370768e63d6ba5a832e"
+WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
+
 # IEM ASOS API (free, no key)
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
-
-# Meteostat API (free tier with key, or use RapidAPI)
-METEOSTAT_BASE = "https://meteostat.p.rapidapi.com"
 
 
 def get_current_observation(city: City) -> Optional[dict]:
@@ -32,19 +32,65 @@ def get_current_observation(city: City) -> Optional[dict]:
               "observation_time": str, "unit": str}
     Returns None if no observation available.
     """
-    # IEM ASOS only for US cities (°F stations, ICAO code). Spec §1.3 Priority 2.
+    # Priority 1: WU API (settlement authority)
+    result = _fetch_wu_observation(city)
+    if result is not None:
+        return result
+
+    # Priority 2: IEM ASOS for US cities
     if city.wu_station and city.settlement_unit == "F":
         result = _fetch_iem_asos(city)
         if result is not None:
             return result
 
-    # All cities fallback: Open-Meteo hourly (free, no API key).
+    # Priority 3: Open-Meteo hourly (free, all cities)
     result = _fetch_openmeteo_hourly(city)
     if result is not None:
         return result
 
     logger.warning("No observation source available for %s", city.name)
     return None
+
+
+def _fetch_wu_observation(city: City) -> Optional[dict]:
+    """Fetch current observation from Weather Underground. Spec §1.3: Priority 1.
+
+    WU is the settlement authority — this is the temperature Polymarket uses.
+    """
+    try:
+        url = WU_OBS_URL.format(lat=city.lat, lon=city.lon)
+        unit = "e" if city.settlement_unit == "F" else "m"  # 'e' = imperial, 'm' = metric
+
+        resp = httpx.get(url, params={
+            "apiKey": WU_API_KEY,
+            "units": unit,
+            "hours": 24,
+        }, timeout=15.0)
+
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        observations = data.get("observations", [])
+        if not observations:
+            return None
+
+        # Get current and max temperature
+        temps = [o.get("temp") for o in observations if o.get("temp") is not None]
+        if not temps:
+            return None
+
+        return {
+            "high_so_far": float(max(temps)),
+            "current_temp": float(temps[-1]),
+            "source": "wu_api",
+            "observation_time": observations[-1].get("valid_time_gmt", ""),
+            "unit": city.settlement_unit,
+        }
+
+    except (httpx.HTTPError, KeyError, ValueError) as e:
+        logger.debug("WU observation fetch failed for %s: %s", city.name, e)
+        return None
 
 
 def _fetch_iem_asos(city: City) -> Optional[dict]:
