@@ -11,6 +11,7 @@ Opening Hunt targets the 6-24h window after market opening where:
 - Edge from ENS vs stale market prices is largest
 """
 
+import json
 import logging
 from datetime import date, datetime, timezone
 
@@ -134,6 +135,13 @@ def _process_market(
     np.random.seed(None)  # Fresh seed for live trading
     p_raw = ens.p_raw_vector(bins)
 
+    # CRITICAL: Store every ENS fetch — irreversible time window.
+    # Every day we don't store = calibration pairs we'll never recover.
+    lead_days_float = float((target_d - date.today()).days)
+    _store_ensemble_snapshot(
+        conn, city, target_date, ens, ens_result, p_raw, lead_days_float
+    )
+
     # Calibration
     cal, cal_level = get_calibrator(conn, city, target_date)
     if cal is not None:
@@ -250,3 +258,42 @@ def _process_market(
             trades += 1
 
     return trades
+
+
+def _store_ensemble_snapshot(
+    conn, city, target_date: str, ens, ens_result: dict,
+    p_raw: np.ndarray, lead_days: float,
+) -> None:
+    """Store ENS fetch to ensemble_snapshots. CRITICAL: every fetch must be stored.
+
+    4 mandatory timestamps per CLAUDE.md:
+    - issue_time: when ENS model run started
+    - valid_time: forecast target time
+    - available_at: when data became available to Zeus
+    - fetch_time: when Zeus actually fetched from API
+    """
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO ensemble_snapshots
+            (city, target_date, issue_time, valid_time, available_at, fetch_time,
+             lead_hours, members_json, p_raw_json, spread, is_bimodal,
+             model_version, data_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city.name, target_date,
+            ens_result["issue_time"].isoformat(),
+            target_date + "T12:00:00Z",
+            ens_result["fetch_time"].isoformat(),  # available_at = fetch_time for live
+            ens_result["fetch_time"].isoformat(),
+            lead_days * 24.0,
+            json.dumps(ens.member_maxes.tolist()),
+            json.dumps(p_raw.tolist()),
+            ens.spread(),
+            int(ens.is_bimodal()),
+            ens_result["model"],
+            "live_v1",
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.warning("Failed to store ENS snapshot for %s %s: %s",
+                       city.name, target_date, e)
