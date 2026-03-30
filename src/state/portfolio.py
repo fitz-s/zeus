@@ -248,7 +248,18 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
 
 
 def add_position(state: PortfolioState, pos: Position) -> None:
-    """Add a position to the portfolio."""
+    """Add a position. Dedup: merge if same token+direction already open."""
+    tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+    for existing in state.positions:
+        existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
+        if tid and existing_tid == tid and existing.direction == pos.direction:
+            # Merge: accumulate shares and cost
+            logger.warning("DEDUP: merging duplicate %s %s into existing %s",
+                           pos.direction, pos.bin_label, existing.trade_id)
+            existing.size_usd += pos.size_usd
+            existing.shares += pos.shares
+            existing.cost_basis_usd += pos.cost_basis_usd
+            return
     state.positions.append(pos)
 
 
@@ -319,17 +330,20 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "token_id": pos.token_id, "no_token_id": pos.no_token_id,
         "exit_reason": pos.exit_reason,
         "exited_at": pos.last_exit_at,
+        "pnl": pos.pnl,
     })
     if len(state.recent_exits) > 50:
         state.recent_exits = state.recent_exits[-50:]
 
 
 def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
-    """Total realized P&L, optionally excluding admin exits. L2."""
+    """Total realized P&L from recent exits. L2: excludes admin exits."""
     total = 0.0
     for ex in state.recent_exits:
-        # recent_exits doesn't have pnl yet — use chronicle for full P&L
-        pass
+        pnl = ex.get("pnl", 0.0)
+        if exclude_admin and ex.get("exit_reason") in ADMIN_EXITS:
+            continue
+        total += pnl
     return total
 
 

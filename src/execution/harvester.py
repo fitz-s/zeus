@@ -255,12 +255,15 @@ def _settle_positions(
         if pos.city != city or pos.target_date != target_date:
             continue
 
-        # Determine P&L
+        # Determine P&L — correct formula: shares × exit_price - cost_basis
+        # Rainstorm comparison found the old formula underestimated winning P&L
         won = pos.bin_label == winning_label
+        shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0
         if pos.direction == "buy_yes":
-            pnl = (1.0 - pos.entry_price) * pos.size_usd if won else -pos.size_usd
+            exit_price = 1.0 if won else 0.0
         else:
-            pnl = (1.0 - pos.entry_price) * pos.size_usd if not won else -pos.size_usd
+            exit_price = 1.0 if not won else 0.0
+        pnl = shares * exit_price - pos.size_usd
 
         log_event(conn, "SETTLEMENT", pos.trade_id, {
             "city": city, "target_date": target_date,
