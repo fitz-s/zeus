@@ -1,6 +1,6 @@
 """Shared types used across Zeus modules."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -26,3 +26,23 @@ class Bin:
     @property
     def is_shoulder(self) -> bool:
         return self.is_open_low or self.is_open_high
+
+
+@dataclass
+class BinEdge:
+    """A detected trading edge on a specific bin. Spec §4.1.
+
+    Not frozen — ev_per_dollar is set by rank_edges() after construction.
+    """
+    bin: Bin
+    direction: str  # "buy_yes" or "buy_no"
+    edge: float
+    ci_lower: float
+    ci_upper: float
+    p_model: float
+    p_market: float
+    p_posterior: float
+    entry_price: float
+    p_value: float
+    vwmp: float
+    ev_per_dollar: float = 0.0
