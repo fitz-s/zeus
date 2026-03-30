@@ -1,0 +1,393 @@
+{
+  "total": 1385,
+  "match": 427,
+  "off_by_one": 394,
+  "mismatch": 564,
+  "mismatch_rate": 0.4072,
+  "per_city": {
+    "Los Angeles": {
+      "match": 1,
+      "off1": 3,
+      "mismatch": 4,
+      "total": 8
+    },
+    "London": {
+      "match": 58,
+      "off1": 47,
+      "mismatch": 324,
+      "total": 429
+    },
+    "NYC": {
+      "match": 132,
+      "off1": 138,
+      "mismatch": 150,
+      "total": 420
+    },
+    "Chicago": {
+      "match": 27,
+      "off1": 32,
+      "mismatch": 9,
+      "total": 68
+    },
+    "Dallas": {
+      "match": 49,
+      "off1": 52,
+      "mismatch": 14,
+      "total": 115
+    },
+    "Miami": {
+      "match": 36,
+      "off1": 31,
+      "mismatch": 1,
+      "total": 68
+    },
+    "Atlanta": {
+      "match": 57,
+      "off1": 33,
+      "mismatch": 24,
+      "total": 114
+    },
+    "Seattle": {
+      "match": 53,
+      "off1": 39,
+      "mismatch": 21,
+      "total": 113
+    },
+    "Paris": {
+      "match": 11,
+      "off1": 19,
+      "mismatch": 14,
+      "total": 44
+    },
+    "San Francisco": {
+      "match": 3,
+      "off1": 0,
+      "mismatch": 3,
+      "total": 6
+    }
+  },
+  "off_by_one_details": [
+    {
+      "city": "NYC",
+      "date": "2025-01-23",
+      "winning_bin": "28-29",
+      "actual_temp": 31.3,
+      "actual_int": 31,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-01-28",
+      "winning_bin": "41-42",
+      "actual_temp": 43.2,
+      "actual_int": 43,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-03",
+      "winning_bin": "47-48",
+      "actual_temp": 48.7,
+      "actual_int": 49,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-04",
+      "winning_bin": "49-999",
+      "actual_temp": 47.8,
+      "actual_int": 48,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-06",
+      "winning_bin": "40-41",
+      "actual_temp": 38.3,
+      "actual_int": 38,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-09",
+      "winning_bin": "36-37",
+      "actual_temp": 35.2,
+      "actual_int": 35,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-12",
+      "winning_bin": "36-37",
+      "actual_temp": 34.7,
+      "actual_int": 35,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-13",
+      "winning_bin": "47-999",
+      "actual_temp": 46.0,
+      "actual_int": 46,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-19",
+      "winning_bin": "30-31",
+      "actual_temp": 32.0,
+      "actual_int": 32,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-20",
+      "winning_bin": "29-30",
+      "actual_temp": 30.6,
+      "actual_int": 31,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-23",
+      "winning_bin": "47-48",
+      "actual_temp": 48.9,
+      "actual_int": 49,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-24",
+      "winning_bin": "48-49",
+      "actual_temp": 49.5,
+      "actual_int": 50,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-25",
+      "winning_bin": "55-56",
+      "actual_temp": 58.1,
+      "actual_int": 58,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-26",
+      "winning_bin": "56-57",
+      "actual_temp": 58.3,
+      "actual_int": 58,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-27",
+      "winning_bin": "55-56",
+      "actual_temp": 54.0,
+      "actual_int": 54,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-28",
+      "winning_bin": "52-53",
+      "actual_temp": 54.1,
+      "actual_int": 54,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-03-03",
+      "winning_bin": "40-41",
+      "actual_temp": 42.3,
+      "actual_int": 42,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-03-04",
+      "winning_bin": "51-52",
+      "actual_temp": 50.0,
+      "actual_int": 50,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-03-06",
+      "winning_bin": "53-54",
+      "actual_temp": 55.4,
+      "actual_int": 55,
+      "unit": "F"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-03-12",
+      "winning_bin": "54-55",
+      "actual_temp": 55.6,
+      "actual_int": 56,
+      "unit": "F"
+    }
+  ],
+  "mismatch_details": [
+    {
+      "city": "Los Angeles",
+      "date": "2025-01-12",
+      "winning_bin": "40-50",
+      "actual_temp": 70.5,
+      "actual_int": 70,
+      "unit": "F"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-22",
+      "winning_bin": "40-41",
+      "actual_temp": 4.7,
+      "actual_int": 5,
+      "unit": "C"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-01-22",
+      "winning_bin": "21-22",
+      "actual_temp": 26.1,
+      "actual_int": 26,
+      "unit": "F"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-23",
+      "winning_bin": "48-49",
+      "actual_temp": 8.4,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-24",
+      "winning_bin": "51-52",
+      "actual_temp": 10.8,
+      "actual_int": 11,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-25",
+      "winning_bin": "47-48",
+      "actual_temp": 8.1,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-28",
+      "winning_bin": "50-51",
+      "actual_temp": 9.6,
+      "actual_int": 10,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-29",
+      "winning_bin": "48-49",
+      "actual_temp": 8.4,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-30",
+      "winning_bin": "46-47",
+      "actual_temp": 8.2,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-01-31",
+      "winning_bin": "44-45",
+      "actual_temp": 8.5,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-01",
+      "winning_bin": "43-44",
+      "actual_temp": 5.9,
+      "actual_int": 6,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-02",
+      "winning_bin": "45-46",
+      "actual_temp": 8.2,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-03",
+      "winning_bin": "48-49",
+      "actual_temp": 8.4,
+      "actual_int": 8,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-05",
+      "winning_bin": "49-50",
+      "actual_temp": 10.0,
+      "actual_int": 10,
+      "unit": "C"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-05",
+      "winning_bin": "36-37",
+      "actual_temp": 41.0,
+      "actual_int": 41,
+      "unit": "F"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-06",
+      "winning_bin": "45-46",
+      "actual_temp": 8.6,
+      "actual_int": 9,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-07",
+      "winning_bin": "40-41",
+      "actual_temp": 4.4,
+      "actual_int": 4,
+      "unit": "C"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-08",
+      "winning_bin": "42-43",
+      "actual_temp": 6.0,
+      "actual_int": 6,
+      "unit": "C"
+    },
+    {
+      "city": "NYC",
+      "date": "2025-02-08",
+      "winning_bin": "34-35",
+      "actual_temp": 37.8,
+      "actual_int": 38,
+      "unit": "F"
+    },
+    {
+      "city": "London",
+      "date": "2025-02-09",
+      "winning_bin": "42-43",
+      "actual_temp": 6.5,
+      "actual_int": 6,
+      "unit": "C"
+    }
+  ]
+}
