@@ -90,3 +90,40 @@ python -m pytest tests/test_X.py   # single file
 - Tests in `tests/` mirror `src/` structure
 - Run from project root with venv activated
 - Use real data fixtures where possible, mock only external API calls
+
+---
+
+## Claude Behavioral Rules
+
+### MUST DO
+
+1. **Spec is law.** Every implementation decision must trace to `ZEUS_SPEC.md` or the four research documents. If you can't cite which section justifies a choice, stop and ask.
+2. **Test before commit.** Run `python -m pytest tests/` and confirm green before any commit. No exceptions.
+3. **Atomic state writes.** All file-based state (positions, trades, calibration) must use write-tmp-then-replace. Never write directly to the target file.
+4. **VWMP, not mid-price.** Every place that references "market price" must use volume-weighted micro-price. If you see `(bid + ask) / 2` anywhere, fix it immediately.
+5. **WU integer rounding in the signal chain.** Every probability calculation must simulate the full settlement chain including integer rounding. `np.round().astype(int)` is mandatory before bin assignment.
+6. **Double-bootstrap for edge CI.** Edge confidence intervals must propagate all three σ sources (ensemble, Platt parameters, instrument noise). Single-layer bootstrap is a bug.
+7. **Commit often, commit small.** Each logical unit of work gets its own commit. Never bundle unrelated changes.
+8. **Read before writing.** Always read a file before modifying it. Understand the existing code before changing it.
+9. **Inherit data, not code.** Zeus inherits Rainstorm's *data assets* (SQLite tables). Never copy Rainstorm code — write fresh implementations from the spec.
+10. **Log decisions.** When making a non-obvious architectural choice, add a brief code comment citing the spec section (e.g., `# ZEUS_SPEC §3.1: Platt with strong regularization when n < 50`).
+
+### MUST NOT
+
+1. **Never use mid-price.** Not for edge, not for sizing, not for display. VWMP only.
+2. **Never blend GFS into probability.** GFS is cross-check only. If KL > 0.15 → skip. Never average ECMWF and GFS vectors.
+3. **Never re-evaluate entry decisions.** Once a position is ENTERED, only exit triggers apply. Don't add "should we still hold?" logic to the monitor loop.
+4. **Never use market orders.** Limit orders only. No exceptions.
+5. **Never skip maturity gates.** If a calibration bucket has n < 15, use P_raw with 3× threshold. Don't "just use Platt anyway."
+6. **Never store secrets in code.** API keys, wallet keys, and credentials go through macOS Keychain (`bin/keychain_resolver.py`). Never hardcode, never commit.
+7. **Never expose UTC to users.** All user-facing times are Chicago local or ET. Internal storage can use UTC but display must not.
+8. **Never add features not in the spec.** If the spec doesn't describe it, don't build it. Ask first.
+9. **Never silently swallow errors in the trading path.** Signal generation, calibration, edge calculation, and order execution must fail loud. Use exceptions, not silent fallbacks.
+10. **Never commit with failing tests.** If tests fail, fix them or fix the code. Don't skip tests, don't mark them xfail to work around failures.
+
+### WHEN UNCERTAIN
+
+- If the spec is ambiguous on a point, **ask before implementing**. Don't guess.
+- If two spec sections appear to conflict, cite both and ask for resolution.
+- If a Rainstorm pattern seems relevant but isn't in the Zeus spec, it's intentionally excluded. Don't port it.
+- If performance and correctness conflict, choose correctness. Optimize later with evidence.
