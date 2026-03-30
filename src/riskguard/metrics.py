@@ -1,6 +1,10 @@
 """RiskGuard metrics: Brier, directional accuracy, win rate. Spec §7.2."""
 
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from src.riskguard.risk_level import RiskLevel
 

@@ -92,14 +92,43 @@ class EnsembleSignal:
     ) -> np.ndarray:
         """Select hourly indices belonging to target_date in the city's timezone.
 
-        When the caller passes pre-sliced hourly data for a single day,
-        this returns all available indices. For multi-day forecasts,
-        the caller should slice to the target day before constructing
-        EnsembleSignal.
-
-        Returns indices [0, min(24, n_hours)).
+        P0-1 FIX: Open-Meteo returns hourly data from midnight UTC on the
+        first forecast day. For T+3 targets, hours 0-23 are day 0 — WRONG.
+        We must select the 24-hour window that corresponds to target_date
+        in the city's local timezone.
         """
-        return np.arange(min(24, n_hours))
+        from datetime import datetime, timedelta
+
+        # Get UTC offset for the target date (midday avoids DST edge)
+        midday = datetime(target_date.year, target_date.month, target_date.day,
+                          12, 0, 0, tzinfo=tz)
+        offset_hours = midday.utcoffset().total_seconds() / 3600.0
+
+        # Open-Meteo starts at midnight UTC of the issue date (today or close to it)
+        # The target_date in local time spans from (midnight_local - offset) in UTC hours
+        # We approximate: local midnight = UTC hour (-offset)
+        # Local 23:59 = UTC hour (23 - offset)
+
+        # Estimate which forecast hour index corresponds to target_date midnight local
+        # If issue date = today, target_date = today + lead_days
+        today = date.today()
+        lead_days = (target_date - today).days
+        if lead_days < 0:
+            lead_days = 0
+
+        # Start hour in the forecast array for target_date local midnight
+        start_h = int(lead_days * 24 - offset_hours)
+        end_h = start_h + 24
+
+        # Clamp to valid range
+        start_h = max(0, start_h)
+        end_h = min(n_hours, end_h)
+
+        if end_h <= start_h:
+            # Fallback: if calculation fails, use last 24 hours available
+            return np.arange(max(0, n_hours - 24), n_hours)
+
+        return np.arange(start_h, end_h)
 
     def p_raw_vector(
         self, bins: list[Bin], n_mc: int = DEFAULT_N_MC

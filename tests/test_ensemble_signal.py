@@ -69,11 +69,16 @@ class TestEnsembleSignalInit:
         assert len(ens.member_maxes) == 51
 
     def test_member_maxes_correct(self):
-        """Each member's max across hours should be extracted."""
-        members = np.random.default_rng(42).uniform(30, 50, (51, 24))
-        ens = EnsembleSignal(members, NYC, date(2026, 1, 15))
-        # member_maxes should be the max of first 24 hours for each member
-        expected = members[:, :24].max(axis=1)
+        """Each member's max across the timezone-selected hours should be extracted."""
+        from zoneinfo import ZoneInfo
+        target_date = date(2026, 1, 15)
+        # Use 120 hours so the timezone-offset window fits regardless of current date
+        members = np.random.default_rng(42).uniform(30, 50, (51, 120))
+        ens = EnsembleSignal(members, NYC, target_date)
+        # Compute expected using the same hour-selection logic as the implementation
+        tz = ZoneInfo(NYC.timezone)
+        tz_hours = EnsembleSignal._select_hours_for_date(target_date, tz, 120)
+        expected = members[:, tz_hours].max(axis=1)
         np.testing.assert_array_almost_equal(ens.member_maxes, expected)
 
 

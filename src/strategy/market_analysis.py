@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
-from src.signal.ensemble_signal import SIGMA_INSTRUMENT
+from src.signal.ensemble_signal import sigma_instrument
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
 
@@ -36,6 +36,7 @@ class MarketAnalysis:
         member_maxes: np.ndarray,
         calibrator: Optional[ExtendedPlattCalibrator] = None,
         lead_days: float = 3.0,
+        unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
     ):
         self.bins = bins
         self.p_raw = p_raw
@@ -47,6 +48,8 @@ class MarketAnalysis:
         self._calibrator = calibrator
         self._alpha = alpha
         self._lead_days = lead_days
+        self._unit = unit
+        self._sigma = sigma_instrument(unit).value  # P0-9: use city-appropriate noise
 
     def find_edges(
         self, n_bootstrap: int = DEFAULT_EDGE_BOOTSTRAP
@@ -133,7 +136,7 @@ class MarketAnalysis:
         for i in range(n):
             # Layer 1: resample ENS members + instrument noise
             sample = rng.choice(members, size=n_members, replace=True)
-            noised = sample + rng.normal(0, SIGMA_INSTRUMENT, n_members)
+            noised = sample + rng.normal(0, self._sigma, n_members)
             measured = np.round(noised).astype(int)
 
             # Compute p_raw for this bin from resampled members
@@ -180,7 +183,7 @@ class MarketAnalysis:
 
         for i in range(n):
             sample = rng.choice(members, size=n_members, replace=True)
-            noised = sample + rng.normal(0, SIGMA_INSTRUMENT, n_members)
+            noised = sample + rng.normal(0, self._sigma, n_members)
             measured = np.round(noised).astype(int)
 
             p_raw_boot = self._bin_probability(measured, b)

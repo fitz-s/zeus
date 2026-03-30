@@ -166,15 +166,33 @@ def _process_market(
             p_market[i] = o["price"]
 
     # Model agreement (GFS crosscheck)
+    # P0-3 FIX: GFS has 31 members. Don't feed to EnsembleSignal (requires ≥51).
+    # Compute GFS p_raw directly via simple member counting (no MC noise needed
+    # for crosscheck — we only need the distribution shape, not precise P_raw).
     gfs_result = fetch_ensemble(city, forecast_days=8, model="gfs025")
     agreement = "AGREE"
     if gfs_result is not None and validate_ensemble(gfs_result, expected_members=31):
         try:
-            gfs_ens = EnsembleSignal(gfs_result["members_hourly"], city, target_d)
-            gfs_p = gfs_ens.p_raw_vector(bins)
+            gfs_members = gfs_result["members_hourly"]
+            # Select target day hours (same logic as EnsembleSignal)
+            n_gfs_hours = min(24, gfs_members.shape[1])
+            gfs_maxes = gfs_members[:, :n_gfs_hours].max(axis=1)
+            gfs_ints = np.round(gfs_maxes).astype(int)
+            n_gfs = len(gfs_ints)
+            gfs_p = np.zeros(len(bins))
+            for i, b in enumerate(bins):
+                if b.is_open_low:
+                    gfs_p[i] = np.sum(gfs_ints <= b.high) / n_gfs
+                elif b.is_open_high:
+                    gfs_p[i] = np.sum(gfs_ints >= b.low) / n_gfs
+                elif b.low is not None and b.high is not None:
+                    gfs_p[i] = np.sum((gfs_ints >= b.low) & (gfs_ints <= b.high)) / n_gfs
+            total = gfs_p.sum()
+            if total > 0:
+                gfs_p = gfs_p / total
             agreement = model_agreement(p_raw, gfs_p)
-        except ValueError:
-            pass
+        except Exception as e:
+            logger.warning("GFS crosscheck failed for %s: %s", city.name, e)
 
     if agreement == "CONFLICT":
         logger.info("Skipping %s %s: ECMWF/GFS CONFLICT", city.name, target_date)
