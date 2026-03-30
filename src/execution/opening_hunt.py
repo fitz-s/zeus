@@ -313,7 +313,7 @@ def _store_ensemble_snapshot(
             lead_days * 24.0,
             json.dumps(ens.member_maxes.tolist()),
             json.dumps(p_raw.tolist()),
-            ens.spread(),
+            ens.spread_float(),  # DB stores bare float
             int(ens.is_bimodal()),
             ens_result["model"],
             "live_v1",

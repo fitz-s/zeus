@@ -134,12 +134,16 @@ class TestSpread:
     def test_zero_spread_for_constant(self):
         members = _make_constant_members(40.0)
         ens = EnsembleSignal(members, NYC, date(2026, 1, 15))
-        assert ens.spread() == pytest.approx(0.0)
+        spread = ens.spread()
+        from src.types.temperature import TemperatureDelta
+        assert isinstance(spread, TemperatureDelta)
+        assert spread.value == pytest.approx(0.0)
+        assert spread.unit == "F"
 
     def test_positive_spread_for_varied(self):
         members = np.random.default_rng(42).uniform(30, 50, (51, 24))
         ens = EnsembleSignal(members, NYC, date(2026, 1, 15))
-        assert ens.spread() > 0
+        assert ens.spread().value > 0
 
 
 class TestBimodal:
