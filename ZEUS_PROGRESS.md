@@ -66,9 +66,31 @@ Almost. Change `mode: "paper"` to `mode: "live"` in settings.json. But before th
 | Script files | 12 |
 | Commits | 33 |
 
-### Opus Review Results
+### Opus Independent Review Results — Score: 3/10
 
-[Pending — Opus subagent running]
+**Critical findings (will lose money):**
+1. Position missing Blueprint v2 fields: unit, chain_state, decision_snapshot_id, cal_std, exit_strategy, calibration_version
+2. Dual execution paths: CycleRunner AND old opening_hunt/update_reaction both exist — state desync risk
+3. Exit recomputes without MC noise (entry uses 5000 MC), creating phantom edge reversals
+4. Day0 capture is a stub — safest profit strategy (settlement capture) is offline
+5. Chain reconciliation quarantine creates positions with `direction="buy_yes"` and `city="UNKNOWN"` — violates identity invariant
+
+**High findings (operational confusion):**
+6. Decision Chain defined but `store_artifact()` never called — NoTradeCase not persisted
+7. Strategy classification bug: Python truthiness ternary (`d.edge.ev_per_dollar > 0 and "shoulder_sell" or "center_buy"`) always returns "shoulder_sell"
+8. Day0Signal uses legacy SIGMA_INSTRUMENT = 0.5 (bare float, not typed)
+9. Status summary hardcodes risk_level = "GREEN" instead of reading RiskGuard
+10. Control plane commands write to dict nobody reads
+
+**What Opus praised:**
+- Math layer (EnsembleSignal, Platt, MarketAnalysis, FDR, Kelly, model agreement) is solid
+- Temperature/TemperatureDelta types well-designed
+- Anti-churn 8 layers well-structured and tested
+- Config strict loader correct
+- Atomic JSON writes crash-safe
+- RiskGuard fail-closed design correct
+
+**Verdict:** "The lifecycle layer is half-migrated from v1 to Blueprint v2. The CycleRunner exists but coexists with old modules. Position object exists but lacks blueprint-required fields. Exit path exists but lacks entry parity. This is exactly the failure pattern the blueprint was written to prevent."
 
 ### Remaining Before Phase D Live
 
