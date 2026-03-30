@@ -93,6 +93,43 @@ vwmp(best_bid, best_ask, bid_size, ask_size) → float
 
 ---
 
+## Attribution Fields (MANDATORY on every trade_decision)
+
+```sql
+edge_source TEXT,         -- 'favorite_longshot' | 'opening_inertia' | 'boundary' | 'vig_exploit' | 'mixed'
+bin_type TEXT,             -- 'shoulder_low' | 'shoulder_high' | 'center' | 'adjacent_boundary'
+discovery_mode TEXT,       -- 'opening_hunt' | 'update_reaction' | 'day0_capture'
+market_hours_open REAL,    -- hours since market opened when entry placed
+fill_quality REAL,         -- (execution_price - vwmp) / vwmp — positive = worse than expected
+```
+
+These are NOT optional metadata. They are the only way to know WHY the system makes or loses money. The harvester aggregates P&L by these dimensions weekly to answer:
+- Which edge source is actually profitable?
+- Which direction (buy_yes vs buy_no) contributes more?
+- Is Opening Hunt better than Update Reaction?
+- Which cities are losing money?
+
+---
+
+## Failure Taxonomy
+
+Every system anomaly maps to exactly one failure type with a pre-defined response:
+
+| Failure Type | Trigger | Response |
+|-------------|---------|----------|
+| `DATA_STALE` | ENS data > 6h old | YELLOW: skip new entries this cycle |
+| `DATA_CORRUPT` | Members ≠ 51 or temp outside physical range | Skip market entirely |
+| `MODEL_DRIFT` | Hosmer-Lemeshow χ² > 7.81 on last 50 pairs | YELLOW + force Platt refit |
+| `MARKET_STRUCTURE` | Vig > 1.08 or < 0.92 sustained | Flag for vig arbitrage or skip |
+| `EXECUTION_DECAY` | Fill rate < 30% for 7 consecutive days | Alert: adjust limit offset |
+| `EDGE_COMPRESSION` | Same edge type's avg magnitude shrinks 50% over 30 days | Alert: this edge may be dying |
+| `REGIME_CHANGE` | ENSO state transition or SSW detected | YELLOW: raise edge threshold 2× |
+| `COMPETITION` | Shoulder bin avg overpricing ratio drops from 3× to < 1.5× | Alert: market efficiency increasing |
+
+RiskGuard checks for these. Each maps to GREEN/YELLOW/ORANGE/RED per spec §7.3.
+
+---
+
 ## Critical Rules
 
 ### Data Integrity (ABSOLUTE)

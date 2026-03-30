@@ -1,0 +1,104 @@
+{
+  "cities": [
+    {
+      "name": "NYC",
+      "lat": 40.7128,
+      "lon": -74.0060,
+      "timezone": "America/New_York",
+      "cluster": "US-Northeast",
+      "settlement_unit": "F",
+      "iem_station": "NYC",
+      "wu_station": "KNYNEWYO1170"
+    },
+    {
+      "name": "Chicago",
+      "lat": 41.8781,
+      "lon": -87.6298,
+      "timezone": "America/Chicago",
+      "cluster": "US-Midwest",
+      "settlement_unit": "F",
+      "iem_station": "ORD",
+      "wu_station": "KILCHICA1180"
+    },
+    {
+      "name": "Atlanta",
+      "lat": 33.7490,
+      "lon": -84.3880,
+      "timezone": "America/New_York",
+      "cluster": "US-Southeast",
+      "settlement_unit": "F",
+      "iem_station": "ATL",
+      "wu_station": "KGAATLAN1253"
+    },
+    {
+      "name": "Miami",
+      "lat": 25.7617,
+      "lon": -80.1918,
+      "timezone": "America/New_York",
+      "cluster": "US-Southeast",
+      "settlement_unit": "F",
+      "iem_station": "MIA",
+      "wu_station": "KFLMIAMI1180"
+    },
+    {
+      "name": "Dallas",
+      "lat": 32.7767,
+      "lon": -96.7970,
+      "timezone": "America/Chicago",
+      "cluster": "US-SouthCentral",
+      "settlement_unit": "F",
+      "iem_station": "DFW",
+      "wu_station": "KTXDALLA1180"
+    },
+    {
+      "name": "Seattle",
+      "lat": 47.6062,
+      "lon": -122.3321,
+      "timezone": "America/Los_Angeles",
+      "cluster": "US-Pacific",
+      "settlement_unit": "F",
+      "iem_station": "SEA",
+      "wu_station": "KWASEATT1180"
+    },
+    {
+      "name": "Los Angeles",
+      "lat": 34.0522,
+      "lon": -118.2437,
+      "timezone": "America/Los_Angeles",
+      "cluster": "US-Pacific",
+      "settlement_unit": "F",
+      "iem_station": "LAX",
+      "wu_station": "KCALOSAN1180"
+    },
+    {
+      "name": "San Francisco",
+      "lat": 37.7749,
+      "lon": -122.4194,
+      "timezone": "America/Los_Angeles",
+      "cluster": "US-Pacific",
+      "settlement_unit": "F",
+      "iem_station": "SFO",
+      "wu_station": "KCASANFR1180"
+    },
+    {
+      "name": "London",
+      "lat": 51.5074,
+      "lon": -0.1278,
+      "timezone": "Europe/London",
+      "cluster": "Europe",
+      "settlement_unit": "C",
+      "iem_station": null,
+      "wu_station": "ILONDO1180"
+    },
+    {
+      "name": "Paris",
+      "lat": 48.8566,
+      "lon": 2.3522,
+      "timezone": "Europe/Paris",
+      "cluster": "Europe",
+      "settlement_unit": "C",
+      "iem_station": null,
+      "wu_station": "ILEPARI1180"
+    }
+  ]
+}
