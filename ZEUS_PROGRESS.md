@@ -68,7 +68,27 @@ Initial Opus score was 3/10. All 5 critical and 5 high findings have been addres
 | Total lines | ~5,500 |
 | Test files | 19 |
 | Tests | 192 (all passing) |
-| Commits | 37 (all pushed) |
+| Commits | 39 (all pushed) |
+
+### Rainstorm Comparison (Step 5)
+
+Opus compared Zeus against Rainstorm's battle-tested lifecycle modules.
+
+**Bugs found and FIXED:**
+- Harvester P&L formula underestimated wins (was `(1-entry)*size`, now `shares*exit - cost`)
+- Position dedup on open (same token+direction merges, prevents ghost accumulation)
+- `realized_pnl()` no longer a stub — sums from recent_exits excluding admin
+
+**Remaining Rainstorm gaps (operational, not blocking for paper):**
+- No EV comparison framework in exit (Rainstorm has sell-vs-hold with confidence modulation)
+- No intraday observation override in monitor (Rainstorm blends WU observed max)
+- Chain reconciliation voids immediately on phantom (Rainstorm infers settlement from price)
+- cal_std initialized to 3.0 default, never updated from actual calibration data
+- No exit retry tracking or settlement parse retry
+- No mode contamination guard on portfolio files
+- No consecutive loss tracking or daily realized loss circuit breaker
+
+**Verdict:** Zeus's math layer is superior to Rainstorm's (member counting > Gaussian CDF, double bootstrap > single). Zeus's lifecycle layer is structurally sound but operationally less battle-tested. The gaps above are enhancements that come from live trading experience — they'll be added as paper trading reveals their necessity.
 
 ### Venus Deliverables
 - ✅ ZEUS_MIGRATION_GUIDE.md
@@ -76,3 +96,16 @@ Initial Opus score was 3/10. All 5 critical and 5 high findings have been addres
 - ✅ HEARTBEAT.md updated
 - ✅ TRADING_RULES.md updated
 - ✅ scripts/healthcheck.py
+
+### Going Live Checklist
+
+1. ✅ All 10 P0 bugs addressed
+2. ✅ All 5 Opus critical gaps fixed
+3. ✅ Rainstorm P&L bug fixed
+4. ✅ Position dedup on open
+5. ✅ Single execution path (CycleRunner only)
+6. ✅ Decision Chain wired
+7. ✅ Blueprint v2 Position fields complete
+8. ⬜ 2 weeks paper trading with new architecture
+9. ⬜ Keychain wallet setup for Polygon
+10. ⬜ Change `"mode": "paper"` to `"mode": "live"` in settings.json
