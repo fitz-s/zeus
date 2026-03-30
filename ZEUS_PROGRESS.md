@@ -1,89 +1,107 @@
 # Zeus Progress
 
-## Session 3 (2026-03-30)
+## Session 4 (2026-03-30)
 
-### All 5 Known Limitations — FIXED ✓
+### URGENT FIX: Cities.json — Airport Coordinates ✓
 
-1. **Monitor fresh ENS** — now fetches fresh ENS + VWMP per position for exit triggers
-2. **Day0Signal** — implemented (observation floor + ENS remaining hours)
-3. **Harvester** — polls Gamma API for settled markets, generates calibration pairs, logs P&L
-4. **Meteostat** — replaced with Open-Meteo hourly (free, no API key)
-5. **token_id** — stored in Position at entry time for CLOB orderbook queries
+All 10 original cities had WRONG coordinates (city center, not airport).
+Example: NYC was 40.7128 (Manhattan) instead of 40.7772 (LaGuardia).
+This affected ALL P_raw calculations — ENS was fetching the wrong grid point.
 
-### New Modules Built
-- src/signal/day0_signal.py — observation-constrained probability
-- src/calibration/drift.py — Hosmer-Lemeshow χ² + 8/20 directional failure + seasonal triggers
-- src/strategy/correlation.py — heuristic cluster correlation matrix (6×6)
+Fixed: replaced with rainstorm validated config (16 cities, airport coords, ICAO stations).
+New cities: Seoul, Shanghai, Tokyo, Austin, Denver, Houston.
 
-### Paper Trading Single-Cycle Test — PASSED ✓
+### Track A: Paper Trading Daemon — RUNNING ✓
 
-```
-ZEUS_MODE=paper python -m src.main --once
-```
+Zeus daemon running as launchd service (com.zeus.paper-trading).
+8 APScheduler jobs active. Collecting live ENS snapshots (correct coordinates).
 
-| Metric | Result |
-|--------|--------|
-| Markets discovered | 41 (38 fresh) |
-| ENS fetches | All successful (ECMWF + GFS) |
-| Edges found (post-FDR) | ≥4 |
-| Paper fills | 4 trades |
-| Risk limits blocked | 6 positions (10% single position cap) |
-| Crashes | 0 (after London/Paris None boundary fix) |
+**Live stats after first run cycle:**
+- ENS snapshots (live_v1): 30
+- Paper trades: 8 (7 buy_no shoulder + 1 buy_yes center)
+- Cities traded: NYC, Seattle, Dallas, San Francisco
+- Risk limits enforcing correctly
 
-**4 Paper Fills (all buy_no — validates FLB thesis):**
-1. Seattle: buy_no "62°F or higher" Apr 1 — $9.46
-2. NYC: buy_no "88°F or higher" Apr 1 — $6.26
-3. NYC: buy_no "86-87°F" Apr 1 — $6.00
-4. SF: buy_no "53°F or below" Apr 1 — $8.72
+### Track B: Rainstorm Data ETL
 
-Total paper exposure: $30.44 / $150 = 20.3% portfolio heat.
-All trades are shorting shoulder bins (overpriced by market, correctly identified by ENS model).
+#### B0: Schema ✓
+Added 8 new tables to db.py: forecast_skill, model_bias, market_price_history,
+hourly_observations, diurnal_curves, historical_forecasts, model_skill, temp_persistence.
 
-### Bug Fixed
-- European bins (London/Paris): `_parse_temp_range` returned `(None, None)` for some labels.
-  `opening_hunt._process_market` now skips bins with both boundaries None.
+#### B1: WU Settlement Audit ✓
+1,385 settlements analyzed:
+- US cities: 85-99% match+off-by-one → WU reliable for settlement
+- London: 75.5% mismatch = unit confusion (°C vs °F encoding), not real error
+- OFF_BY_ONE rate 28-47% → confirms bin boundary discretization edge is real
 
-### Test Summary: 151 tests all passing
+#### B2: Ladder Backfill ETL ✓
+53,581/53,600 rows imported, 19 rejected (error > 30°).
+120 model_bias entries computed.
 
-### Data Assets
-- ENS snapshots: 276+ (backfill) + growing (live collection)
-- Calibration pairs: 562
-- Active Platt models: 6 (all MAM buckets)
+**Key finding: ECMWF has systematic warm bias**
+| City | ECMWF Bias | Best Model | Best MAE |
+|------|-----------|------------|----------|
+| NYC  | +3.63°F   | ICON       | 2.47°F   |
+| Atlanta | +3.88°F | GFS       | 4.32°F   |
+| London | +0.42°C  | ICON       | 1.08°C   |
+| Dallas | +1.65°F  | ICON       | 3.39°F   |
+| Miami | +3.50°F   | ICON       | 2.18°F   |
+
+**Action needed:** Zeus uses ECMWF ENS for P_raw. The warm bias means P_raw
+systematically overestimates probability of high-temperature bins. Platt calibration
+should correct this, but with only 6 MAM models, winter/summer bias is uncompensated.
+When TIGGE provides historical ENS data, we can quantify and correct this directly.
+
+#### B6: calibration_records.jsonl Inspection ✓
+309 MB, ~1.34M records. Format: (city, target_date, source, lead_days, forecast, observed, error, unit).
+Not probability calibration — temperature forecast errors. Usable for bias correction and skill analysis.
+
+#### Remaining ETLs (deferred to Session 5)
+- B3: Token price log → market_price_history (Opening Hunt timing validation)
+- B4: Hourly observations → hourly_observations + diurnal_curves (Day0 signal)
+- B5: Forecasts → historical_forecasts + model_skill (dynamic α)
+- B7: Temperature persistence (ENS anomaly detection)
+- B8: TIGGE priority index
+
+### Data Assets (current)
+| Asset | Count | Notes |
+|-------|-------|-------|
+| ENS snapshots | 306+ (276 backfill + 30 live) | Live growing continuously |
+| Calibration pairs | 562 | From backfill settlements |
+| Active Platt models | 6 | All MAM buckets |
+| forecast_skill | 53,581 | 5 models × 7 leads × 10 cities |
+| model_bias | 120 | Per city×season×source |
+| Paper trades | 8 | 7 buy_no + 1 buy_yes |
+
+### Test Summary: 154 tests all passing
 
 ---
 
 ## Previous Sessions
-
-### Session 2: Integration layer — data clients + discovery pipelines
-### Session 1: Phase 0 (GO) + Phase A (signal/calibration/strategy) + Phase C (execution/RiskGuard)
+- Session 3: Paper trading single-cycle validated, all 5 limitations fixed
+- Session 2: Integration layer, discovery pipelines, data clients
+- Session 1: Phase 0 (GO) + Phase A (signal/calibration) + Phase C (execution)
 
 ---
 
-## Next Session: Persistent Paper Trading
+## Next Session: Paper Trading Analysis + More ETL
 
-**Priority 1:** Run Zeus as persistent daemon (launchd) in paper mode for 48h+
-```bash
-ZEUS_MODE=paper python -m src.main  # APScheduler loop mode
-```
+**Priority 1:** After 24-48h of daemon running, analyze:
+- Trade count, win rate on settled positions
+- Edge source distribution (which edge_source is generating trades?)
+- FDR filter effectiveness (how many edges found vs passed?)
+- ENS snapshot growth rate
 
-**Priority 2:** After 48h, analyze paper trading results:
-- How many trades per day?
-- Win rate on settled positions?
-- Is FDR too aggressive (finding too many edges) or too conservative?
-- Are any cities/modes consistently unprofitable?
+**Priority 2:** Remaining ETL (B3-B5, B7-B8)
 
-**Priority 3:** Calibration pair growth:
-- As backfill completes (647 settlements), regenerate pairs
-- Refit Platt models with larger samples
-- Track which buckets reach Level 1 (n ≥ 150)
+**Priority 3:** Investigate ECMWF warm bias correction:
+- Can we apply model_bias as a correction to P_raw before Platt?
+- Would this improve calibration for uncovered buckets (DJF, JJA, SON)?
 
-**Priority 4:** Live deployment prep (Phase D):
-- Keychain wallet setup for Polygon
-- Set ZEUS_MODE=live with $1 minimum orders
-- First 25 trades: daily review
+**Priority 4:** TIGGE data integration (when agent completes)
 
 **Codebase stats:**
-- 35 source files in src/
-- 16 test files with 151 tests
-- 6 script files
-- 13 commits on main
+- 36 source files in src/
+- 16 test files with 154 tests
+- 8 script files
+- 17 commits on main
