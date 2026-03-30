@@ -2,7 +2,22 @@
 
 ## What This Is
 
-Zeus is a Polymarket weather market trading system. It exploits structural market microstructure inefficiencies (favorite-longshot bias, opening price inertia, bin boundary discretization), NOT weather forecasting superiority.
+Zeus is a **position management system** that uses weather forecasts as one input. It is NOT a signal engine that happens to trade. The system's value is in holding and exiting correctly, not in finding edges — every bot finds edges with the same public data.
+
+## Core Design Principle: Trade-Centric Architecture
+
+Every module exists to serve the lifecycle of a trade. A trade is born (discovery), held (monitoring), and dies (settlement or exit). The Position object must carry its full identity — direction, probability space, entry method, decision-time data snapshot, exit strategy — through every module it touches. When modules pass bare floats instead of typed Position context, interface bugs appear: probability spaces get double-flipped, time context gets lost, processing state isn't tracked.
+
+**The 10 P0 bugs from code review were ALL interface bugs, not logic bugs.** Each module's internal math was correct. But when module A's output passed to module B, semantic context was lost. This is exactly how Rainstorm died.
+
+## Core Debug Principle
+
+**Code shows function. Code NEVER shows logic.** When facing bugs:
+- A list of 10 bugs is usually 10 symptoms of 1-2 design failures
+- Patching individual bugs creates more bugs (the fix breaks assumptions other modules rely on)
+- Before fixing ANY bug: understand WHY the code was written this way, trace the fix through ALL callers and dependents
+- Ask first: "Does Rainstorm have a design that makes this entire CATEGORY of bug impossible?" If yes, port the design. Only then fix individuals.
+- "看一步想十步" — every fix must consider 10 steps of downstream consequences
 
 ## Design Authority
 
@@ -15,9 +30,10 @@ Zeus is a Polymarket weather market trading system. It exploits structural marke
 | Market Microstructure | `~/.openclaw/project level docs/rainstorm_market_microstructure.md` | Edge thesis, participant types, entry timing |
 | Statistical Methodology | `~/.openclaw/project level docs/rainstorm_statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning |
 | **Zeus Spec** | `~/.openclaw/project level docs/ZEUS_SPEC.md` | Complete system specification |
-| **Implementation Plan** | `~/.openclaw/project level docs/ZEUS_IMPLEMENTATION_PLAN.md` | Build order, session management, what to copy vs write |
+| 5. First Principles | `~/.openclaw/project level docs/zeus_first_principles_rethink.md` | Why position management > signal precision. Why type safety is architecture. |
+| **6. Blueprint v2** | **`~/.openclaw/project level docs/zeus_blueprint_v2.md`** | **THE architectural authority. Position-centric design. CycleRunner, Decision Chain, Truth Hierarchy, Exit = Entry rigor. Supersedes ALL prior architecture docs including the original spec's architecture sections.** |
 
-If your implementation contradicts a research doc, you MUST document WHY in a code comment with a citation.
+**Document 6 (Blueprint v2) is the architectural authority.** It supersedes the original spec's module layout, data flow, and lifecycle design. Documents 1-4 remain valid for their specific domains (math, risk thresholds, market microstructure, statistics). Document 5 is the reasoning that led to Document 6. If any code contradicts Document 6, STOP and restructure.
 
 ---
 
@@ -26,7 +42,9 @@ If your implementation contradicts a research doc, you MUST document WHY in a co
 ### Temperature
 All temperatures are `float` internally, in the city's settlement unit.
 - US cities: °F (float)
-- European cities: °C (float)
+- European cities / Asian cities: °C (float)
+- **ANY function with a temperature-space threshold** (spread, std, divergence, instrument noise) **MUST accept a `unit` parameter.** Hardcoded °F thresholds applied to °C values is a CATEGORY of bug — Rainstorm lost real money to this (9 positions). Only probability-space thresholds (0-1) are safe to hardcode.
+- Instrument noise: σ = 0.5°F for US, 0.28°C for °C cities (Statistical Methodology §1.2).
 - NEVER: bare `int`. Rounding to integer happens ONLY in `EnsembleSignal.p_raw_vector()` during WU settlement simulation.
 
 ### Probability
@@ -127,6 +145,58 @@ Every system anomaly maps to exactly one failure type with a pre-defined respons
 | `COMPETITION` | Shoulder bin avg overpricing ratio drops from 3× to < 1.5× | Alert: market efficiency increasing |
 
 RiskGuard checks for these. Each maps to GREEN/YELLOW/ORANGE/RED per spec §7.3.
+
+---
+
+## Rainstorm Autopsy: Lessons for Zeus
+
+### Lesson 1: Position Lifecycle Must Be Airtight
+
+CHURN_DUPLICATE + orphan positions = -$93.63（55% of all trades）。
+引擎每 120 秒重复买入已持有的仓位，然后以 spread loss 卖出。
+
+Zeus 的状态机在架构上防止了重入。但更深的教训是：
+portfolio ↔ chain 之间任何不一致（orphan: portfolio 有但 chain 没有；
+phantom: chain 有但 portfolio 没有）都是静默的资本泄漏。
+追踪 `portfolio_chain_mismatches` 作为系统健康指标。> 0 就是有东西坏了。
+
+### Lesson 2: 对市场保持敬畏 — 入场和退出都要有罪推定
+
+模型正确 22 次（+$32.20），错误 54 次（-$169.36）。
+模型最自信时（avg edge 0.317）恰恰是它最错的时候。
+
+**把每一个 "edge" 当作有罪推定，直到数据证明它无罪。**
+
+但更深的版本是：**退出决策也要有罪推定。** Zeus 的 false
+EDGE_REVERSAL 不是"发现不存在的 edge"——是"制造不存在的退出理由"。
+入场经过 Platt + Bootstrap CI + FDR + Kelly 四层验证，退出只经过
+"刷新 ENS 看方向" 一层检查。这个不对称是最大的风险源。
+
+**不确定时的默认行为：HOLD to settlement。** 入场决策已经被验证过了；
+退出决策必须达到同等严格度才能推翻入场决策。
+
+Phase 0 通过是一个好消息——结构性 mispricing 确认存在。但这不意味着
+可以放松。Alpha 衰减是必然的：更多的 bot 进入、做市商覆盖改善、
+散户学习、平台规则变更。今天 3× 的 shoulder overpricing 可能明年变成
+1.5×，后年变成 1.1×。
+
+Zeus 必须持续回答的问题不是"我今天赚了多少"，而是：
+- edge_source 维度上，每种 edge 的平均大小在过去 30/60/90 天的趋势是什么？
+- EDGE_COMPRESSION failure type 是否触发过？
+- 如果所有结构性 edge 缩小到无法覆盖执行成本，系统是否能自动停止交易？
+
+当 alpha 衰减到零时，正确的行为不是试图找新的 alpha——
+而是停止交易、保住资本、等待新的市场结构出现。
+RiskGuard 的 EDGE_COMPRESSION 检测就是为这个时刻设计的。
+
+### Lesson 3: Execution Asymmetry Kills
+
+模型正确时平均赚 $1.46，错误时平均亏 $3.14。在二元市场中这不应该
+发生。原因是没有 VWMP、赢家退出太早、输家持仓太久。
+
+Zeus 用 VWMP 定价、hold-to-settlement、EDGE_REVERSAL 作为唯一
+信息驱动退出。但要监控 fill_quality——如果系统性为正（执行价持续
+差于 VWMP），limit offset 需要调整。
 
 ---
 
@@ -311,7 +381,7 @@ riskguard.py → riskguard.py (main loop) + metrics.py (Brier, H-L, etc.)
 ## What NOT To Do
 
 - Do NOT reference Rainstorm v1 code for design decisions
-- Do NOT use Gaussian CDF for probability estimation
+- Do NOT use Gaussian CDF for probability estimation — not for live signals AND not for Platt training data. Rainstorm's forecast_log (mean+std) is used for TIGGE backfill prioritization only, never as approximate P_raw
 - Do NOT create 72 calibration buckets
 - Do NOT implement per-position stop loss
 - Do NOT use mid-price for edge calculations
@@ -323,13 +393,64 @@ riskguard.py → riskguard.py (main loop) + metrics.py (Brier, H-L, etc.)
 
 ---
 
+## Rainstorm Code Reuse Rules (Updated)
+
+The original rule "NO code from Rainstorm" was correct at launch — Zeus needed a clean break from a system with contaminated data and broken signal math. But Zeus is now independently hitting the same walls Rainstorm hit. Refusing to inherit battle-tested solutions is wasting time rediscovering old lessons.
+
+**What to reuse from Rainstorm (copy directly or copy design):**
+- **Value types** (Temperature, TemperatureDelta): copy verbatim. Math infrastructure, not business logic.
+- **Position lifecycle** (8-layer anti-churn, void_position, administrative exits, buy_no independent exit): copy design, adapt to Zeus data structures.
+- **Chain reconciliation** (chain-first, ghost detection, orphan quarantine): copy. Live prerequisite.
+- **Day0 observation math** (observation_confidence, diurnal model, divergence guard): copy. 14 months of IEM ASOS calibration.
+- **Execution patterns** (edge recheck, sell-side price, stale cleanup, orphan handling): copy design.
+
+**What NOT to reuse:**
+- **Signal generation** (ensemble weights, forecast combination, edge calculation): Zeus has its own math (ENS member counting, not Gaussian CDF).
+- **Calibration parameters** (error_db values, Platt coefficients, std estimates): contaminated by v1's inverted bias formula.
+- **Config values** (thresholds, edge minimums, Kelly fractions): Zeus has its own tuning.
+
+**The test:** Does this code's correctness depend on Rainstorm's signal chain being correct? If NO → safe to reuse. TemperatureDelta.__truediv__ returning a z-score is mathematically correct regardless of what Platt model produced the inputs. void_position(pnl=0) is correct regardless of entry signal quality.
+
 ## Inherited Data
 
-Data in `~/.openclaw/workspace-venus/rainstorm/state/rainstorm.db`. Import via `scripts/migrate_rainstorm_data.py`. NO code from Rainstorm — only data tables.
+Data in `~/.openclaw/workspace-venus/rainstorm/state/rainstorm.db`. Import via `scripts/migrate_rainstorm_data.py`.
 
 Key: `settlements` (1,634), `observations` (227K+), `market_events` (14.9K), `token_price_log` (285K).
 
-Data agent continuously running: WU 2,000+ city-days backfilling to 2024, 38 cities.
+Data agent continuously running: WU 3,009+ city-days across 19 cities backfilling to 2024-06, TIGGE ENS archive downloading.
+
+## Rainstorm Data Assets (READ-ONLY, do NOT migrate until agent stabilizes)
+
+Data lives in rainstorm.db (2.4 GB). Each asset has a specific Zeus integration point — see spec §12.4 for the full table. Key items:
+
+- **TIGGE** (separate dir, `51 source data/`): True 51-member ENS history → Platt training for DJF/JJA/SON. THE priority.
+- **token_price_log** (319K): Market price trajectories → validate Opening Hunt timing parameters during paper trading.
+- **WU** (3,009 city-days): Settlement precision audit (WU value vs Polymarket winning bin consistency) can run NOW.
+- **forecasts** (171K, 5 models): Dynamic α calibration per city/season/model.
+- **observations** (238K): Temperature persistence model — reality check when ENS predicts anomalous changes.
+- **ladder backfill** (53,600): ENS bias correction (× 0.7) + forecast bust frequency analysis.
+- **forecast_log** (333K): TIGGE download prioritization index (NOT for Gaussian P_raw training).
+- **calibration_records.jsonl** (295 MB): Needs format inspection. May contain usable forecast-actual pairs.
+
+## ENS Data Sources (Two Channels)
+
+**Channel 1: ECMWF Open Data (Zeus's job — daily collection)**
+- Rolling 2-3 day window. Data disappears after ~3 days. Missing a day = data lost forever.
+- Zeus collects this via scheduled job, twice daily (after 00z and 12z).
+- 51 members (50 perturbed + 1 control), parameter `2t`, steps 24-168h.
+- Lower latency than Open-Meteo (source vs wrapper). Feeds Mode B (update reaction).
+- Stored in `zeus.db:ensemble_snapshots`.
+
+**Channel 2: TIGGE Archive (Data agent's job — historical backfill)**
+- Permanent archive of historical ECMWF ENS. Goes back to 2006.
+- Data agent downloads to `~/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens/`.
+- Zeus consumes via `scripts/etl_tigge_ens.py` (future session) when non-MAM data arrives.
+- Currently 126 city-date vectors across 34 cities, ALL MAM. DJF/JJA/SON = 0.
+
+**Channel 3: Open-Meteo Ensemble API (current primary, may be replaced)**
+- 93-day rolling window. Free, no key. 51 ECMWF members via third-party wrapper.
+- 1-3h additional latency vs ECMWF Open Data direct.
+- Currently the only ENS source Zeus uses in production. May be demoted to fallback once ECMWF Open Data collection is stable.
 
 ## Commands
 

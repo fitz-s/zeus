@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-03-30T19:51:52.612762+00:00",
+  "process": {
+    "pid": 69373,
+    "mode": "paper",
+    "version": "zeus_v2"
+  },
+  "risk": {
+    "level": "GREEN"
+  },
+  "portfolio": {
+    "open_positions": 7,
+    "total_exposure_usd": 74.72,
+    "heat_pct": 49.8,
+    "bankroll": 150.0,
+    "positions": [
+      {
+        "trade_id": "f4e0d2a6-b8a",
+        "city": "NYC",
+        "direction": "buy_no",
+        "size": 12.696670261130386,
+        "edge": 0.19980458827499237,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "b2086cca-a1a",
+        "city": "Atlanta",
+        "direction": "buy_no",
+        "size": 11.362577373604545,
+        "edge": 0.17900984135132947,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "836270b8-2cc",
+        "city": "Austin",
+        "direction": "buy_no",
+        "size": 6.564322362655201,
+        "edge": 0.07099875119360965,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "83651497-7e0",
+        "city": "Denver",
+        "direction": "buy_no",
+        "size": 6.988829628388125,
+        "edge": 0.1437875576505696,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "16a62cac-696",
+        "city": "Denver",
+        "direction": "buy_no",
+        "size": 13.39243937391137,
+        "edge": 0.1740065003313147,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "8d9071fa-fab",
+        "city": "San Francisco",
+        "direction": "buy_no",
+        "size": 8.852211581093105,
+        "edge": 0.6402080802540643,
+        "bin": "Will the highest temperature i"
+      },
+      {
+        "trade_id": "eebdb911-99e",
+        "city": "Dallas",
+        "direction": "buy_no",
+        "size": 14.866171427344483,
+        "edge": 0.2678747340792591,
+        "bin": "Will the highest temperature i"
+      }
+    ]
+  },
+  "cycle": {
+    "mode": "day0_capture",
+    "started_at": "2026-03-30T19:49:55.603004+00:00",
+    "monitors": 7,
+    "exits": 0,
+    "candidates": 0,
+    "trades": 0,
+    "no_trades": 0,
+    "completed_at": "2026-03-30T19:51:52.612471+00:00"
+  }
+}
