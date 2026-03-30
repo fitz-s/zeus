@@ -1,104 +1,409 @@
 {
+  "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly \u2014 do not use downtown or approximate coordinates.",
   "cities": [
     {
       "name": "NYC",
-      "lat": 40.7128,
-      "lon": -74.0060,
+      "aliases": [
+        "NYC",
+        "New York",
+        "New York City",
+        "nyc"
+      ],
+      "slug_names": [
+        "nyc",
+        "new-york",
+        "new-york-city"
+      ],
+      "noaa": {
+        "lat": 40.7772,
+        "lon": -73.8726,
+        "office": "OKX",
+        "gridX": 37,
+        "gridY": 39
+      },
+      "wu_station": "KLGA",
+      "wu_pws": "KNYNEWYO1974",
+      "meteostat_station": "72503",
+      "airport_name": "LaGuardia Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
       "timezone": "America/New_York",
-      "cluster": "US-Northeast",
-      "settlement_unit": "F",
-      "iem_station": "NYC",
-      "wu_station": "KNYNEWYO1170"
+      "unit": "F",
+      "historical_peak_hour": 15.8,
+      "diurnal_amplitude_f": 11.0
     },
     {
       "name": "Chicago",
-      "lat": 41.8781,
-      "lon": -87.6298,
+      "aliases": [
+        "Chicago",
+        "chicago"
+      ],
+      "slug_names": [
+        "chicago"
+      ],
+      "noaa": {
+        "lat": 41.9742,
+        "lon": -87.9073,
+        "office": "LOT",
+        "gridX": 66,
+        "gridY": 77
+      },
+      "wu_station": "KORD",
+      "wu_pws": "KILROSEM4",
+      "meteostat_station": "72530",
+      "airport_name": "O'Hare International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
       "timezone": "America/Chicago",
-      "cluster": "US-Midwest",
-      "settlement_unit": "F",
-      "iem_station": "ORD",
-      "wu_station": "KILCHICA1180"
-    },
-    {
-      "name": "Atlanta",
-      "lat": 33.7490,
-      "lon": -84.3880,
-      "timezone": "America/New_York",
-      "cluster": "US-Southeast",
-      "settlement_unit": "F",
-      "iem_station": "ATL",
-      "wu_station": "KGAATLAN1253"
-    },
-    {
-      "name": "Miami",
-      "lat": 25.7617,
-      "lon": -80.1918,
-      "timezone": "America/New_York",
-      "cluster": "US-Southeast",
-      "settlement_unit": "F",
-      "iem_station": "MIA",
-      "wu_station": "KFLMIAMI1180"
-    },
-    {
-      "name": "Dallas",
-      "lat": 32.7767,
-      "lon": -96.7970,
-      "timezone": "America/Chicago",
-      "cluster": "US-SouthCentral",
-      "settlement_unit": "F",
-      "iem_station": "DFW",
-      "wu_station": "KTXDALLA1180"
+      "unit": "F",
+      "historical_peak_hour": 16.4,
+      "diurnal_amplitude_f": 15.0
     },
     {
       "name": "Seattle",
-      "lat": 47.6062,
-      "lon": -122.3321,
+      "aliases": [
+        "Seattle",
+        "seattle"
+      ],
+      "slug_names": [
+        "seattle"
+      ],
+      "noaa": {
+        "lat": 47.4502,
+        "lon": -122.3088,
+        "office": "SEW",
+        "gridX": 124,
+        "gridY": 61
+      },
+      "wu_station": "KSEA",
+      "wu_pws": "KWASEATA17",
+      "meteostat_station": "72793",
+      "airport_name": "Seattle-Tacoma International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/wa/seatac/KSEA",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-Pacific",
-      "settlement_unit": "F",
-      "iem_station": "SEA",
-      "wu_station": "KWASEATT1180"
+      "unit": "F",
+      "historical_peak_hour": 13.8,
+      "diurnal_amplitude_f": 12.2
+    },
+    {
+      "name": "Seoul",
+      "aliases": [
+        "Seoul",
+        "seoul"
+      ],
+      "slug_names": [
+        "seoul"
+      ],
+      "noaa": null,
+      "lat": 37.431683,
+      "lon": 126.625699,
+      "wu_station": "RKSI",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Incheon Intl Airport Station",
+      "settlement_source": "https://www.wunderground.com/history/daily/kr/incheon/RKSI",
+      "timezone": "Asia/Seoul",
+      "unit": "C",
+      "historical_peak_hour": 14.8,
+      "diurnal_amplitude_c": 8.2
+    },
+    {
+      "name": "Shanghai",
+      "aliases": [
+        "Shanghai",
+        "shanghai"
+      ],
+      "slug_names": [
+        "shanghai"
+      ],
+      "noaa": null,
+      "lat": 31.1443,
+      "lon": 121.8083,
+      "wu_station": "ZSPD",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Shanghai Pudong International Airport Station",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
+      "timezone": "Asia/Shanghai",
+      "unit": "C",
+      "historical_peak_hour": 14.6,
+      "diurnal_amplitude_c": 7.8
+    },
+    {
+      "name": "Tokyo",
+      "aliases": [
+        "Tokyo",
+        "tokyo"
+      ],
+      "slug_names": [
+        "tokyo"
+      ],
+      "noaa": null,
+      "lat": 35.601766,
+      "lon": 139.775175,
+      "wu_station": "RJTT",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Tokyo Haneda Airport Station",
+      "settlement_source": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
+      "timezone": "Asia/Tokyo",
+      "unit": "C",
+      "historical_peak_hour": 14.7,
+      "diurnal_amplitude_c": 7.6
+    },
+    {
+      "name": "Atlanta",
+      "aliases": [
+        "Atlanta",
+        "atlanta"
+      ],
+      "slug_names": [
+        "atlanta"
+      ],
+      "noaa": {
+        "lat": 33.6407,
+        "lon": -84.4277,
+        "office": "FFC",
+        "gridX": 50,
+        "gridY": 82
+      },
+      "wu_station": "KATL",
+      "wu_pws": "KGAHAPEV1",
+      "meteostat_station": "72219",
+      "airport_name": "Hartsfield-Jackson Atlanta International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
+      "timezone": "America/New_York",
+      "unit": "F",
+      "historical_peak_hour": 17.6,
+      "diurnal_amplitude_f": 17.3
+    },
+    {
+      "name": "Austin",
+      "aliases": [
+        "Austin",
+        "austin"
+      ],
+      "slug_names": [
+        "austin"
+      ],
+      "noaa": {
+        "lat": 30.168399,
+        "lon": -97.69712,
+        "office": "EWX",
+        "gridX": 157,
+        "gridY": 86
+      },
+      "wu_station": "KAUS",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Austin-Bergstrom International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
+      "timezone": "America/Chicago",
+      "unit": "F",
+      "historical_peak_hour": 17.7,
+      "diurnal_amplitude_f": 18.0
+    },
+    {
+      "name": "Dallas",
+      "aliases": [
+        "Dallas",
+        "dallas"
+      ],
+      "slug_names": [
+        "dallas"
+      ],
+      "noaa": {
+        "lat": 32.8471,
+        "lon": -96.8518,
+        "office": "FWD",
+        "gridX": 87,
+        "gridY": 107
+      },
+      "wu_station": "KDAL",
+      "wu_pws": "KTXDALLA1276",
+      "meteostat_station": "72258",
+      "airport_name": "Dallas Love Field",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
+      "timezone": "America/Chicago",
+      "unit": "F",
+      "historical_peak_hour": 17.7,
+      "diurnal_amplitude_f": 18.6
+    },
+    {
+      "name": "Denver",
+      "aliases": [
+        "Denver",
+        "denver"
+      ],
+      "slug_names": [
+        "denver"
+      ],
+      "noaa": {
+        "lat": 39.698,
+        "lon": -104.777,
+        "office": "BOU",
+        "gridX": 70,
+        "gridY": 59
+      },
+      "wu_station": "KBKF",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Buckley Space Force Base Station",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
+      "timezone": "America/Denver",
+      "unit": "F",
+      "historical_peak_hour": 16.1,
+      "diurnal_amplitude_f": 18.4
+    },
+    {
+      "name": "Houston",
+      "aliases": [
+        "Houston",
+        "houston"
+      ],
+      "slug_names": [
+        "houston"
+      ],
+      "noaa": {
+        "lat": 29.640176,
+        "lon": -95.232926,
+        "office": "HGX",
+        "gridX": 68,
+        "gridY": 89
+      },
+      "wu_station": "KHOU",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "William P. Hobby Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
+      "timezone": "America/Chicago",
+      "unit": "F",
+      "historical_peak_hour": 17.4,
+      "diurnal_amplitude_f": 15.2
+    },
+    {
+      "name": "Miami",
+      "aliases": [
+        "Miami",
+        "miami"
+      ],
+      "slug_names": [
+        "miami"
+      ],
+      "noaa": {
+        "lat": 25.7959,
+        "lon": -80.287,
+        "office": "MFL",
+        "gridX": 106,
+        "gridY": 51
+      },
+      "wu_station": "KMIA",
+      "wu_pws": "KFLMIAMI932",
+      "meteostat_station": "72202",
+      "airport_name": "Miami International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
+      "timezone": "America/New_York",
+      "unit": "F",
+      "historical_peak_hour": 17.3,
+      "diurnal_amplitude_f": 12.1
     },
     {
       "name": "Los Angeles",
-      "lat": 34.0522,
-      "lon": -118.2437,
+      "aliases": [
+        "Los Angeles",
+        "LA",
+        "los angeles"
+      ],
+      "slug_names": [
+        "los-angeles",
+        "la"
+      ],
+      "noaa": {
+        "lat": 33.9416,
+        "lon": -118.4085,
+        "office": "LOX",
+        "gridX": 148,
+        "gridY": 41
+      },
+      "wu_station": "KLAX",
+      "wu_pws": "KCALOSAN958",
+      "meteostat_station": "72295",
+      "airport_name": "Los Angeles International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-Pacific",
-      "settlement_unit": "F",
-      "iem_station": "LAX",
-      "wu_station": "KCALOSAN1180"
+      "unit": "F",
+      "historical_peak_hour": 18.1,
+      "diurnal_amplitude_f": 11.1
     },
     {
       "name": "San Francisco",
-      "lat": 37.7749,
-      "lon": -122.4194,
+      "aliases": [
+        "San Francisco",
+        "SF",
+        "san francisco"
+      ],
+      "slug_names": [
+        "san-francisco",
+        "sf"
+      ],
+      "noaa": {
+        "lat": 37.6213,
+        "lon": -122.379,
+        "office": "MTR",
+        "gridX": 85,
+        "gridY": 98
+      },
+      "wu_station": "KSFO",
+      "wu_pws": "KCASANBR92",
+      "meteostat_station": "72494",
+      "airport_name": "San Francisco International Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-Pacific",
-      "settlement_unit": "F",
-      "iem_station": "SFO",
-      "wu_station": "KCASANFR1180"
-    },
-    {
-      "name": "London",
-      "lat": 51.5074,
-      "lon": -0.1278,
-      "timezone": "Europe/London",
-      "cluster": "Europe",
-      "settlement_unit": "C",
-      "iem_station": null,
-      "wu_station": "ILONDO1180"
+      "unit": "F",
+      "historical_peak_hour": 16.7,
+      "diurnal_amplitude_f": 11.9
     },
     {
       "name": "Paris",
-      "lat": 48.8566,
-      "lon": 2.3522,
+      "aliases": [
+        "Paris",
+        "paris"
+      ],
+      "slug_names": [
+        "paris"
+      ],
+      "noaa": null,
+      "lat": 49.0097,
+      "lon": 2.5479,
+      "wu_station": "LFPG",
+      "wu_pws": "IMITRY1",
+      "meteostat_station": "07157",
+      "airport_name": "Paris-Charles de Gaulle Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
       "timezone": "Europe/Paris",
-      "cluster": "Europe",
-      "settlement_unit": "C",
-      "iem_station": null,
-      "wu_station": "ILEPARI1180"
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "London",
+      "aliases": [
+        "London",
+        "london"
+      ],
+      "slug_names": [
+        "london"
+      ],
+      "noaa": null,
+      "lat": 51.4775,
+      "lon": -0.4614,
+      "wu_station": "EGLL",
+      "wu_pws": "ILONDON513",
+      "meteostat_station": "03772",
+      "airport_name": "London Heathrow Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/gb/london/EGLL",
+      "timezone": "Europe/London",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 7.4
     }
   ]
 }

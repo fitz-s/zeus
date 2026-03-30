@@ -32,8 +32,8 @@ def get_current_observation(city: City) -> Optional[dict]:
               "observation_time": str, "unit": str}
     Returns None if no observation available.
     """
-    # IEM ASOS only for US cities (°F stations). Spec §1.3 Priority 2.
-    if city.iem_station and city.settlement_unit == "F":
+    # IEM ASOS only for US cities (°F stations, ICAO code). Spec §1.3 Priority 2.
+    if city.wu_station and city.settlement_unit == "F":
         result = _fetch_iem_asos(city)
         if result is not None:
             return result
@@ -48,8 +48,11 @@ def get_current_observation(city: City) -> Optional[dict]:
 
 
 def _fetch_iem_asos(city: City) -> Optional[dict]:
-    """Fetch latest ASOS observation from IEM. Spec §1.3: Priority 2."""
-    station = city.iem_station
+    """Fetch latest ASOS observation from IEM. Spec §1.3: Priority 2.
+
+    Uses wu_station (ICAO code like KLGA, KORD) which IEM also accepts.
+    """
+    station = city.wu_station
     if not station:
         return None
 

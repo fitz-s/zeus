@@ -162,22 +162,21 @@ def _parse_event(
 
 
 def _match_city(title: str, slug: str) -> Optional[City]:
-    """Match event title/slug to a configured city."""
+    """Match event title/slug to a configured city using aliases from cities.json."""
+    from src.config import cities_by_alias, cities
+
     text = f"{title} {slug}".lower()
 
-    # City name aliases for matching
-    aliases = {
-        "new york": "NYC", "nyc": "NYC", "manhattan": "NYC",
-        "chicago": "Chicago", "atlanta": "Atlanta", "miami": "Miami",
-        "dallas": "Dallas", "seattle": "Seattle",
-        "los angeles": "Los Angeles", "la-": "Los Angeles",
-        "san francisco": "San Francisco", "sf-": "San Francisco",
-        "london": "London", "paris": "Paris",
-    }
-
-    for alias, city_name in aliases.items():
-        if alias in text:
-            return cities_by_name.get(city_name)
+    # Use aliases from cities.json (validated, includes slug_names)
+    for city in cities:
+        # Check aliases (case-insensitive)
+        for alias in city.aliases:
+            if alias.lower() in text:
+                return city
+        # Check slug_names
+        for sn in city.slug_names:
+            if sn in slug.lower():
+                return city
 
     return None
 

@@ -16,9 +16,9 @@ from src.config import City
 
 
 NYC = City(
-    name="NYC", lat=40.7128, lon=-74.006,
+    name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="US-Northeast",
-    settlement_unit="F", iem_station="NYC", wu_station=None,
+    settlement_unit="F", wu_station="KLGA",
 )
 
 

@@ -186,6 +186,106 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
         );
 
+        -- ETL tables: Rainstorm data validated and imported
+
+        -- Ladder backfill: 5 models × 7 leads per settlement
+        CREATE TABLE IF NOT EXISTS forecast_skill (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            lead_days INTEGER NOT NULL,
+            forecast_temp REAL NOT NULL,
+            actual_temp REAL NOT NULL,
+            error REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            season TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            UNIQUE(city, target_date, source, lead_days)
+        );
+
+        -- Per-model bias correction
+        CREATE TABLE IF NOT EXISTS model_bias (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            source TEXT NOT NULL,
+            bias REAL NOT NULL,
+            mae REAL NOT NULL,
+            n_samples INTEGER NOT NULL,
+            discount_factor REAL DEFAULT 0.7,
+            UNIQUE(city, season, source)
+        );
+
+        -- Token price history with market timing
+        CREATE TABLE IF NOT EXISTS market_price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            recorded_at TEXT NOT NULL,
+            hours_since_open REAL,
+            hours_to_resolution REAL,
+            UNIQUE(token_id, recorded_at)
+        );
+
+        -- Hourly observations for diurnal curves
+        CREATE TABLE IF NOT EXISTS hourly_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            obs_date TEXT NOT NULL,
+            obs_hour INTEGER NOT NULL,
+            temp REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            source TEXT NOT NULL,
+            UNIQUE(city, obs_date, obs_hour, source)
+        );
+
+        -- Diurnal temperature curves per city×season
+        CREATE TABLE IF NOT EXISTS diurnal_curves (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            hour INTEGER NOT NULL,
+            avg_temp REAL NOT NULL,
+            std_temp REAL NOT NULL,
+            n_samples INTEGER NOT NULL,
+            UNIQUE(city, season, hour)
+        );
+
+        -- Historical forecast values (5 NWP models)
+        CREATE TABLE IF NOT EXISTS historical_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            forecast_high REAL NOT NULL,
+            temp_unit TEXT NOT NULL,
+            lead_days INTEGER,
+            available_at TEXT,
+            UNIQUE(city, target_date, source)
+        );
+
+        -- Model skill summary per city×season
+        CREATE TABLE IF NOT EXISTS model_skill (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            source TEXT NOT NULL,
+            mae REAL NOT NULL,
+            bias REAL NOT NULL,
+            n_samples INTEGER NOT NULL,
+            UNIQUE(city, season, source)
+        );
+
+        -- Day-over-day temperature persistence
+        CREATE TABLE IF NOT EXISTS temp_persistence (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            delta_bucket TEXT NOT NULL,
+            frequency REAL NOT NULL,
+            avg_next_day_reversion REAL,
+            n_samples INTEGER NOT NULL,
+            UNIQUE(city, season, delta_bucket)
+        );
+
         -- Create indexes for common query patterns
         CREATE INDEX IF NOT EXISTS idx_settlements_city_date
             ON settlements(city, target_date);

@@ -35,15 +35,15 @@ from src.state.db import get_connection, init_schema
 
 
 NYC = City(
-    name="NYC", lat=40.7128, lon=-74.006,
+    name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="US-Northeast",
-    settlement_unit="F", iem_station="NYC", wu_station=None,
+    settlement_unit="F", wu_station="KLGA",
 )
 
 LONDON = City(
-    name="London", lat=51.5074, lon=-0.1278,
+    name="London", lat=51.4775, lon=-0.4614,
     timezone="Europe/London", cluster="Europe",
-    settlement_unit="C", iem_station=None, wu_station=None,
+    settlement_unit="C", wu_station="EGLL",
 )
 
 
