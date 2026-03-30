@@ -118,8 +118,14 @@ def _paper_fill(
     size_usd: float,
     limit_price: float,
 ) -> OrderResult:
-    """Paper mode: simulate fill at VWMP. Spec §6.4."""
-    fill_price = edge.vwmp if edge.direction == "buy_yes" else (1.0 - edge.vwmp)
+    """Paper mode: simulate fill at VWMP. Spec §6.4.
+
+    BinEdge.vwmp is ALREADY in native space for the direction:
+    - buy_yes: vwmp = YES-side price
+    - buy_no: vwmp = NO-side price
+    DO NOT flip it again — that's the churn bug root cause.
+    """
+    fill_price = edge.vwmp  # Already native space. NEVER flip here.
     now = datetime.now(timezone.utc).isoformat()
 
     logger.info(

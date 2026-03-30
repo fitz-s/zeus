@@ -203,10 +203,28 @@ def _process_market(
         return 0
 
     # Size and execute
+    from src.state.portfolio import is_reentry_blocked, is_token_on_cooldown, has_same_city_range_open
+
     trades = 0
     for edge in filtered:
         bin_idx = bins.index(edge.bin)
         tokens = token_map[bin_idx]
+
+        # Layer 5: reentry block (20 min after reversal exit)
+        if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
+            logger.info("REENTRY BLOCKED: %s %s (recent reversal exit)", city.name, edge.bin.label)
+            continue
+
+        # Layer 6: voided token cooldown (1 hour)
+        check_token = tokens["token_id"] if edge.direction == "buy_yes" else tokens["no_token_id"]
+        if is_token_on_cooldown(portfolio, check_token):
+            logger.info("TOKEN COOLDOWN: %s (recently voided)", check_token[:12])
+            continue
+
+        # Layer 7: same city+range cross-date block
+        if has_same_city_range_open(portfolio, city.name, edge.bin.label):
+            logger.info("CROSS-DATE BLOCK: %s %s already open", city.name, edge.bin.label)
+            continue
 
         # Dynamic Kelly
         km = dynamic_kelly_mult(

@@ -80,7 +80,7 @@ def run_monitor() -> int:
             if signal is not None:
                 logger.info("MONITOR EXIT %s: %s — %s",
                             pos.trade_id, signal.trigger, signal.reason)
-                remove_position(portfolio, pos.trade_id)
+                remove_position(portfolio, pos.trade_id, exit_reason=signal.trigger)
                 clear_reversal_state(pos.trade_id)
                 log_event(conn, "EXIT", pos.trade_id, {
                     "trigger": signal.trigger,
@@ -144,24 +144,32 @@ def _refresh_position(
         # For a single-bin check, we compute P_posterior for that specific bin
         # using the market-wide P_raw renormalized
         bin_obj = Bin(low=None, high=None, label=pos.bin_label)
-        # Simple single-bin posterior: calibrated P_raw vs market VWMP
-        p_raw_single = _estimate_bin_p_raw(ens, pos.bin_label)
+        # Layer 2+3: compute P_raw in YES-space, then flip to native space
+        # Method must match entry (member counting → Platt → posterior)
+        p_raw_yes = _estimate_bin_p_raw(ens, pos.bin_label)
 
         cal, cal_level = get_calibrator(conn, city, pos.target_date)
         if cal is not None:
-            p_cal_single = cal.predict(p_raw_single, float(lead_days))
+            p_cal_yes = cal.predict(p_raw_yes, float(lead_days))
         else:
-            p_cal_single = p_raw_single
+            p_cal_yes = p_raw_yes
 
         alpha = compute_alpha(
             calibration_level=cal_level,
             ensemble_spread=ens.spread(),
-            model_agreement="AGREE",  # Skip GFS crosscheck for monitor (too expensive)
+            model_agreement="AGREE",
             lead_days=float(lead_days),
-            hours_since_open=48.0,  # Conservative: treat as established market
+            hours_since_open=48.0,
         )
 
-        current_p_posterior = alpha * p_cal_single + (1.0 - alpha) * current_p_market
+        # Convert to native space: flip EXACTLY ONCE for buy_no
+        if pos.direction == "buy_no":
+            p_cal_native = 1.0 - p_cal_yes
+        else:
+            p_cal_native = p_cal_yes
+
+        # Posterior blend in native space (current_p_market is already native)
+        current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
 
     except Exception as e:
         logger.debug("ENS refresh failed for %s: %s", pos.trade_id, e)

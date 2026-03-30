@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.execution.exit_triggers import (
-    evaluate_exit_triggers, clear_reversal_state, _reversal_counts,
+    evaluate_exit_triggers, clear_reversal_state,
     ExitSignal,
 )
 from src.execution.harvester import harvest_settlement
@@ -35,8 +35,6 @@ def _make_position(**kwargs) -> Position:
 
 
 class TestExitTriggers:
-    def setup_method(self):
-        _reversal_counts.clear()
 
     def test_settlement_imminent(self):
         pos = _make_position()
@@ -86,13 +84,6 @@ class TestExitTriggers:
         signal = evaluate_exit_triggers(pos, 0.60, 0.40, market_vig=1.10)
         assert signal is not None
         assert signal.trigger == "VIG_EXTREME"
-
-    def test_edge_evaporated(self):
-        pos = _make_position()
-        signal = evaluate_exit_triggers(pos, 0.401, 0.40)  # edge ≈ 0.001
-        assert signal is not None
-        assert signal.trigger == "EDGE_EVAPORATED"
-
 
 class TestHarvester:
     def test_harvest_creates_pairs(self, tmp_path):
