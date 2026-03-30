@@ -79,15 +79,21 @@ def _parse_response(data: dict, model: str, fetch_time: datetime) -> dict:
     hourly = data["hourly"]
     times = hourly["time"]
 
-    # Collect all member arrays
+    # Collect all member arrays.
+    # Open-Meteo format: temperature_2m (control run), temperature_2m_member01, ..., member50
+    # The control run (temperature_2m without suffix) is member 0.
     members = []
-    i = 0
-    while True:
-        key = f"temperature_2m_member{i}"
+
+    # Member 0 = control run (key: temperature_2m, no suffix)
+    if "temperature_2m" in hourly:
+        members.append(hourly["temperature_2m"])
+
+    # Members 01-50 (zero-padded two digits)
+    for i in range(1, 100):
+        key = f"temperature_2m_member{i:02d}"
         if key not in hourly:
             break
         members.append(hourly[key])
-        i += 1
 
     if not members:
         raise ValueError(f"No ensemble members found in response for model {model}")
