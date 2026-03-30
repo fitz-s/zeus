@@ -103,14 +103,16 @@ def _process_market(
     target_date = market["target_date"]
     outcomes = market["outcomes"]
 
-    # Build bins from outcomes
+    # Build bins from outcomes — skip unparseable (both boundaries None)
     bins = []
     token_map = {}  # bin_index → {token_id, no_token_id, market_id}
-    for i, o in enumerate(outcomes):
+    for o in outcomes:
         low = o["range_low"]
         high = o["range_high"]
+        if low is None and high is None:
+            continue  # Unparseable bin label — skip
         bins.append(Bin(low=low, high=high, label=o["title"]))
-        token_map[i] = {
+        token_map[len(bins) - 1] = {
             "token_id": o["token_id"],
             "no_token_id": o["no_token_id"],
             "market_id": o["market_id"],

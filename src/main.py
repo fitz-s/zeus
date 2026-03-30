@@ -11,6 +11,7 @@ Uses APScheduler for job management:
 
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -69,14 +70,37 @@ def _monitor_cycle():
         logger.error("Monitor failed: %s", e, exc_info=True)
 
 
+def run_single_cycle():
+    """Run one complete cycle of all modes. For testing, not production."""
+    logger.info("=== SINGLE CYCLE TEST ===")
+
+    logger.info("[1/5] Opening Hunt...")
+    _opening_hunt_cycle()
+
+    logger.info("[2/5] Update Reaction...")
+    _update_reaction_cycle()
+
+    logger.info("[3/5] Day0 Capture...")
+    _day0_capture_cycle()
+
+    logger.info("[4/5] Harvester...")
+    _harvester_cycle()
+
+    logger.info("[5/5] Monitor...")
+    _monitor_cycle()
+
+    logger.info("=== SINGLE CYCLE COMPLETE ===")
+
+
 def main():
     mode = os.environ.get("ZEUS_MODE", settings.mode)
+    once = "--once" in sys.argv
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    logger.info("Zeus starting in %s mode", mode)
+    logger.info("Zeus starting in %s mode%s", mode, " (single cycle)" if once else "")
     logger.info("Capital: $%.2f | Kelly: %.0f%%",
                 settings.capital_base_usd,
                 settings["sizing"]["kelly_multiplier"] * 100)
@@ -85,6 +109,10 @@ def main():
     conn = get_connection()
     init_schema(conn)
     conn.close()
+
+    if once:
+        run_single_cycle()
+        return
 
     # Set up scheduler
     scheduler = BlockingScheduler()
