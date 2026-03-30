@@ -233,8 +233,11 @@ def _process_market(
             logger.info("Position blocked: %s", reason)
             continue
 
-        # Execute
-        result = execute_order(edge, size, mode="opening_hunt", market_id=tokens["market_id"])
+        # Execute — pass token_id for correct YES/NO token selection
+        result = execute_order(
+            edge, size, mode="opening_hunt", market_id=tokens["market_id"],
+            token_id=tokens["token_id"], no_token_id=tokens["no_token_id"],
+        )
 
         if result.status == "filled":
             pos = Position(
