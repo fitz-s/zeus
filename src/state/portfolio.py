@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +22,12 @@ POSITIONS_PATH = STATE_DIR / "positions.json"
 
 @dataclass
 class Position:
+    """A held trading position.
+
+    INVARIANT: p_posterior and entry_price are ALWAYS in the native space of the
+    direction. For buy_yes: P(YES) and YES market price. For buy_no: P(NO) and NO
+    market price. This invariant is established once at entry and never flipped.
+    """
     trade_id: str
     market_id: str
     city: str
@@ -30,8 +36,8 @@ class Position:
     bin_label: str
     direction: str  # "buy_yes" or "buy_no"
     size_usd: float
-    entry_price: float
-    p_posterior: float
+    entry_price: float  # Native space: YES price for buy_yes, NO price for buy_no
+    p_posterior: float   # Native space: P(YES) for buy_yes, P(NO) for buy_no
     edge: float
     entered_at: str
     # Token IDs for CLOB orderbook queries (exit VWMP refresh)
@@ -41,6 +47,10 @@ class Position:
     edge_source: str = ""
     discovery_mode: str = ""
     market_hours_open: float = 0.0
+    # Churn defense: per-position state
+    neg_edge_count: int = 0  # Layer 1: consecutive negative edge cycles
+    last_exit_at: str = ""   # Layer 5: reentry block timestamp
+    exit_reason: str = ""    # Layer 5+6: why position was closed
 
 
 @dataclass
@@ -48,6 +58,8 @@ class PortfolioState:
     positions: list[Position] = field(default_factory=list)
     bankroll: float = 150.0
     updated_at: str = ""
+    # Layer 5+6: recently closed positions for reentry/cooldown checks
+    recent_exits: list[dict] = field(default_factory=list)
 
 
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
@@ -95,11 +107,27 @@ def add_position(state: PortfolioState, pos: Position) -> None:
     state.positions.append(pos)
 
 
-def remove_position(state: PortfolioState, trade_id: str) -> Optional[Position]:
-    """Remove a position by trade_id. Returns the removed position or None."""
+def remove_position(
+    state: PortfolioState, trade_id: str, exit_reason: str = ""
+) -> Optional[Position]:
+    """Remove a position by trade_id. Track in recent_exits for reentry blocks."""
     for i, p in enumerate(state.positions):
         if p.trade_id == trade_id:
-            return state.positions.pop(i)
+            pos = state.positions.pop(i)
+            pos.exit_reason = exit_reason
+            pos.last_exit_at = datetime.now(timezone.utc).isoformat()
+            # Layer 5+6: track for reentry/cooldown
+            state.recent_exits.append({
+                "city": pos.city, "bin_label": pos.bin_label,
+                "target_date": pos.target_date, "direction": pos.direction,
+                "token_id": pos.token_id, "no_token_id": pos.no_token_id,
+                "exit_reason": exit_reason,
+                "exited_at": pos.last_exit_at,
+            })
+            # Keep only last 50 exits
+            if len(state.recent_exits) > 50:
+                state.recent_exits = state.recent_exits[-50:]
+            return pos
     return None
 
 
@@ -125,3 +153,41 @@ def cluster_exposure(state: PortfolioState, cluster: str) -> float:
         return 0.0
     total = sum(p.size_usd for p in state.positions if p.cluster == cluster)
     return total / state.bankroll
+
+
+# --- Churn defense: Layers 5, 6, 7 ---
+
+def is_reentry_blocked(
+    state: PortfolioState, city: str, bin_label: str,
+    target_date: str, minutes: int = 20,
+) -> bool:
+    """Layer 5: Block re-entry into a range recently exited via reversal."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    reversal_reasons = {
+        "EDGE_REVERSAL", "BUY_NO_EDGE_EXIT", "ENSEMBLE_CONFLICT",
+        "DAY0_OBSERVATION_REVERSAL",
+    }
+    for ex in state.recent_exits:
+        if (ex["city"] == city and ex["bin_label"] == bin_label
+                and ex["target_date"] == target_date
+                and ex["exit_reason"] in reversal_reasons
+                and ex["exited_at"] >= cutoff):
+            return True
+    return False
+
+
+def is_token_on_cooldown(state: PortfolioState, token_id: str, hours: float = 1.0) -> bool:
+    """Layer 6: Block rebuy of tokens voided within the last hour."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    voided_reasons = {"UNFILLED_ORDER", "EXIT_FAILED"}
+    for ex in state.recent_exits:
+        if ((ex["token_id"] == token_id or ex["no_token_id"] == token_id)
+                and ex["exit_reason"] in voided_reasons
+                and ex["exited_at"] >= cutoff):
+            return True
+    return False
+
+
+def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -> bool:
+    """Layer 7: Block same city+range across different dates."""
+    return any(p.city == city and p.bin_label == bin_label for p in state.positions)

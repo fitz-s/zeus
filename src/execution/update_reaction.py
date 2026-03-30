@@ -95,7 +95,7 @@ def _check_exits(conn, portfolio: PortfolioState) -> int:
 
             if signal is not None:
                 logger.info("EXIT %s: %s — %s", pos.trade_id, signal.trigger, signal.reason)
-                remove_position(portfolio, pos.trade_id)
+                remove_position(portfolio, pos.trade_id, exit_reason=signal.trigger)
                 clear_reversal_state(pos.trade_id)
                 log_event(conn, "EXIT", pos.trade_id, {
                     "trigger": signal.trigger,
