@@ -2,83 +2,106 @@
 
 ## Session 1 (2026-03-30)
 
-### Phase 0: Baseline Experiment — COMPLETE ✓
+### Phase 0: Baseline Experiment — GO ✓
 
-**Decision: GO**
+Baseline confirmed structural mispricing exists. Center bins underpriced 2.9×, shoulder bins overpriced. Details in state/baseline_results.json.
 
-#### Completed
-- [x] Project scaffolding: directory structure, venv, config/settings.json, config/cities.json
-- [x] src/config.py — strict config loader, no .get(key, fallback)
-- [x] src/state/db.py — full Zeus schema with 4-timestamp constraint
-- [x] scripts/migrate_rainstorm_data.py — data migration from rainstorm.db
-- [x] scripts/baseline_experiment.py — climatology vs settlement outcome analysis
-- [x] Tests: 12 tests passing (test_config.py, test_db.py, test_migration.py)
+### Phase A: Signal Infrastructure — COMPLETE ✓
 
-#### Baseline Results (41 multi-bin structured markets)
+#### A1: Signal Generation
+- [x] src/types.py — Bin + BinEdge dataclasses
+- [x] src/data/ensemble_client.py — Open-Meteo ECMWF/GFS fetch
+- [x] src/signal/ensemble_signal.py — P_raw with MC instrument noise (σ=0.5°F, 5000 MC)
+- [x] src/signal/model_agreement.py — JSD conflict detection (AGREE/SOFT_DISAGREE/CONFLICT)
 
-| Metric | Shoulder Bins | Center Bins |
-|--------|--------------|-------------|
-| N bins | 239 | 565 |
-| Win rate | 8.4% | 9.9% |
-| Avg P_clim | 41.3% | 3.5% |
-| Win/P_clim ratio | 0.203 | 2.858 |
+#### A2: Calibration Foundation
+- [x] src/calibration/platt.py — ExtendedPlattCalibrator (3-param, 200 bootstrap)
+- [x] src/calibration/store.py — SQLite CRUD for calibration_pairs + platt_models
+- [x] src/calibration/manager.py — 24-bucket routing, maturity gate (4 levels), fallback
 
-**Key findings:**
-1. Center bins win at 2.9× their climatological base rate → systematically underpriced
-2. Shoulder bins win at only 0.2× their climatological rate → overpriced even by climatology
-3. Single-bin threshold markets (n=1,343): 5.0% win rate vs 30.6% P_clim (ratio 0.163)
-4. Calibration table shows severe overestimation at high-P bins — expected, since shoulder bins cover wide ranges but rarely win in multi-bin markets
+#### A3: Edge Detection + Strategy
+- [x] src/strategy/market_analysis.py — MarketAnalysis with double bootstrap CI (3σ)
+- [x] src/strategy/market_fusion.py — compute_alpha (4-level + dynamic), VWMP, posterior
+- [x] src/strategy/fdr_filter.py — BH FDR control with exact bootstrap p-values
 
-**Interpretation:**
-- The edge thesis is confirmed: structural mispricing exists
-- Center bins near model consensus are underpriced → buying center YES is a viable strategy
-- Shoulder bins are overpriced → selling shoulder (buy NO) or avoiding is correct
-- ENS ensemble + Platt calibration will be vastly superior to this crude climatology
+### Phase B: Calibration Seeding — SKIPPED (needs ENS backfill data)
 
-#### Data Discoveries (Critical Intelligence)
+Requires running scripts/backfill_ens.py which makes real API calls over hours. Deferred to Phase D prep.
 
-1. **token_price_log has NO range_label** — Rainstorm bug; column always empty. Token-to-bin mapping requires Gamma API live lookup. Historical price backtesting is NOT possible with current data.
+### Phase C: Execution Layer — COMPLETE ✓
 
-2. **token_price_log date range: 2026-03-28 to 2026-04-15 only** — no historical market prices. Sharpe calculation impossible without price data.
+#### Strategy
+- [x] src/strategy/kelly.py — per-bin Kelly + dynamic multiplier
+- [x] src/strategy/risk_limits.py — portfolio constraint enforcement
 
-3. **market_events range_low/range_high are ALL NULL** — all boundary info is in range_label text. Parser required for: `"49°F or below"`, `"50–51 °F"` (en-dash!), `"4°C"` (point bins), `"68°F or higher"`.
+#### Execution
+- [x] src/execution/executor.py — limit-order-only, paper fills at VWMP
+- [x] src/execution/exit_triggers.py — 6 triggers, 2-confirmation EDGE_REVERSAL
+- [x] src/execution/harvester.py — settlement → 11 calibration pairs
+- [x] src/state/chronicler.py — append-only trade log
+- [x] src/state/portfolio.py — atomic JSON, exposure queries
 
-4. **City name inconsistency**: market_events uses "LA"/"SF", everything else uses "Los Angeles"/"San Francisco". Need normalization layer.
+#### RiskGuard
+- [x] src/riskguard/risk_level.py — GREEN/YELLOW/ORANGE/RED
+- [x] src/riskguard/metrics.py — Brier, directional accuracy, win rate
+- [x] src/riskguard/riskguard.py — independent 60s tick process
 
-5. **London observations contaminated**: WU daily observed for London has values >90 with unit='C' — physically impossible. Openmeteo_archive is clean. Use as primary source for European cities.
+#### Main
+- [x] src/main.py — APScheduler with Mode A/B/C + harvester + monitor
 
-6. **Only 41 multi-bin structured markets** exist (2026-03-24 to 2026-03-28). Historical markets were single-bin threshold format. Multi-bin data will grow as live collection continues.
+### Test Summary
 
-7. **Settlements: 1,390** (filtered from 1,634 where winning_range IS NOT NULL)
-   - NYC: 425, London: 429, Dallas: 115, Atlanta: 114, Seattle: 113
-   - Chicago: 68, Miami: 68, Paris: 44, LA: 8, SF: 6
+130 tests passing across 12 test files. Every src/ module has corresponding tests.
 
-8. **market_events dedup**: 14,901 → 6,023 on UNIQUE(market_slug, condition_id). Some markets have duplicate ingestion records.
+### Key Data Discoveries (from Phase 0)
 
-#### Decisions Made
-- **Baseline redesigned**: Spec called for price-based backtest (condition a). Without historical prices, pivoted to climatology-vs-outcomes analysis (condition b). Both approaches test the same hypothesis; prices would add confidence but aren't required for GO/NO-GO.
-- **Label parser built**: Since range_low/range_high are NULL, wrote regex parser for all label formats. Handles °F, °C, en-dash, "or below"/"or lower"/"or higher" variants.
-- **Observations strategy**: Use openmeteo_archive as primary (cleanest), iem_asos secondary, WU deprioritized for European cities due to unit contamination.
+1. **token_price_log has NO range_label** — Rainstorm bug; all empty
+2. **market_events range_low/range_high ALL NULL** — boundaries in label text only
+3. **City name mismatch** — market_events: "LA"/"SF" vs settlements: "Los Angeles"/"San Francisco"
+4. **London WU observations contaminated** — use openmeteo_archive as primary
+5. **Only 41 multi-bin structured markets** — historical are single-bin binary
 
-#### Schema Updates Pending
-- CLAUDE.md updated: trade_decisions needs attribution fields (edge_source, bin_type, discovery_mode, market_hours_open, fill_quality)
-- Need to add these columns to db.py schema before Phase C
+### Decisions Made (Spec Divergences)
 
-### Next Session: Phase A — Signal Infrastructure
+1. **MarketAnalysis constructor** takes pre-computed vectors (p_raw, p_cal, p_market) instead of (ens, bins, calibrator, alpha). More flexible for handling maturity level 4 (no calibrator). CLAUDE.md interface updated.
 
-**Priority 1:** ensemble_client.py — Open-Meteo ENS 51-member fetch
-**Priority 2:** ensemble_signal.py — P_raw vector with MC instrument noise
-**Priority 3:** model_agreement.py — JSD-based ECMWF vs GFS conflict detection
+2. **compute_posterior normalizes** output to sum=1.0, since p_market sums to vig (~0.95-1.05). CLAUDE.md p_posterior type requires sum=1.0.
 
-**Prerequisites:**
-- Read spec §2.1 (signal generation) and §2.2 (model agreement)
-- ENS backfill script for historical settlements (92-day window)
+3. **Bootstrap .astype(int)** in market_analysis._bootstrap_bin is intentional — it simulates the same WU settlement chain as p_raw_vector, not a temperature type violation.
 
-**Files to create:**
+4. **trade_decisions schema** updated with attribution fields (edge_source, bin_type, discovery_mode, market_hours_open, fill_quality) per CLAUDE.md update.
+
+### Schema Updates Applied
+- trade_decisions: added edge_source, bin_type, discovery_mode, market_hours_open, fill_quality
+- token_price_log: added city, target_date, range_label columns
+
+### Next Session: Integration + Paper Trading Prep
+
+**Priority 1:** Wire discovery modes (opening_hunt, update_reaction, day0_capture) to the full pipeline:
+  ENS fetch → EnsembleSignal → calibrate → MarketAnalysis → FDR → Kelly → executor
+
+**Priority 2:** ENS backfill script (scripts/backfill_ens.py) for historical Platt fitting
+
+**Priority 3:** Polymarket CLOB client (src/data/polymarket_client.py) — extract from Rainstorm v1
+
+**Priority 4:** Market scanner (src/data/market_scanner.py) — Gamma API market discovery
+
+**Files remaining (not yet created):**
 ```
-src/data/ensemble_client.py
-src/signal/ensemble_signal.py
-src/signal/model_agreement.py
-tests/test_ensemble_signal.py
-tests/test_model_agreement.py
+src/data/polymarket_client.py    — CLOB API (extract from Rainstorm)
+src/data/market_scanner.py       — Gamma API market discovery
+src/data/observation_client.py   — IEM ASOS + WU + Meteostat for Day0
+src/data/climatology.py          — NOAA GHCND historical distributions
+src/data/nws_client.py           — NWS extreme weather alerts
+src/signal/day0_signal.py        — Observation + residual ENS
+src/calibration/drift.py         — Hosmer-Lemeshow drift detection
+src/strategy/correlation.py      — Heuristic correlation matrix
+src/execution/opening_hunt.py    — Mode A full pipeline
+src/execution/update_reaction.py — Mode B full pipeline
+src/execution/day0_capture.py    — Mode C full pipeline
+src/execution/monitor.py         — Variable-frequency exit checking
+src/state/ensemble_store.py      — ENS snapshot archive
+src/analysis/dashboard.py        — Dash web UI
+src/analysis/performance.py      — P&L analysis
+scripts/backfill_ens.py          — 92-day ENS backfill
 ```
