@@ -25,6 +25,24 @@ from src.strategy.risk_limits import RiskLimits
 
 logger = logging.getLogger(__name__)
 
+def _classify_strategy(edge) -> str:
+    """Classify edge into one of 4 strategies. No truthiness bugs."""
+    if edge.direction == "buy_no" and edge.bin.is_shoulder:
+        return "shoulder_sell"
+    elif edge.direction == "buy_yes" and not edge.bin.is_shoulder:
+        return "center_buy"
+    elif edge.direction == "buy_yes" and edge.bin.is_shoulder:
+        return "opening_inertia"
+    return "shoulder_sell"
+
+
+def _classify_edge_source(edge) -> str:
+    """Classify edge source based on bin type and direction."""
+    if edge.bin.is_shoulder:
+        return "favorite_longshot"
+    return "opening_inertia"
+
+
 # Mode → scanner parameters
 MODE_PARAMS = {
     DiscoveryMode.OPENING_HUNT: {"max_hours_since_open": 24, "min_hours_to_resolution": 24},
@@ -60,10 +78,10 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     )
 
     # 2. MONITOR FIRST — protect existing value
-    from src.execution.monitor import _refresh_position
+    from src.engine.monitor_refresh import refresh_position
     for pos in list(portfolio.positions):
         try:
-            p_market, p_posterior = _refresh_position(conn, clob, pos)
+            p_market, p_posterior = refresh_position(conn, clob, pos)
             decision = pos.evaluate_exit(current_p_posterior=p_posterior,
                                           current_p_market=p_market)
             summary["monitors"] += 1
@@ -126,8 +144,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
                                 entered_at=datetime.now(timezone.utc).isoformat(),
                                 token_id=d.tokens["token_id"],
                                 no_token_id=d.tokens["no_token_id"],
-                                strategy=d.edge.ev_per_dollar > 0 and "shoulder_sell" or "center_buy",
-                                edge_source=getattr(d.edge, 'ev_per_dollar', '') and "favorite_longshot",
+                                strategy=_classify_strategy(d.edge),
+                                edge_source=_classify_edge_source(d.edge),
                                 discovery_mode=mode.value,
                                 market_hours_open=candidate.hours_since_open,
                             )
@@ -139,9 +157,23 @@ def run_cycle(mode: DiscoveryMode) -> dict:
                 logger.error("Evaluation failed for %s %s: %s",
                              city.name, candidate.target_date, e)
 
-    # 4. Save and cleanup
+    # 4. Save and record decision chain
     if summary["trades"] > 0 or summary["exits"] > 0:
         save_portfolio(portfolio)
+
+    # Wire Decision Chain: store CycleArtifact to decision_log (Opus Gap 6)
+    try:
+        from src.state.decision_chain import CycleArtifact, store_artifact
+        artifact = CycleArtifact(
+            mode=mode.value,
+            started_at=summary["started_at"],
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            summary=summary,
+        )
+        store_artifact(conn, artifact)
+    except Exception as e:
+        logger.warning("Decision chain recording failed: %s", e)
+
     conn.close()
 
     summary["completed_at"] = datetime.now(timezone.utc).isoformat()

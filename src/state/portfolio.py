@@ -45,6 +45,7 @@ class Position:
 
     Position knows HOW to exit itself. Monitor just calls evaluate_exit().
     """
+    # Identity (immutable after creation)
     trade_id: str
     market_id: str
     city: str
@@ -52,25 +53,58 @@ class Position:
     target_date: str
     bin_label: str
     direction: str  # "buy_yes" or "buy_no"
-    size_usd: float
-    entry_price: float  # Native space
-    p_posterior: float   # Native space
-    edge: float
-    entered_at: str
-    # Strategy: which edge source generated this position
+    unit: str = "F"  # Blueprint v2: carried, never inferred
+
+    # Probability (always in held-side space — flipped exactly once at creation)
+    size_usd: float = 0.0
+    entry_price: float = 0.0  # Native space
+    p_posterior: float = 0.0  # Native space (p_held_side in blueprint)
+    edge: float = 0.0
+    shares: float = 0.0  # size_usd / entry_price
+    cost_basis_usd: float = 0.0  # = size_usd
+    bankroll_at_entry: float = 150.0
+    entered_at: str = ""
+
+    # Entry context (immutable snapshot — Blueprint v2 §2)
+    entry_method: str = "ens_member_counting"
+    signal_version: str = "v2"
+    calibration_version: str = ""
+    decision_snapshot_id: str = ""  # FK to ensemble_snapshots at decision time
+
+    # Strategy + attribution
     strategy: str = ""  # "settlement_capture" | "shoulder_sell" | "center_buy" | "opening_inertia"
-    state: str = "holding"  # "holding" | "exiting" | "settled" | "voided"
-    # Token IDs for CLOB orderbook queries
-    token_id: str = ""
-    no_token_id: str = ""
-    # Attribution (CLAUDE.md mandatory)
     edge_source: str = ""
     discovery_mode: str = ""
     market_hours_open: float = 0.0
-    # Churn defense: per-position state
+    fill_quality: float = 0.0  # (exec_price - vwmp) / vwmp
+
+    # Lifecycle state (Blueprint v2 §2)
+    state: str = "holding"  # pending | entered | holding | day0_window | settled | voided | admin_closed
+    exit_strategy: str = ""  # "buy_yes_standard" | "buy_no_conservative" (set from direction)
+
+    # Chain reconciliation (Blueprint v2 §5)
+    chain_state: str = "unknown"  # unknown | synced | local_only | chain_only | quarantined
+    chain_shares: float = 0.0
+    chain_verified_at: str = ""
+
+    # Token IDs for CLOB orderbook queries
+    token_id: str = ""
+    no_token_id: str = ""
+    condition_id: str = ""
+
+    # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
+    last_monitor_prob: float = 0.0
+    last_monitor_edge: float = 0.0
+    last_monitor_at: str = ""
+    cal_std: float = 3.0  # Calibration std for this city-season (default °F)
+    city_peak_hour: float = 15.0  # For Day0 phase detection
+
+    # Anti-churn
     last_exit_at: str = ""
     exit_reason: str = ""
+    admin_exit_reason: str = ""  # Separate from economic exit_reason
+
     # P&L (set on close)
     exit_price: float = 0.0
     pnl: float = 0.0
@@ -136,8 +170,10 @@ class Position:
     def _buy_no_exit(
         self, forward_edge: float, hours_to_settlement: Optional[float] = None
     ) -> ExitDecision:
-        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
-        edge_threshold = -0.045
+        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
+        Blueprint v2 §7: threshold scales with cal_std (noisier cities need deeper reversal).
+        """
+        edge_threshold = -self.cal_std * 0.015  # Default: std=3.0°F → -0.045
 
         # Near-settlement hold (unless deeply negative)
         if hours_to_settlement is not None and hours_to_settlement < 4.0:
@@ -158,7 +194,8 @@ class Position:
 
     @property
     def is_admin_exit(self) -> bool:
-        return self.exit_reason in ADMIN_EXITS
+        return (self.admin_exit_reason != ""
+                or self.exit_reason in ADMIN_EXITS)
 
 
 @dataclass

@@ -7,7 +7,7 @@ This constraint dramatically narrows probability distribution near settlement.
 
 import numpy as np
 
-from src.signal.ensemble_signal import SIGMA_INSTRUMENT
+from src.signal.ensemble_signal import sigma_instrument
 from src.types import Bin
 
 
@@ -25,6 +25,7 @@ class Day0Signal:
         current_temp: float,
         hours_remaining: float,
         member_maxes_remaining: np.ndarray,
+        unit: str = "F",
     ):
         """
         Args:
@@ -38,6 +39,8 @@ class Day0Signal:
         self.current_temp = current_temp
         self.hours_remaining = hours_remaining
         self.ens_remaining = member_maxes_remaining
+        self.unit = unit
+        self._sigma = sigma_instrument(unit).value  # P0-9: city-appropriate noise
 
     def p_vector(self, bins: list[Bin], n_mc: int = 3000) -> np.ndarray:
         """Compute probability vector incorporating observation floor.
@@ -61,7 +64,7 @@ class Day0Signal:
         for _ in range(n_mc):
             # Sample residual ENS member
             remaining = rng.choice(self.ens_remaining, size=n_members, replace=True)
-            noised = remaining + rng.normal(0, SIGMA_INSTRUMENT, n_members)
+            noised = remaining + rng.normal(0, self._sigma, n_members)
 
             # Final high = max(observed, remaining forecast)
             final_highs = np.maximum(noised, self.obs_high)
