@@ -53,3 +53,34 @@ def evaluate_win_rate(rate: float, thresholds: dict) -> RiskLevel:
     elif rate < thresholds["win_rate_yellow"]:
         return RiskLevel.YELLOW
     return RiskLevel.GREEN
+
+
+# R5: Gate_50 — terminal evaluation at 50 settled trades
+_gate_50_state: str = "pending"  # "pending" | "passed" | "failed"
+
+
+def evaluate_gate_50(settled_count: int, accuracy: float) -> str:
+    """R5: Gate_50 terminal evaluation. Irreversible once passed/failed.
+
+    At 50 settled trades: accuracy >= 55% → passed, < 50% → failed (permanent halt).
+    50-55%: still pending, re-evaluate at 100.
+    """
+    global _gate_50_state
+
+    if _gate_50_state in ("passed", "failed"):
+        return _gate_50_state  # Permanent — never re-evaluate
+
+    if settled_count < 50:
+        return "pending"
+
+    if accuracy >= 0.55:
+        _gate_50_state = "passed"
+        logger.info("Gate_50 PASSED: %d trades, %.1f%% accuracy", settled_count, accuracy * 100)
+        return "passed"
+    elif accuracy < 0.50:
+        _gate_50_state = "failed"
+        logger.error("Gate_50 FAILED: %d trades, %.1f%% accuracy. Model has no measurable edge. "
+                      "Rebuild required.", settled_count, accuracy * 100)
+        return "failed"
+    else:
+        return "pending"  # 50-55%: re-evaluate at 100

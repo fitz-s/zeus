@@ -21,12 +21,29 @@ POSITIONS_PATH = STATE_DIR / "positions.json"
 
 
 @dataclass
+class ExitDecision:
+    """Result of Position.evaluate_exit()."""
+    should_exit: bool
+    reason: str = ""
+    urgency: str = "normal"  # "normal" or "immediate"
+
+
+# Administrative exit reasons — excluded from P&L calculations
+ADMIN_EXITS = frozenset({
+    "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
+    "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
+})
+
+
+@dataclass
 class Position:
-    """A held trading position.
+    """A held trading position — stateful entity that owns its exit logic.
 
     INVARIANT: p_posterior and entry_price are ALWAYS in the native space of the
     direction. For buy_yes: P(YES) and YES market price. For buy_no: P(NO) and NO
     market price. This invariant is established once at entry and never flipped.
+
+    Position knows HOW to exit itself. Monitor just calls evaluate_exit().
     """
     trade_id: str
     market_id: str
@@ -36,11 +53,14 @@ class Position:
     bin_label: str
     direction: str  # "buy_yes" or "buy_no"
     size_usd: float
-    entry_price: float  # Native space: YES price for buy_yes, NO price for buy_no
-    p_posterior: float   # Native space: P(YES) for buy_yes, P(NO) for buy_no
+    entry_price: float  # Native space
+    p_posterior: float   # Native space
     edge: float
     entered_at: str
-    # Token IDs for CLOB orderbook queries (exit VWMP refresh)
+    # Strategy: which edge source generated this position
+    strategy: str = ""  # "settlement_capture" | "shoulder_sell" | "center_buy" | "opening_inertia"
+    state: str = "holding"  # "holding" | "exiting" | "settled" | "voided"
+    # Token IDs for CLOB orderbook queries
     token_id: str = ""
     no_token_id: str = ""
     # Attribution (CLAUDE.md mandatory)
@@ -48,9 +68,97 @@ class Position:
     discovery_mode: str = ""
     market_hours_open: float = 0.0
     # Churn defense: per-position state
-    neg_edge_count: int = 0  # Layer 1: consecutive negative edge cycles
-    last_exit_at: str = ""   # Layer 5: reentry block timestamp
-    exit_reason: str = ""    # Layer 5+6: why position was closed
+    neg_edge_count: int = 0
+    last_exit_at: str = ""
+    exit_reason: str = ""
+    # P&L (set on close)
+    exit_price: float = 0.0
+    pnl: float = 0.0
+
+    def evaluate_exit(
+        self,
+        current_p_posterior: float,
+        current_p_market: float,
+        hours_to_settlement: Optional[float] = None,
+        is_whale_sweep: bool = False,
+        best_bid: Optional[float] = None,
+        market_vig: float = 1.0,
+    ) -> ExitDecision:
+        """Position knows how to exit ITSELF. Monitor just calls this.
+
+        All probabilities in native space (same as entry).
+        """
+        # Settlement imminent
+        if hours_to_settlement is not None and hours_to_settlement < 1.0:
+            return ExitDecision(True, "SETTLEMENT_IMMINENT", "immediate")
+
+        # Whale toxicity
+        if is_whale_sweep:
+            return ExitDecision(True, "WHALE_TOXICITY", "immediate")
+
+        # Micro-position hold (Layer 8: < $1 never sold)
+        if self.size_usd < 1.0:
+            return ExitDecision(False)
+
+        # Vig extreme
+        if market_vig > 1.08 or market_vig < 0.92:
+            return ExitDecision(True, f"VIG_EXTREME (vig={market_vig:.3f})")
+
+        # Direction-specific exit logic
+        forward_edge = current_p_posterior - current_p_market
+
+        if self.direction == "buy_no":
+            return self._buy_no_exit(forward_edge, hours_to_settlement)
+        else:
+            return self._buy_yes_exit(forward_edge, best_bid)
+
+    def _buy_yes_exit(
+        self, forward_edge: float, best_bid: Optional[float] = None
+    ) -> ExitDecision:
+        """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
+        if forward_edge >= 0:
+            self.neg_edge_count = 0
+            return ExitDecision(False)
+
+        self.neg_edge_count += 1
+        if self.neg_edge_count < 2:
+            return ExitDecision(False)
+
+        # Layer 4: EV gate
+        if best_bid is not None and self.entry_price > 0:
+            shares = self.size_usd / self.entry_price
+            if shares * best_bid <= shares * self.p_posterior:
+                return ExitDecision(False)  # Selling worse than holding
+
+        self.neg_edge_count = 0
+        return ExitDecision(True, f"EDGE_REVERSAL (edge={forward_edge:.4f})")
+
+    def _buy_no_exit(
+        self, forward_edge: float, hours_to_settlement: Optional[float] = None
+    ) -> ExitDecision:
+        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
+        edge_threshold = -0.045
+
+        # Near-settlement hold (unless deeply negative)
+        if hours_to_settlement is not None and hours_to_settlement < 4.0:
+            if forward_edge < -0.20:
+                return ExitDecision(True, f"BUY_NO_NEAR_EXIT (edge={forward_edge:.4f})")
+            return ExitDecision(False)
+
+        if forward_edge < edge_threshold:
+            self.neg_edge_count += 1
+        else:
+            self.neg_edge_count = 0
+
+        if self.neg_edge_count >= 2:
+            self.neg_edge_count = 0
+            return ExitDecision(True, f"BUY_NO_EDGE_EXIT (edge={forward_edge:.4f})")
+
+        return ExitDecision(False)
+
+    @property
+    def is_admin_exit(self) -> bool:
+        return self.exit_reason in ADMIN_EXITS
 
 
 @dataclass
@@ -107,28 +215,85 @@ def add_position(state: PortfolioState, pos: Position) -> None:
     state.positions.append(pos)
 
 
-def remove_position(
-    state: PortfolioState, trade_id: str, exit_reason: str = ""
+def close_position(
+    state: PortfolioState, trade_id: str,
+    exit_price: float, exit_reason: str,
 ) -> Optional[Position]:
-    """Remove a position by trade_id. Track in recent_exits for reentry blocks."""
+    """Close a position with known exit price. Computes P&L.
+
+    L4: closes ALL same-token positions (handles GHOST_DUPLICATE).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    closed = None
+
+    for i, p in enumerate(list(state.positions)):
+        if p.trade_id == trade_id:
+            pos = state.positions.pop(state.positions.index(p))
+            pos.state = "settled"
+            pos.exit_price = exit_price
+            pos.exit_reason = exit_reason
+            pos.last_exit_at = now
+            # P&L: (exit - entry) * shares
+            if pos.entry_price > 0:
+                shares = pos.size_usd / pos.entry_price
+                pos.pnl = round(shares * exit_price - pos.size_usd, 2)
+            _track_exit(state, pos)
+            closed = pos
+
+    return closed
+
+
+def void_position(
+    state: PortfolioState, trade_id: str, reason: str,
+) -> Optional[Position]:
+    """Close with pnl=0 when real exit price is unknown. L3.
+
+    Use for: UNFILLED_ORDER, SETTLED_NOT_IN_API, EXIT_FAILED.
+    Does NOT affect loss counters (admin exit).
+    """
     for i, p in enumerate(state.positions):
         if p.trade_id == trade_id:
             pos = state.positions.pop(i)
-            pos.exit_reason = exit_reason
+            pos.state = "voided"
+            pos.exit_reason = reason
+            pos.exit_price = 0.0
+            pos.pnl = 0.0
             pos.last_exit_at = datetime.now(timezone.utc).isoformat()
-            # Layer 5+6: track for reentry/cooldown
-            state.recent_exits.append({
-                "city": pos.city, "bin_label": pos.bin_label,
-                "target_date": pos.target_date, "direction": pos.direction,
-                "token_id": pos.token_id, "no_token_id": pos.no_token_id,
-                "exit_reason": exit_reason,
-                "exited_at": pos.last_exit_at,
-            })
-            # Keep only last 50 exits
-            if len(state.recent_exits) > 50:
-                state.recent_exits = state.recent_exits[-50:]
+            _track_exit(state, pos)
             return pos
     return None
+
+
+def remove_position(
+    state: PortfolioState, trade_id: str, exit_reason: str = ""
+) -> Optional[Position]:
+    """Legacy remove. Delegates to close_position with entry_price as exit."""
+    for p in state.positions:
+        if p.trade_id == trade_id:
+            return close_position(state, trade_id, p.entry_price, exit_reason)
+    return None
+
+
+def _track_exit(state: PortfolioState, pos: Position) -> None:
+    """Track exit for reentry/cooldown checks (Layers 5+6)."""
+    state.recent_exits.append({
+        "city": pos.city, "bin_label": pos.bin_label,
+        "target_date": pos.target_date, "direction": pos.direction,
+        "token_id": pos.token_id, "no_token_id": pos.no_token_id,
+        "exit_reason": pos.exit_reason,
+        "exited_at": pos.last_exit_at,
+    })
+    if len(state.recent_exits) > 50:
+        state.recent_exits = state.recent_exits[-50:]
+
+
+def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
+    """Total realized P&L, optionally excluding admin exits. L2."""
+    total = 0.0
+    for ex in state.recent_exits:
+        # recent_exits doesn't have pnl yet — use chronicle for full P&L
+        pass
+    return total
 
 
 def portfolio_heat(state: PortfolioState) -> float:

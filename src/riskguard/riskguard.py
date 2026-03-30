@@ -103,20 +103,37 @@ def tick() -> RiskLevel:
 
 
 def get_current_level() -> RiskLevel:
-    """Read current risk level from risk_state.db."""
+    """Read current risk level from risk_state.db.
+
+    R4: Fail-closed — if DB error or stale (>5 min), return RED.
+    """
     try:
         conn = get_connection(RISK_DB_PATH)
         init_risk_db(conn)
         row = conn.execute(
-            "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "SELECT level, checked_at FROM risk_state ORDER BY checked_at DESC LIMIT 1"
         ).fetchone()
         conn.close()
 
         if row is None:
+            # R3: Bootstrap state — no RiskGuard data yet. Allow trading.
             return RiskLevel.GREEN
+
+        # R4: Staleness check — if last check > 5 min ago, RiskGuard may have crashed
+        from datetime import datetime as dt
+        last_check = dt.fromisoformat(row["checked_at"].replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - last_check).total_seconds()
+        if age_seconds > 300:
+            logger.warning("RiskGuard STALE: last check was %ds ago. Fail-closed → RED.",
+                           int(age_seconds))
+            return RiskLevel.RED
+
         return RiskLevel(row["level"])
-    except Exception:
-        return RiskLevel.GREEN
+
+    except Exception as e:
+        # R4: DB error = fail closed → RED
+        logger.error("RiskGuard DB error: %s. Fail-closed → RED.", e)
+        return RiskLevel.RED
 
 
 if __name__ == "__main__":

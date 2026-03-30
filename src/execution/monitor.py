@@ -21,7 +21,7 @@ from src.calibration.platt import calibrate_and_normalize
 from src.config import settings
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
-from src.execution.exit_triggers import evaluate_exit_triggers, clear_reversal_state
+# Exit logic now lives on Position.evaluate_exit() (F2 architectural change)
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.chronicler import log_event
 from src.state.db import get_connection
@@ -71,20 +71,18 @@ def run_monitor() -> int:
                 conn, clob, pos
             )
 
-            signal = evaluate_exit_triggers(
-                position=pos,
+            # F2: Position owns its exit logic. Monitor just calls it.
+            decision = pos.evaluate_exit(
                 current_p_posterior=current_p_posterior,
                 current_p_market=current_p_market,
             )
 
-            if signal is not None:
-                logger.info("MONITOR EXIT %s: %s — %s",
-                            pos.trade_id, signal.trigger, signal.reason)
-                remove_position(portfolio, pos.trade_id, exit_reason=signal.trigger)
-                clear_reversal_state(pos.trade_id)
+            if decision.should_exit:
+                logger.info("MONITOR EXIT %s: %s", pos.trade_id, decision.reason)
+                from src.state.portfolio import close_position
+                close_position(portfolio, pos.trade_id, current_p_market, decision.reason)
                 log_event(conn, "EXIT", pos.trade_id, {
-                    "trigger": signal.trigger,
-                    "reason": signal.reason,
+                    "trigger": decision.reason,
                     "current_edge": current_p_posterior - current_p_market,
                     "entry_edge": pos.edge,
                     "source": "monitor",
