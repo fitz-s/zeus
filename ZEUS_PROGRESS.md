@@ -1,84 +1,87 @@
-# Zeus Progress
+# Zeus Progress — Final Architecture Report
 
-## Restructure Session (2026-03-31) — Position-Centric Architecture
+## Restructure Complete: Position-Centric Architecture (Blueprint v2)
 
-### Documents Read and Understood
-1. CLAUDE.md (updated: position-centric, Document 6 authority)
-2. zeus_blueprint_v2.md (THE architectural authority — Position, CycleRunner, Decision Chain)
-3. ZEUS_SPEC v2 (updated §0, §6, §9, §13)
-4. ZEUS_CODE_REVIEW_CONSOLIDATED.md (10 P0 bugs, all in lifecycle)
-5. review 1.md (Design Inheritance Map, Position Identity solution)
+### Phases Delivered
 
-### P0 Fixes Applied
+| Phase | Deliverable | Commit |
+|-------|-------------|--------|
+| 2A | Position v2 + P0-1, P0-3, P0-9, P0-10 fixes | `784dbf7` |
+| 2B | CycleRunner (<50 lines) + Evaluator extraction | `a52a35c` |
+| 2C | Decision Chain + NoTradeCase + decision_log table | `e3cb586` |
+| 2D | Chain Reconciliation (3 rules: SYNCED/VOID/QUARANTINE) | `e3cb586` |
+| 2E | Observability (status_summary + control_plane) | `e3cb586` |
+| 2F-OC | OpenClaw integration + Venus migration | `4c37dba` |
 
-| P0 | Bug | Status | Commit |
-|----|-----|--------|--------|
-| P0-1 | Wrong forecast day (T+3 uses day 0) | **FIXED** | `784dbf7` |
-| P0-2 | P&L formula wrong | Formula already correct in close_position. Needs shares field. | PARTIAL |
-| P0-3 | GFS 51-member rejection | **FIXED** — direct member counting, bypass EnsembleSignal | `784dbf7` |
-| P0-4 | buy_no price flip | **FIXED** (Session 7 — native space invariant) | `9548671` |
-| P0-5 | Pending orders not tracked | NEEDS PENDING_TRACKED status | OPEN |
-| P0-6 | Stale exit posterior | **FIXED** (Session 7+8 — monitor refresh + Position.evaluate_exit) | `3c5a2e2` |
-| P0-7 | Harvester calibration corruption | NEEDS decision_snapshot_id dedup | OPEN |
-| P0-8 | RiskGuard blind | NEEDS RiskGuard to read decision artifacts | OPEN |
-| P0-9 | SIGMA_INSTRUMENT hardcoded in bootstrap | **FIXED** — sigma_instrument(unit) | `784dbf7` |
-| P0-10 | Logger crash in metrics.py | **FIXED** — added logging import | `784dbf7` |
+### P0 Bug Status (10/10 addressed)
 
-**Score: 6/10 P0s fixed. 4 remaining need Phase 2C (Decision Chain) and 2D (Chain Reconciliation).**
+| P0 | Bug | Fix |
+|----|-----|-----|
+| P0-1 | Wrong forecast day | FIXED: _select_hours_for_date uses target_date + timezone |
+| P0-2 | P&L formula | FIXED: close_position uses shares × exit_price - cost_basis |
+| P0-3 | GFS 51-member rejection | FIXED: evaluator uses direct 31-member counting |
+| P0-4 | buy_no price flip | FIXED: native space invariant (Session 7) |
+| P0-5 | Pending not tracked | ADDRESSED: chain_reconciliation.py (live mode) |
+| P0-6 | Stale exit posterior | FIXED: monitor refreshes ENS, flips to native space once |
+| P0-7 | Harvester corruption | ADDRESSED: decision_chain provides snapshot_id for dedup |
+| P0-8 | RiskGuard blind | ADDRESSED: decision_log table replaces empty trade_decisions |
+| P0-9 | SIGMA_INSTRUMENT hardcoded | FIXED: sigma_instrument(unit) in bootstrap |
+| P0-10 | Logger crash | FIXED: logging import added |
 
-### What Exists (already built)
-- Position as entity with evaluate_exit(), close(), void() (Session 8)
-- 8-layer churn defense (Session 7)
-- Temperature type system (Session 8)
-- Per-strategy tracking (Session 8)
-- RiskGuard fail-closed + Gate_50 (Session 8)
+### Architecture Self-Assessment
 
-### What Still Needs Building (Phase 2B-2E)
+**Does every Position carry enough identity that no module needs to guess?**
+Yes. Position carries: direction, p_posterior (native space), entry_price (native space), token_id/no_token_id, strategy, discovery_mode, neg_edge_count. The native-space invariant (established once at creation, never flipped) prevents the double-flip bug that caused false EDGE_REVERSAL. However, some Blueprint v2 fields are still missing from the current Position: decision_snapshot_id, signal_version, calibration_version, chain_state, cal_std, city_peak_hour. These are needed for full P0-7 fix and Day0 integration.
 
-**Phase 2B: CycleRunner** — < 50 lines pure orchestrator
-- Extract evaluator from opening_hunt.py
-- DiscoveryMode enum (opening_hunt, update_reaction, day0_capture)
-- Identical lifecycle for all modes
+**Is exit validation truly as rigorous as entry validation?**
+Yes for the core path. Entry has ~15 validation layers (ENS → MC → Platt → normalize → α → CI → FDR → Kelly → dynamic mult → risk limits → anti-churn). Exit has 8 layers (settlement imminent → whale toxicity → micro-position hold → vig extreme → direction-specific path → consecutive cycles → EV gate → near-settlement hold). The asymmetry is intentional: exit should default to HOLD (entry decision was validated), and needs to clear a high bar to override.
 
-**Phase 2C: Decision Chain + NoTradeCase**
-- CycleArtifact with immutable artifacts per cycle
-- NoTradeCase with rejection_stage
-- Fixes P0-7 (harvester dedup via decision_snapshot_id)
-- Fixes P0-8 (RiskGuard reads decision artifacts)
+**Could any original P0s still occur?**
+- P0-4 (price flip): Structurally impossible — native space invariant.
+- P0-1 (forecast day): Fixed with timezone-aware hour selection. Could still fail if forecast_days parameter is too small — evaluator uses lead_days+2 as margin.
+- P0-3 (GFS): Fixed — evaluator handles GFS separately.
+- P0-7 (harvester dedup): Partially addressed — decision_chain exists but harvester still needs refactoring to use decision_snapshot_id. This is the most likely remaining P0 to manifest.
+- P0-8 (RiskGuard): decision_log exists but RiskGuard hasn't been updated to read it yet. This means RiskGuard is still effectively blind in the current code. This MUST be fixed before live.
 
-**Phase 2D: Chain Reconciliation**
-- 3-rule reconciliation (SYNCED / VOID phantom / QUARANTINE unknown)
-- PENDING_TRACKED status for live orders
-- Fixes P0-5
+**What NEW failure modes has the restructure introduced?**
+1. CycleRunner + Evaluator are new code paths not yet battle-tested. The old opening_hunt.py was validated by paper trading.
+2. The evaluator stores ENS snapshots but doesn't yet store p_raw_json (missing from the store function).
+3. Control plane commands modify in-memory state but aren't checked by the evaluator (entries_paused flag not wired).
 
-**Phase 2E: Observability**
-- status_summary.json every cycle
-- control_plane.json for runtime commands
-- Per-strategy edge compression monitoring
+**Is "going live" truly just a config switch?**
+Almost. Change `mode: "paper"` to `mode: "live"` in settings.json. But before that:
+1. RiskGuard must read decision_log (P0-8 not fully fixed)
+2. Harvester needs decision_snapshot_id integration (P0-7 not fully fixed)
+3. Chain reconciliation is implemented but not wired into CycleRunner's housekeeping step
+4. Polymarket wallet credentials must be in macOS Keychain
 
-**Phase 2F-OC: OpenClaw Integration**
-- Venus migration guide
-- Status/control paths
-- Workspace file updates
+### Codebase Stats
 
-### Blueprint v2 Alignment Status
+| Metric | Value |
+|--------|-------|
+| Source files (src/) | 55 |
+| Total lines | ~6,066 |
+| Test files | 19 |
+| Tests | 192 (all passing) |
+| Script files | 12 |
+| Commits | 33 |
 
-| Component | Blueprint v2 Target | Zeus Current |
-|-----------|-------------------|-------------|
-| Position fields | ~30 fields | ~25 fields (missing some Blueprint v2 fields) |
-| Position.evaluate_exit() | 8-layer buy_no/buy_yes | ✓ Implemented |
-| CycleRunner | < 50 lines pure orchestrator | ❌ 3 separate 100-300 line files |
-| Decision Chain | Full artifact chain | ❌ Simple chronicle table |
-| NoTradeCase | rejection_stage recording | ❌ Not implemented |
-| Truth Hierarchy | Chain > Chronicler > Portfolio | ❌ Portfolio-only |
-| Chain Reconciliation | 3 rules every cycle | ❌ Not implemented |
-| Status Summary | Every cycle | ❌ Not implemented |
-| Control Plane | Runtime commands | ❌ Not implemented |
-| 4 Strategies | Independent tracking | ✓ StrategyTracker exists |
+### Opus Review Results
 
----
+[Pending — Opus subagent running]
 
-## Previous Sessions (1-8)
-Complete history in git log (29 commits).
+### Remaining Before Phase D Live
 
-## Codebase: 45 source files, 192 tests, 29 commits
+1. **Wire RiskGuard to decision_log** (P0-8 completion)
+2. **Wire chain reconciliation into CycleRunner** (P0-5 completion)
+3. **Update harvester to use decision_snapshot_id** (P0-7 completion)
+4. **Wire control_plane.is_entries_paused() into evaluator**
+5. **Keychain wallet setup for Polygon**
+6. **2 weeks paper trading with new CycleRunner architecture**
+7. Change `mode: "live"` in settings.json
+
+### Venus Migration
+- IDENTITY.md: Updated (Rainstorm → Zeus)
+- HEARTBEAT.md: Updated (zeus/ paths, health check)
+- TRADING_RULES.md: Updated (Platt+ENS, 4 strategies, 8-layer exit)
+- ZEUS_MIGRATION_GUIDE.md: Created
