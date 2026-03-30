@@ -1,4 +1,4 @@
-"""Shared types used across Zeus modules."""
+"""Market types: Bin and BinEdge."""
 
 from dataclasses import dataclass, field
 

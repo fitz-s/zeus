@@ -7,6 +7,13 @@ lead time, and market freshness.
 
 import numpy as np
 
+from src.types.temperature import TemperatureDelta
+
+# Spread thresholds defined in °F, auto-converted via .to() for any unit.
+# This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
+SPREAD_TIGHT = TemperatureDelta(2.0, "F")
+SPREAD_WIDE = TemperatureDelta(5.0, "F")
+
 
 def vwmp(best_bid: float, best_ask: float,
          bid_size: float, ask_size: float) -> float:
@@ -29,7 +36,7 @@ def vwmp(best_bid: float, best_ask: float,
 
 def compute_alpha(
     calibration_level: int,
-    ensemble_spread: float,
+    ensemble_spread: TemperatureDelta | float,
     model_agreement: str,
     lead_days: float,
     hours_since_open: float,
@@ -38,15 +45,27 @@ def compute_alpha(
 
     Higher α → trust model more. Lower α → trust market more.
     Clamped to [0.20, 0.85].
+
+    ensemble_spread accepts both TemperatureDelta (preferred) and float (legacy).
+    When typed, thresholds auto-convert to the correct unit.
     """
     base = {1: 0.65, 2: 0.55, 3: 0.40, 4: 0.25}[calibration_level]
     a = base
 
-    # Ensemble spread adjustments
-    if ensemble_spread < 2.0:
-        a += 0.05
-    if ensemble_spread > 5.0:
-        a -= 0.10
+    # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
+    if isinstance(ensemble_spread, TemperatureDelta):
+        tight = SPREAD_TIGHT.to(ensemble_spread.unit)
+        wide = SPREAD_WIDE.to(ensemble_spread.unit)
+        if ensemble_spread < tight:
+            a += 0.05
+        if ensemble_spread > wide:
+            a -= 0.10
+    else:
+        # Legacy float path (will be removed after full migration)
+        if ensemble_spread < 2.0:
+            a += 0.05
+        if ensemble_spread > 5.0:
+            a -= 0.10
 
     # Model agreement adjustments
     if model_agreement == "SOFT_DISAGREE":

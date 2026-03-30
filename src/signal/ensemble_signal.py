@@ -17,9 +17,17 @@ from scipy.stats import gaussian_kde
 
 from src.config import City
 from src.types import Bin
+from src.types.temperature import TemperatureDelta, Unit
 
 
-# Spec §2.1: ASOS sensor precision ±0.5°F (Statistical Methodology §1.2)
+def sigma_instrument(unit: Unit) -> TemperatureDelta:
+    """ASOS sensor precision. °C value independently calibrated, not °F/1.8."""
+    if unit == "C":
+        return TemperatureDelta(0.28, "C")
+    return TemperatureDelta(0.5, "F")
+
+
+# Legacy constant for tests that don't pass city. Will be removed after full migration.
 SIGMA_INSTRUMENT = 0.5
 
 # Default MC iterations for p_raw_vector
@@ -108,10 +116,12 @@ class EnsembleSignal:
         p = np.zeros(n_bins)
 
         rng = np.random.default_rng(seed=None)  # Tests should seed externally
+        # Use city-appropriate instrument noise (°C independently calibrated)
+        sig = sigma_instrument(self.city.settlement_unit)
 
         for _ in range(n_mc):
             # Add instrument noise to each member's daily max
-            noised = self.member_maxes + rng.normal(0, SIGMA_INSTRUMENT, n_members)
+            noised = self.member_maxes + rng.normal(0, sig.value, n_members)
             measured_int = np.round(noised).astype(int)
 
             for i, b in enumerate(bins):
@@ -134,8 +144,12 @@ class EnsembleSignal:
             p = p / total
         return p
 
-    def spread(self) -> float:
-        """Ensemble spread (σ of member daily maxes). Low = consensus, High = uncertain."""
+    def spread(self) -> TemperatureDelta:
+        """Ensemble spread (σ of member daily maxes) as typed TemperatureDelta."""
+        return TemperatureDelta(float(np.std(self.member_maxes)), self.city.settlement_unit)
+
+    def spread_float(self) -> float:
+        """Spread as bare float (legacy compatibility, used by DB storage)."""
         return float(np.std(self.member_maxes))
 
     def is_bimodal(self) -> bool:
