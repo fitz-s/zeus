@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 STATUS_PATH = STATE_DIR / "status_summary.json"
 
 
+def _get_risk_level() -> str:
+    """Read actual RiskGuard level instead of hardcoding GREEN."""
+    try:
+        from src.riskguard.riskguard import get_current_level
+        return get_current_level().value
+    except Exception:
+        return "UNKNOWN"
+
+
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
@@ -30,7 +39,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "version": "zeus_v2",
         },
         "risk": {
-            "level": "GREEN",  # Will be updated by RiskGuard
+            "level": _get_risk_level(),
         },
         "portfolio": {
             "open_positions": len(portfolio.positions),
