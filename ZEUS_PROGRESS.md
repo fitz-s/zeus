@@ -1,102 +1,89 @@
 # Zeus Progress
 
-## Session 2 (2026-03-30, continued)
+## Session 3 (2026-03-30)
 
-### Integration Layer — COMPLETE ✓
+### All 5 Known Limitations — FIXED ✓
 
-#### Data Clients
-- [x] src/data/polymarket_client.py — CLOB API: orders, orderbook, VWMP, keychain auth
-- [x] src/data/market_scanner.py — Gamma API: market discovery, bin parsing, city matching
-- [x] src/data/observation_client.py — IEM ASOS (US §F) + Meteostat (Europe °C) for Day0
+1. **Monitor fresh ENS** — now fetches fresh ENS + VWMP per position for exit triggers
+2. **Day0Signal** — implemented (observation floor + ENS remaining hours)
+3. **Harvester** — polls Gamma API for settled markets, generates calibration pairs, logs P&L
+4. **Meteostat** — replaced with Open-Meteo hourly (free, no API key)
+5. **token_id** — stored in Position at entry time for CLOB orderbook queries
 
-#### Discovery Mode Pipelines (full wiring)
-- [x] src/execution/opening_hunt.py — Mode A: ENS→calibrate→edges→FDR→Kelly→execute
-- [x] src/execution/update_reaction.py — Mode B: exit checks (VWMP refresh) + entry scan
-- [x] src/execution/day0_capture.py — Mode C: observation floor + ENS remaining (Day0Signal stub)
-- [x] src/execution/monitor.py — variable-frequency exit checking
+### New Modules Built
+- src/signal/day0_signal.py — observation-constrained probability
+- src/calibration/drift.py — Hosmer-Lemeshow χ² + 8/20 directional failure + seasonal triggers
+- src/strategy/correlation.py — heuristic cluster correlation matrix (6×6)
 
-#### Infrastructure
-- [x] scripts/backfill_ens.py — 93-day ENS backfill (started in background)
-- [x] src/main.py — wired to real discovery mode functions via APScheduler
+### Paper Trading Single-Cycle Test — PASSED ✓
 
-#### Review Fixes Applied
-- observation_client: IEM ASOS restricted to US cities only (unit safety)
-- opening_hunt: VWMP fallback now logs warning instead of silent swallow
-- update_reaction: VWMP refresh via CLOB orderbook before exit trigger evaluation
+```
+ZEUS_MODE=paper python -m src.main --once
+```
 
-### Known Limitations (to fix in future sessions)
-1. **Monitor uses stale p_posterior** — needs fresh ENS recomputation per position
-2. **Day0Signal class not implemented** — day0_capture logs observations but doesn't compute adjusted P_raw
-3. **Meteostat API key is placeholder** — needs keychain integration
-4. **Harvester not connected to Gamma API** — settlement detection is a stub
-5. **token_id mapping** — positions store market_id but exit checks need token_id for VWMP
+| Metric | Result |
+|--------|--------|
+| Markets discovered | 41 (38 fresh) |
+| ENS fetches | All successful (ECMWF + GFS) |
+| Edges found (post-FDR) | ≥4 |
+| Paper fills | 4 trades |
+| Risk limits blocked | 6 positions (10% single position cap) |
+| Crashes | 0 (after London/Paris None boundary fix) |
 
-### Test Summary: 130 tests all passing
+**4 Paper Fills (all buy_no — validates FLB thesis):**
+1. Seattle: buy_no "62°F or higher" Apr 1 — $9.46
+2. NYC: buy_no "88°F or higher" Apr 1 — $6.26
+3. NYC: buy_no "86-87°F" Apr 1 — $6.00
+4. SF: buy_no "53°F or below" Apr 1 — $8.72
+
+Total paper exposure: $30.44 / $150 = 20.3% portfolio heat.
+All trades are shorting shoulder bins (overpriced by market, correctly identified by ENS model).
+
+### Bug Fixed
+- European bins (London/Paris): `_parse_temp_range` returned `(None, None)` for some labels.
+  `opening_hunt._process_market` now skips bins with both boundaries None.
+
+### Test Summary: 151 tests all passing
+
+### Data Assets
+- ENS snapshots: 276+ (backfill) + growing (live collection)
+- Calibration pairs: 562
+- Active Platt models: 6 (all MAM buckets)
 
 ---
 
-## Session 1 (2026-03-30)
+## Previous Sessions
 
-### Phase 0: Baseline — GO ✓
-Center bins underpriced 2.9×, shoulder bins overpriced. Structural mispricing confirmed.
-
-### Phase A: Signal + Calibration + Strategy — COMPLETE ✓
-- ensemble_client, ensemble_signal, model_agreement
-- platt (3-param + 200 bootstrap), calibration store + manager (24 buckets)
-- market_analysis (double bootstrap CI), market_fusion, fdr_filter
-
-### Phase C: Execution Layer — COMPLETE ✓
-- kelly + risk_limits
-- executor (paper/live), exit_triggers (6 triggers, 2-confirm EDGE_REVERSAL)
-- harvester, chronicler, portfolio (atomic JSON)
-- riskguard (GREEN/YELLOW/ORANGE/RED)
-- main.py (APScheduler)
-
-### Data Discoveries
-1. token_price_log has NO range_label (Rainstorm bug)
-2. market_events range_low/range_high ALL NULL — boundaries in label text
-3. City name mismatch: "LA"/"SF" in market_events vs "Los Angeles"/"San Francisco"
-4. London WU observations contaminated — use openmeteo_archive
-5. Only 41 multi-bin structured markets in historical data
-6. ENS API 93-day hard limit — no historical ensemble endpoint
-
-### Spec Divergences (documented)
-1. MarketAnalysis takes pre-computed vectors (not ens object) — more flexible
-2. compute_posterior normalizes output (p_market sums to vig, not 1.0)
-3. Bootstrap .astype(int) in market_analysis is intentional (WU settlement simulation)
-4. trade_decisions schema has attribution fields per CLAUDE.md update
+### Session 2: Integration layer — data clients + discovery pipelines
+### Session 1: Phase 0 (GO) + Phase A (signal/calibration/strategy) + Phase C (execution/RiskGuard)
 
 ---
 
-## Next Session: Paper Trading Deployment
+## Next Session: Persistent Paper Trading
 
-**Priority 1:** Deploy Zeus as launchd daemon in paper mode
+**Priority 1:** Run Zeus as persistent daemon (launchd) in paper mode for 48h+
+```bash
+ZEUS_MODE=paper python -m src.main  # APScheduler loop mode
 ```
-ZEUS_MODE=paper python -m src.main
-```
 
-**Priority 2:** Monitor first 24-48h of paper trading:
-- Are markets being discovered?
-- Are ENS fetches working?
-- Are edges being found and FDR-filtered?
-- Are paper fills being logged?
+**Priority 2:** After 48h, analyze paper trading results:
+- How many trades per day?
+- Win rate on settled positions?
+- Is FDR too aggressive (finding too many edges) or too conservative?
+- Are any cities/modes consistently unprofitable?
 
-**Priority 3:** Implement Day0Signal class for Mode C
+**Priority 3:** Calibration pair growth:
+- As backfill completes (647 settlements), regenerate pairs
+- Refit Platt models with larger samples
+- Track which buckets reach Level 1 (n ≥ 150)
 
-**Priority 4:** Connect harvester to Gamma API settlement detection
-
-**Files remaining:**
-```
-src/signal/day0_signal.py        — Observation + residual ENS
-src/calibration/drift.py         — Hosmer-Lemeshow drift detection
-src/strategy/correlation.py      — Heuristic correlation matrix
-src/state/ensemble_store.py      — ENS snapshot archive
-src/analysis/dashboard.py        — Dash web UI
-src/analysis/performance.py      — P&L analysis
-```
+**Priority 4:** Live deployment prep (Phase D):
+- Keychain wallet setup for Polygon
+- Set ZEUS_MODE=live with $1 minimum orders
+- First 25 trades: daily review
 
 **Codebase stats:**
-- 32 source files in src/
-- 13 test files with 130 tests
-- 5 script files
-- 6 commits on main
+- 35 source files in src/
+- 16 test files with 151 tests
+- 6 script files
+- 13 commits on main
