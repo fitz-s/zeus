@@ -348,16 +348,22 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
             summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
             continue
         try:
-            p_market, p_posterior = refresh_position(conn, clob, pos)
+            edge_ctx = refresh_position(conn, clob, pos)
+            p_market = edge_ctx.p_market[0]
             portfolio_dirty = True
-            decision = pos.evaluate_exit(current_p_posterior=p_posterior, current_p_market=p_market)
+            
+            from src.execution.exit_triggers import evaluate_exit_triggers
+            exit_signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+            should_exit = exit_signal is not None
+            exit_reason = exit_signal.reason if exit_signal else ""
+
             artifact.add_monitor_result(MonitorResult(
-                position_id=pos.trade_id, fresh_prob=p_posterior, fresh_edge=pos.last_monitor_edge,
-                should_exit=decision.should_exit, exit_reason=decision.reason, neg_edge_count=pos.neg_edge_count,
+                position_id=pos.trade_id, fresh_prob=edge_ctx.p_posterior, fresh_edge=pos.last_monitor_edge,
+                should_exit=should_exit, exit_reason=exit_reason, neg_edge_count=pos.neg_edge_count,
             ))
             summary["monitors"] += 1
-            if decision.should_exit:
-                closed = close_position(portfolio, pos.trade_id, p_market, decision.reason)
+            if should_exit:
+                closed = close_position(portfolio, pos.trade_id, p_market, exit_reason)
                 if closed is not None:
                     tracker.record_exit(closed)
                     tracker_dirty = True

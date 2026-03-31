@@ -165,8 +165,21 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             -- Phase 2 Domain Object Snapshots (JSON flattened blobs)
             settlement_semantics_json TEXT,
             epistemic_context_json TEXT,
-            edge_context_json TEXT
+            edge_context_json TEXT,
+            -- Phase 3: Shadow Proof True Attribution
+            entry_alpha_usd REAL DEFAULT 0.0,
+            execution_slippage_usd REAL DEFAULT 0.0,
+            exit_timing_usd REAL DEFAULT 0.0,
+            risk_throttling_usd REAL DEFAULT 0.0,
+            settlement_edge_usd REAL DEFAULT 0.0
         );
+        
+        -- Safe Schema evolution for phase 3 attribution
+        for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
+            try:
+                conn.execute(f"ALTER TABLE trade_decisions ADD COLUMN {col} REAL DEFAULT 0.0;")
+            except sqlite3.OperationalError:
+                pass
 
         -- Shadow signals for pre-trading validation
         CREATE TABLE IF NOT EXISTS shadow_signals (
@@ -334,23 +347,48 @@ def record_shadow_attribution_trade(
     timestamp: str,
     settlement_json: str = "",
     epistemic_json: str = "",
-    edge_context_json: str = ""
+    edge_context_json: str = "",
+    # New Phase 3 Variables passed when completing loops
+    intended_size_usd: float = 0.0,
+    filled_price: float = 0.0,
+    settlement_prob: float = 0.0,
+    final_pnl_usd: float = 0.0,
+    is_early_exit: bool = False
 ) -> None:
-    """Phase 3 Shadow Attribution: Persist new Phase 2 boundaries flattened."""
-    # Ensure backward compatibility by providing dummy values for non-null schema requirements 
-    # since not all fields are always present on initial insert.
+    """Phase 3 Shadow Attribution: Persist truly split advantage metrics."""
+    
+    # Mathematical Splitting calculations
+    # 1. execution_slippage: intended vs filled price
+    slippage_usd = 0.0
+    if filled_price > 0 and price > 0:
+        slippage_usd = (size_usd / price) * filled_price - size_usd
+        
+    # 2. entry_alpha: actual theoretical expected jump vs market immediately
+    entry_alpha_usd = size_usd * edge
+    
+    # 3. exit_timing: did we secure value or get stopped false?
+    exit_timing_usd = final_pnl_usd if is_early_exit else 0.0
+    
+    # 4. risk_throttling: capital shielded from saturation
+    throttling_usd = (intended_size_usd - size_usd) * edge
+    
+    # 5. settlement_edge: the pure outcome movement
+    settlement_edge_usd = final_pnl_usd if not is_early_exit else 0.0
+
     conn.execute("""
         INSERT INTO trade_decisions (
             market_id, bin_label, direction, size_usd, price, timestamp, 
             p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, 
             status, edge_source, 
-            settlement_semantics_json, epistemic_context_json, edge_context_json
+            settlement_semantics_json, epistemic_context_json, edge_context_json,
+            entry_alpha_usd, execution_slippage_usd, exit_timing_usd, risk_throttling_usd, settlement_edge_usd
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         market_id, bin_label, direction, size_usd, price, timestamp,
         p_raw, p_posterior, edge, 0.0, 0.0, 0.0,
         "filled", edge_source,
-        settlement_json, epistemic_json, edge_context_json
+        settlement_json, epistemic_json, edge_context_json,
+        entry_alpha_usd, slippage_usd, exit_timing_usd, throttling_usd, settlement_edge_usd
     ))
 

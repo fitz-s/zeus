@@ -1,6 +1,7 @@
 """Semantic boundary contracts for cross-module invariants."""
 
 from src.contracts.semantic_types import (
+    Direction,
     DecisionSnapshotRef,
     EntryMethod,
     HeldSideProbability,
@@ -17,6 +18,7 @@ from src.contracts.epistemic_context import EpistemicContext
 from src.contracts.settlement_semantics import SettlementSemantics
 
 __all__ = [
+    "Direction",
     "DecisionSnapshotRef",
     "EntryMethod",
     "HeldSideProbability",

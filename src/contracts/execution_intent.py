@@ -10,6 +10,7 @@ class ExecutionIntent:
     """
     direction: Direction
     target_size_usd: float
+    limit_price: float
     toxicity_budget: float
     max_slippage: float
     is_sandbox: bool
