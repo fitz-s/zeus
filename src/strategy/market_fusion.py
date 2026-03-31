@@ -65,13 +65,22 @@ def compute_alpha(
     Higher α → trust model more. Lower α → trust market more.
     Clamped to [0.20, 0.85].
 
-    If a validated per-city α override exists in alpha_overrides table,
-    it replaces the base α for this city×season.
+    α is adjusted by PER-DECISION signals (validated 2026-03-31):
+    - D4: ENS spread (tight → +0.10, wide → -0.15)
+    - D3: tail bin scaling (applied in compute_posterior, not here)
+    - Lead days (short → +0.05, long → -0.05)
+
+    DEPRECATED: per-city α override via alpha_overrides table.
+    D1 analysis showed MAE→α mapping has r=+0.032 (no signal).
+    Override lookup kept for manual experimentation but table is empty
+    and no longer auto-populated by the weekly cycle.
 
     ensemble_spread accepts both TemperatureDelta (preferred) and float (legacy).
     When typed, thresholds auto-convert to the correct unit.
     """
-    # Check for per-city alpha override
+    # Per-city override lookup (DEPRECATED — kept for manual experiments only)
+    # Was part of the dynamic-α per-city approach. alpha_overrides has 0 rows.
+    # Do NOT auto-populate this table; per-decision adjustments are superior.
     base = _get_alpha_override(city_name, season)
     if base is None:
         base = BASE_ALPHA_BY_LEVEL[calibration_level]

@@ -59,20 +59,26 @@ def _ecmwf_open_data_cycle():
 
 
 def _etl_recalibrate():
-    """Weekly recalibration: refresh ETL tables + validate per-city α + refit Platt.
+    """Weekly recalibration: refresh ETL tables + refit Platt + replay audit.
 
-    This is the cross-module sync mechanism. It ensures data tables stay fresh
-    and that downstream consumers (Platt, α) reflect current data.
+    Cross-module sync mechanism. Keeps data tables fresh and downstream
+    consumers (Platt calibration) aligned with current data.
+
+    History:
+    - Originally included per-city α validation (validate_dynamic_alpha.py).
+      Removed after D1 analysis (2026-03-31) showed MAE→α mapping is
+      fundamentally wrong (r=+0.032). α improvements are now per-decision
+      (spread bonus D4, tail scaling D3) not per-city.
+    - Platt refit is critical (D5: overconfidence Brier 0.31→0.02, -92%).
     """
     import subprocess
-    import sys
 
     venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python")
     scripts_dir = Path(__file__).parent.parent / "scripts"
 
     results = {}
 
-    # 1. Refresh ETL tables
+    # 1. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
@@ -89,17 +95,7 @@ def _etl_recalibrate():
             except Exception as e:
                 results[script] = f"ERROR: {e}"
 
-    # 2. Validate per-city alpha
-    try:
-        r = subprocess.run(
-            [venv_python, str(scripts_dir / "validate_dynamic_alpha.py")],
-            capture_output=True, text=True, timeout=600,
-        )
-        results["alpha_validation"] = "OK" if r.returncode == 0 else "FAIL"
-    except Exception as e:
-        results["alpha_validation"] = f"ERROR: {e}"
-
-    # 3. Platt refit (using venv python for sklearn)
+    # 2. Platt refit — critical for calibration accuracy (D5)
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "refit_platt.py")],
@@ -108,6 +104,17 @@ def _etl_recalibrate():
         results["platt_refit"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
     except Exception as e:
         results["platt_refit"] = f"ERROR: {e}"
+
+    # 3. Replay audit snapshot — track system performance trend
+    try:
+        r = subprocess.run(
+            [venv_python, str(scripts_dir / "run_replay.py"),
+             "--mode", "audit", "--start", "2025-01-01", "--end", "2099-12-31"],
+            capture_output=True, text=True, timeout=600,
+        )
+        results["replay_audit"] = "OK" if r.returncode == 0 else "FAIL"
+    except Exception as e:
+        results["replay_audit"] = f"ERROR: {e}"
 
     logger.info("ETL recalibration: %s", results)
 
