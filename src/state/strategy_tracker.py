@@ -89,6 +89,8 @@ class StrategyTracker:
 
     def record_trade(self, trade: dict) -> None:
         strategy = trade.get("strategy") or trade.get("edge_source", "")
+        if not strategy:
+            return
         if strategy not in self.strategies:
             strategy = "opening_inertia"  # Default bucket
         self.strategies[strategy].record(trade)

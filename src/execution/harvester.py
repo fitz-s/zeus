@@ -23,7 +23,7 @@ from src.state.chronicler import log_event
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.db import get_connection
 from src.state.portfolio import (
-    PortfolioState, close_position, load_portfolio, save_portfolio,
+    PortfolioState, close_position, load_portfolio, save_portfolio, void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
 
@@ -359,6 +359,17 @@ def _settle_positions(
     settlement_records = settlement_records if settlement_records is not None else []
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
+            continue
+        if pos.direction not in {"buy_yes", "buy_no"}:
+            logger.warning(
+                "Skipping settlement P&L for %s: unknown direction %r",
+                pos.trade_id,
+                pos.direction,
+            )
+            closed = void_position(portfolio, pos.trade_id, "SETTLED_UNKNOWN_DIRECTION")
+            if closed is not None and strategy_tracker is not None:
+                strategy_tracker.record_exit(closed)
+            settled += 1
             continue
 
         # Determine P&L — correct formula: shares × exit_price - cost_basis
