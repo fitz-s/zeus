@@ -81,6 +81,19 @@ def _refresh_ens_member_counting(
         hours_since_open=48.0,
     )
 
+    # Persistence anomaly check: if ENS predicts a historically rare
+    # day-to-day temperature change, discount model trust
+    anomaly_discount = _check_persistence_anomaly(
+        conn, city.name, target_d, float(np.mean(ens.member_maxes))
+    )
+    if anomaly_discount < 1.0:
+        alpha *= anomaly_discount
+        applied.append("persistence_anomaly_discount")
+        logger.info(
+            "Persistence anomaly for %s: α discounted by %.0f%%",
+            city.name, (1.0 - anomaly_discount) * 100,
+        )
+
     if position.direction == "buy_no":
         p_cal_native = 1.0 - p_cal_yes
     else:
@@ -154,6 +167,76 @@ def _refresh_day0_observation(
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
     return current_p_posterior, [*applied, "alpha_posterior"]
+
+
+def _check_persistence_anomaly(
+    conn, city_name: str, target_date, predicted_high: float
+) -> float:
+    """Check if ENS-predicted temp change from yesterday is historically rare.
+
+    Queries temp_persistence table for frequency of this delta bucket.
+    If frequency < 5%, returns 0.7 (30% discount on model trust).
+    Otherwise returns 1.0 (no discount).
+    """
+    from datetime import timedelta
+
+    try:
+        yesterday = (target_date - timedelta(days=1)).isoformat()
+        row = conn.execute(
+            "SELECT settlement_value FROM settlements "
+            "WHERE city = ? AND target_date = ? LIMIT 1",
+            (city_name, yesterday),
+        ).fetchone()
+
+        if not row or row["settlement_value"] is None:
+            return 1.0  # No yesterday data, no discount
+
+        delta = predicted_high - row["settlement_value"]
+
+        # Classify delta into bucket (matching temp_persistence buckets)
+        if abs(delta) <= 1:
+            bucket = "-1 to 1"
+        elif -3 <= delta < -1:
+            bucket = "-3 to -1"
+        elif -5 <= delta < -3:
+            bucket = "-5 to -3"
+        elif -10 <= delta < -5:
+            bucket = "-10 to -5"
+        elif delta < -10:
+            bucket = "<-10"
+        elif 1 < delta <= 3:
+            bucket = "1 to 3"
+        elif 3 < delta <= 5:
+            bucket = "3 to 5"
+        elif 5 < delta <= 10:
+            bucket = "5 to 10"
+        else:
+            bucket = ">10"
+
+        month = target_date.month
+        if month in (12, 1, 2):
+            season = "DJF"
+        elif month in (3, 4, 5):
+            season = "MAM"
+        elif month in (6, 7, 8):
+            season = "JJA"
+        else:
+            season = "SON"
+
+        freq_row = conn.execute(
+            "SELECT frequency, n_samples FROM temp_persistence "
+            "WHERE city = ? AND season = ? AND delta_bucket = ?",
+            (city_name, season, bucket),
+        ).fetchone()
+
+        if freq_row and freq_row["n_samples"] >= 10 and freq_row["frequency"] < 0.05:
+            return 0.7  # Rare event → 30% discount on model trust
+
+    except Exception as e:
+        logger.debug("Persistence anomaly check failed for %s: %s", city_name, e)
+
+    return 1.0
+
 
 from src.contracts.edge_context import EdgeContext
 

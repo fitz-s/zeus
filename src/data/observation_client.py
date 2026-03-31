@@ -118,14 +118,8 @@ def _fetch_iem_asos(city: City) -> Optional[dict]:
         if temp_f is None:
             return None
 
-        # ASOS→WU offset: not calibrated yet, use 0.0
-        # TODO(Phase B): Apply per-station offset from WU backfill data
-        offset = 0.0
-        if offset == 0.0:
-            logger.warning(
-                "ASOS→WU offset not calibrated for %s (%s). Using 0.0.",
-                city.name, station,
-            )
+        # Apply calibrated ASOS→WU offset (per city×season)
+        offset = _get_asos_wu_offset(city)
 
         current_temp = float(temp_f) + offset
         high_so_far = float(ob.get("max_tmpf", temp_f)) + offset
@@ -196,3 +190,56 @@ def _fetch_openmeteo_hourly(city: City) -> Optional[dict]:
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("Open-Meteo hourly fetch failed for %s: %s", city.name, e)
         return None
+
+
+def _get_asos_wu_offset(city: City) -> float:
+    """Get calibrated ASOS→WU offset for this city×current season.
+
+    The asos_wu_offsets table stores per-city×season offsets computed from
+    historical paired ASOS/WU observations. The offset = mean(WU - ASOS).
+    Positive offset means ASOS reads lower than WU → add to ASOS readings.
+
+    Returns offset in °F (all ASOS stations report Fahrenheit).
+    Falls back to 0.0 if no calibrated offset exists.
+    """
+    from datetime import date
+
+    try:
+        from src.state.db import get_connection
+
+        today = date.today().isoformat()
+        month = int(today.split("-")[1])
+        if month in (12, 1, 2):
+            season = "DJF"
+        elif month in (3, 4, 5):
+            season = "MAM"
+        elif month in (6, 7, 8):
+            season = "JJA"
+        else:
+            season = "SON"
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT offset, std, n_samples FROM asos_wu_offsets "
+            "WHERE city = ? AND season = ?",
+            (city.name, season),
+        ).fetchone()
+        conn.close()
+
+        if row and row["n_samples"] >= 10:
+            offset_val = row["offset"]
+            logger.info(
+                "ASOS→WU offset for %s/%s: %+.2f°F (σ=%.2f, n=%d)",
+                city.name, season, offset_val, row["std"], row["n_samples"],
+            )
+            return float(offset_val)
+
+        logger.warning(
+            "No calibrated ASOS→WU offset for %s/%s (n=%s). Using 0.0.",
+            city.name, season, row["n_samples"] if row else 0,
+        )
+        return 0.0
+
+    except Exception as e:
+        logger.warning("Failed to load ASOS→WU offset for %s: %s", city.name, e)
+        return 0.0

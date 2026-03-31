@@ -281,7 +281,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             temp_unit TEXT NOT NULL,
             lead_days INTEGER,
             available_at TEXT,
-            UNIQUE(city, target_date, source)
+            UNIQUE(city, target_date, source, lead_days)
         );
 
         -- Model skill summary per city×season

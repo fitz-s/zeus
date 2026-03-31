@@ -89,6 +89,20 @@ class EnsembleSignal:
         # Daily max per member, respecting city timezone for day boundary
         self.member_maxes: np.ndarray = members_hourly[:, tz_hours].max(axis=1)
         
+        # Bias correction: subtract per-city×season systematic ECMWF bias
+        # GATED by config flag. Activation requires simultaneous Platt recompute
+        # to avoid out-of-domain inference (see cross-module invariant test).
+        self.bias_corrected = False
+        try:
+            from src.config import settings
+            if settings._data.get("bias_correction_enabled", False):
+                self.member_maxes = self._apply_bias_correction(
+                    self.member_maxes, city, target_date
+                )
+                self.bias_corrected = True
+        except Exception:
+            pass  # Config access failure → no correction, safe fallback
+        
         self.city = city
         self.target_date = target_date
         self.settlement_semantics = settlement_semantics
@@ -111,6 +125,59 @@ class EnsembleSignal:
             rounded = np.round(scaled)
             
         return rounded / inv
+
+    @staticmethod
+    def _apply_bias_correction(
+        maxes: np.ndarray, city: City, target_date: date
+    ) -> np.ndarray:
+        """Apply per-city×season ECMWF bias correction to member maxes.
+
+        model_bias.bias = mean(forecast - actual). Positive = model too warm.
+        Subtract bias × discount_factor from member maxes.
+
+        INVARIANT: If this runs for live signals, ALL calibration_pairs must
+        also have been computed with bias correction. The cross-module test
+        test_calibration_pairs_use_same_bias_correction_as_live enforces this.
+        """
+        try:
+            from src.state.db import get_connection
+
+            month = target_date.month
+            if month in (12, 1, 2):
+                season = "DJF"
+            elif month in (3, 4, 5):
+                season = "MAM"
+            elif month in (6, 7, 8):
+                season = "JJA"
+            else:
+                season = "SON"
+
+            conn = get_connection()
+            row = conn.execute(
+                "SELECT bias, discount_factor, n_samples FROM model_bias "
+                "WHERE city = ? AND season = ? AND source = 'ecmwf'",
+                (city.name, season),
+            ).fetchone()
+            conn.close()
+
+            if row and row["n_samples"] >= 20:
+                discount = row["discount_factor"] if row["discount_factor"] else 0.7
+                correction = row["bias"] * discount
+                import logging
+                logging.getLogger(__name__).info(
+                    "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
+                    city.name, season, row["bias"], discount,
+                    correction, row["n_samples"],
+                )
+                return maxes - correction
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Bias correction failed for %s: %s", city.name, e
+            )
+
+        return maxes
 
     @staticmethod
     def _select_hours_for_date(
