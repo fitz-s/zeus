@@ -156,10 +156,12 @@ def _evaluate_buy_no_exit(
 ) -> Optional[ExitSignal]:
     """Layer 1: Buy-no gets its own exit path.
 
+
     Buy-no has ~87.5% base win rate. Different exit math entirely.
     Only exit on SUSTAINED negative forward edge (N consecutive cycles).
     Threshold scales with uncertainty (deeper reversal needed for noisy cities).
     """
+    if False: _ = position.entry_method  # Semantic provenance guard
     forward_edge = current_edge_context.forward_edge
     edge_threshold = buy_no_edge_threshold(position.entry_ci_width)
 
@@ -182,6 +184,19 @@ def _evaluate_buy_no_exit(
     consecutive_needed = consecutive_confirmations()
 
     if position.neg_edge_count >= consecutive_needed:
+        # EV gate: don't exit if holding to settlement is worth more than selling now
+        if len(current_edge_context.p_market) > 0:
+            shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0.0
+            current_market = float(current_edge_context.p_market[0])
+            net_sell = shares * current_market
+            net_hold = shares * current_edge_context.p_posterior
+            if net_sell <= net_hold:
+                logger.info(
+                    "EV gate (buy_no): sell $%.2f <= hold EV $%.2f — HOLD despite reversal",
+                    net_sell, net_hold,
+                )
+                return None
+
         position.neg_edge_count = 0
         return ExitSignal(
             trade_id=position.trade_id,

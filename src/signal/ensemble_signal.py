@@ -299,11 +299,12 @@ class EnsembleSignal:
             return rng > 0 and float(gaps.max()) / rng > BIMODAL_GAP_RATIO
 
     def boundary_sensitivity(self, boundary: float) -> float:
-        """Fraction of 51 members within ±0.5° of a bin boundary.
+        """Fraction of 51 members within ±σ_instrument of a bin boundary.
 
+        Window is unit-aware: 0.5°F for US cities, 0.28°C for metric cities.
         High sensitivity → probability estimate is fragile at this boundary.
-        Used to flag trades that depend on borderline bin assignment.
         """
+        window = sigma_instrument(self.city.settlement_unit).value
         return float(
-            np.sum(np.abs(self.member_maxes - boundary) < BOUNDARY_WINDOW)
+            np.sum(np.abs(self.member_maxes - boundary) < window)
         ) / len(self.member_maxes)
