@@ -16,7 +16,7 @@ class SettlementSemantics:
     
     @classmethod
     def default_wu_fahrenheit(cls, city_code: str) -> "SettlementSemantics":
-        """Fallback for legacy Polymarket USA city contracts."""
+        """Polymarket USA city contracts: WU integer °F."""
         return cls(
             resolution_source=f"WU_{city_code}",
             measurement_unit="F",
@@ -24,3 +24,29 @@ class SettlementSemantics:
             rounding_rule="round_half_to_even",
             finalization_time="12:00:00Z"
         )
+
+    @classmethod
+    def default_wu_celsius(cls, city_code: str) -> "SettlementSemantics":
+        """Polymarket international city contracts: WU integer °C.
+
+        Polymarket °C markets use 1°C point bins (e.g., "4°C", "5°C").
+        Settlement rounds to integer °C, same rounding rule as °F.
+        """
+        return cls(
+            resolution_source=f"WU_{city_code}",
+            measurement_unit="C",
+            precision=1.0,
+            rounding_rule="round_half_to_even",
+            finalization_time="12:00:00Z"
+        )
+
+    @classmethod
+    def for_city(cls, city) -> "SettlementSemantics":
+        """Construct appropriate SettlementSemantics from a City object.
+
+        This is the single entry point. Do NOT call default_wu_fahrenheit
+        for °C cities.
+        """
+        if city.settlement_unit == "C":
+            return cls.default_wu_celsius(city.wu_station)
+        return cls.default_wu_fahrenheit(city.wu_station)

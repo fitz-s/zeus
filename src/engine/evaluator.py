@@ -202,7 +202,7 @@ def evaluate_candidate(
         )]
 
     epistemic = EpistemicContext.enter_cycle(fallback_override=decision_time)
-    settlement_semantics = SettlementSemantics.default_wu_fahrenheit(city.name)
+    settlement_semantics = SettlementSemantics.for_city(city)
     
     try:
         ens = EnsembleSignal(
