@@ -162,10 +162,12 @@ def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob) -> int:
     if getattr(clob, "paper_mode", True) or not hasattr(clob, "get_open_orders"):
         return 0
 
-    tracked_order_ids = {
-        pos.order_id for pos in portfolio.positions
-        if pos.order_id
-    }
+    tracked_order_ids = set()
+    for pos in portfolio.positions:
+        if pos.order_id:
+            tracked_order_ids.add(pos.order_id)
+        if pos.last_exit_order_id:
+            tracked_order_ids.add(pos.last_exit_order_id)
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = _extract_order_id(order)
@@ -362,6 +364,19 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
         exit_stats = check_pending_exits(portfolio, clob)
         if exit_stats["filled"] or exit_stats["retried"]:
             portfolio_dirty = True
+            
+        from src.state.db import log_trade_exit
+        for filled_pos in exit_stats.get("filled_positions", []):
+            artifact.add_exit(
+                filled_pos.trade_id, 
+                filled_pos.exit_reason or "DEFERRED_SELL_FILL", 
+                filled_pos.exit_price or 0.0, 
+                "sell_filled"
+            )
+            tracker.record_trade_result(filled_pos)
+            log_trade_exit(conn, filled_pos)
+            tracker_dirty = True
+            
         summary["pending_exits_filled"] = exit_stats["filled"]
         summary["pending_exits_retried"] = exit_stats["retried"]
 
