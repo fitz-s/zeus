@@ -85,6 +85,7 @@ class MarketAnalysis:
                         entry_price=float(self.p_market[i]),
                         p_value=p_val,
                         vwmp=float(self.p_market[i]),
+                        forward_edge=edge_yes,
                     ))
 
             # Buy NO direction: edge on the NO side
@@ -108,6 +109,7 @@ class MarketAnalysis:
                         entry_price=p_market_no,
                         p_value=p_val,
                         vwmp=p_market_no,
+                        forward_edge=edge_no,
                     ))
 
         return edges
