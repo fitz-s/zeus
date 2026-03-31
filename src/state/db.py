@@ -324,6 +324,32 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON ensemble_snapshots(city, target_date, available_at);
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
+
+        -- Replay engine results
+        CREATE TABLE IF NOT EXISTS replay_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_run_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            settlement_value REAL,
+            winning_bin TEXT,
+            replay_direction TEXT,
+            replay_edge REAL,
+            replay_p_posterior REAL,
+            replay_size_usd REAL,
+            replay_should_trade INTEGER,
+            replay_rejection_stage TEXT,
+            actual_direction TEXT,
+            actual_edge REAL,
+            actual_should_trade INTEGER,
+            replay_pnl REAL,
+            actual_pnl REAL,
+            overrides_json TEXT,
+            timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_replay_run
+            ON replay_results(replay_run_id);
     """)
     
     # Safe Schema evolution for phase 3 attribution
