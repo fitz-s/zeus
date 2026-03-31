@@ -55,7 +55,7 @@ def _refresh_ens_member_counting(
     if ens_result is None or not validate_ensemble(ens_result):
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    semantics = SettlementSemantics.default_wu_fahrenheit(city.name)
+    semantics = SettlementSemantics.for_city(city)
     ens = EnsembleSignal(ens_result["members_hourly"], city, target_d, settlement_semantics=semantics)
 
     low, high = _parse_temp_range(position.bin_label)
