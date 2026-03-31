@@ -1,0 +1,282 @@
+"""P0 ETL: TIGGE ENS vectors → calibration_pairs + ensemble_snapshots.
+
+Unlocks DJF/JJA/SON Platt buckets (currently 0 models for those seasons).
+After this runs, Zeus goes from 6 Platt models to up to 24.
+
+Source: ~/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens/{city}/{date}/
+Target: zeus.db:calibration_pairs + ensemble_snapshots
+"""
+
+import json
+import sys
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.calibration.manager import season_from_date, bucket_key, CLUSTERS, SEASONS
+from src.calibration.store import add_calibration_pair, get_pairs_count
+from src.config import cities_by_name
+from src.data.market_scanner import _parse_temp_range
+from src.state.db import get_connection, init_schema
+
+
+TIGGE_ROOT = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"
+
+# TIGGE dir name → Zeus canonical name
+CITY_MAP = {
+    "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
+    "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
+    "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
+    "london": "London", "paris": "Paris", "austin": "Austin",
+    "denver": "Denver", "houston": "Houston",
+    "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
+    "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
+    "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
+}
+
+
+def run_etl() -> dict:
+    conn = get_connection()
+    init_schema(conn)
+
+    pairs_before = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
+    snapshots_before = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+
+    processed = 0
+    matched = 0
+    pairs_added = 0
+    skipped_no_city = 0
+    skipped_no_settlement = 0
+    skipped_no_bins = 0
+
+    for city_dir in sorted(TIGGE_ROOT.iterdir()):
+        if not city_dir.is_dir():
+            continue
+
+        city_name = CITY_MAP.get(city_dir.name)
+        if city_name is None:
+            skipped_no_city += 1
+            continue
+
+        city = cities_by_name.get(city_name)
+        if city is None:
+            skipped_no_city += 1
+            continue
+
+        for date_dir in sorted(city_dir.iterdir()):
+            if not date_dir.is_dir():
+                continue
+
+            # Find member JSON
+            member_file = None
+            for f in date_dir.iterdir():
+                if "members" in f.name and f.suffix == ".json" and "step_024" in f.name:
+                    member_file = f
+                    break
+            if member_file is None:
+                continue
+
+            # Parse date
+            dname = date_dir.name
+            target_date = f"{dname[:4]}-{dname[4:6]}-{dname[6:8]}"
+            processed += 1
+
+            # Check if already imported
+            existing = conn.execute("""
+                SELECT COUNT(*) FROM ensemble_snapshots
+                WHERE city = ? AND target_date = ? AND data_version LIKE 'tigge%'
+            """, (city_name, target_date)).fetchone()[0]
+            if existing > 0:
+                continue
+
+            # Load members
+            try:
+                with open(member_file) as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+
+            members = data.get("members", [])
+            if len(members) != 51:
+                continue
+
+            values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
+            values_int = np.round(values).astype(int)
+
+            # Store ensemble snapshot
+            conn.execute("""
+                INSERT OR IGNORE INTO ensemble_snapshots
+                (city, target_date, issue_time, valid_time, available_at, fetch_time,
+                 lead_hours, members_json, spread, is_bimodal,
+                 model_version, data_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                city_name, target_date,
+                f"{target_date}T00:00:00Z",
+                f"{target_date}T00:00:00Z",
+                f"{target_date}T08:00:00Z",
+                data.get("generated_at", ""),
+                24.0,
+                json.dumps(values.tolist()),
+                float(np.std(values)),
+                0,
+                "ecmwf_tigge",
+                "tigge_calibration_v2",
+            ))
+
+            # Match settlement
+            settlement = conn.execute("""
+                SELECT winning_bin FROM settlements
+                WHERE city = ? AND target_date = ?
+            """, (city_name, target_date)).fetchone()
+
+            if settlement is None:
+                skipped_no_settlement += 1
+                continue
+
+            winning_bin = settlement["winning_bin"]
+            matched += 1
+
+            # Get bin structure from market_events
+            bins = _get_bins(conn, city_name, target_date)
+            if not bins:
+                # No market_events → use settlement winning_bin as single-bin fallback
+                # Can't generate full bin calibration without market structure
+                skipped_no_bins += 1
+                continue
+
+            # Generate calibration pairs
+            season = season_from_date(target_date)
+            n_bins = len(bins)
+            for i, (label, low, high) in enumerate(bins):
+                # Compute P_raw for this bin
+                if low is None and high is not None:
+                    p_raw = float(np.sum(values_int <= high)) / 51
+                elif high is None and low is not None:
+                    p_raw = float(np.sum(values_int >= low)) / 51
+                elif low is not None and high is not None:
+                    p_raw = float(np.sum((values_int >= low) & (values_int <= high))) / 51
+                else:
+                    continue
+
+                # Match outcome
+                outcome = 1 if _bin_matches_winning(label, low, high, winning_bin) else 0
+
+                try:
+                    add_calibration_pair(
+                        conn,
+                        city=city_name,
+                        target_date=target_date,
+                        range_label=label,
+                        p_raw=p_raw,
+                        outcome=outcome,
+                        lead_days=1.0,
+                        season=season,
+                        cluster=city.cluster,
+                        forecast_available_at=f"{target_date}T08:00:00Z",
+                    )
+                    pairs_added += 1
+                except Exception:
+                    pass  # Duplicate — INSERT OR IGNORE handles this
+
+    conn.commit()
+
+    pairs_after = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
+    snapshots_after = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+
+    # Refit all Platt models
+    print("\nRefitting Platt models...")
+    from src.calibration.manager import _fit_from_pairs
+    fitted = 0
+    for cluster in CLUSTERS:
+        for season in SEASONS:
+            bk = bucket_key(cluster, season)
+            n = get_pairs_count(conn, cluster, season)
+            if n >= 15:
+                cal = _fit_from_pairs(conn, cluster, season)
+                if cal is not None:
+                    status = f"n={cal.n_samples}, A={cal.A:.3f}"
+                    fitted += 1
+                else:
+                    status = "fit failed"
+            else:
+                status = f"n={n} (< 15)"
+            print(f"  {bk:25s}: {status}")
+
+    conn.close()
+
+    report = {
+        "vectors_processed": processed,
+        "settlements_matched": matched,
+        "pairs_before": pairs_before,
+        "pairs_after": pairs_after,
+        "new_pairs": pairs_after - pairs_before,
+        "snapshots_before": snapshots_before,
+        "snapshots_after": snapshots_after,
+        "platt_models_fitted": fitted,
+        "skipped_no_city": skipped_no_city,
+        "skipped_no_settlement": skipped_no_settlement,
+        "skipped_no_bins": skipped_no_bins,
+    }
+
+    print(f"\nTIGGE ETL complete:")
+    print(f"  Vectors processed: {processed}")
+    print(f"  Settlements matched: {matched} ({matched*100//max(processed,1)}%)")
+    print(f"  Calibration pairs: {pairs_before} → {pairs_after} (+{pairs_after - pairs_before})")
+    print(f"  Ensemble snapshots: {snapshots_before} → {snapshots_after}")
+    print(f"  Platt models fitted: {fitted}")
+
+    return report
+
+
+def _get_bins(conn, city: str, target_date: str) -> list[tuple]:
+    """Get (label, low, high) tuples from market_events."""
+    rows = conn.execute("""
+        SELECT range_label FROM market_events
+        WHERE city = ? AND target_date = ?
+    """, (city, target_date)).fetchall()
+
+    if not rows:
+        return []
+
+    bins = []
+    for r in rows:
+        label = r["range_label"]
+        low, high = _parse_temp_range(label)
+        if low is None and high is None:
+            continue
+        sort_key = low if low is not None else (high - 1000 if high is not None else -2000)
+        bins.append((label, low, high, sort_key))
+
+    bins.sort(key=lambda x: x[3])
+    return [(b[0], b[1], b[2]) for b in bins]
+
+
+def _bin_matches_winning(label, low, high, winning_range: str) -> bool:
+    """Check if a bin matches the winning_range from settlements."""
+    parts = winning_range.replace(" ", "").split("-")
+    try:
+        if len(parts) == 2:
+            w_low, w_high = float(parts[0]), float(parts[1])
+        elif len(parts) == 3 and parts[0] == "":
+            w_low, w_high = -float(parts[1]), float(parts[2])
+        else:
+            return False
+    except ValueError:
+        return False
+
+    if low is None and w_low <= -998:
+        return high is not None and abs(w_high - high) < 1.0
+    elif high is None and w_high >= 998:
+        return low is not None and abs(w_low - low) < 1.0
+    elif low is not None and high is not None:
+        return abs(w_low - low) < 1.0 and abs(w_high - high) < 1.0
+    return False
+
+
+if __name__ == "__main__":
+    run_etl()
