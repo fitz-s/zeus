@@ -16,10 +16,12 @@ from src.config import City
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
 from src.engine.discovery_mode import DiscoveryMode
+from src.engine.time_context import lead_days_to_target
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
 from src.state.db import get_connection, init_schema
+from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import PortfolioState, Position, load_portfolio, save_portfolio
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
@@ -274,6 +276,283 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert captured["entry_bankroll"] == pytest.approx(120.0)
+
+
+def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position()])
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = True
+
+    monitored: list[str] = []
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.ORANGE)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda conn, clob, pos: monitored.append(pos.trade_id) or (pos.entry_price, pos.p_posterior),
+    )
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked at ORANGE")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert monitored == ["t1"]
+    assert summary["monitors"] == 1
+    assert summary["entries_blocked_reason"] == "risk_level=ORANGE"
+    assert summary["candidates"] == 0
+
+
+def test_chain_quarantine_keeps_direction_unknown():
+    portfolio = PortfolioState()
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
+    )
+
+    assert stats["quarantined"] == 1
+    pos = portfolio.positions[0]
+    assert pos.direction == "unknown"
+    assert pos.chain_state == "quarantined"
+    assert pos.strategy == ""
+
+
+def test_unknown_direction_positions_are_not_monitored(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined")])
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = True
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unknown direction should skip refresh")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["monitors"] == 0
+    assert summary["monitor_skipped_unknown_direction"] == 1
+
+
+def test_strategy_classification_preserves_day0_and_update_semantics():
+    center_edge = _edge()
+    shoulder_no = BinEdge(
+        bin=Bin(low=None, high=38, label="38°F or below"),
+        direction="buy_no",
+        edge=0.11,
+        ci_lower=0.03,
+        ci_upper=0.14,
+        p_model=0.72,
+        p_market=0.58,
+        p_posterior=0.69,
+        entry_price=0.58,
+        p_value=0.02,
+        vwmp=0.58,
+    )
+    base_candidate = dict(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+    )
+
+    assert evaluator_module._edge_source_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.DAY0_CAPTURE.value, **base_candidate),
+        center_edge,
+    ) == "settlement_capture"
+    assert evaluator_module._edge_source_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value, **base_candidate),
+        center_edge,
+    ) == "opening_inertia"
+    assert evaluator_module._edge_source_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.UPDATE_REACTION.value, **base_candidate),
+        shoulder_no,
+    ) == "shoulder_sell"
+    assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
+
+
+def test_lead_days_use_city_local_reference_time():
+    lead_days = lead_days_to_target(
+        "2026-04-01",
+        "Asia/Tokyo",
+        datetime(2026, 3, 30, 23, 30, tzinfo=timezone.utc),
+    )
+
+    assert lead_days == pytest.approx(15.5 / 24.0)
+
+
+def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or below",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.20,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.35,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.45,
+            },
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, city, target_d):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=3000):
+            return np.array([0.25, 0.50, 0.25])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+        def is_bimodal(self):
+            return False
+
+    edges = [
+        BinEdge(
+            bin=Bin(low=39, high=40, label="39-40°F"),
+            direction="buy_yes",
+            edge=0.12,
+            ci_lower=0.05,
+            ci_upper=0.15,
+            p_model=0.60,
+            p_market=0.35,
+            p_posterior=0.47,
+            entry_price=0.35,
+            p_value=0.02,
+            vwmp=0.35,
+        ),
+        BinEdge(
+            bin=Bin(low=41, high=None, label="41°F or higher"),
+            direction="buy_yes",
+            edge=0.11,
+            ci_lower=0.04,
+            ci_upper=0.13,
+            p_model=0.55,
+            p_market=0.45,
+            p_posterior=0.49,
+            entry_price=0.45,
+            p_value=0.03,
+            vwmp=0.45,
+        ),
+    ]
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return list(edges)
+
+    heats: list[float] = []
+
+    def _check_position_allowed(**kwargs):
+        heats.append(kwargs["current_portfolio_heat"])
+        projected = kwargs["current_portfolio_heat"] + (kwargs["size_usd"] / kwargs["bankroll"])
+        return (projected <= 0.5, "portfolio_heat")
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None: None if model == "gfs025" else {
+            "members_hourly": np.ones((51, 24)) * 40.0,
+            "times": [
+                datetime(2026, 3, 30, 0, 0, tzinfo=timezone.utc).isoformat()
+                for _ in range(24)
+            ],
+            "issue_time": datetime(2026, 3, 30, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 3, 30, 23, 30, tzinfo=timezone.utc),
+            "model": "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-1")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 4.0)
+    monkeypatch.setattr(evaluator_module, "check_position_allowed", _check_position_allowed)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=10.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(max_portfolio_heat_pct=0.5, min_order_usd=1.0),
+        entry_bankroll=10.0,
+    )
+
+    assert [d.should_trade for d in decisions] == [True, False]
+    assert heats[0] == pytest.approx(0.0)
+    assert heats[1] == pytest.approx(0.4)
 
 
 def test_day0_observation_path_reaches_day0_signal(monkeypatch):

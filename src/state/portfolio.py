@@ -35,6 +35,7 @@ class ExitDecision:
 ADMIN_EXITS = frozenset({
     "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
     "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
+    "SETTLED_UNKNOWN_DIRECTION",
 })
 
 
@@ -55,7 +56,7 @@ class Position:
     cluster: str
     target_date: str
     bin_label: str
-    direction: str  # "buy_yes" or "buy_no"
+    direction: str  # "buy_yes" | "buy_no" | "unknown" (quarantine only)
     unit: str = "F"  # Blueprint v2: carried, never inferred
 
     # Probability (always in held-side space — flipped exactly once at creation)

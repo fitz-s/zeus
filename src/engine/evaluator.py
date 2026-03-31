@@ -6,6 +6,7 @@ portfolio state, or execution. Pure function: candidate -> decision.
 
 import logging
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -18,6 +19,8 @@ from src.config import City, settings
 from src.contracts import EntryMethod
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
+from src.engine.discovery_mode import DiscoveryMode
+from src.engine.time_context import lead_days_to_target, lead_hours_to_target
 from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
@@ -90,9 +93,15 @@ def _decision_id() -> str:
     return str(uuid.uuid4())[:12]
 
 
-def _edge_source_for(edge: BinEdge) -> str:
+def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
+    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+        return "settlement_capture"
+    if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
+        return "opening_inertia"
     if edge.bin.is_shoulder:
-        return "favorite_longshot"
+        return "shoulder_sell"
+    if edge.direction == "buy_yes":
+        return "center_buy"
     return "opening_inertia"
 
 
@@ -151,7 +160,7 @@ def evaluate_candidate(
         )]
 
     target_d = date.fromisoformat(target_date)
-    lead_days = float((target_d - date.today()).days)
+    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
     ens_forecast_days = max(2, int(max(0.0, lead_days)) + 2)
 
     # Fetch ENS
@@ -177,6 +186,9 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
         )]
+
+    decision_reference = ens_result.get("fetch_time")
+    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, decision_reference))
 
     # Store ENS snapshot (time-irreversible data collection)
     snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
@@ -331,13 +343,16 @@ def evaluate_candidate(
         float(portfolio.effective_bankroll if entry_bankroll is None else entry_bankroll),
     )
     current_heat = portfolio_heat_for_bankroll(portfolio, sizing_bankroll)
+    projected_total_exposure_usd = current_heat * sizing_bankroll
+    projected_city_exposure_usd: dict[str, float] = defaultdict(float)
+    projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
 
     decisions = []
     for edge in filtered:
         bin_idx = bins.index(edge.bin)
         tokens = token_map[bin_idx]
         decision_validations = list(entry_validations)
-        edge_source = _edge_source_for(edge)
+        edge_source = _edge_source_for(candidate, edge)
 
         # Anti-churn layers 5, 6, 7
         if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
@@ -383,6 +398,11 @@ def evaluate_candidate(
 
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
+        current_heat = (
+            projected_total_exposure_usd / sizing_bankroll
+            if sizing_bankroll > 0
+            else 0.0
+        )
         km = dynamic_kelly_mult(
             base=settings["sizing"]["kelly_multiplier"],
             ci_width=edge.ci_upper - edge.ci_lower,
@@ -412,8 +432,14 @@ def evaluate_candidate(
             bankroll=sizing_bankroll,
             city=city.name,
             cluster=city.cluster,
-            current_city_exposure=city_exposure_for_bankroll(portfolio, city.name, sizing_bankroll),
-            current_cluster_exposure=cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll),
+            current_city_exposure=(
+                city_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
+                + (projected_city_exposure_usd[city.name] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
+            ),
+            current_cluster_exposure=(
+                cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+                + (projected_cluster_exposure_usd[city.cluster] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
+            ),
             current_portfolio_heat=current_heat,
             limits=limits,
         )
@@ -450,6 +476,9 @@ def evaluate_candidate(
             n_edges_found=len(edges),
             n_edges_after_fdr=len(filtered),
         ))
+        projected_total_exposure_usd += size
+        projected_city_exposure_usd[city.name] += size
+        projected_cluster_exposure_usd[city.cluster] += size
 
     return decisions
 
@@ -472,7 +501,14 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             target_date + "T12:00:00Z",
             ens_result["fetch_time"].isoformat(),
             ens_result["fetch_time"].isoformat(),
-            float((date.fromisoformat(target_date) - date.today()).days * 24),
+            max(
+                0.0,
+                lead_hours_to_target(
+                    target_date,
+                    city.timezone,
+                    ens_result.get("fetch_time"),
+                ),
+            ),
             json.dumps(ens.member_maxes.tolist()),
             ens.spread_float(),
             int(ens.is_bimodal()),

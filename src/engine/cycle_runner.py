@@ -32,22 +32,28 @@ from src.strategy.risk_limits import RiskLimits
 
 logger = logging.getLogger(__name__)
 
-def _classify_strategy(edge) -> str:
-    """Classify edge into one of 4 strategies. No truthiness bugs."""
+KNOWN_DIRECTIONS = {"buy_yes", "buy_no"}
+KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
+
+
+def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
+    """Classify the strategy/edge source without losing discovery-mode context."""
+    if mode == DiscoveryMode.DAY0_CAPTURE:
+        return "settlement_capture"
+    if mode == DiscoveryMode.OPENING_HUNT:
+        return "opening_inertia"
     if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
-    elif edge.direction == "buy_yes" and not edge.bin.is_shoulder:
+    if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
-    elif edge.direction == "buy_yes" and edge.bin.is_shoulder:
-        return "opening_inertia"
-    return "shoulder_sell"
-
-
-def _classify_edge_source(edge) -> str:
-    """Classify edge source based on bin type and direction."""
-    if edge.bin.is_shoulder:
-        return "favorite_longshot"
     return "opening_inertia"
+
+
+def _classify_strategy(mode: DiscoveryMode, edge, edge_source: str = "") -> str:
+    """Strategy attribution should preserve evaluator output when already known."""
+    if edge_source in KNOWN_STRATEGIES:
+        return edge_source
+    return _classify_edge_source(mode, edge)
 
 
 # Mode → scanner parameters
@@ -212,6 +218,7 @@ def _materialize_position(
     timeout_at = ""
     if result.timeout_seconds:
         timeout_at = (now + timedelta(seconds=result.timeout_seconds)).isoformat()
+    edge_source = decision.edge_source or _classify_edge_source(mode, decision.edge)
 
     return Position(
         trade_id=result.trade_id,
@@ -233,8 +240,8 @@ def _materialize_position(
         unit=city.settlement_unit,
         token_id=decision.tokens["token_id"],
         no_token_id=decision.tokens["no_token_id"],
-        strategy=_classify_strategy(decision.edge),
-        edge_source=decision.edge_source or _classify_edge_source(decision.edge),
+        strategy=_classify_strategy(mode, decision.edge, edge_source),
+        edge_source=edge_source,
         discovery_mode=mode.value,
         market_hours_open=candidate.hours_since_open,
         decision_snapshot_id=decision.decision_snapshot_id,
@@ -337,9 +344,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     # 1. Risk precheck
     risk_level = get_current_level()
-    if risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
-        summary["skipped"] = f"risk_level={risk_level.value}"
-        return summary
+    summary["risk_level"] = risk_level.value
 
     conn = get_connection()
     portfolio = load_portfolio()
@@ -380,6 +385,17 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
             continue
+        if pos.direction not in KNOWN_DIRECTIONS:
+            artifact.add_monitor_result(MonitorResult(
+                position_id=pos.trade_id,
+                fresh_prob=pos.last_monitor_prob or pos.p_posterior,
+                fresh_edge=pos.last_monitor_edge,
+                should_exit=False,
+                exit_reason="UNKNOWN_DIRECTION",
+                neg_edge_count=pos.neg_edge_count,
+            ))
+            summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
+            continue
         try:
             p_market, p_posterior = refresh_position(conn, clob, pos)
             portfolio_dirty = True
@@ -414,6 +430,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entries_blocked_reason = None
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
+    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
+        entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
     elif entry_bankroll <= 0:
@@ -422,7 +440,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "near_max_exposure"
 
     # 3. Scan for new (only if GREEN and entry path is safe)
-    if risk_level == RiskLevel.GREEN and not is_entries_paused() and entries_blocked_reason is None:
+    entries_paused = is_entries_paused()
+    if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:
         params = MODE_PARAMS[mode]
         markets = find_weather_markets(
             min_hours_to_resolution=params.get("min_hours_to_resolution", 6),
@@ -478,7 +497,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
                             "range_label": d.edge.bin.label,
                             "direction": d.edge.direction,
                             "edge": d.edge.edge,
-                            "edge_source": d.edge_source or _classify_edge_source(d.edge),
+                            "edge_source": d.edge_source or _classify_edge_source(mode, d.edge),
                             "decision_snapshot_id": d.decision_snapshot_id,
                             "selected_method": d.selected_method,
                             "applied_validations": d.applied_validations,
@@ -518,8 +537,9 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             except Exception as e:
                 logger.error("Evaluation failed for %s %s: %s",
                              city.name, candidate.target_date, e)
-    elif risk_level == RiskLevel.GREEN:
-        summary["entries_paused"] = True
+    else:
+        if entries_paused:
+            summary["entries_paused"] = True
         if entries_blocked_reason is not None:
             summary["entries_blocked_reason"] = entries_blocked_reason
             if entries_blocked_reason == "near_max_exposure":
