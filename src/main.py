@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -45,6 +46,60 @@ def _ecmwf_open_data_cycle():
         logger.info("ECMWF Open Data: %s", result)
     except Exception as e:
         logger.error("ECMWF Open Data collection failed: %s", e, exc_info=True)
+
+
+def _etl_recalibrate():
+    """Weekly recalibration: refresh ETL tables + validate per-city α + refit Platt.
+
+    This is the cross-module sync mechanism. It ensures data tables stay fresh
+    and that downstream consumers (Platt, α) reflect current data.
+    """
+    import subprocess
+    import sys
+
+    venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python")
+    scripts_dir = Path(__file__).parent.parent / "scripts"
+
+    results = {}
+
+    # 1. Refresh ETL tables
+    for script in [
+        "etl_diurnal_curves.py",
+        "etl_temp_persistence.py",
+        "etl_hourly_observations.py",
+    ]:
+        script_path = scripts_dir / script
+        if script_path.exists():
+            try:
+                r = subprocess.run(
+                    [venv_python, str(script_path)],
+                    capture_output=True, text=True, timeout=300,
+                )
+                results[script] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
+            except Exception as e:
+                results[script] = f"ERROR: {e}"
+
+    # 2. Validate per-city alpha
+    try:
+        r = subprocess.run(
+            [venv_python, str(scripts_dir / "validate_dynamic_alpha.py")],
+            capture_output=True, text=True, timeout=600,
+        )
+        results["alpha_validation"] = "OK" if r.returncode == 0 else "FAIL"
+    except Exception as e:
+        results["alpha_validation"] = f"ERROR: {e}"
+
+    # 3. Platt refit (using venv python for sklearn)
+    try:
+        r = subprocess.run(
+            [venv_python, str(scripts_dir / "refit_platt.py")],
+            capture_output=True, text=True, timeout=300,
+        )
+        results["platt_refit"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
+    except Exception as e:
+        results["platt_refit"] = f"ERROR: {e}"
+
+    logger.info("ETL recalibration: %s", results)
 
 
 def run_single_cycle():
@@ -156,6 +211,13 @@ def main():
             _ecmwf_open_data_cycle, "cron",
             hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
         )
+
+    # Weekly recalibration: ETL refresh + alpha validation + Platt refit
+    scheduler.add_job(
+        _etl_recalibrate, "cron",
+        day_of_week="mon", hour=6, minute=0,
+        id="etl_recalibrate",
+    )
 
     jobs = [j.id for j in scheduler.get_jobs()]
     logger.info("Scheduler ready. %d jobs: %s", len(jobs), jobs)
