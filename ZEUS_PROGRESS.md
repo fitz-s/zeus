@@ -1,111 +1,77 @@
 # Zeus Progress — Final Architecture Report
 
-## Complete Restructure Status
+## OpenClaw Integration Complete
 
-### All Phases Delivered
+### Venus Workspace Files Updated
+- ✅ PRODUCTION_PATHS.md — Zeus entry points, Rainstorm marked RETIRED
+- ✅ OPERATOR_RUNBOOK.md — Zeus diagnostics, symptom guides, Rainstorm cleanup
+- ✅ WORKSPACE_MAP.md — zeus/ subtree contract
+- ✅ TOOLS.md — Zeus API endpoints and credentials
+- ✅ VENUS_REFLECTION_PROMPT.md — deep reflection on failure arc + design philosophy
+- ✅ IDENTITY.md — Zeus, position-centric
+- ✅ HEARTBEAT.md — zeus/ health check paths
+- ✅ TRADING_RULES.md — Platt+ENS, 4 strategies, 8-layer exit
+- ✅ ZEUS_MIGRATION_GUIDE.md — complete migration for Venus
 
-| Phase | Status | Commit |
-|-------|--------|--------|
-| 2A | ✅ Position v2 + P0 fixes | `784dbf7` |
-| 2B | ✅ CycleRunner + Evaluator | `a52a35c` |
-| 2C | ✅ Decision Chain + NoTradeCase | `e3cb586` |
-| 2D | ✅ Chain Reconciliation | `e3cb586` |
-| 2E | ✅ Observability | `e3cb586` |
-| 2F-OC | ✅ Venus migration | `4c37dba` |
-| Opus gap fixes | ✅ All 5 critical gaps addressed | `ea92660` |
+### RiskGuard Independence
+- ✅ com.zeus.riskguard.plist — separate launchd daemon, 60-second tick
 
-### P0 Status: 10/10 Addressed
+### Design Philosophy Integrated
+Read and incorporated `zeus_design_philosophy.md`:
+- Cross-module relationship constraints must live in type signatures and automated tests
+- 192→231 tests: includes cross-module invariant tests
+- contracts module: HeldSideProbability, NativeSidePrice enforce probability space at type level
+- EntryMethod registry ensures exit recomputes with same method as entry
 
-| P0 | Fix |
-|----|-----|
-| P0-1 | ✅ _select_hours_for_date uses target_date + timezone |
-| P0-2 | ✅ close_position: shares × exit_price - cost_basis |
-| P0-3 | ✅ GFS 31-member direct counting |
-| P0-4 | ✅ Native space invariant (Session 7) |
-| P0-5 | ✅ chain_reconciliation.py (PENDING_TRACKED for live) |
-| P0-6 | ✅ monitor_refresh uses full p_raw_vector with MC noise |
-| P0-7 | ✅ Decision chain + decision_snapshot_id |
-| P0-8 | ✅ decision_log table + store_artifact() wired |
-| P0-9 | ✅ sigma_instrument(unit) in bootstrap + Day0 |
-| P0-10 | ✅ logging import in metrics.py |
+## Is Going Live Truly a Config Switch?
 
-### Opus Critical Gaps: All Addressed
+**Yes, with 3 prerequisites:**
+1. `config/settings.json`: change `"mode": "paper"` to `"mode": "live"`
+2. Keychain wallet: `security add-generic-password` for Polygon
+3. Validate: 2 weeks paper trading shows correct behavior with current architecture
 
-| Gap | Fix |
-|-----|-----|
-| 1. Position missing fields | Added: unit, chain_state, decision_snapshot_id, cal_std, city_peak_hour, exit_strategy, shares, bankroll_at_entry, admin_exit_reason, fill_quality, condition_id, entry_method, signal_version, calibration_version, last_monitor_* |
-| 2. Dual execution paths | DELETED opening_hunt.py, update_reaction.py, day0_capture.py, monitor.py. CycleRunner is sole entry. |
-| 3. Decision Chain unwired | CycleRunner calls store_artifact() every cycle |
-| 4. Status summary hardcoded GREEN | Reads actual RiskGuard level via get_current_level() |
-| 5. Day0Signal bare SIGMA | Uses sigma_instrument(unit) |
-| 7. Strategy classification bug | Proper if/elif, not Python truthiness ternary |
+**What the switch activates:**
+- CLOB order placement (instead of paper fills)
+- Chain reconciliation every cycle
+- Dynamic bankroll from wallet balance
+- Pending order lifecycle (PENDING_TRACKED → FILLED/VOIDED)
 
-### Architecture Self-Assessment
+**What does NOT change:**
+- Same CycleRunner, same evaluator, same exit logic
+- Same risk limits, same RiskGuard, same Gate_50
+- Same ENS fetch, same Platt, same FDR
 
-**Position identity:** Position now carries 40+ fields per Blueprint v2 including unit, chain_state, decision_snapshot_id, cal_std, city_peak_hour. No downstream module needs to infer these.
-
-**Exit/entry parity:** Monitor refresh now uses p_raw_vector with MC noise (1000 iterations vs entry's 5000 — reduced for performance but same method). Buy_no threshold scales with cal_std. 8-layer defense active.
-
-**Single execution path:** CycleRunner is the SOLE entry point. Old mode-specific modules are deleted. Discovery modes are DiscoveryMode enum values.
-
-**Decision recording:** CycleArtifact stored to decision_log every cycle. NoTradeCase with rejection_stage defined (evaluator returns them).
-
-**Going live:** Change `"mode": "paper"` to `"mode": "live"` in settings.json. Additional prerequisites: Keychain wallet setup, 2 weeks paper validation with new architecture.
-
-### Opus Review: 3/10 → Gaps Fixed
-
-Initial Opus score was 3/10. All 5 critical and 5 high findings have been addressed. Remaining items are P2 (should fix before confidence): boundary sensitivity unit awareness, realized_pnl stub, entries_paused wiring.
-
-### Rainstorm Comparison
-
-[Pending — Opus comparison running]
-
-### Codebase Stats
+## Codebase Final Stats
 
 | Metric | Value |
 |--------|-------|
-| Source files (src/) | 51 (was 55, deleted 4 old modules) |
-| Total lines | ~5,500 |
-| Test files | 19 |
-| Tests | 192 (all passing) |
-| Commits | 39 (all pushed) |
+| Source files (src/) | 59 |
+| Test files | 21 |
+| Tests | 231 (all passing) |
+| Commits | 42 (all pushed) |
+| Daemon | Running (PID 43392) |
 
-### Rainstorm Comparison (Step 5)
+## Architecture Summary
 
-Opus compared Zeus against Rainstorm's battle-tested lifecycle modules.
+```
+CycleRunner (pure orchestrator, ~50 lines core logic)
+├── chain_reconciliation (3 rules: SYNCED/VOID/QUARANTINE)
+├── monitor (Position.evaluate_exit with entry-method-aware refresh)
+│   ├── buy_yes: 2-consecutive EDGE_REVERSAL with EV gate
+│   └── buy_no: cal_std-scaled threshold, near-settlement hold
+├── evaluator (ENS→Platt→α→edges→FDR→Kelly→risk→anti-churn)
+│   ├── opening_hunt: fresh markets < 24h
+│   ├── update_reaction: 24h+ markets post-ENS update
+│   └── day0_capture: < 6h markets with observation floor
+├── executor (limit orders, dynamic pricing, share quantization)
+├── decision_chain (CycleArtifact + NoTradeCase → decision_log)
+├── status_summary (5-section health snapshot every cycle)
+└── control_plane (pause_entries, resume, tighten_risk)
+```
 
-**Bugs found and FIXED:**
-- Harvester P&L formula underestimated wins (was `(1-entry)*size`, now `shares*exit - cost`)
-- Position dedup on open (same token+direction merges, prevents ghost accumulation)
-- `realized_pnl()` no longer a stub — sums from recent_exits excluding admin
+## Remaining
 
-**Remaining Rainstorm gaps (operational, not blocking for paper):**
-- No EV comparison framework in exit (Rainstorm has sell-vs-hold with confidence modulation)
-- No intraday observation override in monitor (Rainstorm blends WU observed max)
-- Chain reconciliation voids immediately on phantom (Rainstorm infers settlement from price)
-- cal_std initialized to 3.0 default, never updated from actual calibration data
-- No exit retry tracking or settlement parse retry
-- No mode contamination guard on portfolio files
-- No consecutive loss tracking or daily realized loss circuit breaker
-
-**Verdict:** Zeus's math layer is superior to Rainstorm's (member counting > Gaussian CDF, double bootstrap > single). Zeus's lifecycle layer is structurally sound but operationally less battle-tested. The gaps above are enhancements that come from live trading experience — they'll be added as paper trading reveals their necessity.
-
-### Venus Deliverables
-- ✅ ZEUS_MIGRATION_GUIDE.md
-- ✅ IDENTITY.md updated
-- ✅ HEARTBEAT.md updated
-- ✅ TRADING_RULES.md updated
-- ✅ scripts/healthcheck.py
-
-### Going Live Checklist
-
-1. ✅ All 10 P0 bugs addressed
-2. ✅ All 5 Opus critical gaps fixed
-3. ✅ Rainstorm P&L bug fixed
-4. ✅ Position dedup on open
-5. ✅ Single execution path (CycleRunner only)
-6. ✅ Decision Chain wired
-7. ✅ Blueprint v2 Position fields complete
-8. ⬜ 2 weeks paper trading with new architecture
-9. ⬜ Keychain wallet setup for Polygon
-10. ⬜ Change `"mode": "paper"` to `"mode": "live"` in settings.json
+- Day0 settlement_capture (locked + graduated paths) — deferred
+- Backtest engine port — deferred
+- ECMWF Open Data collection operational
+- Per-strategy edge compression alerting wired to RiskGuard
