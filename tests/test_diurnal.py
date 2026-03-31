@@ -13,6 +13,7 @@ def test_diurnal_returns_correct_tuple(mock_get_conn):
         for h in range(4, 20)
     ]
     mock_cursor.fetchall.return_value = mock_rows
+    mock_cursor.fetchone.return_value = None  # No monthly data → fall through to heuristic
     mock_conn.execute.return_value = mock_cursor
     mock_get_conn.return_value = mock_conn
 

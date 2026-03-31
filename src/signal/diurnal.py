@@ -98,12 +98,12 @@ def post_peak_confidence(
     target_date: date,
     current_local_hour: int,
 ) -> float:
-    """Empirical P(daily high already set | city, season, hour).
+    """Empirical P(daily high already set | city, month, hour).
 
-    Primary: p_high_set from diurnal_curves, derived from 6-figure hourly
-    observations. Eliminates hardcoded linear slopes (0.5 + h*0.1, 0.5 + z*0.15).
-
-    Fallback (cities/seasons without hourly coverage): heuristic slope.
+    Resolution hierarchy:
+      1. diurnal_peak_prob (monthly) — most precise, 30+ days/cell
+      2. diurnal_curves.p_high_set (seasonal) — ~120 days/cell
+      3. heuristic slope — cities without openmeteo_archive coverage
 
     Returns:
         0.0 - 0.3: pre-peak (observation not yet dominant)
@@ -111,31 +111,39 @@ def post_peak_confidence(
         0.7 - 1.0: post-peak, observation dominates ENS
     """
     season = season_from_month(target_date.month)
+    month = target_date.month
 
     try:
         from src.state.db import get_connection
 
         conn = get_connection()
-        rows = conn.execute(
+
+        # 1. Monthly lookup
+        monthly_row = conn.execute(
+            "SELECT p_high_set FROM diurnal_peak_prob WHERE city = ? AND month = ? AND hour = ?",
+            (city_name, month, current_local_hour),
+        ).fetchone()
+        if monthly_row and monthly_row["p_high_set"] is not None:
+            conn.close()
+            return float(monthly_row["p_high_set"])
+
+        # 2. Seasonal fallback
+        season_rows = conn.execute(
             "SELECT hour, avg_temp, std_temp, p_high_set FROM diurnal_curves "
-            "WHERE city = ? AND season = ? "
-            "ORDER BY hour",
+            "WHERE city = ? AND season = ? ORDER BY hour",
             (city_name, season),
         ).fetchall()
         conn.close()
 
-        if not rows or len(rows) < 12:
+        if not season_rows or len(season_rows) < 12:
             return 0.0
 
-        # Primary: empirical p_high_set
-        current_row = next(
-            (r for r in rows if r["hour"] == current_local_hour), None
-        )
+        current_row = next((r for r in season_rows if r["hour"] == current_local_hour), None)
         if current_row and current_row["p_high_set"] is not None:
             return float(current_row["p_high_set"])
 
-        # Fallback: heuristic slope (cities without openmeteo_archive daily coverage)
-        peak_row = max(rows, key=lambda r: r["avg_temp"])
+        # 3. Heuristic slope
+        peak_row = max(season_rows, key=lambda r: r["avg_temp"])
         peak_hour = peak_row["hour"]
         peak_temp = peak_row["avg_temp"]
 
