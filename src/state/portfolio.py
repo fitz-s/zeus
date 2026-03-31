@@ -409,14 +409,18 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     with open(path) as f:
         data = json.load(f)
 
+    import os
+    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
+
     position_fields = {f.name for f in fields(Position)}
     positions = []
     for p in data.get("positions", []):
         filtered = {k: v for k, v in p.items() if k in position_fields}
+        if "env" not in p:
+            filtered["env"] = current_mode
         positions.append(Position(**filtered))
 
     # Contamination guard: every position's env must match current mode
-    current_mode = settings.mode
     for pos in positions:
         if pos.env and pos.env != current_mode:
             raise PortfolioModeError(

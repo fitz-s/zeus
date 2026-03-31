@@ -595,7 +595,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             city.name,
             target_date,
             ens_result["issue_time"].isoformat(),
-            None,
+            f"{target_date}T12:00:00Z",
             ens_result["fetch_time"].isoformat(),
             ens_result["fetch_time"].isoformat(),
             max(

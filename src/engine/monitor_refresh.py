@@ -381,7 +381,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 (tid, one_hour_ago)
             ).fetchone()
             if row:
-                old_native_p = row["price"] if pos.direction == "buy_yes" else 1.0 - row["price"]
+                old_native_p = row["price"]
                 market_velocity_1h = current_p_market - old_native_p
         except Exception as e:
             logger.debug("Failed to calculate market velocity for %s: %s", pos.trade_id, e)

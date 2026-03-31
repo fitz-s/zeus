@@ -183,9 +183,9 @@ def check_pending_exits(
     """Check fill status for positions with pending sell orders.
 
     Called at start of each cycle, before monitor phase.
-    Returns: {"filled": int, "retried": int, "unchanged": int}
+    Returns: {"filled": int, "retried": int, "unchanged": int, "filled_positions": list[Position]}
     """
-    stats = {"filled": 0, "retried": 0, "unchanged": 0}
+    stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
 
     for pos in list(portfolio.positions):
         if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
@@ -210,6 +210,7 @@ def check_pending_exits(
             closed = close_position(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
                 closed.exit_state = "sell_filled"
+                stats["filled_positions"].append(closed)
             stats["filled"] += 1
         elif status in ("CANCELLED", "CANCELED", "EXPIRED", "REJECTED"):
             _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)

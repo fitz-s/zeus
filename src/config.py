@@ -27,8 +27,8 @@ def state_path(filename: str) -> Path:
 
     positions.json → positions-paper.json / positions-live.json
     """
-    # settings is a module-level singleton, already initialized by import time
-    mode = settings.mode
+    import os
+    mode = os.environ.get("ZEUS_MODE", settings.mode)
     dot = filename.rfind('.')
     if dot > 0:
         stem, ext = filename[:dot], filename[dot:]

@@ -50,6 +50,7 @@ class RejectionStage(str, Enum):
     EDGE_INSUFFICIENT = "EDGE_INSUFFICIENT"
     FDR_FILTERED = "FDR_FILTERED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
+    MARKET_LIQUIDITY = "MARKET_LIQUIDITY"
     
 class EntryMethod(str, Enum):
     """Known probability refresh methods carried by Position across modules."""
