@@ -9,7 +9,7 @@ def test_diurnal_returns_correct_tuple(mock_get_conn):
     mock_cursor = MagicMock()
     # Let's say we have 15 hours of data, peak is round hour 16 (16:00) with avg temp 85.0
     mock_rows = [
-        {"hour": h, "avg_temp": 70.0 + h if h <= 16 else 85.0 - (h - 16)*2, "std_temp": 2.0}
+        {"hour": h, "avg_temp": 70.0 + h if h <= 16 else 85.0 - (h - 16)*2, "std_temp": 2.0, "p_high_set": None}
         for h in range(4, 20)
     ]
     mock_cursor.fetchall.return_value = mock_rows
@@ -35,7 +35,7 @@ def test_diurnal_returns_correct_tuple(mock_get_conn):
     # time_conf = min(0.95, 0.5 + 2 * 0.1) = 0.7
     # drop_conf = min(0.95, 0.5 + 2.5 * 0.15) = 0.875
     assert conf == 0.875
-    assert reason == "data_derived"
+    assert reason == "heuristic_slope"
 
 @patch('src.state.db.get_connection')
 def test_diurnal_handles_missing_data(mock_get_conn):
