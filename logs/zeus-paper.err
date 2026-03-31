@@ -21439,3 +21439,164 @@
 2026-03-30 22:16:07,046 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=12000 "HTTP/1.1 200 OK"
 2026-03-30 22:16:11,072 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=12200 "HTTP/1.1 200 OK"
 2026-03-30 22:16:15,050 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=12400 "HTTP/1.1 200 OK"
+2026-03-30 22:16:19,051 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=12600 "HTTP/1.1 200 OK"
+2026-03-30 22:16:23,243 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=12800 "HTTP/1.1 200 OK"
+2026-03-30 22:16:27,004 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=13000 "HTTP/1.1 200 OK"
+2026-03-30 22:16:31,456 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=13200 "HTTP/1.1 200 OK"
+2026-03-30 22:16:36,874 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=13400 "HTTP/1.1 200 OK"
+2026-03-30 22:16:41,786 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=13600 "HTTP/1.1 200 OK"
+2026-03-30 22:16:46,562 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=13800 "HTTP/1.1 200 OK"
+2026-03-30 22:16:51,395 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=14000 "HTTP/1.1 200 OK"
+2026-03-30 22:16:55,757 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=14200 "HTTP/1.1 200 OK"
+2026-03-30 22:17:00,134 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=14400 "HTTP/1.1 200 OK"
+2026-03-30 22:17:04,380 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=14600 "HTTP/1.1 200 OK"
+2026-03-30 22:17:08,878 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=14800 "HTTP/1.1 200 OK"
+2026-03-30 22:17:13,766 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=15000 "HTTP/1.1 200 OK"
+2026-03-30 22:17:18,822 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=15200 "HTTP/1.1 200 OK"
+2026-03-30 22:17:23,336 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=15400 "HTTP/1.1 200 OK"
+2026-03-30 22:17:27,925 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=15600 "HTTP/1.1 200 OK"
+2026-03-30 22:17:32,976 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=15800 "HTTP/1.1 200 OK"
+2026-03-30 22:17:37,458 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=16000 "HTTP/1.1 200 OK"
+2026-03-30 22:17:41,919 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=16200 "HTTP/1.1 200 OK"
+2026-03-30 22:17:46,342 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=16400 "HTTP/1.1 200 OK"
+2026-03-30 22:17:51,150 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=16600 "HTTP/1.1 200 OK"
+2026-03-30 22:17:55,606 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=16800 "HTTP/1.1 200 OK"
+2026-03-30 22:18:00,439 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=17000 "HTTP/1.1 200 OK"
+2026-03-30 22:18:04,664 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=17200 "HTTP/1.1 200 OK"
+2026-03-30 22:18:09,560 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=17400 "HTTP/1.1 200 OK"
+2026-03-30 22:18:13,869 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=17600 "HTTP/1.1 200 OK"
+2026-03-30 22:18:17,911 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=17800 "HTTP/1.1 200 OK"
+2026-03-30 22:18:22,005 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=18000 "HTTP/1.1 200 OK"
+2026-03-30 22:18:26,302 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=18200 "HTTP/1.1 200 OK"
+2026-03-30 22:18:30,313 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=18400 "HTTP/1.1 200 OK"
+2026-03-30 22:18:34,509 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=18600 "HTTP/1.1 200 OK"
+2026-03-30 22:18:39,226 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=18800 "HTTP/1.1 200 OK"
+2026-03-30 22:18:43,420 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=19000 "HTTP/1.1 200 OK"
+2026-03-30 22:18:48,183 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=19200 "HTTP/1.1 200 OK"
+2026-03-30 22:18:52,385 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=19400 "HTTP/1.1 200 OK"
+2026-03-30 22:18:56,560 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=19600 "HTTP/1.1 200 OK"
+2026-03-30 22:19:00,918 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=19800 "HTTP/1.1 200 OK"
+2026-03-30 22:19:05,873 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=20000 "HTTP/1.1 200 OK"
+2026-03-30 22:19:10,036 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=20200 "HTTP/1.1 200 OK"
+2026-03-30 22:19:13,717 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=20400 "HTTP/1.1 200 OK"
+2026-03-30 22:19:17,503 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=20600 "HTTP/1.1 200 OK"
+2026-03-30 22:19:21,306 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=20800 "HTTP/1.1 200 OK"
+2026-03-30 22:19:25,205 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=21000 "HTTP/1.1 200 OK"
+2026-03-30 22:19:28,942 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=21200 "HTTP/1.1 200 OK"
+2026-03-30 22:19:33,332 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=21400 "HTTP/1.1 200 OK"
+2026-03-30 22:19:37,624 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=21600 "HTTP/1.1 200 OK"
+2026-03-30 22:19:41,770 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=21800 "HTTP/1.1 200 OK"
+2026-03-30 22:19:46,146 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=22000 "HTTP/1.1 200 OK"
+2026-03-30 22:19:49,910 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=22200 "HTTP/1.1 200 OK"
+2026-03-30 22:19:54,085 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=22400 "HTTP/1.1 200 OK"
+2026-03-30 22:19:58,395 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=22600 "HTTP/1.1 200 OK"
+2026-03-30 22:20:02,264 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=22800 "HTTP/1.1 200 OK"
+2026-03-30 22:20:06,347 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=23000 "HTTP/1.1 200 OK"
+2026-03-30 22:20:10,567 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=23200 "HTTP/1.1 200 OK"
+2026-03-30 22:20:14,649 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=23400 "HTTP/1.1 200 OK"
+2026-03-30 22:20:19,217 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=23600 "HTTP/1.1 200 OK"
+2026-03-30 22:20:24,189 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=23800 "HTTP/1.1 200 OK"
+2026-03-30 22:20:28,118 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=24000 "HTTP/1.1 200 OK"
+2026-03-30 22:20:33,392 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=24200 "HTTP/1.1 200 OK"
+2026-03-30 22:20:38,850 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=24400 "HTTP/1.1 200 OK"
+2026-03-30 22:20:43,169 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=24600 "HTTP/1.1 200 OK"
+2026-03-30 22:20:47,198 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=24800 "HTTP/1.1 200 OK"
+2026-03-30 22:20:51,067 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=25000 "HTTP/1.1 200 OK"
+2026-03-30 22:20:55,647 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=25200 "HTTP/1.1 200 OK"
+2026-03-30 22:20:59,853 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=25400 "HTTP/1.1 200 OK"
+2026-03-30 22:21:04,012 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=25600 "HTTP/1.1 200 OK"
+2026-03-30 22:21:07,933 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=25800 "HTTP/1.1 200 OK"
+2026-03-30 22:21:12,327 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=26000 "HTTP/1.1 200 OK"
+2026-03-30 22:21:18,149 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=26200 "HTTP/1.1 200 OK"
+2026-03-30 22:21:22,280 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?closed=true&limit=200&offset=26400 "HTTP/1.1 200 OK"
+2026-03-30 22:21:29,476 [src.execution.harvester] WARNING: Gamma API fetch failed: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:21:29,480 [src.execution.harvester] INFO: Harvester: found 416 settled events
+2026-03-30 22:21:29,506 [zeus] INFO: Harvester: {'settlements_found': 416, 'pairs_created': 0, 'positions_settled': 0}
+2026-03-30 22:21:29,506 [apscheduler.executors.default] INFO: Job "_harvester_cycle (trigger: interval[1:00:00], next run at: 2026-03-30 23:11:49 CDT)" executed successfully
+2026-03-30 22:26:49,144 [apscheduler.executors.default] INFO: Running job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 22:41:49 CDT)" (scheduled at 2026-03-30 22:26:49.005817-05:00)
+2026-03-30 22:26:53,732 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:26:56,254 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:27:00,022 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:27:03,925 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:27:07,699 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:27:09,464 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=6&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:27:11,837 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:27:14,232 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:27:18,272 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:27:22,099 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:27:26,372 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:27:28,044 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=4&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:27:30,427 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:27:32,862 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:27:36,683 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:27:40,430 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:27:44,498 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:27:45,375 [src.data.market_scanner] INFO: Found 69 active weather markets
+2026-03-30 22:27:45,389 [src.engine.cycle_runner] INFO: Cycle day0_capture: 2 monitors, 0 exits, 0 candidates, 0 trades
+2026-03-30 22:27:45,389 [zeus] INFO: day0_capture: {'mode': 'day0_capture', 'started_at': '2026-03-31T03:26:49.145491+00:00', 'monitors': 2, 'exits': 0, 'candidates': 0, 'trades': 0, 'no_trades': 0, 'pending_voids': 0, 'chain_sync': {'skipped': 'paper_mode'}, 'config_cap_usd': 150.0, 'effective_bankroll_usd': 406.41638964610024, 'dynamic_cap_usd': 150.0, 'portfolio_heat_pct': 13.59, 'completed_at': '2026-03-31T03:27:45.383532+00:00'}
+2026-03-30 22:27:45,389 [apscheduler.executors.default] INFO: Job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 22:41:49 CDT)" executed successfully
+2026-03-30 22:41:49,079 [apscheduler.executors.default] INFO: Running job "main.<locals>.<lambda> (trigger: interval[0:30:00], next run at: 2026-03-30 23:11:49 CDT)" (scheduled at 2026-03-30 22:41:49.001407-05:00)
+2026-03-30 22:41:49,083 [apscheduler.executors.default] INFO: Running job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 22:56:49 CDT)" (scheduled at 2026-03-30 22:41:49.005817-05:00)
+2026-03-30 22:41:51,606 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:41:51,607 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:41:53,981 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:41:53,985 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:41:57,851 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:41:57,937 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:42:02,033 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:42:02,136 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:42:07,129 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:42:07,140 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:42:08,924 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=6&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:42:09,139 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=6&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:42:21,859 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:42:21,959 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:42:27,914 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:42:29,352 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:42:35,965 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:42:39,450 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:42:42,138 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:42:46,661 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:42:49,047 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:42:50,795 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=4&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:42:56,038 [src.data.market_scanner] WARNING: Tag fetch failed for temperature: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:01,264 [src.data.market_scanner] WARNING: Tag fetch failed for weather: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:03,659 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:43:06,496 [src.data.market_scanner] WARNING: Tag fetch failed for daily-temperature: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:11,731 [src.data.market_scanner] WARNING: Keyword fetch failed: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:11,732 [src.data.market_scanner] INFO: Found 0 active weather markets
+2026-03-30 22:43:11,738 [src.engine.cycle_runner] INFO: Cycle day0_capture: 2 monitors, 0 exits, 0 candidates, 0 trades
+2026-03-30 22:43:11,738 [zeus] INFO: day0_capture: {'mode': 'day0_capture', 'started_at': '2026-03-31T03:41:49.086774+00:00', 'monitors': 2, 'exits': 0, 'candidates': 0, 'trades': 0, 'no_trades': 0, 'pending_voids': 0, 'chain_sync': {'skipped': 'paper_mode'}, 'config_cap_usd': 150.0, 'effective_bankroll_usd': 406.2334707573481, 'dynamic_cap_usd': 150.0, 'portfolio_heat_pct': 13.59, 'completed_at': '2026-03-31T03:43:11.735962+00:00'}
+2026-03-30 22:43:11,738 [apscheduler.executors.default] INFO: Job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 22:56:49 CDT)" executed successfully
+2026-03-30 22:43:14,057 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=4&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:43:16,692 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:43:18,456 [src.data.market_scanner] WARNING: Tag fetch failed for temperature: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:19,300 [src.data.market_scanner] WARNING: Tag fetch failed for weather: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:20,198 [src.data.market_scanner] WARNING: Tag fetch failed for daily-temperature: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:21,010 [src.data.market_scanner] WARNING: Keyword fetch failed: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)
+2026-03-30 22:43:21,011 [src.data.market_scanner] INFO: Found 0 active weather markets
+2026-03-30 22:43:21,024 [src.engine.cycle_runner] INFO: Cycle opening_hunt: 2 monitors, 0 exits, 0 candidates, 0 trades
+2026-03-30 22:43:21,024 [zeus] INFO: opening_hunt: {'mode': 'opening_hunt', 'started_at': '2026-03-31T03:41:49.086278+00:00', 'monitors': 2, 'exits': 0, 'candidates': 0, 'trades': 0, 'no_trades': 0, 'pending_voids': 0, 'chain_sync': {'skipped': 'paper_mode'}, 'config_cap_usd': 150.0, 'effective_bankroll_usd': 406.2334707573481, 'dynamic_cap_usd': 150.0, 'portfolio_heat_pct': 13.59, 'completed_at': '2026-03-31T03:43:21.018341+00:00'}
+2026-03-30 22:43:21,024 [apscheduler.executors.default] INFO: Job "main.<locals>.<lambda> (trigger: interval[0:30:00], next run at: 2026-03-30 23:11:49 CDT)" executed successfully
+2026-03-30 22:56:49,074 [apscheduler.executors.default] INFO: Running job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 23:11:49 CDT)" (scheduled at 2026-03-30 22:56:49.005817-05:00)
+2026-03-30 22:56:51,457 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:56:53,900 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:56:57,703 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:57:01,793 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:57:05,946 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:57:07,759 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=6&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:57:10,285 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:57:12,720 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:57:16,585 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:57:20,357 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:57:24,054 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:57:25,644 [httpx] INFO: HTTP Request: GET https://ensemble-api.open-meteo.com/v1/ensemble?latitude=39.698&longitude=-104.777&hourly=temperature_2m&models=ecmwf_ifs025&forecast_days=4&temperature_unit=fahrenheit "HTTP/1.1 200 OK"
+2026-03-30 22:57:28,118 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/tags/slug/temperature "HTTP/1.1 200 OK"
+2026-03-30 22:57:30,629 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=0 "HTTP/1.1 200 OK"
+2026-03-30 22:57:34,929 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=50 "HTTP/1.1 200 OK"
+2026-03-30 22:57:38,745 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=100 "HTTP/1.1 200 OK"
+2026-03-30 22:57:42,444 [httpx] INFO: HTTP Request: GET https://gamma-api.polymarket.com/events?tag_id=103040&closed=false&limit=50&offset=150 "HTTP/1.1 200 OK"
+2026-03-30 22:57:43,354 [src.data.market_scanner] INFO: Found 69 active weather markets
+2026-03-30 22:57:43,366 [src.engine.cycle_runner] INFO: Cycle day0_capture: 2 monitors, 0 exits, 0 candidates, 0 trades
+2026-03-30 22:57:43,366 [zeus] INFO: day0_capture: {'mode': 'day0_capture', 'started_at': '2026-03-31T03:56:49.077563+00:00', 'monitors': 2, 'exits': 0, 'candidates': 0, 'trades': 0, 'no_trades': 0, 'pending_voids': 0, 'chain_sync': {'skipped': 'paper_mode'}, 'config_cap_usd': 150.0, 'effective_bankroll_usd': 406.22330859686184, 'dynamic_cap_usd': 150.0, 'portfolio_heat_pct': 13.59, 'completed_at': '2026-03-31T03:57:43.365241+00:00'}
+2026-03-30 22:57:43,366 [apscheduler.executors.default] INFO: Job "main.<locals>.<lambda> (trigger: interval[0:15:00], next run at: 2026-03-30 23:11:49 CDT)" executed successfully
