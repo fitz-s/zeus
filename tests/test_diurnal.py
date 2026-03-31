@@ -1,9 +1,9 @@
 from datetime import date
 from unittest.mock import patch, MagicMock
-from src.signal.peak_hour_provider import get_peak_hour_context
+from src.signal.diurnal import get_peak_hour_context
 
 @patch('src.state.db.get_connection')
-def test_peak_hour_provider_returns_correct_tuple(mock_get_conn):
+def test_diurnal_returns_correct_tuple(mock_get_conn):
     # Mock connection and rows returned by DB
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -38,7 +38,7 @@ def test_peak_hour_provider_returns_correct_tuple(mock_get_conn):
     assert reason == "data_derived"
 
 @patch('src.state.db.get_connection')
-def test_peak_hour_provider_handles_missing_data(mock_get_conn):
+def test_diurnal_handles_missing_data(mock_get_conn):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     # Less than 12 rows missing data

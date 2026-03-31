@@ -118,7 +118,7 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
 def _get_post_peak_confidence(city: City, target_date: date) -> float:
     """Get diurnal post-peak confidence for Day0 signal refinement."""
     try:
-        from src.signal.peak_hour_provider import get_peak_hour_context, get_current_local_hour
+        from src.signal.diurnal import get_peak_hour_context, get_current_local_hour
         current_hour = get_current_local_hour(city.timezone)
         peak_hr, conf, reason = get_peak_hour_context(city.name, target_date, current_hour)
         return conf
