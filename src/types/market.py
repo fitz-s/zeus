@@ -92,4 +92,5 @@ class BinEdge:
     entry_price: float
     p_value: float
     vwmp: float
+    forward_edge: float = 0.0
     ev_per_dollar: float = 0.0
