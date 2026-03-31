@@ -1,0 +1,688 @@
+"""Cross-module P&L flow, CI-threshold, and hardcoded-audit tests."""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+import src.control.control_plane as control_plane_module
+import src.engine.cycle_runner as cycle_runner
+import src.engine.evaluator as evaluator_module
+import src.engine.monitor_refresh as monitor_refresh
+import src.execution.harvester as harvester_module
+import src.observability.status_summary as status_summary_module
+import src.riskguard.riskguard as riskguard_module
+from src.calibration.manager import season_from_date
+from src.calibration.store import add_calibration_pair
+from src.config import City
+from src.engine.discovery_mode import DiscoveryMode
+from src.engine.evaluator import EdgeDecision, MarketCandidate
+from src.execution.executor import OrderResult
+from src.riskguard.risk_level import RiskLevel
+from src.state.db import get_connection, init_schema
+from src.state.decision_chain import SettlementRecord, store_settlement_records
+from src.state.portfolio import (
+    PortfolioState,
+    Position,
+    buy_no_edge_threshold,
+    buy_yes_edge_threshold,
+)
+from src.state.strategy_tracker import StrategyTracker
+from src.types import Bin, BinEdge
+
+
+NYC = City(
+    name="NYC",
+    lat=40.7772,
+    lon=-73.8726,
+    timezone="America/New_York",
+    cluster="US-Northeast",
+    settlement_unit="F",
+    wu_station="KLGA",
+)
+
+MISSING = object()
+
+
+def _position(**kwargs) -> Position:
+    defaults = dict(
+        trade_id="t1",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=5.0,
+        entry_price=0.10,
+        p_posterior=0.20,
+        edge=0.10,
+        shares=50.0,
+        cost_basis_usd=5.0,
+        entered_at="2026-03-30T00:00:00Z",
+        token_id="yes123",
+        no_token_id="no456",
+        entry_method="ens_member_counting",
+        entry_ci_width=0.10,
+    )
+    defaults.update(kwargs)
+    return Position(**defaults)
+
+
+def _recent_exit(pnl: float) -> dict:
+    return {
+        "city": "NYC",
+        "bin_label": "39-40°F",
+        "target_date": "2026-04-01",
+        "direction": "buy_yes",
+        "token_id": "yes123",
+        "no_token_id": "no456",
+        "exit_reason": "SETTLEMENT",
+        "exited_at": "2026-03-30T00:00:00Z",
+        "pnl": pnl,
+    }
+
+
+def _insert_snapshot(conn, city: str, target_date: str, p_raw: list[float]) -> str:
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            city,
+            target_date,
+            "2026-03-30T00:00:00Z",
+            f"{target_date}T12:00:00Z",
+            "2026-03-30T01:00:00Z",
+            "2026-03-30T01:00:00Z",
+            48.0,
+            json.dumps([40.0] * 51),
+            json.dumps(p_raw),
+            2.0,
+            0,
+            "ecmwf_ifs025",
+            "live_v1",
+        ),
+    )
+    row = conn.execute("SELECT last_insert_rowid() AS snapshot_id").fetchone()
+    conn.commit()
+    return str(row["snapshot_id"])
+
+
+def _lookup_nested(data: dict, dotted_path: str):
+    current = data
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return MISSING
+        current = current[part]
+    return current
+
+
+def test_unrealized_pnl_updates_with_market():
+    pos = _position()
+    assert pos.unrealized_pnl == 0.0
+
+    pos.last_monitor_market_price = 0.15
+    assert pos.unrealized_pnl == pytest.approx(2.50)
+
+    pos.last_monitor_market_price = 0.05
+    assert pos.unrealized_pnl == pytest.approx(-2.50)
+
+
+def test_total_pnl_combines_realized_and_unrealized():
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        recent_exits=[_recent_exit(3.0)],
+    )
+
+    open_pos = _position()
+    open_pos.last_monitor_market_price = 0.08
+    portfolio.positions.append(open_pos)
+
+    assert portfolio.realized_pnl == pytest.approx(3.0)
+    assert portfolio.total_unrealized_pnl == pytest.approx(-1.0)
+    assert portfolio.total_pnl == pytest.approx(2.0)
+    assert portfolio.effective_bankroll == pytest.approx(152.0)
+
+
+def test_buy_no_edge_threshold_uses_entry_ci_width():
+    assert buy_no_edge_threshold(0.04) == pytest.approx(-0.02)
+
+
+def test_buy_no_edge_threshold_clamps_to_ceiling():
+    assert buy_no_edge_threshold(0.80) == pytest.approx(-0.15)
+
+
+def test_buy_yes_edge_threshold_uses_entry_ci_width():
+    assert buy_yes_edge_threshold(0.02) == pytest.approx(-0.01)
+
+
+def test_buy_yes_edge_threshold_clamps_to_ceiling():
+    assert buy_yes_edge_threshold(0.80) == pytest.approx(-0.10)
+
+
+def test_hardcoded_constants_documented():
+    settings = json.loads(
+        Path("/Users/leofitz/.openclaw/workspace-venus/zeus/config/settings.json").read_text()
+    )
+    src_root = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src")
+    marker_pattern = re.compile(
+        r'HARDCODED\(\s*setting_key="([^"]+)",\s*note_key="([^"]+)"',
+        re.S,
+    )
+
+    markers: list[tuple[str, str]] = []
+    for path in src_root.rglob("*.py"):
+        markers.extend(marker_pattern.findall(path.read_text()))
+
+    assert markers, "No HARDCODED markers found in source"
+
+    for setting_key, note_key in markers:
+        assert _lookup_nested(settings, setting_key) is not MISSING
+        note_value = _lookup_nested(settings, note_key)
+        assert note_value is not MISSING
+        assert isinstance(note_value, str) and note_value
+
+    # Settings-only tracked constants still need explicit notes even if not hardcoded in src/.
+    for note_key in [
+        "sizing._kelly_multiplier_note",
+        "edge._base_alpha_note",
+        "edge._spread_tight_f_note",
+        "edge._spread_wide_f_note",
+        "edge._fdr_alpha_note",
+        "exit._buy_no_scaling_factor_note",
+        "exit._buy_yes_scaling_factor_note",
+        "exit._buy_no_floor_note",
+        "exit._buy_no_ceiling_note",
+        "exit._buy_yes_floor_note",
+        "exit._buy_yes_ceiling_note",
+        "exit._consecutive_confirmations_note",
+        "exit._near_settlement_hours_note",
+    ]:
+        value = _lookup_nested(settings, note_key)
+        assert value is not MISSING
+        assert isinstance(value, str) and value
+
+
+def test_inv_unrealized_pnl_computed():
+    pos = _position()
+    pos.last_monitor_market_price = 0.12
+    assert pos.unrealized_pnl == pytest.approx(1.0)
+
+
+def test_inv_monitor_updates_market_price(monkeypatch):
+    class DummyClob:
+        paper_mode = True
+
+    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.62)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "recompute_native_probability",
+        lambda position, current_p_market, registry, **context: position.p_posterior,
+    )
+
+    pos = _position(last_monitor_market_price=None, last_monitor_at="")
+    initial = pos.last_monitor_at
+
+    market_price, _ = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert market_price == pytest.approx(0.62)
+    assert pos.last_monitor_market_price == pytest.approx(0.62)
+    assert pos.last_monitor_at != initial
+
+
+def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        recent_exits=[_recent_exit(-2.3)],
+    )
+    open_pos = _position()
+    open_pos.last_monitor_market_price = 0.13
+    portfolio.positions.append(open_pos)
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert status["portfolio"]["realized_pnl"] == pytest.approx(-2.3)
+    assert status["portfolio"]["unrealized_pnl"] == pytest.approx(1.5)
+    assert status["portfolio"]["total_pnl"] == pytest.approx(-0.8)
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(149.2)
+
+
+def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = paper_mode
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{"city": NYC}])
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
+    monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should be paused")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["entries_paused"] is True
+    assert summary["trades"] == 0
+    assert summary["candidates"] == 0
+
+
+def test_inv_kelly_uses_effective_bankroll(monkeypatch):
+    captured: dict[str, float] = {}
+
+    future_target = "2026-04-03"
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=future_target,
+        outcomes=[
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.35,
+            },
+            {
+                "title": "41-42°F",
+                "range_low": 41,
+                "range_high": 42,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.33,
+            },
+            {
+                "title": "43°F or higher",
+                "range_low": 43,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.32,
+            },
+        ],
+        hours_since_open=10.0,
+        hours_to_resolution=30.0,
+    )
+
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        recent_exits=[_recent_exit(3.0)],
+        positions=[_position(bin_label="41-42°F", last_monitor_market_price=0.08)],
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, city, target_d):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=5000):
+            return np.array([0.60, 0.25, 0.15])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            self.bins = kwargs["bins"]
+
+        def find_edges(self, n_bootstrap=500):
+            return [
+                BinEdge(
+                    bin=self.bins[0],
+                    direction="buy_yes",
+                    edge=0.12,
+                    ci_lower=0.05,
+                    ci_upper=0.15,
+                    p_model=0.60,
+                    p_market=0.35,
+                    p_posterior=0.47,
+                    entry_price=0.35,
+                    p_value=0.02,
+                    vwmp=0.35,
+                )
+            ]
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=8, model=None: None if model == "gfs025" else {
+            "members_hourly": np.ones((51, 48)) * 40.0,
+            "issue_time": datetime.now(timezone.utc),
+            "fetch_time": datetime.now(timezone.utc),
+            "model": "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap1")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
+    monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+
+    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult):
+        captured["bankroll"] = bankroll
+        return 5.0
+
+    monkeypatch.setattr(evaluator_module, "kelly_size", _capture_kelly)
+    monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=portfolio,
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(
+            max_single_position_pct=0.10,
+            max_portfolio_heat_pct=0.50,
+            max_correlated_pct=0.25,
+            max_city_pct=0.20,
+            max_region_pct=0.35,
+            min_order_usd=1.0,
+        ),
+    )
+
+    assert decisions[0].should_trade is True
+    assert captured["bankroll"] == pytest.approx(portfolio.effective_bankroll)
+
+
+def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    conn.close()
+
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        daily_baseline_total=150.0,
+        recent_exits=[_recent_exit(-13.0)],
+    )
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: portfolio)
+
+    level = riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+
+    assert level == RiskLevel.RED
+    assert row["level"] == RiskLevel.RED.value
+    assert details["daily_loss"] == pytest.approx(13.0)
+    assert details["total_pnl"] == pytest.approx(-13.0)
+
+
+def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="trade-1",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.70,
+            outcome=1,
+            pnl=3.0,
+        ),
+        SettlementRecord(
+            trade_id="trade-2",
+            city="NYC",
+            target_date="2026-04-02",
+            range_label="41-42°F",
+            direction="buy_yes",
+            p_posterior=0.35,
+            outcome=1,
+            pnl=1.5,
+        ),
+    ])
+    conn.close()
+
+    portfolio = PortfolioState(bankroll=150.0)
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: portfolio)
+
+    riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT win_rate FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    assert row["win_rate"] == pytest.approx(1.0)
+
+
+def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="trade-1",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.80,
+            outcome=0,
+            pnl=-5.0,
+        )
+    ])
+    conn.close()
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+
+    riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT brier FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    assert row["brier"] == pytest.approx(0.64)
+
+
+def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = paper_mode
+
+    calls: list[dict] = []
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "outcomes": [],
+        "hours_since_open": 2.0,
+        "hours_to_resolution": 30.0,
+    }])
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
+    monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: [EdgeDecision(
+            should_trade=True,
+            edge=BinEdge(
+                bin=Bin(low=39, high=40, label="39-40°F"),
+                direction="buy_yes",
+                edge=0.12,
+                ci_lower=0.05,
+                ci_upper=0.15,
+                p_model=0.60,
+                p_market=0.35,
+                p_posterior=0.47,
+                entry_price=0.35,
+                p_value=0.02,
+                vwmp=0.35,
+            ),
+            tokens={"market_id": "m1", "token_id": "yes123", "no_token_id": "no456"},
+            size_usd=5.0,
+            decision_id="dec1",
+            decision_snapshot_id="snap1",
+            edge_source="settlement_capture",
+            applied_validations=["ens_fetch"],
+        )],
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "execute_order",
+        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35),
+    )
+    monkeypatch.setattr(
+        "src.state.strategy_tracker.StrategyTracker.record_trade",
+        lambda self, trade: calls.append(trade),
+    )
+
+    cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert calls, "StrategyTracker never received the filled trade"
+
+
+def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    season = season_from_date("2026-04-01")
+    for i in range(13):
+        add_calibration_pair(
+            conn,
+            city="NYC",
+            target_date=f"2026-04-{i+1:02d}",
+            range_label=f"{30+i}-{31+i}",
+            p_raw=0.10 + 0.02 * (i % 5),
+            outcome=i % 2,
+            lead_days=3.0,
+            season=season,
+            cluster=NYC.cluster,
+            forecast_available_at="2026-03-30T01:00:00Z",
+            settlement_value=None,
+        )
+    snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            },
+            {
+                "question": "41-42°F",
+                "winningOutcome": "No",
+                "clobTokenIds": json.dumps(["yes2", "no2"]),
+                "outcomePrices": json.dumps([0.0, 1.0]),
+                "conditionId": "m2",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(
+            bankroll=150.0,
+            positions=[_position(
+                trade_id="trade-1",
+                target_date="2026-04-01",
+                bin_label="39-40°F",
+                decision_snapshot_id=snapshot_id,
+            )],
+        ),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+
+    result = harvester_module.run_harvester()
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT n_samples FROM platt_models ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+
+    assert result["pairs_created"] == 2
+    assert row is not None
+    assert row["n_samples"] >= 15

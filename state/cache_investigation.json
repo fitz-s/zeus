@@ -1,0 +1,159 @@
+{
+  "generated_at": "2026-03-30T20:20:00-05:00",
+  "scope": {
+    "goal": "Investigate Open-Meteo model-run metadata, free-tier rate limiting, and cache-TTL implications for Zeus.",
+    "methods": [
+      "Read official Open-Meteo docs pages for Ensemble API, ECMWF API, and pricing.",
+      "Probe one live ensemble response and inspect headers/body fields.",
+      "Review Rainstorm's existing Open-Meteo quota and TTL logic.",
+      "Attempt a rapid-request probe against the forecast API."
+    ]
+  },
+  "official_docs": {
+    "ensemble_api": {
+      "url": "https://open-meteo.com/en/docs/ensemble-api",
+      "fetched_on": "2026-03-30",
+      "observations": {
+        "ecmwf_ifs_025_update_frequency": "Every 6 hours",
+        "gfs_ensemble_025_update_frequency": "Every 6 hours"
+      },
+      "implication": "The older assumption 'ECMWF 12h, GFS 6h' is stale against the docs as read on 2026-03-30."
+    },
+    "pricing": {
+      "url": "https://open-meteo.com/en/pricing",
+      "fetched_on": "2026-03-30",
+      "free_tier_limits": {
+        "per_minute": 600,
+        "per_hour": 5000,
+        "per_day": 10000,
+        "per_month": 300000
+      }
+    },
+    "model_updates_metadata": {
+      "url": "https://open-meteo.com/en/docs/ecmwf-api",
+      "fetched_on": "2026-03-30",
+      "docs_claim": "Model updates documentation references metadata such as availability time and last run initialisation time.",
+      "status": "Concrete public metadata endpoint still unresolved during this investigation."
+    }
+  },
+  "live_probes": {
+    "ensemble_response_probe": {
+      "requested_at_utc": "2026-03-31T01:14:22Z",
+      "endpoint": "https://ensemble-api.open-meteo.com/v1/ensemble",
+      "params": {
+        "latitude": 40.7772,
+        "longitude": -73.8726,
+        "hourly": "temperature_2m",
+        "models": "ecmwf_ifs025",
+        "forecast_days": 2,
+        "temperature_unit": "fahrenheit"
+      },
+      "status_code": 200,
+      "headers_subset": {
+        "content_type": "application/json; charset=utf-8",
+        "content_encoding": "deflate",
+        "date": "Tue, 31 Mar 2026 01:14:22 GMT"
+      },
+      "top_level_keys": [
+        "elevation",
+        "generationtime_ms",
+        "hourly",
+        "hourly_units",
+        "latitude",
+        "longitude",
+        "timezone",
+        "timezone_abbreviation",
+        "utc_offset_seconds"
+      ],
+      "hourly_key_count": 52,
+      "sample_hourly_keys": [
+        "temperature_2m",
+        "temperature_2m_member01",
+        "temperature_2m_member02",
+        "temperature_2m_member03",
+        "temperature_2m_member04",
+        "temperature_2m_member05",
+        "temperature_2m_member06",
+        "temperature_2m_member07",
+        "temperature_2m_member08",
+        "temperature_2m_member09"
+      ],
+      "model_run_timestamp_present_in_response": false,
+      "conclusion": "Neither headers nor body exposed a model_run_time / initialization_time field in this live probe."
+    },
+    "rate_limit_probe": {
+      "endpoint": "https://api.open-meteo.com/v1/forecast",
+      "status": "inconclusive",
+      "known_result_from_prior_probe": {
+        "requests": 120,
+        "unique_statuses": [
+          200
+        ],
+        "retry_after_headers": []
+      },
+      "conclusion": "No 429 was observed under a 120-request rapid probe, so the actual enforcement threshold remains unresolved. Pricing docs are the best current bound."
+    }
+  },
+  "rainstorm_reference": {
+    "quota_understanding": {
+      "daily_limit": 10000,
+      "warn_threshold": 0.8,
+      "hard_block_threshold": 0.95,
+      "reset": "UTC midnight"
+    },
+    "ttl_logic": {
+      "hours_to_resolution_lte_6": "30 minutes",
+      "hours_to_resolution_gt_6": "60 minutes",
+      "note": "Rainstorm used TTL as a pragmatic compromise, not because model runs changed that frequently."
+    }
+  },
+  "answers": {
+    "question_1_model_run_timestamp_format": {
+      "answer": "Open-Meteo's live ensemble response did not expose model_run_time, initialization_time, or equivalent fields in headers or JSON body.",
+      "best_current_inference": "If model-run metadata is available, it is likely exposed through a separate metadata/model-updates API, not the forecast payload itself."
+    },
+    "question_2_429_behavior": {
+      "answer": "Official pricing documents free-tier limits of 600/minute, 5000/hour, and 10000/day. Our rapid probe did not trigger 429 or Retry-After, so actual runtime enforcement details remain unconfirmed.",
+      "operational_rule": "Treat 95% of 10000/day as the hard Zeus circuit-breaker unless Open-Meteo later documents stronger per-minute semantics."
+    },
+    "question_3_theoretical_max_ttl": {
+      "principle": "If cache is keyed by model run, the theoretical max TTL is 'until the next model update becomes available'. If cache is purely time-based, TTL must stay below the model update interval to avoid serving stale-model data after a new run lands.",
+      "lead_buckets": {
+        "day0": {
+          "theoretical_max_ttl": "Observation-dominated; ENS should not be the primary freshness clock.",
+          "recommended_strategy": "Use 5-15 minute observation refreshes and at most a 30 minute residual-ENS cache."
+        },
+        "day1": {
+          "theoretical_max_ttl": "Up to the next model update availability window; docs imply 6 hours.",
+          "recommended_strategy": "Model-run keyed cache preferred. If TTL-only, keep <= 60 minutes."
+        },
+        "day2_day3": {
+          "theoretical_max_ttl": "Up to the next model update availability window; docs imply 6 hours.",
+          "recommended_strategy": "Model-run keyed cache preferred. If TTL-only, 1-3 hours is acceptable."
+        },
+        "day4_plus": {
+          "theoretical_max_ttl": "Up to the next model update availability window; docs imply 6 hours.",
+          "recommended_strategy": "Model-run keyed cache preferred. If TTL-only, 3-6 hours is acceptable."
+        }
+      }
+    }
+  },
+  "zeus_recommendation": {
+    "cache_key_priority": [
+      "model_run_identifier or availability timestamp when Open-Meteo exposes it",
+      "city coordinates + target_date + unit + model",
+      "lead bucket"
+    ],
+    "engineering_policy": [
+      "Do not rely on a fixed 60-minute TTL as the primary freshness guarantee.",
+      "Prefer model-run keyed caching for ENS/GFS paths.",
+      "Keep Day0 driven by observation refresh cadence, not by ENS TTL.",
+      "Continue using Zeus-side quota blocking at 95% of the daily free-tier limit."
+    ]
+  },
+  "unresolved": [
+    "Concrete public endpoint for Open-Meteo model-updates metadata remains unresolved.",
+    "Actual 429 enforcement pattern was not empirically reached during this investigation.",
+    "Open-Meteo response payload still does not expose run metadata directly, so model-run keyed cache cannot be completed until metadata endpoint details are known."
+  ]
+}
