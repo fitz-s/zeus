@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-03-31T17:16:09.918435+00:00",
+  "timestamp": "2026-03-31T17:29:08.081441+00:00",
   "process": {
-    "pid": 87987,
+    "pid": 59087,
     "mode": "paper",
     "version": "zeus_v2"
   },
@@ -11,13 +11,13 @@
   "portfolio": {
     "open_positions": 19,
     "total_exposure_usd": 56.57,
-    "heat_pct": 36.0,
+    "heat_pct": 35.9,
     "initial_bankroll": 150.0,
     "realized_pnl": 5.34,
-    "unrealized_pnl": 1.91,
-    "total_pnl": 7.25,
-    "effective_bankroll": 157.25,
-    "bankroll": 157.25,
+    "unrealized_pnl": 2.18,
+    "total_pnl": 7.52,
+    "effective_bankroll": 157.52,
+    "bankroll": 157.52,
     "positions": [
       {
         "trade_id": "454db425-76d",
@@ -36,8 +36,8 @@
         "size": 1.0988892428292492,
         "edge": 0.029010676010692175,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.007,
-        "unrealized_pnl": -0.33
+        "mark_price": 0.006,
+        "unrealized_pnl": -0.44
       },
       {
         "trade_id": "0178da5e-93f",
@@ -46,8 +46,8 @@
         "size": 1.0172121625296633,
         "edge": 0.02663739582944345,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0195,
-        "unrealized_pnl": 0.08
+        "mark_price": 0.0175,
+        "unrealized_pnl": -0.03
       },
       {
         "trade_id": "772833bd-bf1",
@@ -56,8 +56,8 @@
         "size": 1.2266071390263813,
         "edge": 0.032496911803272265,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0065,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.0075,
+        "unrealized_pnl": 0.19
       },
       {
         "trade_id": "bc05151e-0e0",
@@ -86,8 +86,8 @@
         "size": 13.070684160574134,
         "edge": 0.14639166259843028,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.5800000000000001,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.5900000000000001,
+        "unrealized_pnl": 0.23
       },
       {
         "trade_id": "6f8ce461-902",
@@ -106,8 +106,8 @@
         "size": 1.107565102306971,
         "edge": 0.029092043353929772,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0115,
-        "unrealized_pnl": -0.26
+        "mark_price": 0.011,
+        "unrealized_pnl": -0.3
       },
       {
         "trade_id": "9e97c78f-2a8",
@@ -136,8 +136,8 @@
         "size": 1.047414720952367,
         "edge": 0.027833300518107566,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0035,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.0045,
+        "unrealized_pnl": 0.3
       },
       {
         "trade_id": "0a8d35bc-03a",
@@ -166,8 +166,8 @@
         "size": 5.346210977182252,
         "edge": 0.0983702819801534,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.69,
-        "unrealized_pnl": 0.29
+        "mark_price": 0.6799999999999999,
+        "unrealized_pnl": 0.2
       },
       {
         "trade_id": "9ad96ae9-de1",
@@ -176,8 +176,8 @@
         "size": 3.6903386240304346,
         "edge": 0.10965577625690437,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.64,
-        "unrealized_pnl": 0.18
+        "mark_price": 0.635,
+        "unrealized_pnl": 0.15
       },
       {
         "trade_id": "b21e81ef-125",
@@ -186,8 +186,8 @@
         "size": 1.2541000976540801,
         "edge": 0.07526091843857441,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.6699999999999999,
-        "unrealized_pnl": -0.02
+        "mark_price": 0.665,
+        "unrealized_pnl": -0.03
       },
       {
         "trade_id": "adad4dea-fc9",
@@ -206,16 +206,16 @@
         "size": 4.20577556626922,
         "edge": 0.11957745555518073,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.72,
-        "unrealized_pnl": 0.03
+        "mark_price": 0.71,
+        "unrealized_pnl": -0.03
       }
     ]
   },
   "cycle": {
     "mode": "day0_capture",
-    "started_at": "2026-03-31T17:09:08.564072+00:00",
-    "monitors": 23,
-    "exits": 4,
+    "started_at": "2026-03-31T17:23:12.875818+00:00",
+    "monitors": 19,
+    "exits": 0,
     "candidates": 0,
     "trades": 0,
     "no_trades": 0,
@@ -225,9 +225,9 @@
       "skipped": "paper_mode"
     },
     "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 154.44,
+    "effective_bankroll_usd": 157.2471243847073,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 37.71,
-    "completed_at": "2026-03-31T17:16:09.917609+00:00"
+    "completed_at": "2026-03-31T17:29:08.080651+00:00"
   }
 }

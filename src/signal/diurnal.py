@@ -28,35 +28,50 @@ def get_peak_hour_context(
     """Single source of truth for peak hour.
     Returns: (peak_hour, confidence, fallback_reason)
 
-    Confidence is p_high_set: empirical P(daily max already set | city, season, hour)
-    from hourly observations. Falls back to heuristic slope if data unavailable.
+    Confidence = empirical P(daily max already set | city, month, hour).
+    Resolution hierarchy:
+      1. diurnal_peak_prob (monthly) — 30+ days per cell
+      2. diurnal_curves.p_high_set (seasonal) — ~120 days per cell
+      3. heuristic slope — cities without openmeteo_archive daily coverage
     """
     season = season_from_month(target_date.month)
+    month = target_date.month
 
     try:
         from src.state.db import get_connection
 
         conn = get_connection()
-        rows = conn.execute(
+
+        # Peak hour from seasonal avg_temp curve (unchanged)
+        season_rows = conn.execute(
             "SELECT hour, avg_temp, std_temp, p_high_set FROM diurnal_curves "
-            "WHERE city = ? AND season = ? "
-            "ORDER BY hour",
+            "WHERE city = ? AND season = ? ORDER BY hour",
             (city_name, season),
         ).fetchall()
-        conn.close()
 
-        if not rows or len(rows) < 12:
+        if not season_rows or len(season_rows) < 12:
+            conn.close()
             return None, 0.0, "insufficient_diurnal_data_rows"
 
-        peak_row = max(rows, key=lambda r: r["avg_temp"])
+        peak_row = max(season_rows, key=lambda r: r["avg_temp"])
         peak_hour = int(peak_row["hour"])
 
-        # Use empirical p_high_set if available for this hour
-        current_row = next((r for r in rows if r["hour"] == current_local_hour), None)
-        if current_row and current_row["p_high_set"] is not None:
-            return peak_hour, float(current_row["p_high_set"]), "empirical_p_high_set"
+        # 1. Monthly lookup
+        monthly_row = conn.execute(
+            "SELECT p_high_set FROM diurnal_peak_prob WHERE city = ? AND month = ? AND hour = ?",
+            (city_name, month, current_local_hour),
+        ).fetchone()
+        conn.close()
 
-        # Fallback: heuristic slope for cities/seasons without hourly data
+        if monthly_row and monthly_row["p_high_set"] is not None:
+            return peak_hour, float(monthly_row["p_high_set"]), "monthly_empirical"
+
+        # 2. Seasonal fallback
+        current_row = next((r for r in season_rows if r["hour"] == current_local_hour), None)
+        if current_row and current_row["p_high_set"] is not None:
+            return peak_hour, float(current_row["p_high_set"]), "seasonal_empirical"
+
+        # 3. Heuristic slope (cities without openmeteo_archive coverage)
         peak_temp = peak_row["avg_temp"]
         if current_local_hour < peak_hour - 2:
             return peak_hour, 0.1, "well_before_peak"
@@ -66,7 +81,6 @@ def get_peak_hour_context(
             return peak_hour, 0.5, "at_peak_uncertain"
         if current_row is None:
             return peak_hour, 0.95, "late_night_wrap"
-
         hours_past_peak = current_local_hour - peak_hour
         temp_drop = peak_temp - current_row["avg_temp"]
         drop_zscore = temp_drop / peak_row["std_temp"] if peak_row["std_temp"] > 0 else 1.0

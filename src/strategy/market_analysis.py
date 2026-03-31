@@ -45,7 +45,7 @@ class MarketAnalysis:
         self.p_raw = p_raw
         self.p_cal = p_cal
         self.p_market = p_market
-        self.p_posterior = compute_posterior(p_cal, p_market, alpha)
+        self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
         self.vig = float(p_market.sum())
         self._member_maxes = member_maxes
         self._calibrator = calibrator

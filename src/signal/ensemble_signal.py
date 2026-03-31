@@ -283,7 +283,8 @@ class EnsembleSignal:
         maxes = self.member_maxes
         rng = float(maxes.max() - maxes.min())
 
-        if rng < UNIMODAL_RANGE_EPSILON:
+        # Unit-aware: if spread < 1 instrument noise, members are in consensus
+        if rng < sigma_instrument(self.city.settlement_unit).value:
             return False  # All members agree — definitely unimodal
 
         try:
