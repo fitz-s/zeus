@@ -14,6 +14,7 @@ def test_settings_loads_all_required_keys():
     assert s.mode == "paper"
     assert s.capital_base_usd == 150.0
     assert s["discovery"]["opening_hunt_interval_min"] == 30
+    assert s["discovery"]["ecmwf_open_data_times_utc"] == ["01:30", "13:30"]
     assert s["sizing"]["kelly_multiplier"] == 0.25
 
 
