@@ -84,32 +84,53 @@ def run_profit_validation_replay():
 
         stats["tick_covered"] += 1
         
-        # Try to pull real attributes from trade_decisions DB since recent_exits usually strips them
-        bin_label = exit_record.get("bin_label")
-        row = conn.execute(
-            "SELECT price, size_usd, ci_upper, ci_lower, p_posterior FROM trade_decisions WHERE bin_label = ? AND direction = ? ORDER BY timestamp DESC LIMIT 1",
-            (bin_label, direction)
-        ).fetchone()
+        # 3-tier field recovery: recent_exits (new) → trade_decisions DB → skip
+        real_entry_price = exit_record.get("entry_price")
+        real_size = exit_record.get("size_usd")
+        real_ci_width = exit_record.get("entry_ci_width")
+        real_prob = exit_record.get("p_posterior")
+        real_method = exit_record.get("entry_method")
         
         is_high_confidence = False
+        field_source = "unknown"
         
-        if row:
-            real_entry_price = row["price"]
-            real_size = row["size_usd"]
-            real_ci_width = row["ci_upper"] - row["ci_lower"]
-            real_prob = row["p_posterior"]
-            real_method = "ens_member_counting"
+        # Tier 1: Direct from enriched recent_exits (post-fix)
+        # Only entry_price, size_usd, p_posterior must be non-zero.
+        # entry_ci_width=0.0 is valid (means no CI band), entry_method can default.
+        if all(v not in (None, "") for v in [real_entry_price, real_size, real_prob]) and real_entry_price > 0 and real_size > 0:
             is_high_confidence = True
+            field_source = "recent_exits"
+            real_ci_width = real_ci_width if real_ci_width is not None else 0.0
+            real_method = real_method or "ens_member_counting"
             stats["high_confidence_analyzed"] += 1
         else:
-            # PR-B.1: Delete fabricated fallback. Truly skip without inventing 15.0 / 0.08 properties.
-            stats["fully_skipped"] += 1
-            continue
+            # Tier 2: Fallback to trade_decisions DB
+            bin_label = exit_record.get("bin_label")
+            row = conn.execute(
+                "SELECT price, size_usd, ci_upper, ci_lower, p_posterior FROM trade_decisions WHERE bin_label = ? AND direction = ? ORDER BY timestamp DESC LIMIT 1",
+                (bin_label, direction)
+            ).fetchone()
+            
+            if row:
+                real_entry_price = row["price"]
+                real_size = row["size_usd"]
+                real_ci_width = row["ci_upper"] - row["ci_lower"]
+                real_prob = row["p_posterior"]
+                real_method = "ens_member_counting"
+                is_high_confidence = True
+                field_source = "trade_decisions"
+                stats["high_confidence_analyzed"] += 1
+            else:
+                # Tier 3: No fabrication. Truly skip.
+                stats["fully_skipped"] += 1
+                continue
 
         # Synthesize V2 simulation using real dimensions
         sim_position = Position(
-            trade_id="sim_123", market_id="", city=city, cluster="", target_date=target_date, 
-            bin_label="", direction=direction, entry_price=real_entry_price, size_usd=real_size, 
+            trade_id=exit_record.get("trade_id", "sim"), market_id=exit_record.get("market_id", ""), 
+            city=city, cluster=exit_record.get("cluster", ""), target_date=target_date, 
+            bin_label=exit_record.get("bin_label", ""), direction=direction, 
+            entry_price=real_entry_price, size_usd=real_size, 
             p_posterior=real_prob, entry_ci_width=real_ci_width, entry_method=real_method
         )
         

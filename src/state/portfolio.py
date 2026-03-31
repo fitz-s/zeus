@@ -523,12 +523,39 @@ def remove_position(
 
 
 def _track_exit(state: PortfolioState, pos: Position) -> None:
-    """Track exit for reentry/cooldown checks (Layers 5+6)."""
+    """Track exit for reentry/cooldown checks AND replay auditability.
+
+    CRITICAL: All fields required by profit_validation_replay.py must be
+    persisted here. If a field is on Position but not in this dict, the
+    replay engine will classify the exit as 'fully_skipped'.
+    """
     state.recent_exits.append({
-        "city": pos.city, "bin_label": pos.bin_label,
-        "target_date": pos.target_date, "direction": pos.direction,
-        "token_id": pos.token_id, "no_token_id": pos.no_token_id,
+        # Identity
+        "trade_id": pos.trade_id,
+        "market_id": pos.market_id,
+        "city": pos.city,
+        "cluster": pos.cluster,
+        "bin_label": pos.bin_label,
+        "target_date": pos.target_date,
+        "direction": pos.direction,
+        "token_id": pos.token_id,
+        "no_token_id": pos.no_token_id,
+        # Entry context (replay-critical)
+        "entry_price": pos.entry_price,
+        "size_usd": pos.size_usd,
+        "p_posterior": pos.p_posterior,
+        "edge": pos.edge,
+        "entry_ci_width": pos.entry_ci_width,
+        "entry_method": pos.entry_method,
+        "decision_snapshot_id": pos.decision_snapshot_id,
+        "entered_at": pos.entered_at,
+        # Strategy attribution
+        "strategy": pos.strategy,
+        "edge_source": pos.edge_source,
+        "discovery_mode": pos.discovery_mode,
+        # Exit context
         "exit_reason": pos.exit_reason,
+        "exit_price": pos.exit_price,
         "exited_at": pos.last_exit_at,
         "pnl": pos.pnl,
     })
