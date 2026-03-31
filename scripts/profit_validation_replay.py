@@ -42,13 +42,18 @@ def run_profit_validation_replay():
     
     # Track stats
     stats = {
-        "trades_analyzed": 0,
+        "total_exits": len(portfolio.recent_exits),
+        "tick_covered": 0,
+        "high_confidence_analyzed": 0,
+        "low_confidence_reconstructed": 0,
+        "fully_skipped": 0,
+        
         "v1_misidentified_exits": 0,
         "v2_early_cut_losses": 0,
         "v1_false_stops": 0,
-        "total_pnl_diff_usd": 0.0,
-        "low_confidence_skipped": 0,
-        "coverage_total": len(portfolio.recent_exits)
+        
+        "gross_delta_all_analyzed": 0.0,
+        "gross_delta_high_confidence_only": 0.0,
     }
     
     for exit_record in portfolio.recent_exits:
@@ -74,9 +79,10 @@ def run_profit_validation_replay():
         
         if not ticks:
             # logger.warning(f"No price history found for {city} {target_date} {token_id}")
+            stats["fully_skipped"] += 1
             continue
 
-        stats["trades_analyzed"] += 1
+        stats["tick_covered"] += 1
         
         # Try to pull real attributes from trade_decisions DB since recent_exits usually strips them
         bin_label = exit_record.get("bin_label")
@@ -85,21 +91,20 @@ def run_profit_validation_replay():
             (bin_label, direction)
         ).fetchone()
         
+        is_high_confidence = False
+        
         if row:
             real_entry_price = row["price"]
             real_size = row["size_usd"]
             real_ci_width = row["ci_upper"] - row["ci_lower"]
             real_prob = row["p_posterior"]
             real_method = "ens_member_counting"
-        if not row:
-            # Fallback recovery for stripped JSON exits
-            first_tick = conn.execute("SELECT price FROM token_price_log WHERE token_id=? ORDER BY timestamp ASC LIMIT 1", (token_id,)).fetchone()
-            real_entry_price = first_tick["price"] if first_tick else 0.5
-            real_size = 15.0 # default baseline size for comparison
-            real_ci_width = 0.08
-            real_prob = real_entry_price + 0.1 # assuming we traded with edge
-            real_method = "ens_member_counting"
-            stats["low_confidence_skipped"] += 1
+            is_high_confidence = True
+            stats["high_confidence_analyzed"] += 1
+        else:
+            # PR-B.1: Delete fabricated fallback. Truly skip without inventing 15.0 / 0.08 properties.
+            stats["fully_skipped"] += 1
+            continue
 
         # Synthesize V2 simulation using real dimensions
         sim_position = Position(
@@ -193,7 +198,9 @@ def run_profit_validation_replay():
         v2_pnl_sim = sim_position.size_usd * (v2_final_price / sim_position.entry_price) - sim_position.size_usd
 
         pnl_delta = v2_pnl_sim - v1_pnl_sim
-        stats["total_pnl_diff_usd"] += pnl_delta
+        stats["gross_delta_all_analyzed"] += pnl_delta
+        if is_high_confidence:
+            stats["gross_delta_high_confidence_only"] += pnl_delta
 
         if "BUY_NO_EDGE_EXIT" in exit_reason and v1_pnl_sim < 0 and v2_exit_price is None:
             stats["v1_false_stops"] += 1
@@ -201,18 +208,21 @@ def run_profit_validation_replay():
         if v1_pnl_sim < -5.0 and v2_exit_price is not None and v2_exit_time < v1_exited_at:
             stats["v2_early_cut_losses"] += 1
                 
-    if stats["coverage_total"] > 0:
-        coverage_pct = (stats["trades_analyzed"] / stats["coverage_total"]) * 100
+    if stats["total_exits"] > 0:
+        coverage_pct = (stats["tick_covered"] / stats["total_exits"]) * 100
     else:
         coverage_pct = 0.0
 
     logger.info("--- SHADOW ATTRIBUTION REPLAY RESULTS ---")
-    logger.info(f"Total Trajectories Found: {stats['coverage_total']}")
-    logger.info(f"Coverage Analyzed via Ticks: {stats['trades_analyzed']} ({coverage_pct:.1f}%)")
-    logger.info(f"Low Confidence Divergences Skipped: {stats['low_confidence_skipped']}")
+    logger.info(f"Total Trajectories Exits: {stats['total_exits']}")
+    logger.info(f"Ticks Covered: {stats['tick_covered']} ({coverage_pct:.1f}%)")
+    logger.info(f"High Confidence Analyzed: {stats['high_confidence_analyzed']}")
+    logger.info(f"Low Confidence Reconstructed: {stats['low_confidence_reconstructed']}")
+    logger.info(f"Fully Skipped Missing Attributes: {stats['fully_skipped']}")
     logger.info(f"V1 False Stops Avoided: {stats['v1_false_stops']}")
     logger.info(f"V2 Early-Cuts Triggered: {stats['v2_early_cut_losses']}")
-    logger.info(f"Gross Advantage vs V1 Path: ${stats['total_pnl_diff_usd']:.2f}")
+    logger.info(f"Gross Advantage vs V1 Path (All): ${stats['gross_delta_all_analyzed']:.2f}")
+    logger.info(f"Gross Advantage vs V1 Path (High Conf): ${stats['gross_delta_high_confidence_only']:.2f}")
 
     # Generate Report File
     report_path = PROJECT_ROOT / "shadow_replay_report.md"
@@ -220,15 +230,17 @@ def run_profit_validation_replay():
         with open(report_path, "w") as f:
             f.write(f"# Zeus Measurement Spine: Operational PnL Replay\n\n")
             f.write(f"## Data Estate Coverage\n")
-            f.write(f"- Total Historical Exits In DB: {stats['coverage_total']}\n")
-            f.write(f"- Low Confidence Traits Skipped: {stats['low_confidence_skipped']}\n")
-            f.write(f"- Full Replay Coverage: {stats['trades_analyzed']} trades ({coverage_pct:.2f}%)\n\n")
-            f.write(f"## Metrics of Decision Output\n")
-            f.write(f"- Model-Market Divergences & Flash Crash Mitigations active: True\n")
+            f.write(f"- Total Historical Exits In DB: {stats['total_exits']}\n")
+            f.write(f"- Ticks Covered: {stats['tick_covered']}\n")
+            f.write(f"- High Confidence Analyzed: {stats['high_confidence_analyzed']}\n")
+            f.write(f"- Low Confidence Reconstructed: {stats['low_confidence_reconstructed']}\n")
+            f.write(f"- Fully Skipped Missing Attributes: {stats['fully_skipped']}\n")
+            f.write(f"\n## Metrics of Decision Output\n")
             f.write(f"- V1 False-Stops Nullified (Position recovered): {stats['v1_false_stops']}\n")
             f.write(f"- V2 Pre-emptive Loss Mitigations (Cut ahead of bleed): {stats['v2_early_cut_losses']}\n")
-            f.write(f"### Estimated Gross Advantage Delta: **${stats['total_pnl_diff_usd']:.2f}**\n\n")
-            f.write(f"> Audit Signed with Real Tick Data Verification.\n")
+            f.write(f"### Estimated Gross Advantage Delta (All Analyzed): **${stats['gross_delta_all_analyzed']:.2f}**\n")
+            f.write(f"### Estimated Gross Advantage Delta (High Confidence Only): **${stats['gross_delta_high_confidence_only']:.2f}**\n\n")
+            f.write(f"> PR-B.1 Cleanup Signed. False heuristics removed for absolute measurement.\n")
     except Exception as e:
         logger.error(f"Failed to write shadow artifact: {e}")
 
