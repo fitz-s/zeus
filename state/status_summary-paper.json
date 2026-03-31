@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T17:29:08.081441+00:00",
+  "timestamp": "2026-03-31T17:44:01.433594+00:00",
   "process": {
     "pid": 59087,
     "mode": "paper",
@@ -11,13 +11,13 @@
   "portfolio": {
     "open_positions": 19,
     "total_exposure_usd": 56.57,
-    "heat_pct": 35.9,
+    "heat_pct": 36.0,
     "initial_bankroll": 150.0,
     "realized_pnl": 5.34,
-    "unrealized_pnl": 2.18,
-    "total_pnl": 7.52,
-    "effective_bankroll": 157.52,
-    "bankroll": 157.52,
+    "unrealized_pnl": 1.63,
+    "total_pnl": 6.97,
+    "effective_bankroll": 156.97,
+    "bankroll": 156.97,
     "positions": [
       {
         "trade_id": "454db425-76d",
@@ -36,8 +36,8 @@
         "size": 1.0988892428292492,
         "edge": 0.029010676010692175,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.006,
-        "unrealized_pnl": -0.44
+        "mark_price": 0.0085,
+        "unrealized_pnl": -0.16
       },
       {
         "trade_id": "0178da5e-93f",
@@ -46,8 +46,8 @@
         "size": 1.0172121625296633,
         "edge": 0.02663739582944345,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0175,
-        "unrealized_pnl": -0.03
+        "mark_price": 0.0185,
+        "unrealized_pnl": 0.03
       },
       {
         "trade_id": "772833bd-bf1",
@@ -56,8 +56,8 @@
         "size": 1.2266071390263813,
         "edge": 0.032496911803272265,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0075,
-        "unrealized_pnl": 0.19
+        "mark_price": 0.0065,
+        "unrealized_pnl": 0.0
       },
       {
         "trade_id": "bc05151e-0e0",
@@ -66,8 +66,8 @@
         "size": 1.2903274366518058,
         "edge": 0.034357118546582084,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.003,
-        "unrealized_pnl": 1.29
+        "mark_price": 0.0025,
+        "unrealized_pnl": 0.86
       },
       {
         "trade_id": "f4604ca3-caf",
@@ -76,8 +76,8 @@
         "size": 11.439741595982191,
         "edge": 0.11134681820089332,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.635,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.655,
+        "unrealized_pnl": 0.36
       },
       {
         "trade_id": "f904a495-ec5",
@@ -126,8 +126,8 @@
         "size": 1.047414720952367,
         "edge": 0.027833300518107566,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0035,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.003,
+        "unrealized_pnl": -0.15
       },
       {
         "trade_id": "cea42e98-b7e",
@@ -136,8 +136,8 @@
         "size": 1.047414720952367,
         "edge": 0.027833300518107566,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.0045,
-        "unrealized_pnl": 0.3
+        "mark_price": 0.0035,
+        "unrealized_pnl": 0.0
       },
       {
         "trade_id": "0a8d35bc-03a",
@@ -146,8 +146,8 @@
         "size": 1.0546375940103592,
         "edge": 0.028039298166088748,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.003,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.0025,
+        "unrealized_pnl": -0.18
       },
       {
         "trade_id": "050cb6f5-5cf",
@@ -166,8 +166,8 @@
         "size": 5.346210977182252,
         "edge": 0.0983702819801534,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.6799999999999999,
-        "unrealized_pnl": 0.2
+        "mark_price": 0.685,
+        "unrealized_pnl": 0.24
       },
       {
         "trade_id": "9ad96ae9-de1",
@@ -176,8 +176,8 @@
         "size": 3.6903386240304346,
         "edge": 0.10965577625690437,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.635,
-        "unrealized_pnl": 0.15
+        "mark_price": 0.625,
+        "unrealized_pnl": 0.09
       },
       {
         "trade_id": "b21e81ef-125",
@@ -186,8 +186,8 @@
         "size": 1.2541000976540801,
         "edge": 0.07526091843857441,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.665,
-        "unrealized_pnl": -0.03
+        "mark_price": 0.675,
+        "unrealized_pnl": -0.01
       },
       {
         "trade_id": "adad4dea-fc9",
@@ -212,8 +212,8 @@
     ]
   },
   "cycle": {
-    "mode": "day0_capture",
-    "started_at": "2026-03-31T17:23:12.875818+00:00",
+    "mode": "opening_hunt",
+    "started_at": "2026-03-31T17:38:12.792272+00:00",
     "monitors": 19,
     "exits": 0,
     "candidates": 0,
@@ -225,9 +225,9 @@
       "skipped": "paper_mode"
     },
     "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 157.2471243847073,
+    "effective_bankroll_usd": 157.5207062339657,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 37.71,
-    "completed_at": "2026-03-31T17:29:08.080651+00:00"
+    "completed_at": "2026-03-31T17:44:01.431805+00:00"
   }
 }
