@@ -353,6 +353,7 @@ def _settle_positions(
     city: str, target_date: str, winning_label: str,
     settlement_records: Optional[list[SettlementRecord]] = None,
     strategy_tracker=None,
+    paper_mode: bool = True,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     # Semantic Provenance Guard
@@ -405,6 +406,23 @@ def _settle_positions(
             ))
             if strategy_tracker is not None:
                 strategy_tracker.record_settlement(closed)
+
+        # T2-G: Redemption — claim winning USDC on-chain
+        if exit_price > 0 and not paper_mode and pos.condition_id:
+            try:
+                from src.data.polymarket_client import PolymarketClient
+                clob = PolymarketClient(paper_mode=False)
+                clob.redeem(pos.condition_id)
+                logger.info("Redeemed winning position %s (condition=%s)",
+                            pos.trade_id, pos.condition_id)
+            except Exception as exc:
+                logger.warning("Redeem failed for %s: %s (USDC still claimable later)",
+                               pos.trade_id, exc)
+
+        # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)
+        token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+        if token_id and token_id not in portfolio.ignored_tokens:
+            portfolio.ignored_tokens.append(token_id)
 
         log_event(conn, "SETTLEMENT", pos.trade_id, {
             "city": city, "target_date": target_date,

@@ -205,6 +205,22 @@ def _entry_bankroll_for_cycle(portfolio: PortfolioState, clob) -> tuple[float | 
             "entry_block_reason": "wallet_balance_unavailable",
         }
 
+    # Sanity check: if balance is 0 but we have open positions, the API
+    # likely returned bad data. Block new entries but don't panic-exit.
+    if balance <= 0.0 and exposure > 0:
+        logger.warning(
+            "SUSPICIOUS: wallet balance $%.2f but exposure $%.2f — "
+            "possible API error. Blocking new entries.",
+            balance, exposure,
+        )
+        return None, {
+            "config_cap_usd": config_cap,
+            "effective_bankroll_usd": effective,
+            "wallet_balance_usd": balance,
+            "dynamic_cap_usd": None,
+            "entry_block_reason": "wallet_balance_zero_with_exposure",
+        }
+
     dynamic_cap = min(config_cap, balance + exposure)
     bankroll = min(dynamic_cap, effective) if effective > 0 else dynamic_cap
     return max(0.0, bankroll), {
@@ -260,6 +276,7 @@ def _materialize_position(
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
+        env=settings.mode,
     )
 
 
@@ -333,13 +350,36 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
     """Phase 1: Protect existing value. MUST RUN regardless of risk limits."""
     if False: _ = None.entry_method
     from src.engine.monitor_refresh import refresh_position
-    from src.state.portfolio import close_position
+    from src.execution.exit_lifecycle import check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    paper_mode = getattr(clob, "paper_mode", True)
     portfolio_dirty = False
     tracker_dirty = False
-    
+
+    # Check pending sell orders from previous cycles (live mode)
+    if not paper_mode:
+        exit_stats = check_pending_exits(portfolio, clob)
+        if exit_stats["filled"] or exit_stats["retried"]:
+            portfolio_dirty = True
+        summary["pending_exits_filled"] = exit_stats["filled"]
+        summary["pending_exits_retried"] = exit_stats["retried"]
+
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
             continue
+
+        # Skip positions with active exit states
+        if pos.exit_state in ("sell_placed", "sell_pending"):
+            continue  # Already checked above by check_pending_exits
+        if pos.exit_state == "backoff_exhausted":
+            continue  # Hold to settlement, stop retrying
+        if is_exit_cooldown_active(pos):
+            continue  # Retry cooldown not expired yet
+
+        # Check if retry cooldown just expired — reset for re-evaluation
+        check_pending_retries(pos)
+
         if pos.direction not in {"buy_yes", "buy_no"}:
             artifact.add_monitor_result(MonitorResult(
                 position_id=pos.trade_id, fresh_prob=pos.last_monitor_prob or pos.p_posterior,
@@ -348,12 +388,12 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
             ))
             summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
             continue
+
         try:
             edge_ctx = refresh_position(conn, clob, pos)
             p_market = edge_ctx.p_market[0]
             portfolio_dirty = True
-            
-            from src.execution.exit_triggers import evaluate_exit_triggers
+
             exit_signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
             should_exit = exit_signal is not None
             exit_reason = exit_signal.reason if exit_signal else ""
@@ -363,16 +403,27 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
                 should_exit=should_exit, exit_reason=exit_reason, neg_edge_count=pos.neg_edge_count,
             ))
             summary["monitors"] += 1
+
             if should_exit:
-                closed = close_position(portfolio, pos.trade_id, p_market, exit_reason)
-                if closed is not None:
-                    tracker.record_exit(closed)
+                # Exit lifecycle handles paper/live divergence
+                best_bid = edge_ctx.p_market[0] if len(edge_ctx.p_market) > 0 else None
+                outcome = execute_exit(
+                    portfolio=portfolio,
+                    position=pos,
+                    exit_reason=exit_reason,
+                    current_market_price=p_market,
+                    paper_mode=paper_mode,
+                    clob=clob,
+                    best_bid=best_bid,
+                )
+                if "paper_exit" in outcome or "exit_filled" in outcome:
+                    tracker.record_exit(pos)
                     tracker_dirty = True
-                    summary["exits"] += 1
-                    portfolio_dirty = True
+                summary["exits"] += 1
+                portfolio_dirty = True
         except Exception as e:
             logger.error("Monitor failed for %s: %s", pos.trade_id, e)
-            
+
     return portfolio_dirty, tracker_dirty
 
 
@@ -436,6 +487,8 @@ def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tra
                             bankroll_at_entry=entry_bankroll,
                         )
                         add_position(portfolio, pos)
+                        from src.state.db import log_trade_entry
+                        log_trade_entry(conn, pos)
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)
@@ -498,6 +551,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["chain_sync"] = chain_stats
         if chain_stats.get("synced") or chain_stats.get("voided") or chain_stats.get("quarantined") or chain_stats.get("updated"):
             portfolio_dirty = True
+
+    # Quarantine timeout: 48h → eligible for exit evaluation
+    from src.state.chain_reconciliation import check_quarantine_timeouts
+    q_expired = check_quarantine_timeouts(portfolio)
+    if q_expired:
+        summary["quarantine_expired"] = q_expired
+        portfolio_dirty = True
 
     stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob)
     if stale_cancelled:

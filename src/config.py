@@ -15,6 +15,28 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 STATE_DIR = PROJECT_ROOT / "state"
 
 
+def state_path(filename: str) -> Path:
+    """Mode-qualified path for per-process state files.
+
+    This is the single control point for process state isolation.
+    All per-process mutable files (positions, tracker, status, control, risk_state)
+    MUST use this function.
+
+    zeus.db does NOT use this — it holds shared world data (ENS, calibration,
+    settlements) plus env-tagged decision data.
+
+    positions.json → positions-paper.json / positions-live.json
+    """
+    # settings is a module-level singleton, already initialized by import time
+    mode = settings.mode
+    dot = filename.rfind('.')
+    if dot > 0:
+        stem, ext = filename[:dot], filename[dot:]
+    else:
+        stem, ext = filename, ""
+    return STATE_DIR / f"{stem}-{mode}{ext}"
+
+
 def _load_json(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)

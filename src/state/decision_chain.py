@@ -89,15 +89,17 @@ class SettlementRecord:
     settled_at: str = ""
 
 
-def store_artifact(conn, artifact: CycleArtifact) -> None:
+def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> None:
     """Store cycle artifact to decision_log table."""
+    from src.config import settings
     now = datetime.now(timezone.utc).isoformat()
+    env = env or settings.mode
     conn.execute("""
-        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
     """, (
         artifact.mode, artifact.started_at, artifact.completed_at,
-        json.dumps(asdict(artifact), default=str), now,
+        json.dumps(asdict(artifact), default=str), now, env,
     ))
     conn.commit()
 
@@ -112,7 +114,9 @@ def store_settlement_records(
     if not records:
         return
 
+    from src.config import settings
     now = datetime.now(timezone.utc).isoformat()
+    env = settings.mode
     artifact = {
         "mode": "settlement",
         "started_at": now,
@@ -128,10 +132,10 @@ def store_settlement_records(
     }
     conn.execute(
         """
-        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        ("settlement", now, now, json.dumps(artifact, default=str), now),
+        ("settlement", now, now, json.dumps(artifact, default=str), now, env),
     )
     conn.commit()
 

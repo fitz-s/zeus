@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.config import STATE_DIR, settings
+from src.config import STATE_DIR, settings, state_path
 from src.contracts import (
     HeldSideProbability, 
     NativeSidePrice, 
@@ -24,7 +24,7 @@ from src.contracts.semantic_types import Direction, LifecycleState, ChainState, 
 
 logger = logging.getLogger(__name__)
 
-POSITIONS_PATH = STATE_DIR / "positions.json"
+POSITIONS_PATH = state_path("positions.json")
 
 
 @dataclass
@@ -65,6 +65,9 @@ class Position:
     direction: DirectionAlias  # Forces use of Direction(Enum)
 
     unit: str = "F"  # Blueprint v2: carried, never inferred
+
+    # Provenance: which environment created this position (set once, never changed)
+    env: str = "paper"  # "paper" | "live" | "backtest"
 
     # Probability (always in held-side space — flipped exactly once at creation)
     size_usd: float = 0.0
@@ -110,12 +113,27 @@ class Position:
     no_token_id: str = ""
     condition_id: str = ""
 
+    # Quarantine tracking
+    quarantined_at: str = ""  # ISO timestamp when quarantined
+
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
     last_monitor_prob: float = 0.0
     last_monitor_edge: float = 0.0
     last_monitor_market_price: Optional[float] = None
     last_monitor_at: str = ""
+
+    # Live exit lifecycle (sell order state machine)
+    exit_state: str = ""  # "" | "exit_intent" | "sell_placed" | "sell_pending" |
+                          #   "sell_filled" | "retry_pending" | "backoff_exhausted"
+    exit_retry_count: int = 0
+    next_exit_retry_at: Optional[str] = None  # ISO timestamp for retry cooldown
+    last_exit_order_id: Optional[str] = None  # for stale cancel on retry
+    last_exit_error: str = ""
+
+    # Entry fill verification (live mode)
+    entry_order_id: Optional[str] = None  # CLOB order ID from entry
+    entry_fill_verified: bool = False  # True only after CLOB confirms MATCHED/FILLED
 
     # Anti-churn
     last_exit_at: str = ""
@@ -338,6 +356,8 @@ class PortfolioState:
     weekly_baseline_total: float = 150.0
     # Layer 5+6: recently closed positions for reentry/cooldown checks
     recent_exits: list[dict] = field(default_factory=list)
+    # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
+    ignored_tokens: list[str] = field(default_factory=list)
 
     @property
     def initial_bankroll(self) -> float:
@@ -372,8 +392,16 @@ class PortfolioState:
         return max(0.0, self.weekly_baseline_total - self.current_total_value)
 
 
+class PortfolioModeError(RuntimeError):
+    """Paper data in live state, or vice versa. Daemon refuses to boot."""
+    pass
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
-    """Load portfolio from JSON file. Returns empty state if file missing."""
+    """Load portfolio from JSON file. Returns empty state if file missing.
+
+    Includes contamination guard: refuses to load positions from wrong env.
+    """
     path = path or POSITIONS_PATH
     if not path.exists():
         return PortfolioState()
@@ -387,6 +415,16 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         filtered = {k: v for k, v in p.items() if k in position_fields}
         positions.append(Position(**filtered))
 
+    # Contamination guard: every position's env must match current mode
+    current_mode = settings.mode
+    for pos in positions:
+        if pos.env and pos.env != current_mode:
+            raise PortfolioModeError(
+                f"{current_mode} portfolio contains {pos.env} position "
+                f"{pos.trade_id} — refusing to load. Resolve manually: "
+                f"settle or void all {pos.env} positions before switching modes."
+            )
+
     bankroll = data.get("bankroll", 150.0)
     return PortfolioState(
         positions=positions,
@@ -395,6 +433,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         daily_baseline_total=data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
         recent_exits=data.get("recent_exits", []),
+        ignored_tokens=data.get("ignored_tokens", []),
     )
 
 
@@ -411,6 +450,7 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "daily_baseline_total": state.daily_baseline_total,
         "weekly_baseline_total": state.weekly_baseline_total,
         "recent_exits": state.recent_exits,
+        "ignored_tokens": state.ignored_tokens,
     }
 
     # Atomic write pattern per OpenClaw conventions
@@ -561,6 +601,15 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
     if len(state.recent_exits) > 50:
         state.recent_exits = state.recent_exits[-50:]
 
+    try:
+        from src.state.db import get_connection, log_trade_exit
+        conn = get_connection()
+        log_trade_exit(conn, pos)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("Error logging trade exit to db: %s", e)
+
 
 def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
     return _realized_pnl_value(state, exclude_admin=exclude_admin)
@@ -575,6 +624,38 @@ def _realized_pnl_value(state: PortfolioState, exclude_admin: bool = True) -> fl
             continue
         total += pnl
     return total
+
+
+def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
+    """T2-E: Chain-journal merge for live position queries.
+
+    Paper mode or no chain_view: return local positions only.
+    Live mode with chain_view: merge chain truth (shares/price) with
+    local metadata (city, range, direction, decision context).
+    """
+    if chain_view is None or getattr(chain_view, "is_stale", True):
+        return [p for p in state.positions if p.state not in ("voided", "settled")]
+
+    merged = []
+    for pos in state.positions:
+        if pos.state in ("voided", "settled"):
+            continue
+
+        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+        chain_pos = chain_view.get_position(tid) if tid else None
+
+        if chain_pos:
+            # Chain overrides size/price, local keeps metadata
+            pos.shares = chain_pos.size
+            if chain_pos.avg_price > 0:
+                pos.entry_price = chain_pos.avg_price
+            pos.chain_state = "synced"
+            merged.append(pos)
+        elif pos.state == "pending_tracked":
+            merged.append(pos)  # Just placed, chain hasn't indexed yet
+        # else: gone from chain — reconciler will handle
+
+    return merged
 
 
 def total_exposure_usd(state: PortfolioState) -> float:

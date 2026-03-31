@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from src.execution.executor import execute_order, OrderResult
+from src.execution.executor import create_execution_intent, execute_intent, OrderResult
+from src.contracts import EdgeContext, EntryMethod
+import numpy as np
 from src.state.portfolio import (
     Position, PortfolioState, load_portfolio, save_portfolio,
     add_position, remove_position, portfolio_heat,
@@ -93,7 +95,30 @@ class TestExecutor:
             p_model=0.50, p_market=0.40, p_posterior=0.50,
             entry_price=0.40, p_value=0.02, vwmp=0.42,
         )
-        result = execute_order(edge, size_usd=5.0, mode="opening_hunt", market_id="m1")
+        edge_context = EdgeContext(
+            p_raw=np.array([0.50]),
+            p_cal=np.array([0.50]),
+            p_market=np.array([0.40]),
+            p_posterior=0.50,
+            forward_edge=0.10,
+            alpha=0.65,
+            confidence_band_upper=0.17,
+            confidence_band_lower=0.03,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+        intent = create_execution_intent(
+            edge_context=edge_context,
+            edge=edge,
+            size_usd=5.0,
+            mode="opening_hunt",
+            market_id="m1",
+            token_id="yes-token",
+            no_token_id="no-token",
+        )
+        result = execute_intent(intent, edge.vwmp, edge.bin.label)
 
         assert result.status == "filled"
         assert result.fill_price is not None

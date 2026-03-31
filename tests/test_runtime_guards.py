@@ -256,14 +256,34 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
+    _market_list = [{
         "city": NYC,
         "target_date": "2026-04-01",
         "outcomes": [],
         "hours_since_open": 2.0,
         "hours_to_resolution": 30.0,
-    }])
-    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (pos.entry_price, pos.p_posterior))
+    }]
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: _market_list)
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kwargs: _market_list)
+
+    def _dummy_refresh(conn, clob, pos):
+        from src.contracts import EdgeContext, EntryMethod
+        return EdgeContext(
+            p_raw=np.array([pos.p_posterior]),
+            p_cal=np.array([pos.p_posterior]),
+            p_market=np.array([pos.entry_price]),
+            p_posterior=pos.p_posterior,
+            forward_edge=0.0,
+            alpha=0.5,
+            confidence_band_upper=0.6,
+            confidence_band_lower=0.4,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="",
+            n_edges_found=0,
+            n_edges_after_fdr=0,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _dummy_refresh)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
 
@@ -299,10 +319,26 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
-    monkeypatch.setattr(
-        "src.engine.monitor_refresh.refresh_position",
-        lambda conn, clob, pos: monitored.append(pos.trade_id) or (pos.entry_price, pos.p_posterior),
-    )
+
+    def _tracking_refresh(conn, clob, pos):
+        from src.contracts import EdgeContext, EntryMethod
+        monitored.append(pos.trade_id)
+        return EdgeContext(
+            p_raw=np.array([pos.p_posterior]),
+            p_cal=np.array([pos.p_posterior]),
+            p_market=np.array([pos.entry_price]),
+            p_posterior=pos.p_posterior,
+            forward_edge=0.0,
+            alpha=0.5,
+            confidence_band_upper=0.6,
+            confidence_band_lower=0.4,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="",
+            n_edges_found=0,
+            n_edges_after_fdr=0,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _tracking_refresh)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(
@@ -452,7 +488,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d):
+        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=3000):
@@ -503,7 +539,10 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
             pass
 
         def find_edges(self, n_bootstrap=500):
-            return list(edges)
+            result = list(edges)
+            for e in result:
+                e.forward_edge = e.p_posterior - e.p_market
+            return result
 
     heats: list[float] = []
 
@@ -603,7 +642,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     )
 
     class DummyDay0Signal:
-        def __init__(self, observed_high_so_far, current_temp, hours_remaining, member_maxes_remaining, unit="F"):
+        def __init__(self, observed_high_so_far, current_temp, hours_remaining, member_maxes_remaining, unit="F", diurnal_peak_confidence=0.0):
             calls["observed_high_so_far"] = observed_high_so_far
             calls["hours_remaining"] = hours_remaining
             calls["unit"] = unit
@@ -613,7 +652,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             return np.array([0.60, 0.30, 0.10])
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d):
+        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 44.0)
 
         def spread(self):
@@ -632,7 +671,10 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
-            return [_edge()]
+            result = [_edge()]
+            for e in result:
+                e.forward_edge = e.p_posterior - e.p_market
+            return result
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):

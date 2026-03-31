@@ -252,3 +252,19 @@ class PolymarketClient:
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
         return int(resp["balance"]) / 1e6
+
+    def redeem(self, condition_id: str) -> Optional[dict]:
+        """Redeem winning shares for USDC after settlement.
+
+        Not urgent (USDC stays claimable indefinitely) but without it,
+        winning capital sits on-chain instead of being available for new trades.
+        """
+        if self.paper_mode:
+            return None
+        try:
+            result = self._clob_client.redeem(condition_id)
+            logger.info("Redeemed condition %s → %s", condition_id, result)
+            return result
+        except Exception as exc:
+            logger.warning("Redeem failed for condition %s: %s", condition_id, exc)
+            return None

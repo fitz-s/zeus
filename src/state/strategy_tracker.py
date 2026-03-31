@@ -13,12 +13,12 @@ from typing import Any, Optional
 
 import numpy as np
 
-from src.config import STATE_DIR
+from src.config import STATE_DIR, state_path
 
 logger = logging.getLogger(__name__)
 
 STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
-TRACKER_PATH = STATE_DIR / "strategy_tracker.json"
+TRACKER_PATH = state_path("strategy_tracker.json")
 _TRACKER_SINGLETON: "StrategyTracker | None" = None
 
 

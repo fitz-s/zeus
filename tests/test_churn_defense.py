@@ -4,6 +4,7 @@ Each test targets one specific churn vector from Rainstorm forensic audit.
 """
 
 import pytest
+import numpy as np
 from datetime import datetime, timezone
 
 from src.execution.exit_triggers import (
@@ -15,6 +16,29 @@ from src.state.portfolio import (
     is_reentry_blocked, is_token_on_cooldown, has_same_city_range_open,
     remove_position,
 )
+from src.contracts import EdgeContext, EntryMethod
+
+
+def _make_edge_context(p_posterior: float, entry_price: float) -> EdgeContext:
+    """Build a minimal EdgeContext for tests. forward_edge = p_posterior - entry_price."""
+    forward_edge = p_posterior - entry_price
+    dummy_vec = np.array([1.0])
+    return EdgeContext(
+        p_raw=dummy_vec,
+        p_cal=dummy_vec,
+        p_market=dummy_vec,
+        p_posterior=p_posterior,
+        forward_edge=forward_edge,
+        alpha=0.55,
+        confidence_band_upper=forward_edge + 0.05,
+        confidence_band_lower=forward_edge - 0.05,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="test-snap",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
 
 
 def _pos(**kwargs) -> Position:
@@ -36,7 +60,7 @@ class TestBuyNoNoFalseReversal:
         pos = _pos(p_posterior=0.95, entry_price=0.91)
         # Fallback: both values in NO-space
         # forward_edge = 0.95 - 0.91 = 0.04 → positive → HOLD
-        signal = evaluate_exit_triggers(pos, 0.95, 0.91)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.95, 0.91))
         assert signal is None
 
     def test_mixed_space_bug_scenario(self):
@@ -47,7 +71,7 @@ class TestBuyNoNoFalseReversal:
         would give 0.95 - 0.09 = 0.86 → positive → HOLD (not reversal).
         """
         pos = _pos(p_posterior=0.95, entry_price=0.09)
-        signal = evaluate_exit_triggers(pos, 0.95, 0.09)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.95, 0.09))
         # 0.95 - 0.09 = 0.86 → huge positive → HOLD
         assert signal is None
 
@@ -56,31 +80,31 @@ class TestBuyNoConsecutiveCycles:
     def test_one_negative_cycle_holds(self):
         """1 negative cycle → HOLD. Must see 2 consecutive."""
         pos = _pos()
-        signal = evaluate_exit_triggers(pos, 0.80, 0.91)  # edge = -0.11
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91))  # edge = -0.11
         assert signal is None
         assert pos.neg_edge_count == 1
 
     def test_two_consecutive_exits(self):
         """2 consecutive negative cycles → BUY_NO_EDGE_EXIT."""
         pos = _pos()
-        evaluate_exit_triggers(pos, 0.80, 0.91)  # cycle 1: neg
-        signal = evaluate_exit_triggers(pos, 0.80, 0.91)  # cycle 2: neg
+        evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91))  # cycle 1: neg
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91))  # cycle 2: neg
         assert signal is not None
         assert signal.trigger == "BUY_NO_EDGE_EXIT"
 
     def test_reset_on_positive(self):
         """Negative → positive → negative → only 1 count (reset)."""
         pos = _pos()
-        evaluate_exit_triggers(pos, 0.80, 0.91)  # neg → count=1
-        evaluate_exit_triggers(pos, 0.95, 0.91)  # pos → count=0
-        signal = evaluate_exit_triggers(pos, 0.80, 0.91)  # neg → count=1
+        evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91))  # neg → count=1
+        evaluate_exit_triggers(pos, _make_edge_context(0.95, 0.91))  # pos → count=0
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91))  # neg → count=1
         assert signal is None  # Only 1 cycle, not 2
 
     def test_near_settlement_hold(self):
         """Buy-no near settlement (<4h): hold unless deeply negative."""
         pos = _pos()
         # Mildly negative edge, near settlement
-        signal = evaluate_exit_triggers(pos, 0.80, 0.91, hours_to_settlement=2.0)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.80, 0.91), hours_to_settlement=2.0)
         assert signal is None  # Hold: -0.11 is not deeply negative (-0.20)
 
 
@@ -135,7 +159,7 @@ class TestEVGate:
         # Edge negative (0.40 - 0.55 = -0.15) but best_bid (0.35) < p_posterior (0.60)
         # Selling at 0.35 is worse than holding for EV of 0.60
         signal = evaluate_exit_triggers(
-            pos, 0.40, 0.55, best_bid=0.35,
+            pos, _make_edge_context(0.40, 0.55), best_bid=0.35,
         )
         assert signal is None  # EV gate blocks the exit
 
@@ -159,5 +183,5 @@ class TestMicroPositionHold:
         """Positions < $1 are never sold — hold to settlement."""
         pos = _pos(size_usd=0.50)
         # Even with negative edge, micro-position holds
-        signal = evaluate_exit_triggers(pos, 0.50, 0.91)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.50, 0.91))
         assert signal is None

@@ -8,11 +8,11 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from src.config import STATE_DIR
+from src.config import STATE_DIR, state_path, settings
 
 
-ZEUS_DB_PATH = STATE_DIR / "zeus.db"
-RISK_DB_PATH = STATE_DIR / "risk_state.db"
+ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
+RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -333,6 +333,20 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # Provenance: env column on trade-facing tables (Decision 2)
+    # Existing rows default to 'paper' — all historical data is from paper trading.
+    _env_tables = ["trade_decisions", "chronicle", "decision_log"]
+    for table in _env_tables:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'paper';")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+            
+    try:
+        conn.execute("ALTER TABLE trade_decisions ADD COLUMN edge_source TEXT;")
+    except sqlite3.OperationalError:
+        pass
+
     if own_conn:
         conn.commit()
         conn.close()
@@ -411,3 +425,58 @@ def log_microstructure(conn, token_id: str, city: str, target_date: str, range_l
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log microstructure: %s', e)
+
+def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
+    """Evidence spine: Log explicitly at entry for replay reconstruction."""
+    if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    try:
+        env = getattr(pos, "env", None) or settings.mode
+        conn.execute("""
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, edge_source, env
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            pos.market_id,
+            pos.bin_label,
+            pos.direction,
+            pos.size_usd,
+            pos.entry_price,
+            pos.entered_at,
+            pos.p_posterior,
+            pos.p_posterior,
+            pos.edge,
+            pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+            pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+            0.0,
+            "entered",
+            pos.edge_source,
+            env
+        ))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
+
+def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
+    """Evidence spine: Update or insert exit fill evidence."""
+    if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    try:
+        from datetime import datetime
+        env = getattr(pos, "env", None) or settings.mode
+        conn.execute("""
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, edge_source, env, filled_at, fill_price, settlement_edge_usd
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
+            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
+            "exited", pos.edge_source, env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0)
+        ))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)

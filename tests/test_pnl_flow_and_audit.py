@@ -155,7 +155,10 @@ def test_total_pnl_combines_realized_and_unrealized():
 
 
 def test_buy_no_edge_threshold_uses_entry_ci_width():
-    assert buy_no_edge_threshold(0.04) == pytest.approx(-0.02)
+    # ExpiringAssumption for buy_no_scaling_factor expires after 180 days from 2025-01-01.
+    # With current date (2026-03-31), the fallback scaling=1.5 and fallback floor=-0.03 apply:
+    # raw = -0.04 * 1.5 = -0.06, clamped to max(-0.15, min(-0.03, -0.06)) = -0.06
+    assert buy_no_edge_threshold(0.04) == pytest.approx(-0.06)
 
 
 def test_buy_no_edge_threshold_clamps_to_ceiling():
@@ -163,7 +166,10 @@ def test_buy_no_edge_threshold_clamps_to_ceiling():
 
 
 def test_buy_yes_edge_threshold_uses_entry_ci_width():
-    assert buy_yes_edge_threshold(0.02) == pytest.approx(-0.01)
+    # ExpiringAssumption for buy_yes_scaling_factor expires after 180 days from 2025-01-01.
+    # With current date (2026-03-31), the fallback scaling=1.0 and fallback floor=-0.02 apply:
+    # raw = -0.02 * 1.0 = -0.02, clamped to max(-0.10, min(-0.02, -0.02)) = -0.02
+    assert buy_yes_edge_threshold(0.02) == pytest.approx(-0.02)
 
 
 def test_buy_yes_edge_threshold_clamps_to_ceiling():
@@ -233,7 +239,8 @@ def test_inv_monitor_updates_market_price(monkeypatch):
     pos = _position(last_monitor_market_price=None, last_monitor_at="")
     initial = pos.last_monitor_at
 
-    market_price, _ = monitor_refresh.refresh_position(None, DummyClob(), pos)
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+    market_price = edge_ctx.p_market[0]
 
     assert market_price == pytest.approx(0.62)
     assert pos.last_monitor_market_price == pytest.approx(0.62)
@@ -342,7 +349,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d):
+        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -364,21 +371,21 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
-            return [
-                BinEdge(
-                    bin=self.bins[0],
-                    direction="buy_yes",
-                    edge=0.12,
-                    ci_lower=0.05,
-                    ci_upper=0.15,
-                    p_model=0.60,
-                    p_market=0.35,
-                    p_posterior=0.47,
-                    entry_price=0.35,
-                    p_value=0.02,
-                    vwmp=0.35,
-                )
-            ]
+            edge = BinEdge(
+                bin=self.bins[0],
+                direction="buy_yes",
+                edge=0.12,
+                ci_lower=0.05,
+                ci_upper=0.15,
+                p_model=0.60,
+                p_market=0.35,
+                p_posterior=0.47,
+                entry_price=0.35,
+                p_value=0.02,
+                vwmp=0.35,
+            )
+            edge.forward_edge = edge.p_posterior - edge.p_market
+            return [edge]
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
@@ -562,13 +569,15 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
+    _market_list = [{
         "city": NYC,
         "target_date": "2026-04-01",
         "outcomes": [],
         "hours_since_open": 2.0,
         "hours_to_resolution": 30.0,
-    }])
+    }]
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: _market_list)
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kwargs: _market_list)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
     monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
@@ -601,12 +610,17 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         cycle_runner,
-        "execute_order",
-        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35),
+        "create_execution_intent",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "src.state.strategy_tracker.StrategyTracker.record_trade",
-        lambda self, trade: calls.append(trade),
+        cycle_runner,
+        "execute_intent",
+        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35, shares=14.29),
+    )
+    monkeypatch.setattr(
+        "src.state.strategy_tracker.StrategyTracker.record_entry",
+        lambda self, pos: calls.append(pos),
     )
 
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)

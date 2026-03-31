@@ -172,6 +172,54 @@ def _paper_fill(
     )
 
 
+def place_sell_order(
+    token_id: str,
+    shares: float,
+    current_price: float,
+    best_bid: Optional[float] = None,
+) -> dict:
+    """Place a limit sell order for live exit. Returns order receipt (NOT fill confirmation).
+
+    Dynamic limit pricing adapted from Rainstorm:
+    - Base price: 1 cent below mid for passive fill
+    - If best_bid within 3% slippage: match best bid for faster fill
+    - Beyond 3% slippage: stay passive (better unfilled than fire-sale)
+    - Share quantization: SELL rounds DOWN (0.01 increments)
+    """
+    from src.data.polymarket_client import PolymarketClient
+
+    base_price = current_price - 0.01
+    limit_price = base_price
+
+    if best_bid is not None and best_bid < base_price:
+        slippage = current_price - best_bid
+        if current_price > 0 and slippage / current_price <= 0.03:
+            limit_price = best_bid
+        # else: stay passive, better unfilled than fire-sale
+
+    limit_price = max(0.01, min(0.99, limit_price))
+
+    # SELL rounds DOWN (opposite of BUY rounding UP)
+    shares = math.floor(shares * 100 + 1e-9) / 100.0
+    if shares <= 0:
+        return {"error": "shares_rounded_to_zero"}
+
+    logger.info(
+        "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
+        token_id[:8], token_id[-4:], limit_price, shares,
+        current_price, f"{best_bid:.3f}" if best_bid else "N/A",
+    )
+
+    client = PolymarketClient(paper_mode=False)
+    result = client.place_limit_order(
+        token_id=token_id,
+        price=limit_price,
+        size=shares,
+        side="SELL",
+    )
+    return result or {"error": "clob_returned_none"}
+
+
 def _live_order(
     trade_id: str,
     intent: ExecutionIntent,

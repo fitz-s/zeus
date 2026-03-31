@@ -10,12 +10,12 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import STATE_DIR, settings
+from src.config import STATE_DIR, settings, state_path
 from src.state.portfolio import PortfolioState, load_portfolio, portfolio_heat
 
 logger = logging.getLogger(__name__)
 
-STATUS_PATH = STATE_DIR / "status_summary.json"
+STATUS_PATH = state_path("status_summary.json")
 
 
 def _get_risk_level() -> str:

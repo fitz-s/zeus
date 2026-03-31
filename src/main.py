@@ -7,6 +7,7 @@ The lifecycle is identical for all modes — only scanner parameters differ.
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,14 +20,23 @@ from src.state.db import init_schema, get_connection
 
 logger = logging.getLogger("zeus")
 
+# Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
+_cycle_lock = threading.Lock()
+
 
 def _run_mode(mode: DiscoveryMode):
-    """Wrapper with error handling for scheduler."""
+    """Wrapper with error handling and cycle lock for scheduler."""
+    acquired = _cycle_lock.acquire(blocking=False)
+    if not acquired:
+        logger.warning("%s skipped: another cycle is still running", mode.value)
+        return
     try:
         summary = run_cycle(mode)
         logger.info("%s: %s", mode.value, summary)
     except Exception as e:
         logger.error("%s failed: %s", mode.value, e, exc_info=True)
+    finally:
+        _cycle_lock.release()
 
 
 def _harvester_cycle():
@@ -100,6 +110,29 @@ def _etl_recalibrate():
         results["platt_refit"] = f"ERROR: {e}"
 
     logger.info("ETL recalibration: %s", results)
+
+
+def _automation_analysis_cycle():
+    """Daily diagnostic: check calibration layer tables and bias correction readiness.
+
+    Designed to run every 6 hours so Zeus operator always knows the state
+    of the automation layer without manual DB queries.
+    """
+    try:
+        import subprocess
+        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python")
+        script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
+        r = subprocess.run(
+            [venv_python, str(script)],
+            capture_output=True, text=True, timeout=60,
+        )
+        output = r.stdout.strip()
+        if output:
+            logger.info("[automation_analysis]\n%s", output)
+        if r.returncode != 0 and r.stderr:
+            logger.warning("[automation_analysis] errors: %s", r.stderr[-300:])
+    except Exception as e:
+        logger.error("automation_analysis failed: %s", e, exc_info=True)
 
 
 def run_single_cycle():
@@ -190,19 +223,23 @@ def main():
     discovery = settings["discovery"]
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
+    # max_instances=1: prevent concurrent execution if previous cycle still running
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
         minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
+        max_instances=1, coalesce=True,
     )
     for time_str in discovery["update_reaction_times_utc"]:
         h, m = time_str.split(":")
         scheduler.add_job(
             lambda: _run_mode(DiscoveryMode.UPDATE_REACTION), "cron",
             hour=int(h), minute=int(m), id=f"update_reaction_{time_str}",
+            max_instances=1, coalesce=True,
         )
     scheduler.add_job(
         lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
         minutes=discovery["day0_interval_min"], id="day0_capture",
+        max_instances=1, coalesce=True,
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     for time_str in discovery["ecmwf_open_data_times_utc"]:
@@ -217,6 +254,13 @@ def main():
         _etl_recalibrate, "cron",
         day_of_week="mon", hour=6, minute=0,
         id="etl_recalibrate",
+    )
+
+    # Daily automation analysis: calibration layer diagnostics once a day
+    scheduler.add_job(
+        _automation_analysis_cycle, "cron",
+        hour=9, minute=0, id="automation_analysis",
+        max_instances=1, coalesce=True,
     )
 
     jobs = [j.id for j in scheduler.get_jobs()]

@@ -1,77 +1,85 @@
-# Zeus Progress — Final Architecture Report
+# Zeus — Operating Status
 
-## OpenClaw Integration Complete
+## System Phase: OPERATING
 
-### Venus Workspace Files Updated
-- ✅ PRODUCTION_PATHS.md — Zeus entry points, Rainstorm marked RETIRED
-- ✅ OPERATOR_RUNBOOK.md — Zeus diagnostics, symptom guides, Rainstorm cleanup
-- ✅ WORKSPACE_MAP.md — zeus/ subtree contract
-- ✅ TOOLS.md — Zeus API endpoints and credentials
-- ✅ VENUS_REFLECTION_PROMPT.md — deep reflection on failure arc + design philosophy
-- ✅ IDENTITY.md — Zeus, position-centric
-- ✅ HEARTBEAT.md — zeus/ health check paths
-- ✅ TRADING_RULES.md — Platt+ENS, 4 strategies, 8-layer exit
-- ✅ ZEUS_MIGRATION_GUIDE.md — complete migration for Venus
+Zeus is a live position management system for Polymarket weather markets. Paper trading validated ($244 profit). Architecture validated (21 invariant tests, 5 structural decisions). Now in pre-live verification.
 
-### RiskGuard Independence
-- ✅ com.zeus.riskguard.plist — separate launchd daemon, 60-second tick
+## 5 Structural Decisions (Live Safety Foundation)
 
-### Design Philosophy Integrated
-Read and incorporated `zeus_design_philosophy.md`:
-- Cross-module relationship constraints must live in type signatures and automated tests
-- 192→231 tests: includes cross-module invariant tests
-- contracts module: HeldSideProbability, NativeSidePrice enforce probability space at type level
-- EntryMethod registry ensures exit recomputes with same method as entry
+Every live safety mechanism traces to one of these decisions. When a new risk appears, first ask: "Which decision does this belong to?"
 
-## Is Going Live Truly a Config Switch?
+| # | Decision | Single Point of Control | Status |
+|---|----------|------------------------|--------|
+| 1 | **Exit = Order Lifecycle** | `exit_lifecycle.py` | ✅ State machine: sell_placed → fill/retry → backoff_exhausted |
+| 2 | **Chain Truth with Uncertainty** | `chain_reconciliation.py` | ✅ Immutable snapshot, incomplete API guard, quarantine timeout |
+| 3 | **Entry = Pending State** | `fill_tracker.py` | ✅ pending_tracked → entered/voided |
+| 4 | **Provenance** | `config.state_path()` + `Position.env` | ✅ Physical file isolation + env column + contamination guard |
+| 5 | **Single-threaded per Mode** | `main.py` cycle lock | ✅ threading.Lock + max_instances=1 |
 
-**Yes, with 3 prerequisites:**
-1. `config/settings.json`: change `"mode": "paper"` to `"mode": "live"`
-2. Keychain wallet: `security add-generic-password` for Polygon
-3. Validate: 2 weeks paper trading shows correct behavior with current architecture
-
-**What the switch activates:**
-- CLOB order placement (instead of paper fills)
-- Chain reconciliation every cycle
-- Dynamic bankroll from wallet balance
-- Pending order lifecycle (PENDING_TRACKED → FILLED/VOIDED)
-
-**What does NOT change:**
-- Same CycleRunner, same evaluator, same exit logic
-- Same risk limits, same RiskGuard, same Gate_50
-- Same ENS fetch, same Platt, same FDR
-
-## Codebase Final Stats
-
-| Metric | Value |
-|--------|-------|
-| Source files (src/) | 59 |
-| Test files | 21 |
-| Tests | 231 (all passing) |
-| Commits | 42 (all pushed) |
-| Daemon | Running (PID 43392) |
-
-## Architecture Summary
+## Provenance Model (State Architecture)
 
 ```
-CycleRunner (pure orchestrator, ~50 lines core logic)
-├── chain_reconciliation (3 rules: SYNCED/VOID/QUARANTINE)
-├── monitor (Position.evaluate_exit with entry-method-aware refresh)
+World Data (shared zeus.db, no mode tagging):
+  ensemble_snapshots, calibration_pairs, platt_models,
+  settlements, observations, market_events, ETL tables
+
+Decision Data (shared zeus.db, env column):
+  trade_decisions, chronicle, decision_log
+  → env = "paper" | "live" | "backtest" (future)
+
+Process State (physically isolated via state_path()):
+  positions-{mode}.json, strategy_tracker-{mode}.json,
+  status_summary-{mode}.json, control_plane-{mode}.json,
+  risk_state-{mode}.db
+```
+
+Paper→live switch: change `settings.json` mode. World data inherits seamlessly. Process state starts fresh. Contamination guard blocks mixed-env positions.
+
+## Architecture
+
+```
+CycleRunner (pure orchestrator, calls but does not contain logic)
+├── chain_reconciliation (ChainPositionView snapshot → 3 rules + quarantine timeout)
+├── exit_lifecycle (sell order state machine, retry/backoff, collateral check)
+├── fill_tracker (pending_tracked → entered/voided via CLOB status)
+├── monitor (Position.evaluate_exit via exit_triggers, entry-method-aware)
 │   ├── buy_yes: 2-consecutive EDGE_REVERSAL with EV gate
 │   └── buy_no: cal_std-scaled threshold, near-settlement hold
 ├── evaluator (ENS→Platt→α→edges→FDR→Kelly→risk→anti-churn)
-│   ├── opening_hunt: fresh markets < 24h
-│   ├── update_reaction: 24h+ markets post-ENS update
-│   └── day0_capture: < 6h markets with observation floor
-├── executor (limit orders, dynamic pricing, share quantization)
-├── decision_chain (CycleArtifact + NoTradeCase → decision_log)
-├── status_summary (5-section health snapshot every cycle)
-└── control_plane (pause_entries, resume, tighten_risk)
+│   ├── opening_hunt, update_reaction, day0_capture
+├── executor (limit orders, dynamic pricing, place_sell_order)
+├── decision_chain (CycleArtifact + NoTradeCase → decision_log with env)
+├── status_summary (health snapshot, mode-isolated)
+└── control_plane (pause_entries, resume — mode-isolated)
 ```
 
-## Remaining
+## Codebase Stats
 
-- Day0 settlement_capture (locked + graduated paths) — deferred
-- Backtest engine port — deferred
-- ECMWF Open Data collection operational
-- Per-strategy edge compression alerting wired to RiskGuard
+| Metric | Value |
+|--------|-------|
+| Source files (src/) | 67 |
+| Test files | 29 |
+| Tests passing | 216+ |
+| Invariant tests | 21 (test_live_safety_invariants.py) |
+| New modules this session | exit_lifecycle.py, fill_tracker.py, collateral.py |
+
+## Open Items
+
+### Needed for Live
+
+- [ ] **39 stale test failures** — interface drift (EnsembleSignal, exit_triggers, execute_order). Tests need updating to current API. In progress.
+- [ ] **Keychain wallet setup** — `security add-generic-password` for Polygon private key + funder address
+- [ ] **2-week paper validation** — verify daemon stability with new exit lifecycle, provenance paths, state isolation
+
+### Deferred (not blocking live)
+
+- **Day0 settlement_capture** — locked + graduated paths. Requires more WU data.
+- **Backtest engine** — will use `env="backtest"` in provenance model. Needs TIGGE DJF/JJA/SON data.
+- **ECMWF Open Data** — collection operational, needs stability verification.
+- **Edge compression alerting** — RiskGuard monitors per-strategy trends. Wire to APScheduler.
+- **T2-A: Post-trade chain refresh** — nice-to-have within Decision 3. Chain reconciliation already runs every cycle.
+- **T2-F: Multi-phase reconciliation with Gamma metadata** — nice-to-have within Decision 2. Operational convenience for identifying quarantined positions.
+
+### Observations
+
+The original prompt framed the gap as "7/22 Rainstorm mechanisms, missing 15." Structural analysis showed this was 5 decisions, not 22 patches. T2-A and T2-F, originally flagged as "critical next session", are low-priority optimizations within already-complete structural decisions. The actual blocker for live was **provenance** — which wasn't in the original 22 at all.

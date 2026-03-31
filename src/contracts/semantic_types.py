@@ -29,6 +29,17 @@ class ChainState(str, Enum):
     LOCAL_ONLY = "local_only"
     CHAIN_ONLY = "chain_only"
     QUARANTINED = "quarantined"
+    QUARANTINE_EXPIRED = "quarantine_expired"
+
+class ExitState(str, Enum):
+    """Live sell-order state machine for exit lifecycle."""
+    NONE = ""
+    EXIT_INTENT = "exit_intent"
+    SELL_PLACED = "sell_placed"
+    SELL_PENDING = "sell_pending"
+    SELL_FILLED = "sell_filled"
+    RETRY_PENDING = "retry_pending"
+    BACKOFF_EXHAUSTED = "backoff_exhausted"
 
 class RejectionStage(str, Enum):
     SIGNAL_QUALITY = "SIGNAL_QUALITY"

@@ -9,11 +9,11 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import STATE_DIR
+from src.config import STATE_DIR, state_path
 
 logger = logging.getLogger(__name__)
 
-CONTROL_PATH = STATE_DIR / "control_plane.json"
+CONTROL_PATH = state_path("control_plane.json")
 
 # Supported commands
 COMMANDS = {
