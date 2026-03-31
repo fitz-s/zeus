@@ -301,6 +301,21 @@ def evaluate_candidate(
                 source_timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )
         except Exception as e:
+            try:
+                from src.contracts.exceptions import EmptyOrderbookError
+            except ImportError:
+                EmptyOrderbookError = type("Dummy", (Exception,), {})
+            if isinstance(e, EmptyOrderbookError) or e.__class__.__name__ == "EmptyOrderbookError":
+                logger.warning("Empty orderbook detected: %s", e)
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="MARKET_LIQUIDITY",
+                    rejection_reasons=[str(e)],
+                    selected_method=selected_method,
+                    applied_validations=entry_validations,
+                    decision_snapshot_id=snapshot_id,
+                )]
             p_market[idx] = o["price"]
 
     agreement = "AGREE"

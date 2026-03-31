@@ -49,8 +49,9 @@ def get_current_observation(city: City) -> Optional[dict]:
     if result is not None:
         return result
 
-    logger.warning("No observation source available for %s", city.name)
-    return None
+    from src.contracts.exceptions import ObservationUnavailableError
+    logger.error("No observation source available for %s", city.name)
+    raise ObservationUnavailableError(f"All observation providers failed for {city.name}")
 
 
 def _fetch_wu_observation(city: City) -> Optional[dict]:
@@ -72,12 +73,12 @@ def _fetch_wu_observation(city: City) -> Optional[dict]:
             return None
 
         data = resp.json()
-        observations = data.get("observations", [])
+        observations = data["observations"]
         if not observations:
             return None
 
         # Get current and max temperature
-        temps = [o.get("temp") for o in observations if o.get("temp") is not None]
+        temps = [o["temp"] for o in observations if o.get("temp") is not None]
         if not temps:
             return None
 
@@ -85,7 +86,7 @@ def _fetch_wu_observation(city: City) -> Optional[dict]:
             "high_so_far": float(max(temps)),
             "current_temp": float(temps[-1]),
             "source": "wu_api",
-            "observation_time": observations[-1].get("valid_time_gmt", ""),
+            "observation_time": observations[-1]["valid_time_gmt"],
             "unit": city.settlement_unit,
         }
 
@@ -114,7 +115,7 @@ def _fetch_iem_asos(city: City) -> Optional[dict]:
             return None
 
         ob = data["last_ob"]
-        temp_f = ob.get("tmpf")
+        temp_f = ob["tmpf"]
         if temp_f is None:
             return None
 
@@ -122,13 +123,13 @@ def _fetch_iem_asos(city: City) -> Optional[dict]:
         offset = _get_asos_wu_offset(city)
 
         current_temp = float(temp_f) + offset
-        high_so_far = float(ob.get("max_tmpf", temp_f)) + offset
+        high_so_far = float(ob["max_tmpf"]) + offset if ob.get("max_tmpf") is not None else current_temp
 
         return {
             "high_so_far": high_so_far,
             "current_temp": current_temp,
             "source": "iem_asos",
-            "observation_time": ob.get("local_valid", ""),
+            "observation_time": ob["local_valid"],
             "unit": "F",
         }
 
@@ -164,9 +165,9 @@ def _fetch_openmeteo_hourly(city: City) -> Optional[dict]:
         quota_tracker.record_call("observation")
         data = resp.json()
 
-        hourly = data.get("hourly", {})
-        temps = hourly.get("temperature_2m", [])
-        times = hourly.get("time", [])
+        hourly = data["hourly"]
+        temps = hourly["temperature_2m"]
+        times = hourly["time"]
 
         if not temps:
             return None
@@ -234,12 +235,17 @@ def _get_asos_wu_offset(city: City) -> float:
             )
             return float(offset_val)
 
+        from src.contracts.exceptions import MissingCalibrationError
+        
         logger.warning(
-            "No calibrated ASOS→WU offset for %s/%s (n=%s). Using 0.0.",
+            "No calibrated ASOS→WU offset for %s/%s (n=%s). Missing required calibration.",
             city.name, season, row["n_samples"] if row else 0,
         )
-        return 0.0
+        raise MissingCalibrationError(f"No calibrated ASOS→WU offset found for {city.name}/{season}")
 
     except Exception as e:
+        from src.contracts.exceptions import MissingCalibrationError
+        if isinstance(e, MissingCalibrationError):
+            raise
         logger.warning("Failed to load ASOS→WU offset for %s: %s", city.name, e)
-        return 0.0
+        raise MissingCalibrationError(f"Offset load failed for {city.name}: {e}") from e

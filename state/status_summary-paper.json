@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-03-31T16:23:30.973460+00:00",
+  "timestamp": "2026-03-31T16:46:57.142435+00:00",
   "process": {
-    "pid": 59087,
+    "pid": 87987,
     "mode": "paper",
     "version": "zeus_v2"
   },
@@ -21,8 +21,8 @@
     "positions": []
   },
   "cycle": {
-    "mode": "day0_capture",
-    "started_at": "2026-03-31T16:23:12.866415+00:00",
+    "mode": "opening_hunt",
+    "started_at": "2026-03-31T16:46:39.903832+00:00",
     "monitors": 0,
     "exits": 0,
     "candidates": 0,
@@ -37,6 +37,6 @@
     "effective_bankroll_usd": 154.44,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 0.0,
-    "completed_at": "2026-03-31T16:23:30.972620+00:00"
+    "completed_at": "2026-03-31T16:46:57.141417+00:00"
   }
 }

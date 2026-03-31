@@ -449,11 +449,20 @@ def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tra
         city = market.get("city")
         if city is None:
             continue
+        try:
+            obs = get_current_observation(city) if mode == DiscoveryMode.DAY0_CAPTURE else None
+        except Exception as e:
+            from src.contracts.exceptions import ObservationUnavailableError, MissingCalibrationError
+            if isinstance(e, (ObservationUnavailableError, MissingCalibrationError)):
+                logger.warning("Skipping candidate for %s: %s", city.name, e)
+                continue
+            raise
+
         candidate = MarketCandidate(
             city=city, target_date=market["target_date"], outcomes=market["outcomes"],
             hours_since_open=market["hours_since_open"], hours_to_resolution=market["hours_to_resolution"],
             event_id=market.get("event_id", ""), slug=market.get("slug", ""),
-            observation=get_current_observation(city) if mode == DiscoveryMode.DAY0_CAPTURE else None,
+            observation=obs,
             discovery_mode=mode.value,
         )
         summary["candidates"] += 1
