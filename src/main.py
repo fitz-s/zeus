@@ -57,6 +57,54 @@ def run_single_cycle():
     logger.info("=== SINGLE CYCLE COMPLETE ===")
 
 
+def _startup_data_health_check(conn):
+    """Warn about deferred data actions on every startup.
+
+    This exists because bias correction activation and Platt recompute
+    are easy to forget. The warnings persist until the actions are taken.
+    """
+    try:
+        # 1. Bias correction reminder
+        bias_enabled = settings._data.get("bias_correction_enabled", False)
+        bias_data = conn.execute(
+            "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
+        ).fetchone()[0]
+
+        if not bias_enabled and bias_data > 0:
+            logger.warning(
+                "⚠ DEFERRED ACTION: bias_correction_enabled=false but %d ECMWF bias "
+                "entries ready. To activate: 1) Recompute calibration_pairs with bias "
+                "correction 2) Refit Platt models 3) Set bias_correction_enabled=true "
+                "4) Run test_cross_module_invariants.py",
+                bias_data,
+            )
+
+        # 2. Data freshness check
+        from datetime import datetime, timezone, timedelta
+
+        stale_tables = []
+        for table, col in [
+            ("asos_wu_offsets", None),
+            ("diurnal_curves", None),
+            ("temp_persistence", None),
+        ]:
+            try:
+                n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                if n == 0:
+                    stale_tables.append(f"{table} (empty)")
+            except Exception:
+                stale_tables.append(f"{table} (missing)")
+
+        if stale_tables:
+            logger.warning(
+                "⚠ DATA GAPS: %s — run ETL scripts to populate",
+                ", ".join(stale_tables),
+            )
+
+    except Exception as e:
+        logger.debug("Startup health check failed: %s", e)
+
+
 def main():
     mode = os.environ.get("ZEUS_MODE", settings.mode)
     once = "--once" in sys.argv
@@ -72,6 +120,10 @@ def main():
 
     conn = get_connection()
     init_schema(conn)
+
+    # Startup health check: warn about deferred data actions
+    _startup_data_health_check(conn)
+
     conn.close()
 
     if once:

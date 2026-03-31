@@ -70,6 +70,18 @@
           "direction": "buy_no",
           "city": "Dallas",
           "target_date": "2026-04-02"
+        },
+        {
+          "trade_id": "16a62cac-696",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 6.04,
+          "status": "exited",
+          "entered_at": "2026-03-30T12:03:11.070533+00:00",
+          "edge": 0.1740065003313147,
+          "direction": "buy_no",
+          "city": "Denver",
+          "target_date": "2026-04-01"
         }
       ]
     }
