@@ -74,16 +74,21 @@ def run_profit_validation_replay():
         stats["trades_analyzed"] += 1
         
         # Pull real attributes from historical trade output
-        real_entry_price = exit_record.get("entry_price", 0.5)
-        real_size = exit_record.get("size_usd", 15.0)
-        real_ci_width = exit_record.get("entry_ci_width", 0.08)
-        real_prob = exit_record.get("p_posterior", 0.5)
+        real_entry_price = exit_record.get("entry_price")
+        real_size = exit_record.get("size_usd")
+        real_ci_width = exit_record.get("entry_ci_width")
+        real_prob = exit_record.get("p_posterior")
+        real_method = exit_record.get("entry_method")
+        
+        if None in (real_entry_price, real_size, real_ci_width, real_prob, real_method):
+            stats["low_confidence_skipped"] += 1
+            continue
 
         # Synthesize V2 simulation using real dimensions
         sim_position = Position(
             trade_id="sim_123", market_id="", city=city, cluster="", target_date=target_date, 
             bin_label="", direction=direction, entry_price=real_entry_price, size_usd=real_size, 
-            p_posterior=real_prob, entry_ci_width=real_ci_width, entry_method="ens_member_counting"
+            p_posterior=real_prob, entry_ci_width=real_ci_width, entry_method=real_method
         )
         
         v2_exit_time = None
@@ -109,18 +114,25 @@ def run_profit_validation_replay():
                 p_posterior=native_p_posterior,
                 forward_edge=native_p_posterior - native_p_market,
                 alpha=0.0,
-                confidence_band_upper=0.1,
+                confidence_band_upper=real_ci_width,
                 confidence_band_lower=0.0,
                 entry_provenance=EntryMethod(sim_position.entry_method),
                 decision_snapshot_id="replay",
                 n_edges_found=1,
-                n_edges_after_fdr=1
+                n_edges_after_fdr=1,
+                market_velocity_1h=0.0,
+                divergence_score=0.0
             )
+            
+            # Compute actual hours to settlement
+            tick_dt = datetime.fromisoformat(tick["timestamp"].replace("Z", "+00:00"))
+            target_dt = datetime.fromisoformat(target_date + "T23:59:59+00:00")
+            hours_to_settle = max(0.0, (target_dt - tick_dt).total_seconds() / 3600.0)
             
             signal = evaluate_exit_triggers(
                 position=sim_position,
                 current_edge_context=edge_ctx,
-                hours_to_settlement=24.0, # Dummy for now
+                hours_to_settlement=hours_to_settle,
             )
             
             if signal:

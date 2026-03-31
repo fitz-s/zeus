@@ -173,13 +173,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             risk_throttling_usd REAL DEFAULT 0.0,
             settlement_edge_usd REAL DEFAULT 0.0
         );
-        
-        -- Safe Schema evolution for phase 3 attribution
-        for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
-            try:
-                conn.execute(f"ALTER TABLE trade_decisions ADD COLUMN {col} REAL DEFAULT 0.0;")
-            except sqlite3.OperationalError:
-                pass
 
         -- Shadow signals for pre-trading validation
         CREATE TABLE IF NOT EXISTS shadow_signals (
@@ -327,6 +320,13 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
     """)
+    
+    # Safe Schema evolution for phase 3 attribution
+    for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
+        try:
+            conn.execute(f"ALTER TABLE trade_decisions ADD COLUMN {col} REAL DEFAULT 0.0;")
+        except sqlite3.OperationalError:
+            pass
 
     if own_conn:
         conn.commit()

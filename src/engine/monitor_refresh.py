@@ -177,7 +177,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     if pos.direction not in {"buy_yes", "buy_no"}:
         logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
-        return current_p_market, current_p_posterior
+        raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
 
     # 1. Refresh market price
     market_refreshed = False
@@ -206,7 +206,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     # 2. Recompute P_posterior from fresh ENS
     city = cities_by_name.get(pos.city)
     if city is None:
-        return current_p_market, current_p_posterior
+        raise ValueError(f"Unknown city {pos.city} for trade {pos.trade_id}")
 
     try:
         target_d = date.fromisoformat(pos.target_date)
