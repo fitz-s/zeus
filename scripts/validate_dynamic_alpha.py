@@ -5,6 +5,50 @@ Key improvements over v1:
 2. Computes true p_posterior via proper bin-probability calculation  
 3. Tests non-linear α mappings (logistic, piecewise) alongside linear
 4. Go/No-Go criteria: Brier improvement > 0.01 across 5+ city-season combos
+
+Result: NO-GO for all 4 dynamic methods. Hardcoded wins 18/23 city-season combos.
+
+POST-MORTEM ANALYSIS (2026-03-31)
+==================================
+
+Why dynamic α fails — it's NOT about the mapping function.
+
+Five diagnostic findings:
+
+D1 — MAE does NOT predict trading Brier (r = +0.032)
+    Correlation between city-season MAE and actual Brier score is essentially
+    zero. A city with high temp forecasting error can still produce excellent
+    bin probabilities (and vice versa). MAE measures the wrong thing.
+
+D2 — Validation uses UNIFORM market prior (1/n_bins)
+    Against a uniform prior, α has a trivially correct answer: α=1.0 always
+    wins because the model is always more informative than random. The test
+    actually measures "is model better than random?" (yes, trivially) rather
+    than "does model beat market?" (the real question).
+
+D3 — Tail bins are 5.3× harder than center bins (Brier 0.67 vs 0.11)
+    Model accuracy varies dramatically by bin position. A per-city α
+    applies the same trust to the center bin (where model is great) and
+    the tail bin (where model is terrible). Per-BIN α would be more
+    appropriate but requires a different formulation.
+
+D4 — ENS spread IS predictive of per-decision accuracy (r = +0.214)
+    Tight spread: Brier 0.114. Wide spread: Brier 0.269.
+    This is ALREADY captured by compute_alpha() ±0.05 bonus. But the
+    magnitude may be wrong — the actual Brier gap suggests ±0.10 might
+    be more appropriate.
+
+D5 — Model is OVERCONFIDENT at high p_raw
+    p_raw > 0.40: model claims 56% confidence, actual rate is 4.6%.
+    This is a severe calibration problem that Platt should fix, not α.
+    High-confidence model predictions are systematically wrong.
+
+CORRECT DIRECTIONS:
+- Tune existing α ADJUSTMENT MAGNITUDES (spread bonus, lead days penalty)
+  using walk-forward replay with real market prices
+- Per-BIN α (lower trust for tail bins)
+- Regime-dependent α via persistence anomaly (already in monitor_refresh)
+- Fix D5 via Platt recalibration (already done)
 """
 
 import sqlite3

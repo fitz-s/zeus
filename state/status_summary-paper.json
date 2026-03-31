@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T17:09:08.562502+00:00",
+  "timestamp": "2026-03-31T17:16:09.918435+00:00",
   "process": {
     "pid": 87987,
     "mode": "paper",
@@ -9,15 +9,15 @@
     "level": "GREEN"
   },
   "portfolio": {
-    "open_positions": 23,
-    "total_exposure_usd": 74.01,
-    "heat_pct": 47.9,
+    "open_positions": 19,
+    "total_exposure_usd": 56.57,
+    "heat_pct": 36.0,
     "initial_bankroll": 150.0,
-    "realized_pnl": 4.44,
-    "unrealized_pnl": 0.0,
-    "total_pnl": 4.44,
-    "effective_bankroll": 154.44,
-    "bankroll": 154.44,
+    "realized_pnl": 5.34,
+    "unrealized_pnl": 1.91,
+    "total_pnl": 7.25,
+    "effective_bankroll": 157.25,
+    "bankroll": 157.25,
     "positions": [
       {
         "trade_id": "454db425-76d",
@@ -26,8 +26,8 @@
         "size": 1.2839841384863893,
         "edge": 0.03417109787225111,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.003,
+        "unrealized_pnl": 0.64
       },
       {
         "trade_id": "a9fd32ad-a8b",
@@ -36,8 +36,8 @@
         "size": 1.0988892428292492,
         "edge": 0.029010676010692175,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.007,
+        "unrealized_pnl": -0.33
       },
       {
         "trade_id": "0178da5e-93f",
@@ -46,8 +46,8 @@
         "size": 1.0172121625296633,
         "edge": 0.02663739582944345,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.0195,
+        "unrealized_pnl": 0.08
       },
       {
         "trade_id": "772833bd-bf1",
@@ -56,7 +56,7 @@
         "size": 1.2266071390263813,
         "edge": 0.032496911803272265,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.0065,
         "unrealized_pnl": 0.0
       },
       {
@@ -66,8 +66,8 @@
         "size": 1.2903274366518058,
         "edge": 0.034357118546582084,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.003,
+        "unrealized_pnl": 1.29
       },
       {
         "trade_id": "f4604ca3-caf",
@@ -76,7 +76,7 @@
         "size": 11.439741595982191,
         "edge": 0.11134681820089332,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.635,
         "unrealized_pnl": 0.0
       },
       {
@@ -86,7 +86,7 @@
         "size": 13.070684160574134,
         "edge": 0.14639166259843028,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.5800000000000001,
         "unrealized_pnl": 0.0
       },
       {
@@ -96,7 +96,7 @@
         "size": 1.2522457125530209,
         "edge": 0.03327634273490895,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.0035,
         "unrealized_pnl": 0.0
       },
       {
@@ -106,8 +106,8 @@
         "size": 1.107565102306971,
         "edge": 0.029092043353929772,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.0115,
+        "unrealized_pnl": -0.26
       },
       {
         "trade_id": "9e97c78f-2a8",
@@ -116,7 +116,7 @@
         "size": 1.2085672324248844,
         "edge": 0.03200286031461094,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.007,
         "unrealized_pnl": 0.0
       },
       {
@@ -126,7 +126,7 @@
         "size": 1.047414720952367,
         "edge": 0.027833300518107566,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.0035,
         "unrealized_pnl": 0.0
       },
       {
@@ -136,7 +136,7 @@
         "size": 1.047414720952367,
         "edge": 0.027833300518107566,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.0035,
         "unrealized_pnl": 0.0
       },
       {
@@ -146,7 +146,7 @@
         "size": 1.0546375940103592,
         "edge": 0.028039298166088748,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.003,
         "unrealized_pnl": 0.0
       },
       {
@@ -156,7 +156,7 @@
         "size": 1.0546375940103592,
         "edge": 0.028039298166088748,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.003,
         "unrealized_pnl": 0.0
       },
       {
@@ -166,8 +166,8 @@
         "size": 5.346210977182252,
         "edge": 0.0983702819801534,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.69,
+        "unrealized_pnl": 0.29
       },
       {
         "trade_id": "9ad96ae9-de1",
@@ -176,48 +176,8 @@
         "size": 3.6903386240304346,
         "edge": 0.10965577625690437,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      },
-      {
-        "trade_id": "7f7451c7-beb",
-        "city": "Los Angeles",
-        "direction": "buy_no",
-        "size": 6.712801379686884,
-        "edge": 0.0787635361883261,
-        "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      },
-      {
-        "trade_id": "53cafe02-510",
-        "city": "Los Angeles",
-        "direction": "buy_no",
-        "size": 6.286766051278685,
-        "edge": 0.11902943723754311,
-        "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      },
-      {
-        "trade_id": "bfc758ac-cef",
-        "city": "San Francisco",
-        "direction": "buy_no",
-        "size": 3.137581626572066,
-        "edge": 0.06291664582588219,
-        "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      },
-      {
-        "trade_id": "258ee14e-7fc",
-        "city": "Chicago",
-        "direction": "buy_no",
-        "size": 1.3099478332268404,
-        "edge": 0.3432219559617403,
-        "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.64,
+        "unrealized_pnl": 0.18
       },
       {
         "trade_id": "b21e81ef-125",
@@ -226,8 +186,8 @@
         "size": 1.2541000976540801,
         "edge": 0.07526091843857441,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.6699999999999999,
+        "unrealized_pnl": -0.02
       },
       {
         "trade_id": "adad4dea-fc9",
@@ -236,7 +196,7 @@
         "size": 3.870216348223784,
         "edge": 0.1049708450123501,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
+        "mark_price": 0.7150000000000001,
         "unrealized_pnl": 0.0
       },
       {
@@ -246,19 +206,19 @@
         "size": 4.20577556626922,
         "edge": 0.11957745555518073,
         "bin": "Will the highest temperature i",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
+        "mark_price": 0.72,
+        "unrealized_pnl": 0.03
       }
     ]
   },
   "cycle": {
-    "mode": "update_reaction",
-    "started_at": "2026-03-31T16:46:57.143920+00:00",
-    "monitors": 0,
-    "exits": 0,
-    "candidates": 68,
-    "trades": 23,
-    "no_trades": 165,
+    "mode": "day0_capture",
+    "started_at": "2026-03-31T17:09:08.564072+00:00",
+    "monitors": 23,
+    "exits": 4,
+    "candidates": 0,
+    "trades": 0,
+    "no_trades": 0,
     "risk_level": "GREEN",
     "pending_voids": 0,
     "chain_sync": {
@@ -267,7 +227,7 @@
     "config_cap_usd": 150.0,
     "effective_bankroll_usd": 154.44,
     "dynamic_cap_usd": 150.0,
-    "portfolio_heat_pct": 0.0,
-    "completed_at": "2026-03-31T17:09:08.561659+00:00"
+    "portfolio_heat_pct": 37.71,
+    "completed_at": "2026-03-31T17:16:09.917609+00:00"
   }
 }

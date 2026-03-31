@@ -7,6 +7,43 @@ Three modes:
 
 Key principle: feeds the SAME evaluate_candidate() function via ReplayContext,
 which replaces live API calls with stored ensemble_snapshots + token_price_log.
+
+Known Limitations (v1, 2026-03-31)
+===================================
+
+L1 — MARKET PRICE: UNIFORM PRIOR
+    token_price_log only has 3 days of data (2026-03-28 onward) and lacks
+    city/target_date columns. So replay uses p_market = 1/n_bins (uniform).
+    This means α has NO effect in audit mode — edge = α*(p_cal - 1/n) which
+    is just a scaled version of p_cal. To fix: link token_price_log to markets
+    via condition_id, or store market prices per bin at decision time.
+    IMPACT: PnL results are directionally correct but magnitudes are wrong.
+
+L2 — FLAT POSITION SIZING ($5/trade)
+    Live evaluator uses Kelly criterion with FDR-filtered edges and bootstrap CI.
+    Replay uses a flat $5 per signal that passes edge_min=0.03.
+    To fix: port MarketAnalysis.find_edges() + kelly_size() into replay path.
+    IMPACT: Overstates trade count (no FDR), understates size on strong edges.
+
+L3 — NO BOOTSTRAP CI / FDR FILTER
+    Edge detection uses a simple |edge| >= 0.03 threshold instead of the
+    full bootstrap CI + FDR pipeline. This makes replay LESS selective than
+    live — it will "trade" things live would reject.
+    To fix: reconstruct EnsembleSignal from stored member_maxes and run
+    full MarketAnalysis with bootstrap.
+    IMPACT: Replay trade count is an upper bound; live would trade fewer.
+
+L4 — COVERAGE GAP (18.3%)
+    Only 254/1385 settlements have matching ensemble_snapshots with p_raw_json.
+    Most snapshots are from 2026-03-24 onward. Pre-January 2026 has zero coverage.
+    Coverage improves automatically as live system stores snapshots every cycle.
+    IMPACT: Results are biased toward recent weather patterns. No summer (JJA) data.
+
+L5 — MODEL AGREEMENT ASSUMED "AGREE"
+    GFS crosscheck is skipped in replay (no stored GFS data). All candidates
+    are assumed to have model_agreement="AGREE". In live, ~5-10% are CONFLICT
+    and get rejected.
+    IMPACT: Overstates trade count by not filtering model-disagreement cases.
 """
 
 import json

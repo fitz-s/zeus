@@ -27,6 +27,9 @@ def get_peak_hour_context(
 ) -> tuple[Optional[int], float, str]:
     """Single source of truth for peak hour.
     Returns: (peak_hour, confidence, fallback_reason)
+
+    Confidence is p_high_set: empirical P(daily max already set | city, season, hour)
+    from hourly observations. Falls back to heuristic slope if data unavailable.
     """
     season = season_from_month(target_date.month)
 
@@ -35,7 +38,7 @@ def get_peak_hour_context(
 
         conn = get_connection()
         rows = conn.execute(
-            "SELECT hour, avg_temp, std_temp FROM diurnal_curves "
+            "SELECT hour, avg_temp, std_temp, p_high_set FROM diurnal_curves "
             "WHERE city = ? AND season = ? "
             "ORDER BY hour",
             (city_name, season),
@@ -47,34 +50,29 @@ def get_peak_hour_context(
 
         peak_row = max(rows, key=lambda r: r["avg_temp"])
         peak_hour = int(peak_row["hour"])
-        peak_temp = peak_row["avg_temp"]
 
+        # Use empirical p_high_set if available for this hour
+        current_row = next((r for r in rows if r["hour"] == current_local_hour), None)
+        if current_row and current_row["p_high_set"] is not None:
+            return peak_hour, float(current_row["p_high_set"]), "empirical_p_high_set"
+
+        # Fallback: heuristic slope for cities/seasons without hourly data
+        peak_temp = peak_row["avg_temp"]
         if current_local_hour < peak_hour - 2:
             return peak_hour, 0.1, "well_before_peak"
-
         if current_local_hour < peak_hour:
             return peak_hour, 0.3, "approaching_peak"
-
         if current_local_hour == peak_hour:
             return peak_hour, 0.5, "at_peak_uncertain"
-
-        # Post-peak cooling rate
-        hours_past_peak = current_local_hour - peak_hour
-        current_row = next((r for r in rows if r["hour"] == current_local_hour), None)
-
         if current_row is None:
             return peak_hour, 0.95, "late_night_wrap"
 
+        hours_past_peak = current_local_hour - peak_hour
         temp_drop = peak_temp - current_row["avg_temp"]
-        if peak_row["std_temp"] > 0:
-            drop_zscore = temp_drop / peak_row["std_temp"]
-        else:
-            drop_zscore = 1.0
-
+        drop_zscore = temp_drop / peak_row["std_temp"] if peak_row["std_temp"] > 0 else 1.0
         time_confidence = min(0.95, 0.5 + hours_past_peak * 0.1)
         drop_confidence = min(0.95, 0.5 + drop_zscore * 0.15)
-
-        return peak_hour, max(time_confidence, drop_confidence), "data_derived"
+        return peak_hour, max(time_confidence, drop_confidence), "heuristic_slope"
 
     except Exception as e:
         logger.debug("Failed to fetch peak hour context for %s: %s", city_name, e)
@@ -86,16 +84,17 @@ def post_peak_confidence(
     target_date: date,
     current_local_hour: int,
 ) -> float:
-    """Compute confidence (0.0-1.0) that the daily high has already been reached.
+    """Empirical P(daily high already set | city, season, hour).
 
-    Uses diurnal_curves to check:
-    1. Has the peak hour passed? (main signal)
-    2. How steep is the post-peak cooling curve? (sharper cooling = higher confidence)
+    Primary: p_high_set from diurnal_curves, derived from 6-figure hourly
+    observations. Eliminates hardcoded linear slopes (0.5 + h*0.1, 0.5 + z*0.15).
+
+    Fallback (cities/seasons without hourly coverage): heuristic slope.
 
     Returns:
-        0.0 - 0.3: pre-peak or unknown
+        0.0 - 0.3: pre-peak (observation not yet dominant)
         0.3 - 0.7: near peak, uncertain
-        0.7 - 1.0: clearly post-peak, high confidence observation dominates
+        0.7 - 1.0: post-peak, observation dominates ENS
     """
     season = season_from_month(target_date.month)
 
@@ -104,7 +103,7 @@ def post_peak_confidence(
 
         conn = get_connection()
         rows = conn.execute(
-            "SELECT hour, avg_temp, std_temp FROM diurnal_curves "
+            "SELECT hour, avg_temp, std_temp, p_high_set FROM diurnal_curves "
             "WHERE city = ? AND season = ? "
             "ORDER BY hour",
             (city_name, season),
@@ -112,44 +111,34 @@ def post_peak_confidence(
         conn.close()
 
         if not rows or len(rows) < 12:
-            return 0.0  # Not enough data
+            return 0.0
 
-        # Find peak hour and temperature
+        # Primary: empirical p_high_set
+        current_row = next(
+            (r for r in rows if r["hour"] == current_local_hour), None
+        )
+        if current_row and current_row["p_high_set"] is not None:
+            return float(current_row["p_high_set"])
+
+        # Fallback: heuristic slope (cities without openmeteo_archive daily coverage)
         peak_row = max(rows, key=lambda r: r["avg_temp"])
         peak_hour = peak_row["hour"]
         peak_temp = peak_row["avg_temp"]
 
         if current_local_hour < peak_hour - 2:
-            return 0.1  # Well before peak
-
+            return 0.1
         if current_local_hour < peak_hour:
-            return 0.3  # Approaching peak
-
+            return 0.3
         if current_local_hour == peak_hour:
-            return 0.5  # At peak — could still be rising
-
-        # Post-peak: compute cooling rate
-        hours_past_peak = current_local_hour - peak_hour
-        current_row = next(
-            (r for r in rows if r["hour"] == current_local_hour), None
-        )
-
+            return 0.5
         if current_row is None:
-            # Past 23:00 wrapping, definitely post-peak
             return 0.95
 
+        hours_past_peak = current_local_hour - peak_hour
         temp_drop = peak_temp - current_row["avg_temp"]
-        # Normalize: if temp has dropped > 2 std from peak, very confident
-        if peak_row["std_temp"] > 0:
-            drop_zscore = temp_drop / peak_row["std_temp"]
-        else:
-            drop_zscore = 1.0
-
-        # Confidence ramps from 0.5 to 0.95 based on hours past peak
-        # and how much temperature has dropped
+        drop_zscore = temp_drop / peak_row["std_temp"] if peak_row["std_temp"] > 0 else 1.0
         time_confidence = min(0.95, 0.5 + hours_past_peak * 0.1)
         drop_confidence = min(0.95, 0.5 + drop_zscore * 0.15)
-
         return max(time_confidence, drop_confidence)
 
     except Exception as e:
