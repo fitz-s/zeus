@@ -124,33 +124,70 @@ def test_celsius_settlement_precision():
 
 # ---- Day0: Observation → ENS Transition ----
 
-@pytest.mark.xfail(reason="Day0 continuous transition function not implemented")
 def test_day0_observation_weight_increases_monotonically():
-    """As hours_to_settlement decreases, observation weight must increase.
+    """As hours_remaining decreases, observation_weight() must increase.
 
-    Not a binary switch (obs_dominates at 80%). A continuous function:
-    weight_obs = f(hours_since_sunrise, diurnal_peak_confidence, obs_count)
+    Continuous function, not a binary switch at 80%.
     """
-    # When implemented: for a sequence of decreasing hours_to_settlement,
-    # the observation weight should be monotonically non-decreasing
+    import numpy as np
+    from src.signal.day0_signal import Day0Signal
+
+    members = np.full(51, 20.0)
     hours_sequence = [12.0, 8.0, 6.0, 4.0, 2.0, 1.0, 0.5]
     weights = []
     for h in hours_sequence:
-        # w = day0_observation_weight(hours_to_settlement=h, ...)
-        # weights.append(w)
-        pass
-    # assert all(weights[i] <= weights[i+1] for i in range(len(weights)-1))
-    assert False, "Day0 must have continuous observation weight function"
+        sig = Day0Signal(
+            observed_high_so_far=18.0,
+            current_temp=17.0,
+            hours_remaining=h,
+            member_maxes_remaining=members,
+            unit="C",
+            diurnal_peak_confidence=0.0,
+        )
+        weights.append(sig.observation_weight())
+
+    assert all(
+        weights[i] <= weights[i + 1] for i in range(len(weights) - 1)
+    ), f"observation_weight not monotonically increasing: {weights}"
+    assert weights[-1] > weights[0], "Weight at 0.5h must be > weight at 12h"
 
 
-@pytest.mark.xfail(reason="Day0 post-peak sigma reduction not continuous")
 def test_day0_post_peak_sigma_is_continuous():
-    """After diurnal peak, instrument noise sigma should decrease continuously.
+    """Sigma should decrease continuously with peak_confidence, not binary-step at 0.7.
 
-    Currently: binary — if diurnal_peak_confidence > 0.7, sigma halved.
-    Should be: sigma = base_sigma * (1 - peak_confidence * decay_factor)
+    No abrupt halving at diurnal_peak_confidence=0.7.
     """
-    assert False
+    import numpy as np
+    from src.signal.day0_signal import Day0Signal
+    from src.signal.ensemble_signal import sigma_instrument
+
+    members = np.full(51, 20.0)
+    base = sigma_instrument("C").value
+    confidences = [0.0, 0.3, 0.5, 0.69, 0.70, 0.71, 1.0]
+    sigmas = []
+    for pc in confidences:
+        sig = Day0Signal(
+            observed_high_so_far=18.0,
+            current_temp=17.0,
+            hours_remaining=6.0,
+            member_maxes_remaining=members,
+            unit="C",
+            diurnal_peak_confidence=pc,
+        )
+        sigmas.append(sig._sigma)
+
+    # Must be monotonically decreasing
+    assert all(
+        sigmas[i] >= sigmas[i + 1] for i in range(len(sigmas) - 1)
+    ), f"sigma not monotonically decreasing with peak_confidence: {list(zip(confidences, sigmas))}"
+
+    # At peak=0: sigma = base; at peak=1: sigma = base * 0.5
+    assert abs(sigmas[0] - base) < 1e-9, "sigma at peak=0 must equal base_sigma"
+    assert abs(sigmas[-1] - base * 0.5) < 1e-9, "sigma at peak=1 must equal base_sigma * 0.5"
+
+    # No abrupt jump at 0.7 — the step from 0.69 to 0.71 must be small
+    step = abs(sigmas[confidences.index(0.69)] - sigmas[confidences.index(0.71)])
+    assert step < 0.02, f"Abrupt jump at 0.7 threshold: {step:.4f}"
 
 
 # ---- Exit/Entry Epistemic Parity ----
@@ -188,17 +225,52 @@ def test_exit_uses_ci_not_raw_edge():
 
 # ---- Data Confidence ----
 
-@pytest.mark.xfail(reason="Persistence anomaly sample size guard too low")
 def test_persistence_discount_requires_adequate_samples():
-    """A 30% alpha discount should not fire on 10 samples.
+    """Persistence discount must not fire on < 30 samples, and must scale with n.
 
-    Statistical rule of thumb: for a frequency estimate to be reliable,
-    n should be large enough that expected count in category > 5.
-    For frequency=0.05, n=100 gives expected count=5. n=10 gives 0.5.
+    Statistical rule: frequency estimate needs n >= 30 before applying discount.
+    Discount scales linearly from 10% at n=30 to 30% at n>=100.
     """
-    # When fixed: minimum sample count for persistence discount
-    # should be at least 30, not 10
-    assert False
+    from src.engine.monitor_refresh import _check_persistence_anomaly
+    from unittest.mock import MagicMock
+    from datetime import date
+
+    def make_conn(n_samples):
+        conn = MagicMock()
+        # yesterday settlement
+        conn.execute.return_value.fetchone.side_effect = [
+            {"settlement_value": 15.0},  # yesterday
+            None,  # 2 days ago
+            None,  # 3 days ago
+            {"frequency": 0.02, "n_samples": n_samples},  # persistence lookup
+        ]
+        return conn
+
+    target = date(2026, 4, 1)
+    predicted = 25.0  # delta = +10 from 15.0 → ">10" bucket, rare
+
+    # n=10: no discount (too few samples)
+    conn_10 = make_conn(10)
+    result_10 = _check_persistence_anomaly(conn_10, "London", target, predicted)
+    assert result_10 == 1.0, f"n=10 should give no discount, got {result_10}"
+
+    # n=29: still no discount
+    conn_29 = make_conn(29)
+    result_29 = _check_persistence_anomaly(conn_29, "London", target, predicted)
+    assert result_29 == 1.0, f"n=29 should give no discount, got {result_29}"
+
+    # n=30: minimum discount fires (10%)
+    conn_30 = make_conn(30)
+    result_30 = _check_persistence_anomaly(conn_30, "London", target, predicted)
+    assert abs(result_30 - 0.90) < 0.01, f"n=30 should give 10% discount, got {1 - result_30:.2%}"
+
+    # n=100: full 30% discount
+    conn_100 = make_conn(100)
+    result_100 = _check_persistence_anomaly(conn_100, "London", target, predicted)
+    assert abs(result_100 - 0.70) < 0.01, f"n=100 should give 30% discount, got {1 - result_100:.2%}"
+
+    # Discount must increase with n (more data → more confident → larger penalty)
+    assert result_30 > result_100, "Larger n should yield larger discount"
 
 
 # ---- Integer Rounding Must Be Unit-Aware ----

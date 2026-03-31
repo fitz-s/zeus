@@ -47,13 +47,11 @@ class Day0Signal:
         self._precision = precision
         self._peak_confidence = diurnal_peak_confidence
 
-        # Post-peak: observation floor is more reliable, reduce MC noise
-        # This tightens the distribution when we're confident the high is set
+        # Post-peak: observation floor is more reliable, reduce MC noise.
+        # Continuous reduction: sigma scales from base (peak=0) down to 0.5×base (peak=1).
+        # Previous binary threshold (>0.7 → halve) caused abrupt signal jump.
         base_sigma = sigma_instrument(unit).value
-        if diurnal_peak_confidence > 0.7:
-            self._sigma = base_sigma * 0.5  # Halve noise post-peak
-        else:
-            self._sigma = base_sigma
+        self._sigma = base_sigma * (1.0 - diurnal_peak_confidence * 0.5)
 
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
@@ -117,10 +115,26 @@ class Day0Signal:
         final = np.maximum(self.ens_remaining, self.obs_high)
         return float(np.mean(final))
 
+    def observation_weight(self) -> float:
+        """Continuous 0→1 weight for how much observation dominates over ENS.
+
+        Increases monotonically as hours_remaining decreases and
+        diurnal_peak_confidence increases.
+
+        - At 0h remaining: weight = 1.0 (observation is final fact)
+        - At 12h+ remaining, low confidence: weight ≈ 0 (ENS dominant)
+        - Diurnal peak already passed: peak_confidence pushes weight up by ≤ 0.5
+
+        Does NOT attempt to model evening-colder-than-morning reversal edge cases
+        (those require diurnal_peak_confidence < 0 or explicit flag — caller's job).
+        """
+        time_weight = max(0.0, 1.0 - self.hours_remaining / 12.0)
+        peak_weight = self._peak_confidence * 0.5
+        return min(1.0, time_weight + peak_weight)
+
     def obs_dominates(self) -> bool:
         """True if observation already exceeds most ENS remaining forecasts.
 
-        When this is True, the settlement is largely determined — the
-        remaining hours are unlikely to produce a higher temperature.
+        Legacy boolean interface. Prefer observation_weight() for continuous blending.
         """
         return float(np.mean(self.ens_remaining < self.obs_high)) > 0.8
