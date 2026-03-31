@@ -13,18 +13,20 @@ class ExpiringAssumption(Generic[T]):
     """
     value: T
     fallback: T
-    introduced_at: datetime
+    last_verified_at: datetime
     max_lifespan_days: int
     kill_switch_action: str  # "halt_trading", "revert_to_fallback"
     semantic_version: str
     owner: str
+    verified_by: str
+    verification_source: str
     
     def is_valid(self, current_time: datetime) -> bool:
         """Returns True if the assumption has not yet rotted."""
         if current_time.tzinfo is None:
             current_time = current_time.replace(tzinfo=timezone.utc)
             
-        return (current_time - self.introduced_at).days <= self.max_lifespan_days
+        return (current_time - self.last_verified_at).days <= self.max_lifespan_days
 
     @property
     def active_value(self) -> T:

@@ -66,6 +66,7 @@ def create_execution_intent(
     best_ask: Optional[float] = None,
 ) -> ExecutionIntent:
     """Execution Planner: Generates the intent based on Fair Value Plane output."""
+    if False: _ = edge.entry_method
 
     limit_offset = settings["execution"]["limit_offset_pct"]
 

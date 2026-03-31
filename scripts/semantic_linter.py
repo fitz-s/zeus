@@ -11,11 +11,14 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-# A mapping of { (Target Attributes...) : (Required Context Attributes...) }
 SEMANTIC_RULES = {
     ("p_posterior", "p_held_side", "last_monitor_prob"): {
         "required_context": ("entry_method", "selected_method"),
         "message": "Semantic Loss Detected: You accessed a context-dependent probability but did not evaluate its entry provenance in the same scope."
+    },
+    ("p_raw",): {
+        "required_context": ("bias_correction", "calibration", "platt", "sigma_instrument"),
+        "message": "Semantic Loss Detected: Raw probability 'p_raw' accessed without evaluating bias_correction or calibration. This violates the structural invariant."
     }
 }
 

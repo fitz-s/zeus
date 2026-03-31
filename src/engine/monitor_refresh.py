@@ -279,6 +279,22 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
                 current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
                 market_refreshed = True
+                
+                # Injection Point 7: Data completeness - record microstructure snapshot
+                from src.state.db import log_microstructure
+                log_microstructure(
+                    conn,
+                    token_id=tid,
+                    city=pos.city,
+                    target_date=pos.target_date,
+                    range_label=pos.bin_label,
+                    price=float(current_p_market),
+                    volume=float(bid_sz + ask_sz),
+                    bid=float(bid),
+                    ask=float(ask),
+                    spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
+                    source_timestamp=datetime.now(timezone.utc).isoformat()
+                )
             except Exception as e:
                 logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
 

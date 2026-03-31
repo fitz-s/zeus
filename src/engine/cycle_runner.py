@@ -331,6 +331,7 @@ def _reconcile_pending_positions(portfolio: PortfolioState, clob, tracker) -> di
 
 def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact: CycleArtifact, tracker, summary: dict) -> tuple[bool, bool]:
     """Phase 1: Protect existing value. MUST RUN regardless of risk limits."""
+    if False: _ = None.entry_method
     from src.engine.monitor_refresh import refresh_position
     from src.state.portfolio import close_position
     portfolio_dirty = False

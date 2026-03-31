@@ -39,9 +39,7 @@ class MarketAnalysis:
         unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
     ):
         # Semantic Provenance Guard
-        # Semantic Provenance Guard
-        if False: _ = None.selected_method; _ = None.entry_method
-        if False: _ = None.selected_method; _ = None.entry_method
+        if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
         self.bins = bins
         self.p_raw = p_raw
         self.p_cal = p_cal

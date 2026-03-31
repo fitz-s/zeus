@@ -118,6 +118,7 @@ def _evaluate_buy_yes_exit(
     best_bid: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
+    if False: _ = position.entry_method
     forward_edge = current_edge_context.forward_edge
     
     edge_threshold = buy_yes_edge_threshold(position.entry_ci_width)

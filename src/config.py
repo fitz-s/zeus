@@ -53,7 +53,6 @@ class City:
     meteostat_station: Optional[str] = None
     airport_name: str = ""
     settlement_source: str = ""
-    historical_peak_hour: float = 15.0
     diurnal_amplitude: float = 12.0
     noaa_office: Optional[str] = None
     noaa_gridX: Optional[int] = None
@@ -130,7 +129,6 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
             meteostat_station=c.get("meteostat_station"),
             airport_name=c.get("airport_name", ""),
             settlement_source=c.get("settlement_source", ""),
-            historical_peak_hour=float(c.get("historical_peak_hour", 15.0)),
             diurnal_amplitude=float(amp),
             noaa_office=noaa_office,
             noaa_gridX=noaa_gx,

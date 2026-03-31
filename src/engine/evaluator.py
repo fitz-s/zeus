@@ -118,9 +118,10 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
 def _get_post_peak_confidence(city: City, target_date: date) -> float:
     """Get diurnal post-peak confidence for Day0 signal refinement."""
     try:
-        from src.signal.diurnal import post_peak_confidence, get_current_local_hour
+        from src.signal.peak_hour_provider import get_peak_hour_context, get_current_local_hour
         current_hour = get_current_local_hour(city.timezone)
-        return post_peak_confidence(city.name, target_date, current_hour)
+        peak_hr, conf, reason = get_peak_hour_context(city.name, target_date, current_hour)
+        return conf
     except Exception:
         return 0.0  # No data → no extra confidence
 
@@ -282,7 +283,24 @@ def evaluate_candidate(
         try:
             bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(o["token_id"])
             p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
-        except Exception:
+            
+            # Injection Point 7: Data completeness - record microstructure snapshot
+            import datetime
+            from src.state.db import log_microstructure
+            log_microstructure(
+                conn,
+                token_id=o["token_id"],
+                city=city.name,
+                target_date=target_d.isoformat(),
+                range_label=b.label,
+                price=float(p_market[idx]),
+                volume=float(bid_sz + ask_sz),
+                bid=float(bid),
+                ask=float(ask),
+                spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
+                source_timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+            )
+        except Exception as e:
             p_market[idx] = o["price"]
 
     agreement = "AGREE"

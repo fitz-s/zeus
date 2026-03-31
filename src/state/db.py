@@ -84,6 +84,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             target_date TEXT,
             range_label TEXT,
             price REAL NOT NULL,
+            volume REAL,
+            bid REAL,
+            ask REAL,
+            spread REAL,
+            source_timestamp TEXT,
             timestamp TEXT NOT NULL
         );
 
@@ -392,3 +397,17 @@ def record_shadow_attribution_trade(
         entry_alpha_usd, slippage_usd, exit_timing_usd, throttling_usd, settlement_edge_usd
     ))
 
+
+
+def log_microstructure(conn, token_id: str, city: str, target_date: str, range_label: str,
+                       price: float, volume: float, bid: float, ask: float, spread: float, source_timestamp: str):
+    """Log microstructure snapshot (Spec injection point 7)."""
+    try:
+        conn.execute("""
+            INSERT INTO token_price_log
+            (token_id, city, target_date, range_label, price, volume, bid, ask, spread, source_timestamp, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'utc'))
+        """, (token_id, city, target_date, range_label, price, volume, bid, ask, spread, source_timestamp))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('Failed to log microstructure: %s', e)
