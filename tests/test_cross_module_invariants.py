@@ -126,11 +126,54 @@ def test_platt_models_consistent_with_bias_flag():
     return True
 
 
+def test_structural_linter_gate():
+    """Run the structural linter to ensure all cross-module semantic invariants hold.
+    Also tests an intentional violation to explicitly prove the gate works.
+    """
+    import tempfile
+    import os
+    import ast
+    from pathlib import Path
+    from scripts.semantic_linter import SemanticAnalyzer, run_linter
+    
+    # 1. Test intentional violation
+    with tempfile.NamedTemporaryFile(suffix='.py', delete=False, mode='w') as test_file:
+        test_file.write("""
+def bad_function(obj):
+    return obj.p_raw[0]
+""")
+        test_file_path = test_file.name
+
+    try:
+        py_file = Path(test_file_path)
+        tree = ast.parse(py_file.read_text())
+        analyzer = SemanticAnalyzer(py_file)
+        analyzer.visit(tree)
+        if not analyzer.violations:
+            print("FAIL: Linter gate did NOT catch the intentional p_raw violation!")
+            return False
+        if not any('p_raw' in e and ('bias' in e.lower() or 'cal' in e.lower() or 'platt' in e.lower() or 'sigma' in e.lower()) for e in analyzer.violations):
+            print("FAIL: Linter gate caught errors, but not the p_raw rule as expected!")
+            return False
+        print("PASS: Linter gate correctly caught the intentional p_raw violation.")
+    finally:
+        os.remove(test_file_path)
+
+    # 2. Test entire repo passes
+    repo_errors = run_linter(Path('src'))
+    if repo_errors != 0:
+        print("FAIL: Linter gate flagged existing code in src/:")
+        return False
+
+    print("PASS: Entire src/ repository passes the structural linter.")
+    return True
+
 if __name__ == "__main__":
     tests = [
-        test_calibration_pairs_use_same_bias_correction_as_live,
+    test_calibration_pairs_use_same_bias_correction_as_live,
         test_model_bias_table_not_empty_if_bias_enabled,
         test_platt_models_consistent_with_bias_flag,
+        test_structural_linter_gate,
     ]
 
     results = {}
