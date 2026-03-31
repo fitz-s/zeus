@@ -41,6 +41,7 @@ BIMODAL_GAP_RATIO = 0.3
 
 # Boundary sensitivity window: members within ±0.5° of boundary
 BOUNDARY_WINDOW = 0.5
+UNIMODAL_RANGE_EPSILON = 0.5
 
 
 class EnsembleSignal:
@@ -190,7 +191,7 @@ class EnsembleSignal:
         maxes = self.member_maxes
         rng = float(maxes.max() - maxes.min())
 
-        if rng < 0.5:
+        if rng < UNIMODAL_RANGE_EPSILON:
             return False  # All members agree — definitely unimodal
 
         try:

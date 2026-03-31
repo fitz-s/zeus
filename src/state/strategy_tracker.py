@@ -4,12 +4,12 @@ Four strategies, independently tracked. RiskGuard monitors per-strategy,
 not per-portfolio. Strategy C's degradation should NOT halt Strategy A.
 """
 
-import json
 import logging
-from collections import defaultdict
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -18,6 +18,8 @@ from src.config import STATE_DIR
 logger = logging.getLogger(__name__)
 
 STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
+TRACKER_PATH = STATE_DIR / "strategy_tracker.json"
+_TRACKER_SINGLETON: "StrategyTracker | None" = None
 
 
 class StrategyMetrics:
@@ -27,7 +29,13 @@ class StrategyMetrics:
         self.trades: list[dict] = []
 
     def record(self, trade: dict) -> None:
-        self.trades.append(trade)
+        trade_id = trade.get("trade_id")
+        if trade_id:
+            for existing in self.trades:
+                if existing.get("trade_id") == trade_id:
+                    existing.update(trade)
+                    return
+        self.trades.append(dict(trade))
 
     def win_rate(self) -> float:
         settled = [t for t in self.trades if t.get("pnl") is not None]
@@ -61,6 +69,15 @@ class StrategyMetrics:
     def count(self) -> int:
         return len(self.trades)
 
+    def to_dict(self) -> dict:
+        return {"trades": list(self.trades)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyMetrics":
+        inst = cls()
+        inst.trades = list(data.get("trades", []))
+        return inst
+
 
 class StrategyTracker:
     """Track all four strategies independently."""
@@ -75,6 +92,28 @@ class StrategyTracker:
         if strategy not in self.strategies:
             strategy = "opening_inertia"  # Default bucket
         self.strategies[strategy].record(trade)
+
+    def record_entry(self, position: Any) -> None:
+        self.record_trade(_position_like_payload(position, status="entered"))
+
+    def record_exit(self, position: Any) -> None:
+        self.record_trade(_position_like_payload(position, status="exited"))
+
+    def record_settlement(self, position: Any) -> None:
+        self.record_trade(_position_like_payload(position, status="settled"))
+
+    def record_chronicle_event(self, event_type: str, details: dict) -> None:
+        """Record a chronicle event without re-deriving attribution downstream."""
+        if event_type not in {"SETTLEMENT", "EXIT", "ENTRY"}:
+            return
+        self.record_trade({
+            "strategy": details.get("strategy", ""),
+            "edge_source": details.get("edge_source", ""),
+            "pnl": details.get("pnl"),
+            "status": details.get("status", "filled"),
+            "entered_at": details.get("entered_at", ""),
+            "edge": details.get("edge", 0.0),
+        })
 
     def edge_compression_check(self, window_days: int = 30) -> list[str]:
         """Per-strategy edge trend. Returns list of alerts."""
@@ -97,3 +136,72 @@ class StrategyTracker:
             }
             for name, m in self.strategies.items()
         }
+
+    def to_dict(self) -> dict:
+        return {
+            "strategies": {
+                name: metrics.to_dict()
+                for name, metrics in self.strategies.items()
+            }
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyTracker":
+        tracker = cls()
+        strategies = data.get("strategies", {})
+        for name in STRATEGIES:
+            tracker.strategies[name] = StrategyMetrics.from_dict(strategies.get(name, {}))
+        return tracker
+
+
+def _position_like_payload(position: Any, *, status: str) -> dict:
+    getter = position.get if isinstance(position, dict) else lambda key, default=None: getattr(position, key, default)
+    return {
+        "trade_id": getter("trade_id", "") or getter("token_id", ""),
+        "strategy": getter("strategy", ""),
+        "edge_source": getter("edge_source", ""),
+        "pnl": getter("pnl", None),
+        "status": status,
+        "entered_at": getter("entered_at", "") or getter("opened_at", ""),
+        "edge": getter("edge", 0.0),
+        "direction": getter("direction", ""),
+        "city": getter("city", ""),
+        "target_date": getter("target_date", ""),
+    }
+
+
+def load_tracker(path: Optional[Path] = None) -> StrategyTracker:
+    path = path or TRACKER_PATH
+    if not path.exists():
+        return StrategyTracker()
+    try:
+        import json
+
+        with open(path) as f:
+            data = json.load(f)
+        return StrategyTracker.from_dict(data)
+    except Exception as exc:
+        logger.warning("Strategy tracker load failed: %s", exc)
+        return StrategyTracker()
+
+
+def save_tracker(tracker: StrategyTracker, path: Optional[Path] = None) -> None:
+    path = path or TRACKER_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(tracker.to_dict(), f, indent=2)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+
+
+def get_tracker() -> StrategyTracker:
+    global _TRACKER_SINGLETON
+    if _TRACKER_SINGLETON is None:
+        _TRACKER_SINGLETON = load_tracker()
+    return _TRACKER_SINGLETON

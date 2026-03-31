@@ -48,6 +48,23 @@ def find_weather_markets(
     return results
 
 
+def get_current_yes_price(market_id: str) -> Optional[float]:
+    """Fetch the current YES-side price for an active market in paper mode.
+
+    Paper mode uses Gamma event data, not live CLOB VWMP, as the observable
+    market price source during monitor cycles.
+    """
+    events = _fetch_events_by_tags()
+    if not events:
+        events = _fetch_events_by_keyword("temperature")
+
+    for event in events:
+        for outcome in _extract_outcomes(event):
+            if outcome.get("market_id") == market_id:
+                return float(outcome["price"])
+    return None
+
+
 def _fetch_events_by_tags() -> list[dict]:
     """Fetch events using tag slugs."""
     for tag_slug in TAG_SLUGS:

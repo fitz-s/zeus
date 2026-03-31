@@ -7,12 +7,29 @@ lead time, and market freshness.
 
 import numpy as np
 
+from src.config import settings
 from src.types.temperature import TemperatureDelta
 
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
 # This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
-SPREAD_TIGHT = TemperatureDelta(2.0, "F")
-SPREAD_WIDE = TemperatureDelta(5.0, "F")
+# HARDCODED(setting_key="edge.spread_tight_f", note_key="edge._spread_tight_f_note",
+#           tier=2, replace_after="1000+ ENS snapshots per city",
+#           data_needed="per-city spread distribution percentiles")
+SPREAD_TIGHT = TemperatureDelta(settings["edge"]["spread_tight_f"], "F")
+# HARDCODED(setting_key="edge.spread_wide_f", note_key="edge._spread_wide_f_note",
+#           tier=2, replace_after="1000+ ENS snapshots per city",
+#           data_needed="per-city spread distribution percentiles")
+SPREAD_WIDE = TemperatureDelta(settings["edge"]["spread_wide_f"], "F")
+
+# HARDCODED(setting_key="edge.base_alpha", note_key="edge._base_alpha_note",
+#           tier=1, replace_after="100+ settlements",
+#           data_needed="Model Brier vs Market Brier per calibration level")
+BASE_ALPHA_BY_LEVEL = {
+    1: settings["edge"]["base_alpha"]["level1"],
+    2: settings["edge"]["base_alpha"]["level2"],
+    3: settings["edge"]["base_alpha"]["level3"],
+    4: settings["edge"]["base_alpha"]["level4"],
+}
 
 
 def vwmp(best_bid: float, best_ask: float,
@@ -49,7 +66,7 @@ def compute_alpha(
     ensemble_spread accepts both TemperatureDelta (preferred) and float (legacy).
     When typed, thresholds auto-convert to the correct unit.
     """
-    base = {1: 0.65, 2: 0.55, 3: 0.40, 4: 0.25}[calibration_level]
+    base = BASE_ALPHA_BY_LEVEL[calibration_level]
     a = base
 
     # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
@@ -62,9 +79,11 @@ def compute_alpha(
             a -= 0.10
     else:
         # Legacy float path (will be removed after full migration)
-        if ensemble_spread < 2.0:
+        tight_f = float(settings["edge"]["spread_tight_f"])
+        wide_f = float(settings["edge"]["spread_wide_f"])
+        if ensemble_spread < tight_f:
             a += 0.05
-        if ensemble_spread > 5.0:
+        if ensemble_spread > wide_f:
             a -= 0.10
 
     # Model agreement adjustments

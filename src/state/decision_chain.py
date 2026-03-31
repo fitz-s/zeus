@@ -64,6 +64,24 @@ class CycleArtifact:
         self.trade_cases.append(trade_info)
 
 
+@dataclass
+class SettlementRecord:
+    """Decision-log record for a realized settlement outcome."""
+
+    trade_id: str
+    city: str
+    target_date: str
+    range_label: str
+    direction: str
+    p_posterior: float
+    outcome: int
+    pnl: float
+    decision_snapshot_id: str = ""
+    edge_source: str = ""
+    strategy: str = ""
+    settled_at: str = ""
+
+
 def store_artifact(conn, artifact: CycleArtifact) -> None:
     """Store cycle artifact to decision_log table."""
     now = datetime.now(timezone.utc).isoformat()
@@ -75,6 +93,61 @@ def store_artifact(conn, artifact: CycleArtifact) -> None:
         json.dumps(asdict(artifact), default=str), now,
     ))
     conn.commit()
+
+
+def store_settlement_records(
+    conn,
+    records: list[SettlementRecord | dict],
+    *,
+    source: str = "harvester",
+) -> None:
+    """Store settlement outcomes in decision_log for downstream risk metrics."""
+    if not records:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    artifact = {
+        "mode": "settlement",
+        "started_at": now,
+        "completed_at": now,
+        "summary": {
+            "count": len(records),
+            "source": source,
+        },
+        "settlements": [
+            asdict(record) if isinstance(record, SettlementRecord) else dict(record)
+            for record in records
+        ],
+    }
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("settlement", now, now, json.dumps(artifact, default=str), now),
+    )
+    conn.commit()
+
+
+def query_settlement_records(conn, limit: int = 50) -> list[dict]:
+    """Load recent settlement records written into decision_log."""
+    rows = conn.execute(
+        """
+        SELECT artifact_json FROM decision_log
+        WHERE mode = 'settlement'
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    results: list[dict] = []
+    for row in rows:
+        artifact = json.loads(row["artifact_json"])
+        results.extend(artifact.get("settlements", []))
+        if len(results) >= limit:
+            return results[:limit]
+    return results[:limit]
 
 
 def query_no_trade_cases(conn, city: str = None, hours: int = 24) -> list[dict]:

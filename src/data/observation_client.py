@@ -13,6 +13,7 @@ from typing import Optional
 import httpx
 
 from src.config import City
+from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,9 @@ def _fetch_openmeteo_hourly(city: City) -> Optional[dict]:
     Works for all cities (US and Europe). Returns °C for European, °F for US.
     """
     try:
+        if not quota_tracker.can_call():
+            logger.warning("Open-Meteo quota blocked observation fallback for %s", city.name)
+            return None
         temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
         resp = httpx.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -163,6 +167,7 @@ def _fetch_openmeteo_hourly(city: City) -> Optional[dict]:
             timeout=15.0,
         )
         resp.raise_for_status()
+        quota_tracker.record_call("observation")
         data = resp.json()
 
         hourly = data.get("hourly", {})

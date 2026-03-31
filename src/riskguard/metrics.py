@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 from src.riskguard.risk_level import RiskLevel
 
+PROBABILITY_DECISION_THRESHOLD = 0.5
+
 
 def brier_score(p_forecasts: list[float], outcomes: list[int]) -> float:
     """Brier score: mean squared error of probability forecasts. Lower = better."""
@@ -21,12 +23,13 @@ def brier_score(p_forecasts: list[float], outcomes: list[int]) -> float:
 def directional_accuracy(
     p_forecasts: list[float], outcomes: list[int]
 ) -> float:
-    """Fraction of forecasts where direction was correct (p > 0.5 ↔ outcome=1)."""
+    """Fraction of forecasts where direction was correct above/below decision threshold."""
     if not p_forecasts:
-        return 0.5
+        return PROBABILITY_DECISION_THRESHOLD
     correct = sum(
         1 for p, o in zip(p_forecasts, outcomes)
-        if (p > 0.5 and o == 1) or (p <= 0.5 and o == 0)
+        if (p > PROBABILITY_DECISION_THRESHOLD and o == 1)
+        or (p <= PROBABILITY_DECISION_THRESHOLD and o == 0)
     )
     return correct / len(p_forecasts)
 
@@ -34,7 +37,7 @@ def directional_accuracy(
 def win_rate(pnl_list: list[float]) -> float:
     """Fraction of trades with positive P&L."""
     if not pnl_list:
-        return 0.5
+        return PROBABILITY_DECISION_THRESHOLD
     wins = sum(1 for p in pnl_list if p > 0)
     return wins / len(pnl_list)
 

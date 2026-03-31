@@ -15,15 +15,17 @@ from typing import Optional
 
 import httpx
 
-from src.calibration.manager import season_from_date
+from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
+from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.db import get_connection
 from src.state.portfolio import (
-    PortfolioState, load_portfolio, save_portfolio, remove_position,
+    PortfolioState, close_position, load_portfolio, save_portfolio,
 )
+from src.state.strategy_tracker import get_tracker, save_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,9 @@ def run_harvester() -> dict:
 
     total_pairs = 0
     positions_settled = 0
+    settlement_records: list[SettlementRecord] = []
+    tracker = get_tracker()
+    tracker_dirty = False
 
     for event in settled_events:
         try:
@@ -59,29 +64,52 @@ def run_harvester() -> dict:
             if winning_label is None:
                 continue
 
-            # Extract all bin labels and check for ENS snapshot
+            # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
-            p_raw_vector = _get_stored_p_raw(conn, city.name, target_date)
-
-            # Generate calibration pairs
-            n = harvest_settlement(
-                conn, city, target_date, winning_label,
-                all_labels, p_raw_vector,
+            snapshot_contexts = _snapshot_contexts_for_market(
+                conn, portfolio, city.name, target_date
             )
-            total_pairs += n
+            event_pairs = 0
+            for context in snapshot_contexts:
+                event_pairs += harvest_settlement(
+                    conn,
+                    city,
+                    target_date,
+                    winning_label,
+                    all_labels,
+                    context["p_raw_vector"],
+                    lead_days=context["lead_days"],
+                    forecast_available_at=context["available_at"],
+                )
+            total_pairs += event_pairs
+            if event_pairs > 0:
+                maybe_refit_bucket(conn, city, target_date)
 
             # Settle held positions in this market
             n_settled = _settle_positions(
-                conn, portfolio, city.name, target_date, winning_label
+                conn,
+                portfolio,
+                city.name,
+                target_date,
+                winning_label,
+                settlement_records=settlement_records,
+                strategy_tracker=tracker,
             )
             positions_settled += n_settled
+            if n_settled > 0:
+                tracker_dirty = True
 
         except Exception as e:
             logger.error("Harvester error for event %s: %s",
                          event.get("slug", "?"), e)
 
+    if settlement_records:
+        store_settlement_records(conn, settlement_records, source="harvester")
+
     if positions_settled > 0:
         save_portfolio(portfolio)
+    if tracker_dirty:
+        save_tracker(tracker)
 
     conn.commit()
     conn.close()
@@ -189,13 +217,28 @@ def _extract_target_date(event: dict) -> Optional[str]:
     return _parse_target_date(event)
 
 
-def _get_stored_p_raw(conn, city: str, target_date: str) -> Optional[list[float]]:
+def _get_stored_p_raw(
+    conn,
+    city: str,
+    target_date: str,
+    snapshot_id: Optional[str] = None,
+) -> Optional[list[float]]:
     """Get stored P_raw vector from ensemble_snapshots."""
-    row = conn.execute("""
-        SELECT p_raw_json FROM ensemble_snapshots
-        WHERE city = ? AND target_date = ?
-        ORDER BY fetch_time DESC LIMIT 1
-    """, (city, target_date)).fetchone()
+    if snapshot_id:
+        row = conn.execute(
+            """
+            SELECT p_raw_json FROM ensemble_snapshots
+            WHERE snapshot_id = ?
+            LIMIT 1
+            """,
+            (snapshot_id,),
+        ).fetchone()
+    else:
+        row = conn.execute("""
+            SELECT p_raw_json FROM ensemble_snapshots
+            WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
+            ORDER BY fetch_time DESC LIMIT 1
+        """, (city, target_date)).fetchone()
 
     if row and row["p_raw_json"]:
         try:
@@ -203,6 +246,66 @@ def _get_stored_p_raw(conn, city: str, target_date: str) -> Optional[list[float]
         except (json.JSONDecodeError, TypeError):
             pass
     return None
+
+
+def get_snapshot_p_raw(conn, snapshot_id: str) -> Optional[list[float]]:
+    """Get the decision-time P_raw vector for a specific snapshot."""
+    row = conn.execute("""
+        SELECT p_raw_json FROM ensemble_snapshots
+        WHERE snapshot_id = ?
+        LIMIT 1
+    """, (snapshot_id,)).fetchone()
+
+    if row and row["p_raw_json"]:
+        try:
+            return json.loads(row["p_raw_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
+
+def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
+    """Get the decision-time snapshot payload needed for calibration capture."""
+    row = conn.execute(
+        """
+        SELECT p_raw_json, lead_hours, available_at
+        FROM ensemble_snapshots
+        WHERE snapshot_id = ?
+        LIMIT 1
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    if row is None or not row["p_raw_json"]:
+        return None
+    try:
+        return {
+            "p_raw_vector": json.loads(row["p_raw_json"]),
+            "lead_days": float(row["lead_hours"]) / 24.0,
+            "available_at": row["available_at"],
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _snapshot_contexts_for_market(
+    conn,
+    portfolio: PortfolioState,
+    city: str,
+    target_date: str,
+) -> list[dict]:
+    """Resolve unique decision-time snapshots for positions in this settled market."""
+    snapshot_ids: list[str] = []
+    for pos in portfolio.positions:
+        if pos.city == city and pos.target_date == target_date and pos.decision_snapshot_id:
+            if pos.decision_snapshot_id not in snapshot_ids:
+                snapshot_ids.append(pos.decision_snapshot_id)
+
+    contexts: list[dict] = []
+    for snapshot_id in snapshot_ids:
+        context = get_snapshot_context(conn, snapshot_id)
+        if context is not None:
+            contexts.append(context)
+    return contexts
 
 
 def harvest_settlement(
@@ -248,9 +351,12 @@ def harvest_settlement(
 def _settle_positions(
     conn, portfolio: PortfolioState,
     city: str, target_date: str, winning_label: str,
+    settlement_records: Optional[list[SettlementRecord]] = None,
+    strategy_tracker=None,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     settled = 0
+    settlement_records = settlement_records if settlement_records is not None else []
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
             continue
@@ -263,16 +369,40 @@ def _settle_positions(
             exit_price = 1.0 if won else 0.0
         else:
             exit_price = 1.0 if not won else 0.0
-        pnl = shares * exit_price - pos.size_usd
+        closed = close_position(portfolio, pos.trade_id, exit_price, "SETTLEMENT")
+        pnl = closed.pnl if closed is not None else round(shares * exit_price - pos.size_usd, 2)
+        outcome = 1 if exit_price > 0 else 0
+
+        if closed is not None:
+            settlement_records.append(SettlementRecord(
+                trade_id=closed.trade_id,
+                city=city,
+                target_date=target_date,
+                range_label=closed.bin_label,
+                direction=closed.direction,
+                p_posterior=closed.p_posterior,
+                outcome=outcome,
+                pnl=round(pnl, 2),
+                decision_snapshot_id=closed.decision_snapshot_id,
+                edge_source=closed.edge_source,
+                strategy=closed.strategy,
+                settled_at=closed.last_exit_at,
+            ))
+            if strategy_tracker is not None:
+                strategy_tracker.record_settlement(closed)
 
         log_event(conn, "SETTLEMENT", pos.trade_id, {
             "city": city, "target_date": target_date,
             "winning_bin": winning_label, "position_bin": pos.bin_label,
             "direction": pos.direction, "won": won,
+            "position_won": bool(exit_price > 0),
             "pnl": round(pnl, 2), "entry_price": pos.entry_price,
+            "p_posterior": pos.p_posterior,
+            "outcome": outcome,
+            "edge_source": pos.edge_source,
+            "strategy": pos.strategy,
+            "decision_snapshot_id": pos.decision_snapshot_id,
         })
-
-        remove_position(portfolio, pos.trade_id)
         settled += 1
 
         logger.info("SETTLED %s: %s %s %s — PnL=$%.2f",

@@ -18,6 +18,8 @@ from src.riskguard.metrics import (
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.state.db import get_connection, RISK_DB_PATH
+from src.state.decision_chain import query_settlement_records
+from src.state.portfolio import load_portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -48,26 +50,13 @@ def tick() -> RiskLevel:
     init_risk_db(risk_conn)
 
     thresholds = settings["riskguard"]
+    portfolio = load_portfolio()
 
-    # Get recent settled trades for Brier/accuracy
-    rows = zeus_conn.execute("""
-        SELECT p_posterior, CASE WHEN status = 'won' THEN 1 ELSE 0 END as outcome
-        FROM trade_decisions
-        WHERE status IN ('won', 'lost')
-        ORDER BY timestamp DESC LIMIT 50
-    """).fetchall()
+    settlement_rows = query_settlement_records(zeus_conn, limit=50)
 
-    p_forecasts = [r["p_posterior"] for r in rows]
-    outcomes = [r["outcome"] for r in rows]
-
-    # Get recent P&L for win rate
-    pnl_rows = zeus_conn.execute("""
-        SELECT fill_price FROM trade_decisions
-        WHERE status IN ('won', 'lost')
-        ORDER BY timestamp DESC LIMIT 20
-    """).fetchall()
-    # Simplified P&L: won=+1, lost=-1 (actual P&L computed elsewhere)
-    pnl_list = [1.0 if r["outcome"] == 1 else -1.0 for r in rows[:20]] if rows else []
+    p_forecasts = [float(r["p_posterior"]) for r in settlement_rows if "p_posterior" in r]
+    outcomes = [int(r["outcome"]) for r in settlement_rows if "outcome" in r]
+    pnl_list = [float(r["pnl"]) for r in settlement_rows[:20] if "pnl" in r]
 
     # Compute metrics
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
@@ -78,7 +67,18 @@ def tick() -> RiskLevel:
     brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
     wr_level = evaluate_win_rate(w_rate, thresholds) if pnl_list else RiskLevel.GREEN
 
-    level = overall_level(brier_level, wr_level)
+    daily_loss_level = (
+        RiskLevel.RED
+        if portfolio.daily_loss > portfolio.initial_bankroll * thresholds["max_daily_loss_pct"]
+        else RiskLevel.GREEN
+    )
+    weekly_loss_level = (
+        RiskLevel.RED
+        if portfolio.weekly_loss > portfolio.initial_bankroll * thresholds["max_weekly_loss_pct"]
+        else RiskLevel.GREEN
+    )
+
+    level = overall_level(brier_level, wr_level, daily_loss_level, weekly_loss_level)
 
     # Record
     now = datetime.now(timezone.utc).isoformat()
@@ -87,7 +87,18 @@ def tick() -> RiskLevel:
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         level.value, b_score, d_accuracy, w_rate,
-        json.dumps({"brier_level": brier_level.value, "wr_level": wr_level.value}),
+        json.dumps({
+            "brier_level": brier_level.value,
+            "wr_level": wr_level.value,
+            "daily_loss_level": daily_loss_level.value,
+            "weekly_loss_level": weekly_loss_level.value,
+            "daily_loss": round(portfolio.daily_loss, 2),
+            "weekly_loss": round(portfolio.weekly_loss, 2),
+            "realized_pnl": round(portfolio.realized_pnl, 2),
+            "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
+            "total_pnl": round(portfolio.total_pnl, 2),
+            "effective_bankroll": round(portfolio.effective_bankroll, 2),
+        }),
         now,
     ))
     risk_conn.commit()
@@ -96,7 +107,7 @@ def tick() -> RiskLevel:
     risk_conn.close()
 
     if level != RiskLevel.GREEN:
-        logger.warning("RiskGuard level: %s (Brier=%.3f, WinRate=%.1%%)",
+        logger.warning("RiskGuard level: %s (Brier=%.3f, WinRate=%.1f%%)",
                        level.value, b_score, w_rate * 100)
 
     return level

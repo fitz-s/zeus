@@ -37,6 +37,16 @@ def _harvester_cycle():
         logger.error("Harvester failed: %s", e, exc_info=True)
 
 
+def _ecmwf_open_data_cycle():
+    try:
+        from src.data.ecmwf_open_data import collect_open_ens_cycle
+
+        result = collect_open_ens_cycle()
+        logger.info("ECMWF Open Data: %s", result)
+    except Exception as e:
+        logger.error("ECMWF Open Data collection failed: %s", e, exc_info=True)
+
+
 def run_single_cycle():
     """Run one complete cycle of all modes. For testing, not production."""
     logger.info("=== SINGLE CYCLE TEST ===")
@@ -88,6 +98,12 @@ def main():
         minutes=discovery["day0_interval_min"], id="day0_capture",
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
+    for time_str in discovery["ecmwf_open_data_times_utc"]:
+        h, m = time_str.split(":")
+        scheduler.add_job(
+            _ecmwf_open_data_cycle, "cron",
+            hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
+        )
 
     jobs = [j.id for j in scheduler.get_jobs()]
     logger.info("Scheduler ready. %d jobs: %s", len(jobs), jobs)

@@ -11,7 +11,14 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from src.state.portfolio import Position
+from src.state.portfolio import (
+    Position,
+    buy_no_ceiling,
+    buy_no_edge_threshold,
+    buy_yes_edge_threshold,
+    consecutive_confirmations,
+    near_settlement_hours,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +99,14 @@ def _evaluate_buy_yes_exit(
     best_bid: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
-    if forward_edge >= 0:
+    edge_threshold = buy_yes_edge_threshold(position.entry_ci_width)
+    if forward_edge >= edge_threshold:
         position.neg_edge_count = 0  # Reset on positive
         return None
 
     position.neg_edge_count += 1
 
-    if position.neg_edge_count < 2:
+    if position.neg_edge_count < consecutive_confirmations():
         return None  # Need 2 consecutive negative cycles
 
     # Layer 4: EV gate — only exit if selling is better than holding
@@ -130,12 +138,11 @@ def _evaluate_buy_no_exit(
     Only exit on SUSTAINED negative forward edge (N consecutive cycles).
     Threshold scales with uncertainty (deeper reversal needed for noisy cities).
     """
-    # Dynamic threshold — buy_no needs deeper reversal than buy_yes
-    edge_threshold = -0.045  # Default: must be this negative to count
+    edge_threshold = buy_no_edge_threshold(position.entry_ci_width)
 
     # Near-settlement: hold unless deeply negative
-    if hours_to_settlement is not None and hours_to_settlement < 4.0:
-        near_threshold = -0.20
+    if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():
+        near_threshold = buy_no_ceiling()
         if forward_edge < near_threshold:
             return ExitSignal(
                 trade_id=position.trade_id,
@@ -149,7 +156,7 @@ def _evaluate_buy_no_exit(
     else:
         position.neg_edge_count = 0  # Reset on ANY non-negative cycle
 
-    consecutive_needed = 2  # Must see sustained reversal
+    consecutive_needed = consecutive_confirmations()
 
     if position.neg_edge_count >= consecutive_needed:
         position.neg_edge_count = 0

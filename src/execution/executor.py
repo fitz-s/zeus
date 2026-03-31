@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import settings
+from src.contracts import (
+    HeldSideProbability,
+    NativeSidePrice,
+    compute_native_limit_price,
+)
 from src.types import BinEdge
 
 logger = logging.getLogger(__name__)
@@ -41,6 +46,10 @@ class OrderResult:
     fill_price: Optional[float] = None
     filled_at: Optional[str] = None
     reason: Optional[str] = None
+    order_id: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    submitted_price: Optional[float] = None
+    shares: Optional[float] = None
 
 
 def execute_order(
@@ -68,13 +77,12 @@ def execute_order(
     trade_id = str(uuid.uuid4())[:12]
     limit_offset = settings["execution"]["limit_offset_pct"]
 
-    # Compute initial limit price
-    if edge.direction == "buy_yes":
-        limit_price = min(edge.p_posterior, edge.vwmp) - limit_offset
-    else:
-        limit_price = min(1.0 - edge.p_posterior, 1.0 - edge.vwmp) - limit_offset
-
-    limit_price = max(0.01, min(0.99, limit_price))
+    # Compute initial limit price in the native/held-side probability space.
+    limit_price = compute_native_limit_price(
+        HeldSideProbability(edge.p_posterior, edge.direction),
+        NativeSidePrice(edge.vwmp, edge.direction),
+        limit_offset=limit_offset,
+    )
 
     # V7: Dynamic limit price — if within 5% of best ask, jump to ask
     if edge.direction == "buy_yes" and best_ask is not None:
@@ -138,6 +146,8 @@ def _paper_fill(
         status="filled",
         fill_price=fill_price,
         filled_at=now,
+        submitted_price=limit_price,
+        shares=(size_usd / fill_price) if fill_price > 0 else 0.0,
     )
 
 
@@ -181,6 +191,15 @@ def _live_order(
             trade_id=trade_id,
             status="pending",
             reason=f"Order posted, timeout={timeout}s",
+            order_id=(
+                result.get("orderID")
+                or result.get("orderId")
+                or result.get("id")
+                or trade_id
+            ),
+            timeout_seconds=timeout,
+            submitted_price=limit_price,
+            shares=shares,
         )
 
     except Exception as e:

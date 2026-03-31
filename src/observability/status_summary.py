@@ -45,10 +45,17 @@ def write_status(cycle_summary: dict = None) -> None:
             "open_positions": len(portfolio.positions),
             "total_exposure_usd": round(sum(p.size_usd for p in portfolio.positions), 2),
             "heat_pct": round(portfolio_heat(portfolio) * 100, 1),
-            "bankroll": portfolio.bankroll,
+            "initial_bankroll": round(portfolio.initial_bankroll, 2),
+            "realized_pnl": round(portfolio.realized_pnl, 2),
+            "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
+            "total_pnl": round(portfolio.total_pnl, 2),
+            "effective_bankroll": round(portfolio.effective_bankroll, 2),
+            "bankroll": round(portfolio.effective_bankroll, 2),
             "positions": [
                 {"trade_id": p.trade_id, "city": p.city, "direction": p.direction,
-                 "size": p.size_usd, "edge": p.edge, "bin": p.bin_label[:30]}
+                 "size": p.size_usd, "edge": p.edge, "bin": p.bin_label[:30],
+                 "mark_price": p.last_monitor_market_price,
+                 "unrealized_pnl": round(p.unrealized_pnl, 2)}
                 for p in portfolio.positions
             ],
         },

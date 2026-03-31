@@ -7,12 +7,18 @@ p-values are computed via np.mean(bootstrap_edges <= 0) in MarketAnalysis,
 NEVER via approximation formula.
 """
 
+from src.config import settings
 from src.types import BinEdge
+
+# HARDCODED(setting_key="edge.fdr_alpha", note_key="edge._fdr_alpha_note",
+#           tier=1, replace_after="500+ candidate evaluations",
+#           data_needed="observed false positive rate versus target FDR")
+DEFAULT_FDR_ALPHA = float(settings["edge"]["fdr_alpha"])
 
 
 def fdr_filter(
     edges: list[BinEdge],
-    fdr_alpha: float = 0.10,
+    fdr_alpha: float = DEFAULT_FDR_ALPHA,
 ) -> list[BinEdge]:
     """Benjamini-Hochberg procedure for FDR control.
 

@@ -14,6 +14,7 @@ import httpx
 import numpy as np
 
 from src.config import City
+from src.data.openmeteo_quota import quota_tracker
 
 
 API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -55,9 +56,13 @@ def fetch_ensemble(
 
     for attempt in range(MAX_RETRIES):
         try:
+            if not quota_tracker.can_call():
+                print("  WARN Open-Meteo quota blocked ensemble request")
+                return None
             resp = httpx.get(API_URL, params=params, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
+            quota_tracker.record_call("ensemble")
             return _parse_response(data, model, fetch_time)
         except (httpx.HTTPError, KeyError, ValueError) as e:
             last_error = e

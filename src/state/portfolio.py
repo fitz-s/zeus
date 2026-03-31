@@ -8,12 +8,13 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.config import STATE_DIR
+from src.config import STATE_DIR, settings
+from src.contracts import HeldSideProbability, NativeSidePrice, compute_forward_edge
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ class ExitDecision:
     should_exit: bool
     reason: str = ""
     urgency: str = "normal"  # "normal" or "immediate"
+    selected_method: str = ""
+    applied_validations: list[str] = field(default_factory=list)
 
 
 # Administrative exit reasons — excluded from P&L calculations
@@ -64,12 +67,15 @@ class Position:
     cost_basis_usd: float = 0.0  # = size_usd
     bankroll_at_entry: float = 150.0
     entered_at: str = ""
+    entry_ci_width: float = 0.0
 
     # Entry context (immutable snapshot — Blueprint v2 §2)
     entry_method: str = "ens_member_counting"
     signal_version: str = "v2"
     calibration_version: str = ""
     decision_snapshot_id: str = ""  # FK to ensemble_snapshots at decision time
+    selected_method: str = ""
+    applied_validations: list[str] = field(default_factory=list)
 
     # Strategy + attribution
     strategy: str = ""  # "settlement_capture" | "shoulder_sell" | "center_buy" | "opening_inertia"
@@ -79,8 +85,12 @@ class Position:
     fill_quality: float = 0.0  # (exec_price - vwmp) / vwmp
 
     # Lifecycle state (Blueprint v2 §2)
-    state: str = "holding"  # pending | entered | holding | day0_window | settled | voided | admin_closed
+    state: str = "holding"  # pending_tracked | entered | holding | day0_window | settled | voided | admin_closed
     exit_strategy: str = ""  # "buy_yes_standard" | "buy_no_conservative" (set from direction)
+    order_id: str = ""
+    order_status: str = ""
+    order_posted_at: str = ""
+    order_timeout_at: str = ""
 
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = "unknown"  # unknown | synced | local_only | chain_only | quarantined
@@ -96,8 +106,8 @@ class Position:
     neg_edge_count: int = 0
     last_monitor_prob: float = 0.0
     last_monitor_edge: float = 0.0
+    last_monitor_market_price: Optional[float] = None
     last_monitor_at: str = ""
-    cal_std: float = 3.0  # Calibration std for this city-season (default °F)
     city_peak_hour: float = 15.0  # For Day0 phase detection
 
     # Anti-churn
@@ -108,6 +118,25 @@ class Position:
     # P&L (set on close)
     exit_price: float = 0.0
     pnl: float = 0.0
+
+    @property
+    def effective_shares(self) -> float:
+        if self.shares > 0:
+            return self.shares
+        if self.entry_price > 0:
+            return self.size_usd / self.entry_price
+        return 0.0
+
+    @property
+    def effective_cost_basis_usd(self) -> float:
+        return self.cost_basis_usd if self.cost_basis_usd > 0 else self.size_usd
+
+    @property
+    def unrealized_pnl(self) -> float:
+        """Mark-to-market P&L based on the last known native-space market price."""
+        if self.last_monitor_market_price is None:
+            return 0.0
+        return self.effective_shares * self.last_monitor_market_price - self.effective_cost_basis_usd
 
     def evaluate_exit(
         self,
@@ -122,75 +151,155 @@ class Position:
 
         All probabilities in native space (same as entry).
         """
+        applied = list(self.applied_validations)
+
         # Settlement imminent
         if hours_to_settlement is not None and hours_to_settlement < 1.0:
-            return ExitDecision(True, "SETTLEMENT_IMMINENT", "immediate")
+            applied.append("near_settlement_gate")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True, "SETTLEMENT_IMMINENT", "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Whale toxicity
         if is_whale_sweep:
-            return ExitDecision(True, "WHALE_TOXICITY", "immediate")
+            applied.append("whale_toxicity_gate")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True, "WHALE_TOXICITY", "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Micro-position hold (Layer 8: < $1 never sold)
         if self.size_usd < 1.0:
-            return ExitDecision(False)
+            applied.append("micro_position_hold")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Vig extreme
         if market_vig > 1.08 or market_vig < 0.92:
-            return ExitDecision(True, f"VIG_EXTREME (vig={market_vig:.3f})")
+            applied.append("vig_extreme_gate")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True, f"VIG_EXTREME (vig={market_vig:.3f})",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Direction-specific exit logic
-        forward_edge = current_p_posterior - current_p_market
+        forward_edge = compute_forward_edge(
+            HeldSideProbability(current_p_posterior, self.direction),
+            NativeSidePrice(current_p_market, self.direction),
+        )
+        applied.append("forward_edge_compute")
 
         if self.direction == "buy_no":
-            return self._buy_no_exit(forward_edge, hours_to_settlement)
+            return self._buy_no_exit(forward_edge, hours_to_settlement, applied)
         else:
-            return self._buy_yes_exit(forward_edge, best_bid)
+            return self._buy_yes_exit(forward_edge, best_bid, applied)
 
     def _buy_yes_exit(
-        self, forward_edge: float, best_bid: Optional[float] = None
+        self, forward_edge: float, best_bid: Optional[float] = None,
+        applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
-        if forward_edge >= 0:
+        applied = list(applied or [])
+        edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
+        applied.append("ci_threshold")
+        applied.append("consecutive_cycle_check")
+        if forward_edge >= edge_threshold:
             self.neg_edge_count = 0
-            return ExitDecision(False)
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         self.neg_edge_count += 1
-        if self.neg_edge_count < 2:
-            return ExitDecision(False)
+        if self.neg_edge_count < consecutive_confirmations():
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Layer 4: EV gate
         if best_bid is not None and self.entry_price > 0:
+            applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
             if shares * best_bid <= shares * self.p_posterior:
-                return ExitDecision(False)  # Selling worse than holding
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
 
         self.neg_edge_count = 0
-        return ExitDecision(True, f"EDGE_REVERSAL (edge={forward_edge:.4f})")
+        self.applied_validations = _dedupe_validations(applied)
+        return ExitDecision(
+            True, f"EDGE_REVERSAL (edge={forward_edge:.4f})",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        )
 
     def _buy_no_exit(
-        self, forward_edge: float, hours_to_settlement: Optional[float] = None
+        self, forward_edge: float, hours_to_settlement: Optional[float] = None,
+        applied: Optional[list[str]] = None,
     ) -> ExitDecision:
-        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
-        Blueprint v2 §7: threshold scales with cal_std (noisier cities need deeper reversal).
-        """
-        edge_threshold = -self.cal_std * 0.015  # Default: std=3.0°F → -0.045
+        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
+        applied = list(applied or [])
+        edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
+        near_threshold = buy_no_ceiling()
+        applied.append("ci_threshold")
 
         # Near-settlement hold (unless deeply negative)
-        if hours_to_settlement is not None and hours_to_settlement < 4.0:
-            if forward_edge < -0.20:
-                return ExitDecision(True, f"BUY_NO_NEAR_EXIT (edge={forward_edge:.4f})")
-            return ExitDecision(False)
+        if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():
+            applied.append("near_settlement_gate")
+            if forward_edge < near_threshold:
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True, f"BUY_NO_NEAR_EXIT (edge={forward_edge:.4f})",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
+        applied.append("consecutive_cycle_check")
         if forward_edge < edge_threshold:
             self.neg_edge_count += 1
         else:
             self.neg_edge_count = 0
 
-        if self.neg_edge_count >= 2:
+        if self.neg_edge_count >= consecutive_confirmations():
             self.neg_edge_count = 0
-            return ExitDecision(True, f"BUY_NO_EDGE_EXIT (edge={forward_edge:.4f})")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True, f"BUY_NO_EDGE_EXIT (edge={forward_edge:.4f})",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
-        return ExitDecision(False)
+        self.applied_validations = _dedupe_validations(applied)
+        return ExitDecision(
+            False,
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        )
 
     @property
     def is_admin_exit(self) -> bool:
@@ -203,8 +312,42 @@ class PortfolioState:
     positions: list[Position] = field(default_factory=list)
     bankroll: float = 150.0
     updated_at: str = ""
+    daily_baseline_total: float = 150.0
+    weekly_baseline_total: float = 150.0
     # Layer 5+6: recently closed positions for reentry/cooldown checks
     recent_exits: list[dict] = field(default_factory=list)
+
+    @property
+    def initial_bankroll(self) -> float:
+        return self.bankroll
+
+    @property
+    def realized_pnl(self) -> float:
+        return _realized_pnl_value(self, exclude_admin=True)
+
+    @property
+    def total_unrealized_pnl(self) -> float:
+        return sum(p.unrealized_pnl for p in self.positions)
+
+    @property
+    def total_pnl(self) -> float:
+        return self.realized_pnl + self.total_unrealized_pnl
+
+    @property
+    def effective_bankroll(self) -> float:
+        return self.initial_bankroll + self.total_pnl
+
+    @property
+    def current_total_value(self) -> float:
+        return self.initial_bankroll + self.total_pnl
+
+    @property
+    def daily_loss(self) -> float:
+        return max(0.0, self.daily_baseline_total - self.current_total_value)
+
+    @property
+    def weekly_loss(self) -> float:
+        return max(0.0, self.weekly_baseline_total - self.current_total_value)
 
 
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
@@ -216,11 +359,20 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     with open(path) as f:
         data = json.load(f)
 
-    positions = [Position(**p) for p in data.get("positions", [])]
+    position_fields = {f.name for f in fields(Position)}
+    positions = []
+    for p in data.get("positions", []):
+        filtered = {k: v for k, v in p.items() if k in position_fields}
+        positions.append(Position(**filtered))
+
+    bankroll = data.get("bankroll", 150.0)
     return PortfolioState(
         positions=positions,
-        bankroll=data.get("bankroll", 150.0),
+        bankroll=bankroll,
         updated_at=data.get("updated_at", ""),
+        daily_baseline_total=data.get("daily_baseline_total", bankroll),
+        weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
+        recent_exits=data.get("recent_exits", []),
     )
 
 
@@ -234,6 +386,9 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "positions": [asdict(p) for p in state.positions],
         "bankroll": state.bankroll,
         "updated_at": state.updated_at,
+        "daily_baseline_total": state.daily_baseline_total,
+        "weekly_baseline_total": state.weekly_baseline_total,
+        "recent_exits": state.recent_exits,
     }
 
     # Atomic write pattern per OpenClaw conventions
@@ -249,18 +404,41 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
 
 def add_position(state: PortfolioState, pos: Position) -> None:
     """Add a position. Dedup: merge if same token+direction already open."""
+    if pos.shares <= 0 and pos.entry_price > 0:
+        pos.shares = pos.size_usd / pos.entry_price
+    if pos.cost_basis_usd <= 0:
+        pos.cost_basis_usd = pos.size_usd
+
+    for existing in state.positions:
+        if pos.order_id and existing.order_id and pos.order_id == existing.order_id:
+            for field_name, value in asdict(pos).items():
+                setattr(existing, field_name, value)
+            return
+
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
     for existing in state.positions:
+        if pos.state == "pending_tracked" or existing.state == "pending_tracked":
+            continue
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
             # Merge: accumulate shares and cost
             logger.warning("DEDUP: merging duplicate %s %s into existing %s",
                            pos.direction, pos.bin_label, existing.trade_id)
             existing.size_usd += pos.size_usd
-            existing.shares += pos.shares
-            existing.cost_basis_usd += pos.cost_basis_usd
+            existing.shares += pos.effective_shares
+            existing.cost_basis_usd += pos.effective_cost_basis_usd
             return
     state.positions.append(pos)
+
+
+def _dedupe_validations(steps: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for step in steps:
+        if step and step not in seen:
+            seen.add(step)
+            ordered.append(step)
+    return ordered
 
 
 def close_position(
@@ -283,8 +461,7 @@ def close_position(
             pos.last_exit_at = now
             # P&L: (exit - entry) * shares
             if pos.entry_price > 0:
-                shares = pos.size_usd / pos.entry_price
-                pos.pnl = round(shares * exit_price - pos.size_usd, 2)
+                pos.pnl = round(pos.effective_shares * exit_price - pos.effective_cost_basis_usd, 2)
             _track_exit(state, pos)
             closed = pos
 
@@ -337,6 +514,10 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
 
 
 def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
+    return _realized_pnl_value(state, exclude_admin=exclude_admin)
+
+
+def _realized_pnl_value(state: PortfolioState, exclude_admin: bool = True) -> float:
     """Total realized P&L from recent exits. L2: excludes admin exits."""
     total = 0.0
     for ex in state.recent_exits:
@@ -347,28 +528,55 @@ def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
     return total
 
 
+def total_exposure_usd(state: PortfolioState) -> float:
+    """Total open exposure in USD."""
+    return sum(p.size_usd for p in state.positions)
+
+
+def portfolio_heat_for_bankroll(state: PortfolioState, bankroll: float) -> float:
+    """Portfolio heat against an explicit entry bankroll/cap."""
+    if bankroll <= 0:
+        return 0.0
+    return total_exposure_usd(state) / bankroll
+
+
+def city_exposure_for_bankroll(state: PortfolioState, city: str, bankroll: float) -> float:
+    """City exposure against an explicit entry bankroll/cap."""
+    if bankroll <= 0:
+        return 0.0
+    total = sum(p.size_usd for p in state.positions if p.city == city)
+    return total / bankroll
+
+
+def cluster_exposure_for_bankroll(state: PortfolioState, cluster: str, bankroll: float) -> float:
+    """Cluster exposure against an explicit entry bankroll/cap."""
+    if bankroll <= 0:
+        return 0.0
+    total = sum(p.size_usd for p in state.positions if p.cluster == cluster)
+    return total / bankroll
+
+
 def portfolio_heat(state: PortfolioState) -> float:
     """Total portfolio exposure as fraction of bankroll."""
-    if state.bankroll <= 0:
+    if state.effective_bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions)
-    return total / state.bankroll
+    return total_exposure_usd(state) / state.effective_bankroll
 
 
 def city_exposure(state: PortfolioState, city: str) -> float:
     """Exposure to a specific city as fraction of bankroll."""
-    if state.bankroll <= 0:
+    if state.effective_bankroll <= 0:
         return 0.0
     total = sum(p.size_usd for p in state.positions if p.city == city)
-    return total / state.bankroll
+    return total / state.effective_bankroll
 
 
 def cluster_exposure(state: PortfolioState, cluster: str) -> float:
     """Exposure to a cluster/region as fraction of bankroll."""
-    if state.bankroll <= 0:
+    if state.effective_bankroll <= 0:
         return 0.0
     total = sum(p.size_usd for p in state.positions if p.cluster == cluster)
-    return total / state.bankroll
+    return total / state.effective_bankroll
 
 
 # --- Churn defense: Layers 5, 6, 7 ---
@@ -407,3 +615,74 @@ def is_token_on_cooldown(state: PortfolioState, token_id: str, hours: float = 1.
 def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -> bool:
     """Layer 7: Block same city+range across different dates."""
     return any(p.city == city and p.bin_label == bin_label for p in state.positions)
+
+
+# HARDCODED(setting_key="exit.buy_no_scaling_factor", note_key="exit._buy_no_scaling_factor_note",
+#           tier=1, replace_after="200+ buy_no settlements",
+#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
+def buy_no_scaling_factor() -> float:
+    return float(settings["exit"]["buy_no_scaling_factor"])
+
+
+# HARDCODED(setting_key="exit.buy_yes_scaling_factor", note_key="exit._buy_yes_scaling_factor_note",
+#           tier=1, replace_after="200+ buy_yes settlements",
+#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
+def buy_yes_scaling_factor() -> float:
+    return float(settings["exit"]["buy_yes_scaling_factor"])
+
+
+# HARDCODED(setting_key="exit.buy_no_floor", note_key="exit._buy_no_floor_note",
+#           tier=1, replace_after="200+ settlements",
+#           data_needed="historical forward_edge noise floor for buy_no exits")
+def buy_no_floor() -> float:
+    return float(settings["exit"]["buy_no_floor"])
+
+
+# HARDCODED(setting_key="exit.buy_no_ceiling", note_key="exit._buy_no_ceiling_note",
+#           tier=1, replace_after="200+ settlements",
+#           data_needed="historical forward_edge deep-reversal ceiling for buy_no exits")
+def buy_no_ceiling() -> float:
+    return float(settings["exit"]["buy_no_ceiling"])
+
+
+# HARDCODED(setting_key="exit.buy_yes_floor", note_key="exit._buy_yes_floor_note",
+#           tier=1, replace_after="200+ settlements",
+#           data_needed="historical forward_edge noise floor for buy_yes exits")
+def buy_yes_floor() -> float:
+    return float(settings["exit"]["buy_yes_floor"])
+
+
+# HARDCODED(setting_key="exit.buy_yes_ceiling", note_key="exit._buy_yes_ceiling_note",
+#           tier=1, replace_after="200+ settlements",
+#           data_needed="historical forward_edge deep-reversal ceiling for buy_yes exits")
+def buy_yes_ceiling() -> float:
+    return float(settings["exit"]["buy_yes_ceiling"])
+
+
+# HARDCODED(setting_key="exit.consecutive_confirmations", note_key="exit._consecutive_confirmations_note",
+#           tier=2, replace_after="500+ exit events",
+#           data_needed="1-cycle vs 2-cycle vs 3-cycle false positive rate")
+def consecutive_confirmations() -> int:
+    return int(settings["exit"]["consecutive_confirmations"])
+
+
+# HARDCODED(setting_key="exit.near_settlement_hours", note_key="exit._near_settlement_hours_note",
+#           tier=2, replace_after="100+ near-settlement trades per city",
+#           data_needed="per-city optimal near-settlement hold window")
+def near_settlement_hours() -> float:
+    return float(settings["exit"]["near_settlement_hours"])
+
+
+def _clamp_negative_threshold(raw: float, floor: float, ceiling: float) -> float:
+    """Clamp a negative threshold between a shallow floor and deep ceiling."""
+    return max(ceiling, min(floor, raw))
+
+
+def buy_no_edge_threshold(entry_ci_width: float) -> float:
+    raw = -abs(entry_ci_width) * buy_no_scaling_factor()
+    return _clamp_negative_threshold(raw, buy_no_floor(), buy_no_ceiling())
+
+
+def buy_yes_edge_threshold(entry_ci_width: float) -> float:
+    raw = -abs(entry_ci_width) * buy_yes_scaling_factor()
+    return _clamp_negative_threshold(raw, buy_yes_floor(), buy_yes_ceiling())

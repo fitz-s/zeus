@@ -24,6 +24,7 @@ DIRECTIONAL_FAIL_THRESHOLD = 8  # 8/20 misses → emergency
 
 # Seasonal boundary dates (spec §3.7)
 SEASONAL_DATES = ["03-20", "06-21", "09-22", "12-21"]
+DIRECTIONAL_DECISION_THRESHOLD = 0.5
 
 
 def hosmer_lemeshow(
@@ -91,7 +92,8 @@ def directional_failure_check(
 
     misses = sum(
         1 for p, o in zip(recent_p, recent_o)
-        if (p > 0.5 and o == 0) or (p <= 0.5 and o == 1)
+        if (p > DIRECTIONAL_DECISION_THRESHOLD and o == 0)
+        or (p <= DIRECTIONAL_DECISION_THRESHOLD and o == 1)
     )
 
     return misses >= DIRECTIONAL_FAIL_THRESHOLD
