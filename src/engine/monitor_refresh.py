@@ -232,6 +232,25 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     except Exception as e:
         logger.debug("ENS refresh failed for %s: %s", pos.trade_id, e)
 
+    divergence_score = abs(current_p_posterior - current_p_market)
+    market_velocity_1h = 0.0
+    
+    # Try fetching 1h velocity if we know the token
+    tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+    if tid:
+        from datetime import timedelta
+        try:
+            one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            row = conn.execute(
+                "SELECT price FROM token_price_log WHERE token_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+                (tid, one_hour_ago)
+            ).fetchone()
+            if row:
+                old_native_p = row["price"] if pos.direction == "buy_yes" else 1.0 - row["price"]
+                market_velocity_1h = current_p_market - old_native_p
+        except Exception as e:
+            logger.debug("Failed to calculate market velocity for %s: %s", pos.trade_id, e)
+
     # Wrap into verified EdgeContext
     return EdgeContext(
         p_raw=np.array([]),
@@ -246,6 +265,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         decision_snapshot_id=pos.decision_snapshot_id,
         n_edges_found=1,
         n_edges_after_fdr=1,
-        market_velocity_1h=0.0, # Currently stubbed for monitor
-        divergence_score=0.0 # Currently stubbed for monitor
+        market_velocity_1h=market_velocity_1h,
+        divergence_score=divergence_score
     )
