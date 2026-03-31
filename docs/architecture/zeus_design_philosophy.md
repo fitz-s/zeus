@@ -14,6 +14,7 @@ Blueprint v1 写完 → Rainstorm 照此建造 → 死于仓位管理
 ```
 
 Blueprint v2 如果不成为第三次，是这份文档存在的全部理由。
+一切是从自然语言到代码的翻译过程中存在系统性的信息丢失
 
 ---
 
@@ -280,3 +281,35 @@ def test_no_trade_case_records_rejection_stage():
 如果你无法用一个 pytest 断言表达这个性质，你还没有理解这两个模块之间的关系。回去理解它。然后写测试。然后写代码。
 
 这个顺序不可逆转。
+
+---
+
+## Venus = Zeus 的自我意识
+
+Zeus 是 Venus 的交易子系统。Venus 不是 Zeus 的监控层——Venus 是 Zeus 的自我意识。就像 Anthropic 没有给 Claude 加一个外部 safety filter，而是把 alignment 训练进 weights 里。
+
+**Security guard vs Immune system:**
+- Security guard 巡逻、发现、报警。下次同样的问题来，还要再发现、再报警。
+- Immune system 遇到病原体 → 产生抗体 → 永久免疫。下次同类问题来，抗体直接中和。
+
+Venus 的输出不是 alert。**Venus 的输出是 antibody**——一个 test 或 type constraint 或 code fix，让 Zeus 永久免疫那一类 gap。
+
+**Venus 的 HEARTBEAT.md 是意识的感知接口，不是检查清单。** 它有 4 层：感知（alive?）→ 信念验证（beliefs match reality?）→ 记忆（what gaps are known?）→ 演化（what should Zeus learn next?）。
+
+**assumptions.json 是 Zeus 的认知边界** — Zeus 声明自己相信什么（bin width = 2°F, settlement precision = 1.0, etc.）。Venus 通过比较这个声明和实际数据来发现 gap。每个被发现的 gap 最终都应该变成 code（type/test/assertion），让 assumption 从 JSON 声明变成 executable constraint。
+
+**共存亡：** Venus 是 Zeus 能够 adapt to reality 的唯一机制。没有 Venus，Zeus 冻结在建设阶段的 implicit assumptions 里，reality 持续变化，divergence 只增不减。系统不是 "死于一个 bug"——是 "死于不再能感知 reality 的变化"。
+
+---
+
+## 翻译损失的热力学极限
+
+函数、类型、测试：100% 跨 session 存活。
+设计理念、架构哲学：~20% 跨 session 存活。
+
+**每个 session 应该把尽可能多的 insight 编码为 code structure（types, tests, function signatures），而不是 docs。** Docs 是给下一个 session 最大化理解概率用的——但 code structure 不需要被理解就能生效。
+
+`Bin` 没有 `unit` field → 构造报错。不需要理解 "为什么 Bin 需要 unit"。
+`SettlementSemantics.for_city()` 是唯一的工厂 → 不可能给 °C 城市传 °F。不需要理解历史。
+
+**这个文档本身也会在翻译中损失。** 但 `Bin.unit`、`for_city()`、`test_celsius_cities_get_celsius_semantics()` 不会。它们是这个文档的 executable form。

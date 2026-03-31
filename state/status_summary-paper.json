@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T12:33:34.760719+00:00",
+  "timestamp": "2026-03-31T13:48:33.921781+00:00",
   "process": {
     "pid": 52871,
     "mode": "paper",
@@ -21,8 +21,8 @@
     "positions": []
   },
   "cycle": {
-    "mode": "day0_capture",
-    "started_at": "2026-03-31T12:33:17.039454+00:00",
+    "mode": "opening_hunt",
+    "started_at": "2026-03-31T13:48:17.028155+00:00",
     "monitors": 0,
     "exits": 0,
     "candidates": 0,
@@ -37,6 +37,6 @@
     "effective_bankroll_usd": 154.44,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 0.0,
-    "completed_at": "2026-03-31T12:33:34.760204+00:00"
+    "completed_at": "2026-03-31T13:48:33.921378+00:00"
   }
 }

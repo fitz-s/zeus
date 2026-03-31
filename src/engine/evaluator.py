@@ -168,7 +168,7 @@ def evaluate_candidate(
         low, high = o["range_low"], o["range_high"]
         if low is None and high is None:
             continue
-        bins.append(Bin(low=low, high=high, label=o["title"]))
+        bins.append(Bin(low=low, high=high, label=o["title"], unit=city.settlement_unit))
         token_map[len(bins) - 1] = {
             "token_id": o["token_id"],
             "no_token_id": o["no_token_id"],

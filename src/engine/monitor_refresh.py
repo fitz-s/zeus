@@ -62,8 +62,8 @@ def _refresh_ens_member_counting(
     if low is None and high is None:
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    single_bin = [Bin(low=low, high=high, label=position.bin_label)]
-    p_raw_single = float(ens.p_raw_vector(single_bin, n_mc=1000)[0])
+    single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
+    p_raw_single = float(ens.p_raw_vector(single_bin, n_mc=5000)[0])
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:
@@ -145,8 +145,8 @@ def _refresh_day0_observation(
         member_maxes_remaining=remaining_member_maxes,
         unit=city.settlement_unit,
     )
-    single_bin = [Bin(low=low, high=high, label=position.bin_label)]
-    p_raw_yes = float(day0.p_vector(single_bin, n_mc=1000)[0])
+    single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
+    p_raw_yes = float(day0.p_vector(single_bin, n_mc=5000)[0])
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:
