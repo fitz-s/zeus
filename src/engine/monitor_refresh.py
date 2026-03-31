@@ -155,11 +155,13 @@ def _refresh_day0_observation(
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
     return current_p_posterior, [*applied, "alpha_posterior"]
 
-def refresh_position(conn, clob: PolymarketClient, pos: Position) -> tuple[float, float]:
+from src.contracts.edge_context import EdgeContext
+
+def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
     """Fetch fresh market price and recompute P_posterior for a held position.
 
     Blueprint v2 §7 Layer 1: uses same method as entry (p_raw_vector with MC noise).
-    Returns: (current_p_market, current_p_posterior) in native space.
+    Returns: EdgeContext wrapping both fresh market and semantic provenance.
     Falls back to stored values if refresh fails.
     """
     # Semantic Provenance Guard
@@ -230,4 +232,20 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> tuple[float
     except Exception as e:
         logger.debug("ENS refresh failed for %s: %s", pos.trade_id, e)
 
-    return current_p_market, current_p_posterior
+    # Wrap into verified EdgeContext
+    return EdgeContext(
+        p_raw=np.array([]),
+        p_cal=np.array([]),
+        p_market=np.array([current_p_market]),
+        p_posterior=current_p_posterior,
+        forward_edge=current_p_posterior - current_p_market,
+        alpha=0.0, # Could be plucked from internal registry returns eventually
+        confidence_band_upper=pos.entry_ci_width,
+        confidence_band_lower=0.0,
+        entry_provenance=EntryMethod(pos.entry_method),
+        decision_snapshot_id=pos.decision_snapshot_id,
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=0.0, # Currently stubbed for monitor
+        divergence_score=0.0 # Currently stubbed for monitor
+    )

@@ -41,7 +41,9 @@ def run_profit_validation_replay():
         "trades_analyzed": 0,
         "v1_misidentified_exits": 0,
         "v2_early_cut_losses": 0,
-        "total_pnl_diff_usd": 0.0
+        "v1_false_stops": 0,
+        "total_pnl_diff_usd": 0.0,
+        "low_confidence_skipped": 0,
     }
     
     for exit_record in portfolio.recent_exits:
@@ -71,11 +73,17 @@ def run_profit_validation_replay():
 
         stats["trades_analyzed"] += 1
         
-        # Synthesize V2 simulation
+        # Pull real attributes from historical trade output
+        real_entry_price = exit_record.get("entry_price", 0.5)
+        real_size = exit_record.get("size_usd", 15.0)
+        real_ci_width = exit_record.get("entry_ci_width", 0.08)
+        real_prob = exit_record.get("p_posterior", 0.5)
+
+        # Synthesize V2 simulation using real dimensions
         sim_position = Position(
             trade_id="sim_123", market_id="", city=city, cluster="", target_date=target_date, 
-            bin_label="", direction=direction, entry_price=0.5, size_usd=15.0, 
-            p_posterior=0.5, entry_ci_width=0.08, entry_method="ens_member_counting"
+            bin_label="", direction=direction, entry_price=real_entry_price, size_usd=real_size, 
+            p_posterior=real_prob, entry_ci_width=real_ci_width, entry_method="ens_member_counting"
         )
         
         v2_exit_time = None
@@ -125,6 +133,7 @@ def run_profit_validation_replay():
             if v2_exit_price is None:
                 # V2 successfully stayed in a trade V1 panicked out of
                 stats["v1_misidentified_exits"] += 1
+                stats["v1_false_stops"] += 1
                 stats["total_pnl_diff_usd"] += abs(v1_pnl)
                 
         elif v1_pnl < -5.0:
@@ -133,12 +142,16 @@ def run_profit_validation_replay():
                 stats["v2_early_cut_losses"] += 1
                 diff = abs(v1_pnl) - (sim_position.size_usd - (sim_position.size_usd/sim_position.entry_price * v2_exit_price))
                 stats["total_pnl_diff_usd"] += max(0, diff)
+        else:
+            if v2_exit_price is None and "EXIT" in exit_reason:
+                stats["low_confidence_skipped"] += 1
                 
     logger.info("--- SHADOW ATTRIBUTION REPLAY RESULTS ---")
-    logger.info(f"Trades analyzed with tick sequence: {stats['trades_analyzed']}")
-    logger.info(f"V1 False-Positives Avoided: {stats['v1_misidentified_exits']}")
-    logger.info(f"V2 Early-Loss Mitigations: {stats['v2_early_cut_losses']}")
-    logger.info(f"Estimated Gross Advantage USD: ${stats['total_pnl_diff_usd']:.2f}")
+    logger.info(f"Trades Analyzed: {stats['trades_analyzed']}")
+    logger.info(f"V1 False Stops Avoided: {stats['v1_false_stops']}")
+    logger.info(f"V2 Early-Cuts Triggered: {stats['v2_early_cut_losses']}")
+    logger.info(f"Low Confidence Divergences Skipped: {stats['low_confidence_skipped']}")
+    logger.info(f"Gross Advantage vs V1 Path: ${stats['total_pnl_diff_usd']:.2f}")
 
 if __name__ == "__main__":
     run_profit_validation_replay()
