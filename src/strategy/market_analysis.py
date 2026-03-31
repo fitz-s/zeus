@@ -37,6 +37,7 @@ class MarketAnalysis:
         calibrator: Optional[ExtendedPlattCalibrator] = None,
         lead_days: float = 3.0,
         unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
+        precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -51,6 +52,7 @@ class MarketAnalysis:
         self._alpha = alpha
         self._lead_days = lead_days
         self._unit = unit
+        self._precision = precision
         self._sigma = sigma_instrument(unit).value  # P0-9: use city-appropriate noise
 
     def find_edges(
@@ -114,6 +116,17 @@ class MarketAnalysis:
 
         return edges
 
+    def _settle(self, values: np.ndarray) -> np.ndarray:
+        """Apply settlement rounding using this market's precision.
+
+        Mirrors EnsembleSignal._simulate_settlement() logic.
+        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
+        Uses numpy's default round_half_to_even (banker's rounding).
+        Result is float, not int — callers use >= / <= comparisons on Bin bounds.
+        """
+        inv = 1.0 / self._precision if self._precision > 0 else 1.0
+        return np.round(values * inv) / inv
+
     def _bootstrap_bin(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
@@ -145,7 +158,7 @@ class MarketAnalysis:
             # Layer 1: resample ENS members + instrument noise
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = np.round(noised).astype(int)
+            measured = self._settle(noised)
 
             # Compute p_raw for this bin from resampled members
             p_raw_boot = self._bin_probability(measured, b)
@@ -192,7 +205,7 @@ class MarketAnalysis:
         for i in range(n):
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = np.round(noised).astype(int)
+            measured = self._settle(noised)
 
             p_raw_boot = self._bin_probability(measured, b)
 

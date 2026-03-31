@@ -27,6 +27,7 @@ class Day0Signal:
         member_maxes_remaining: np.ndarray,
         unit: str = "F",
         diurnal_peak_confidence: float = 0.0,
+        precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
     ):
         """
         Args:
@@ -43,6 +44,7 @@ class Day0Signal:
         self.hours_remaining = hours_remaining
         self.ens_remaining = member_maxes_remaining
         self.unit = unit
+        self._precision = precision
         self._peak_confidence = diurnal_peak_confidence
 
         # Post-peak: observation floor is more reliable, reduce MC noise
@@ -52,6 +54,19 @@ class Day0Signal:
             self._sigma = base_sigma * 0.5  # Halve noise post-peak
         else:
             self._sigma = base_sigma
+
+    def _settle(self, values) -> np.ndarray:
+        """Apply settlement rounding using this market's precision.
+
+        Mirrors EnsembleSignal._simulate_settlement() logic.
+        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
+        Uses numpy's default round_half_to_even (banker's rounding).
+        Result is float, not int — callers use >= / <= comparisons on Bin bounds.
+        Accepts both scalar and ndarray inputs.
+        """
+        arr = np.asarray(values, dtype=float)
+        inv = 1.0 / self._precision if self._precision > 0 else 1.0
+        return np.round(arr * inv) / inv
 
     def p_vector(self, bins: list[Bin], n_mc: int = 3000) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.
@@ -70,7 +85,7 @@ class Day0Signal:
         p = np.zeros(n_bins)
 
         rng = np.random.default_rng()
-        obs_int = round(self.obs_high)
+        obs_settled = self._settle(self.obs_high)
 
         for _ in range(n_mc):
             # Sample residual ENS member
@@ -79,16 +94,16 @@ class Day0Signal:
 
             # Final high = max(observed, remaining forecast)
             final_highs = np.maximum(noised, self.obs_high)
-            final_ints = np.round(final_highs).astype(int)
+            final_settled = self._settle(final_highs)
 
             for i, b in enumerate(bins):
                 if b.is_open_low:
-                    p[i] += np.sum(final_ints <= b.high)
+                    p[i] += np.sum(final_settled <= b.high)
                 elif b.is_open_high:
-                    p[i] += np.sum(final_ints >= b.low)
+                    p[i] += np.sum(final_settled >= b.low)
                 else:
                     p[i] += np.sum(
-                        (final_ints >= b.low) & (final_ints <= b.high)
+                        (final_settled >= b.low) & (final_settled <= b.high)
                     )
 
         p = p / (float(n_members) * n_mc)
