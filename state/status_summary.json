@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T06:27:41.362240+00:00",
+  "timestamp": "2026-03-31T06:42:42.054432+00:00",
   "process": {
     "pid": 5785,
     "mode": "paper",
@@ -14,10 +14,10 @@
     "heat_pct": 5.0,
     "initial_bankroll": 150.0,
     "realized_pnl": 244.0,
-    "unrealized_pnl": 13.28,
-    "total_pnl": 257.28,
-    "effective_bankroll": 407.28,
-    "bankroll": 407.28,
+    "unrealized_pnl": 13.29,
+    "total_pnl": 257.29,
+    "effective_bankroll": 407.29,
+    "bankroll": 407.29,
     "positions": [
       {
         "trade_id": "83651497-7e0",
@@ -36,14 +36,14 @@
         "size": 13.39243937391137,
         "edge": 0.1740065003313147,
         "bin": "Will the highest temperature i",
-        "mark_price": 0.9275,
-        "unrealized_pnl": 5.46
+        "mark_price": 0.928,
+        "unrealized_pnl": 5.47
       }
     ]
   },
   "cycle": {
-    "mode": "day0_capture",
-    "started_at": "2026-03-31T06:26:49.079802+00:00",
+    "mode": "opening_hunt",
+    "started_at": "2026-03-31T06:41:49.096756+00:00",
     "monitors": 2,
     "exits": 0,
     "candidates": 0,
@@ -54,9 +54,9 @@
       "skipped": "paper_mode"
     },
     "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 407.27001112694376,
+    "effective_bankroll_usd": 407.28017328743,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 13.59,
-    "completed_at": "2026-03-31T06:27:41.362113+00:00"
+    "completed_at": "2026-03-31T06:42:42.054148+00:00"
   }
 }
