@@ -26,6 +26,7 @@ class Day0Signal:
         hours_remaining: float,
         member_maxes_remaining: np.ndarray,
         unit: str = "F",
+        diurnal_peak_confidence: float = 0.0,
     ):
         """
         Args:
@@ -34,16 +35,26 @@ class Day0Signal:
             hours_remaining: hours until settlement closes
             member_maxes_remaining: ENS member daily max for remaining hours,
                                    shape (n_members,)
+            diurnal_peak_confidence: 0.0-1.0, how confident we are that the
+                daily peak has already passed (from diurnal_curves data)
         """
         self.obs_high = observed_high_so_far
         self.current_temp = current_temp
         self.hours_remaining = hours_remaining
         self.ens_remaining = member_maxes_remaining
         self.unit = unit
-        self._sigma = sigma_instrument(unit).value  # P0-9: city-appropriate noise
+        self._peak_confidence = diurnal_peak_confidence
+
+        # Post-peak: observation floor is more reliable, reduce MC noise
+        # This tightens the distribution when we're confident the high is set
+        base_sigma = sigma_instrument(unit).value
+        if diurnal_peak_confidence > 0.7:
+            self._sigma = base_sigma * 0.5  # Halve noise post-peak
+        else:
+            self._sigma = base_sigma
 
     def p_vector(self, bins: list[Bin], n_mc: int = 3000) -> np.ndarray:
-        """Compute probability vector incorporating observation floor.
+        """Compute probability vector incorporating observation floor and diurnal data.
 
         For each MC iteration:
         1. Sample ENS remaining-hours member (with replacement)

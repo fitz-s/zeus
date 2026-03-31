@@ -115,6 +115,16 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     return "opening_inertia"
 
 
+def _get_post_peak_confidence(city: City, target_date: date) -> float:
+    """Get diurnal post-peak confidence for Day0 signal refinement."""
+    try:
+        from src.signal.diurnal import post_peak_confidence, get_current_local_hour
+        current_hour = get_current_local_hour(city.timezone)
+        return post_peak_confidence(city.name, target_date, current_hour)
+    except Exception:
+        return 0.0  # No data → no extra confidence
+
+
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -239,10 +249,11 @@ def evaluate_candidate(
             hours_remaining=hours_remaining,
             member_maxes_remaining=remaining_member_maxes,
             unit=city.settlement_unit,
+            diurnal_peak_confidence=_get_post_peak_confidence(city, target_d),
         )
         p_raw = day0.p_vector(bins)
         ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
-        entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise"]
+        entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0
     else:
         p_raw = ens.p_raw_vector(bins)
