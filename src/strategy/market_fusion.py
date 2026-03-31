@@ -57,16 +57,24 @@ def compute_alpha(
     model_agreement: str,
     lead_days: float,
     hours_since_open: float,
+    city_name: str = "",
+    season: str = "",
 ) -> float:
     """Compute α for model-market blending. Spec §4.5.
 
     Higher α → trust model more. Lower α → trust market more.
     Clamped to [0.20, 0.85].
 
+    If a validated per-city α override exists in alpha_overrides table,
+    it replaces the base α for this city×season.
+
     ensemble_spread accepts both TemperatureDelta (preferred) and float (legacy).
     When typed, thresholds auto-convert to the correct unit.
     """
-    base = BASE_ALPHA_BY_LEVEL[calibration_level]
+    # Check for per-city alpha override
+    base = _get_alpha_override(city_name, season)
+    if base is None:
+        base = BASE_ALPHA_BY_LEVEL[calibration_level]
     a = base
 
     # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
@@ -105,6 +113,54 @@ def compute_alpha(
         a += 0.05  # Cumulative with above
 
     return max(0.20, min(0.85, a))
+
+
+# Cache to avoid repeated DB lookups within a cycle
+_alpha_override_cache: dict[tuple[str, str], float | None] = {}
+_alpha_cache_ts: float = 0.0
+
+
+def _get_alpha_override(city_name: str, season: str) -> float | None:
+    """Look up per-city alpha override. Returns None if no override exists."""
+    import time
+    global _alpha_override_cache, _alpha_cache_ts
+
+    if not city_name or not season:
+        return None
+
+    # Cache for 300s to avoid DB thrashing during a cycle
+    now = time.time()
+    if now - _alpha_cache_ts > 300:
+        _alpha_override_cache.clear()
+        _alpha_cache_ts = now
+
+    key = (city_name, season)
+    if key in _alpha_override_cache:
+        return _alpha_override_cache[key]
+
+    try:
+        from src.state.db import get_connection
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT alpha FROM alpha_overrides "
+            "WHERE city = ? AND season = ? AND source = 'validated_optimal'",
+            (city_name, season),
+        ).fetchone()
+        conn.close()
+
+        result = float(row["alpha"]) if row else None
+        _alpha_override_cache[key] = result
+
+        if result is not None:
+            import logging
+            logging.getLogger(__name__).info(
+                "Using validated α=%.3f for %s/%s", result, city_name, season,
+            )
+        return result
+
+    except Exception:
+        _alpha_override_cache[key] = None
+        return None
 
 
 def compute_posterior(
