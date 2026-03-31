@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T06:42:42.054432+00:00",
+  "timestamp": "2026-03-31T06:58:07.745031+00:00",
   "process": {
     "pid": 5785,
     "mode": "paper",
@@ -42,8 +42,8 @@
     ]
   },
   "cycle": {
-    "mode": "opening_hunt",
-    "started_at": "2026-03-31T06:41:49.096756+00:00",
+    "mode": "day0_capture",
+    "started_at": "2026-03-31T06:56:49.012582+00:00",
     "monitors": 2,
     "exits": 0,
     "candidates": 0,
@@ -54,9 +54,9 @@
       "skipped": "paper_mode"
     },
     "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 407.28017328743,
+    "effective_bankroll_usd": 407.2903354479162,
     "dynamic_cap_usd": 150.0,
     "portfolio_heat_pct": 13.59,
-    "completed_at": "2026-03-31T06:42:42.054148+00:00"
+    "completed_at": "2026-03-31T06:58:07.744807+00:00"
   }
 }
