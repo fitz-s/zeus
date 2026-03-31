@@ -20,20 +20,26 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 
+    Uses OpenClaw's keychain_resolver stdin/stdout protocol directly.
     Returns dict with 'private_key' and 'funder_address'.
-    Raises RuntimeError if keychain resolution fails.
     """
     try:
+        # Read credentials via OpenClaw keychain resolver protocol
         result = subprocess.run(
             ["python3", "-c",
-             "from bin.keychain_resolver import resolve_polymarket; "
-             "import json; print(json.dumps(resolve_polymarket()))"],
+             "import json, sys; sys.path.insert(0, '/Users/leofitz/.openclaw'); "
+             "from bin.keychain_resolver import read_keychain; "
+             "pk = read_keychain('openclaw-metamask-private-key'); "
+             "fa = read_keychain('openclaw-polymarket-funder-address'); "
+             "print(json.dumps({'private_key': pk, 'funder_address': fa}))"],
             capture_output=True, text=True, timeout=10,
-            cwd="/Users/leofitz/.openclaw",
         )
         if result.returncode != 0:
             raise RuntimeError(f"Keychain resolution failed: {result.stderr}")
-        return json.loads(result.stdout)
+        creds = json.loads(result.stdout)
+        if not creds.get("private_key") or not creds.get("funder_address"):
+            raise RuntimeError("Missing private_key or funder_address from Keychain")
+        return creds
     except Exception as e:
         raise RuntimeError(f"Cannot resolve Polymarket credentials: {e}") from e
 
