@@ -8,13 +8,15 @@ Settlement = round(member_max + instrument_noise) → integer.
 Simple member counting ignores measurement uncertainty at bin boundaries.
 """
 
-from datetime import date
+from datetime import date, datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
 from scipy.signal import argrelextrema
 from scipy.stats import gaussian_kde
 
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.config import City
 from src.types import Bin
 from src.types.temperature import TemperatureDelta, Unit
@@ -56,12 +58,16 @@ class EnsembleSignal:
         members_hourly: np.ndarray,
         city: City,
         target_date: date,
+        settlement_semantics: SettlementSemantics,
+        decision_time: datetime | None = None,
     ):
         """
         Args:
             members_hourly: shape (n_members, hours), city's settlement unit
             city: City config with timezone
             target_date: the settlement date
+            settlement_semantics: Exact resolution constraints for this target market
+            decision_time: Exact time the orchestrator began the evaluation cycle
         """
         if members_hourly.shape[0] < 51:
             raise ValueError(
@@ -71,7 +77,7 @@ class EnsembleSignal:
 
         tz = ZoneInfo(city.timezone)
         tz_hours = self._select_hours_for_date(
-            target_date, tz, members_hourly.shape[1]
+            target_date, tz, members_hourly.shape[1], decision_time
         )
 
         if len(tz_hours) == 0:
@@ -82,14 +88,33 @@ class EnsembleSignal:
 
         # Daily max per member, respecting city timezone for day boundary
         self.member_maxes: np.ndarray = members_hourly[:, tz_hours].max(axis=1)
-        # WU settlement simulation: round to integer
-        self.member_maxes_int: np.ndarray = np.round(self.member_maxes).astype(int)
+        
         self.city = city
         self.target_date = target_date
+        self.settlement_semantics = settlement_semantics
+        
+        # Simulated settlement values (may have floating decimals if precision < 1)
+        self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_maxes)
+
+    def _simulate_settlement(self, values: np.ndarray) -> np.ndarray:
+        s = self.settlement_semantics
+        inv = 1.0 / s.precision if s.precision > 0 else 1.0
+        scaled = values * inv
+        
+        if s.rounding_rule == "round_half_to_even":
+            rounded = np.round(scaled)
+        elif s.rounding_rule == "floor":
+            rounded = np.floor(scaled)
+        elif s.rounding_rule == "ceil":
+            rounded = np.ceil(scaled)
+        else:
+            rounded = np.round(scaled)
+            
+        return rounded / inv
 
     @staticmethod
     def _select_hours_for_date(
-        target_date: date, tz: ZoneInfo, n_hours: int
+        target_date: date, tz: ZoneInfo, n_hours: int, decision_time: datetime | None = None
     ) -> np.ndarray:
         """Select hourly indices belonging to target_date in the city's timezone.
 
@@ -112,7 +137,7 @@ class EnsembleSignal:
 
         # Estimate which forecast hour index corresponds to target_date midnight local
         # If issue date = today, target_date = today + lead_days
-        today = date.today()
+        today = decision_time.date() if decision_time else date.today()
         lead_days = (target_date - today).days
         if lead_days < 0:
             lead_days = 0
@@ -137,7 +162,7 @@ class EnsembleSignal:
         """Probability vector over all bins with instrument noise.
 
         Spec §2.1: Monte Carlo with ε ~ N(0, σ_instrument²) per member.
-        Simulates full settlement chain including WU integer rounding.
+        Simulates full settlement chain according to SettlementSemantics rules.
 
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
@@ -152,18 +177,18 @@ class EnsembleSignal:
         for _ in range(n_mc):
             # Add instrument noise to each member's daily max
             noised = self.member_maxes + rng.normal(0, sig.value, n_members)
-            measured_int = np.round(noised).astype(int)
+            measured = self._simulate_settlement(noised)
 
             for i, b in enumerate(bins):
                 if b.is_open_low:
-                    # Shoulder low: "X or below" — compare int measurement to float boundary
-                    p[i] += np.sum(measured_int <= b.high)
+                    # Shoulder low: "X or below"
+                    p[i] += np.sum(measured <= b.high)
                 elif b.is_open_high:
                     # Shoulder high: "X or higher"
-                    p[i] += np.sum(measured_int >= b.low)
+                    p[i] += np.sum(measured >= b.low)
                 else:
                     p[i] += np.sum(
-                        (measured_int >= b.low) & (measured_int <= b.high)
+                        (measured >= b.low) & (measured <= b.high)
                     )
 
         p = p / (float(n_members) * n_mc)
