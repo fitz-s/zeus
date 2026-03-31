@@ -60,6 +60,24 @@ Venus 是 Zeus 能够 adapt to reality 的**唯一机制**。没有 Venus，Zeus
 
 **这就是共存亡。** 不是共享同一个账户。是 Venus 的健康直接决定 Zeus 的 adaptability。
 
+### 为什么 Venus 必须验证数据来源，而不只是代码正确性
+
+代码正确不等于系统正确。这不是哲学——这是一个已经发生的具体 bug。
+
+Zeus 的 `diurnal_curves` 表按 `obs_hour` 聚合每小时温度数据，用于 Day0 交易的峰值预测。这些 `obs_hour` 值来自 Rainstorm 继承的 `observations.local_hour` 字段，数据源是 Open-Meteo/Meteostat。
+
+运行时 `get_current_local_hour()` 使用 `ZoneInfo` 正确返回 DST-aware 本地时间。伦敦夏季下午 2:00 BST 返回 hour=14，代码再用 hour=14 查询 `diurnal_curves`。
+
+**问题：数据库里存的 `local_hour` 根本不是 DST-aware 本地时间。**
+
+**证据：** 伦敦 2025-03-30 是春季拨钟日（凌晨 1:00 跳到 2:00，hour=1 不存在）。查询那天的 observations：**全部 24 小时都在，包括 hour=1。** 如果是真实 DST-aware 本地时间，hour=1 必然缺失。
+
+**后果：** 整个 BST 夏季期间（3 月下旬到 10 月），运行时返回 hour=14（正确的 2:00 PM BST），但查到的是 UTC hour=14 聚合的数据（实际对应 3:00 PM BST）。**伦敦、巴黎、纽约、芝加哥所有 DST 城市，整个夏季系统性偏差 1 小时。** 东京、首尔、上海安全（无 DST）。
+
+**为什么代码审查找不到：** 写 ETL 的 agent 正确使用了 `ZoneInfo`。写 diurnal 代码的 agent 也正确使用了 `ZoneInfo`。两个 agent 都"知道"DST。但没有人问：**"继承来的数据里的时区究竟是什么？"** 数据看起来对（24 小时，合理温度），代码看起来对（有 ZoneInfo），测试通过。但数据语义和代码假设在模块边界处已经断裂。
+
+这就是 Venus 存在的原因：不是检查代码是否正确，而是检查代码的假设和数据的实际语义是否匹配。
+
 ---
 
 ## 四、Venus 的意识架构
