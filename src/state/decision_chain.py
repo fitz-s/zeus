@@ -10,6 +10,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.contracts.semantic_types import Direction, RejectionStage, DirectionAlias
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,15 +22,20 @@ class NoTradeCase:
     city: str
     target_date: str
     range_label: str
-    direction: str
-    rejection_stage: str  # MARKET_FILTER | SIGNAL_QUALITY | EDGE_INSUFFICIENT |
-                          # FDR_FILTERED | RISK_REJECTED | SIZING_TOO_SMALL |
-                          # EXECUTION_FAILED | ANTI_CHURN
+    direction: DirectionAlias
+    rejection_stage: str
     rejection_reasons: list[str] = field(default_factory=list)
     best_edge: float = 0.0
     model_prob: float = 0.0
     market_price: float = 0.0
     timestamp: str = ""
+    
+    def __post_init__(self):
+        """CRITICAL: Enforce Enum strictness via coercion."""
+        if self.direction and not isinstance(self.direction, Direction):
+            self.direction = Direction(self.direction)
+        if self.rejection_stage and not isinstance(self.rejection_stage, RejectionStage):
+            self.rejection_stage = RejectionStage(self.rejection_stage)
 
 
 @dataclass

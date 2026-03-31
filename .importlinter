@@ -1,0 +1,24 @@
+[importlinter]
+root_package = src
+
+[importlinter:contract:1]
+name = Execution Plane Isolation
+type = forbidden
+source_modules =
+    src.execution
+forbidden_modules =
+    src.signal
+    src.calibration
+    src.data
+    src.engine.evaluator
+    src.engine.monitor_refresh
+
+[importlinter:contract:2]
+name = Fair Value Plane Isolation
+type = forbidden
+source_modules =
+    src.signal
+    src.calibration
+forbidden_modules =
+    src.execution
+    src.engine

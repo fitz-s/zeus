@@ -7,9 +7,39 @@ from enum import Enum
 from typing import Any, Callable, Iterable, Mapping
 
 
-Direction = str
+DirectionAlias = str  # Temporary backward-compatibility for untyped downstream inputs
 
+class Direction(str, Enum):
+    YES = "buy_yes"
+    NO = "buy_no"
+    UNKNOWN = "unknown"
 
+class LifecycleState(str, Enum):
+    PENDING_TRACKED = "pending_tracked"
+    ENTERED = "entered"
+    HOLDING = "holding"
+    DAY0_WINDOW = "day0_window"
+    SETTLED = "settled"
+    VOIDED = "voided"
+    ADMIN_CLOSED = "admin_closed"
+
+class ChainState(str, Enum):
+    UNKNOWN = "unknown"
+    SYNCED = "synced"
+    LOCAL_ONLY = "local_only"
+    CHAIN_ONLY = "chain_only"
+    QUARANTINED = "quarantined"
+
+class RejectionStage(str, Enum):
+    SIGNAL_QUALITY = "SIGNAL_QUALITY"
+    MARKET_FILTER = "MARKET_FILTER"
+    ANTI_CHURN = "ANTI_CHURN"
+    SIZING_TOO_SMALL = "SIZING_TOO_SMALL"
+    RISK_REJECTED = "RISK_REJECTED"
+    EDGE_INSUFFICIENT = "EDGE_INSUFFICIENT"
+    FDR_FILTERED = "FDR_FILTERED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    
 class EntryMethod(str, Enum):
     """Known probability refresh methods carried by Position across modules."""
 
@@ -30,11 +60,11 @@ class HeldSideProbability:
     """Probability in the native space of the held side."""
 
     value: float
-    direction: Direction
+    direction: DirectionAlias
 
     def __post_init__(self) -> None:
-        if self.direction not in {"buy_yes", "buy_no"}:
-            raise ValueError(f"Unsupported direction: {self.direction}")
+        if self.direction not in {Direction.YES, Direction.NO, "buy_yes", "buy_no"}:
+            raise ValueError(f"Pricing requires concrete buy_yes/buy_no, got {self.direction}")
         if not 0.0 <= float(self.value) <= 1.0:
             raise ValueError(f"Held-side probability must be in [0, 1], got {self.value}")
 
@@ -53,11 +83,11 @@ class NativeSidePrice:
     """Market price in the native space of the held side."""
 
     value: float
-    direction: Direction
+    direction: DirectionAlias
 
     def __post_init__(self) -> None:
-        if self.direction not in {"buy_yes", "buy_no"}:
-            raise ValueError(f"Unsupported direction: {self.direction}")
+        if self.direction not in {Direction.YES, Direction.NO, "buy_yes", "buy_no"}:
+            raise ValueError(f"Pricing requires concrete buy_yes/buy_no, got {self.direction}")
         if not 0.0 <= float(self.value) <= 1.0:
             raise ValueError(f"Native-side price must be in [0, 1], got {self.value}")
 
@@ -95,8 +125,8 @@ def _unwrap_native_value(item: Any, label: str, expected_direction: str | None =
 
     value = getattr(item, "value", item)
     direction = getattr(item, "direction", expected_direction)
-    if direction not in (None, "buy_yes", "buy_no"):
-        raise ValueError(f"{label} direction must be buy_yes/buy_no, got {direction}")
+    if direction not in (None, Direction.YES, Direction.NO, "buy_yes", "buy_no"):
+        raise ValueError(f"{label} direction must be pure buy_yes/buy_no, got {direction}")
     if expected_direction is not None and direction is not None and direction != expected_direction:
         raise ValueError(f"{label} direction mismatch: expected {expected_direction}, got {direction}")
     return float(value), direction

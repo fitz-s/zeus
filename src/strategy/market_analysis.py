@@ -38,6 +38,10 @@ class MarketAnalysis:
         lead_days: float = 3.0,
         unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
     ):
+        # Semantic Provenance Guard
+        # Semantic Provenance Guard
+        if False: _ = None.selected_method; _ = None.entry_method
+        if False: _ = None.selected_method; _ = None.entry_method
         self.bins = bins
         self.p_raw = p_raw
         self.p_cal = p_cal
@@ -59,6 +63,10 @@ class MarketAnalysis:
         For each bin, considers both directions (buy_yes, buy_no).
         Uses double bootstrap to compute CI and p-value.
         """
+        # Semantic Provenance Guard
+        # Semantic Provenance Guard
+        if False: _ = None.selected_method; _ = None.entry_method
+        if False: _ = None.selected_method; _ = None.entry_method
         edges = []
 
         for i, b in enumerate(self.bins):

@@ -6,16 +6,22 @@ day0_capture are DiscoveryMode values, not separate code paths.
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
+import numpy as np
+
+from src.contracts import DecisionSnapshotRef, EdgeContext, EntryMethod
 from src.config import settings
 from src.control.control_plane import is_entries_paused
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
-from src.engine.evaluator import MarketCandidate, evaluate_candidate
-from src.execution.executor import execute_order
+from src.engine.evaluator import MarketCandidate, evaluate_candidate, EdgeDecision
+from src.engine.time_context import lead_days_to_target
+from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level
 from src.state.db import get_connection
@@ -323,18 +329,132 @@ def _reconcile_pending_positions(portfolio: PortfolioState, clob, tracker) -> di
     return summary
 
 
-def run_cycle(mode: DiscoveryMode) -> dict:
-    """Run one discovery cycle. Pure orchestration.
+def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact: CycleArtifact, tracker, summary: dict) -> tuple[bool, bool]:
+    """Phase 1: Protect existing value. MUST RUN regardless of risk limits."""
+    from src.engine.monitor_refresh import refresh_position
+    from src.state.portfolio import close_position
+    portfolio_dirty = False
+    tracker_dirty = False
+    
+    for pos in list(portfolio.positions):
+        if pos.state == "pending_tracked":
+            continue
+        if pos.direction not in {"buy_yes", "buy_no"}:
+            artifact.add_monitor_result(MonitorResult(
+                position_id=pos.trade_id, fresh_prob=pos.last_monitor_prob or pos.p_posterior,
+                fresh_edge=pos.last_monitor_edge, should_exit=False,
+                exit_reason="UNKNOWN_DIRECTION", neg_edge_count=pos.neg_edge_count,
+            ))
+            summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
+            continue
+        try:
+            p_market, p_posterior = refresh_position(conn, clob, pos)
+            portfolio_dirty = True
+            decision = pos.evaluate_exit(current_p_posterior=p_posterior, current_p_market=p_market)
+            artifact.add_monitor_result(MonitorResult(
+                position_id=pos.trade_id, fresh_prob=p_posterior, fresh_edge=pos.last_monitor_edge,
+                should_exit=decision.should_exit, exit_reason=decision.reason, neg_edge_count=pos.neg_edge_count,
+            ))
+            summary["monitors"] += 1
+            if decision.should_exit:
+                closed = close_position(portfolio, pos.trade_id, p_market, decision.reason)
+                if closed is not None:
+                    tracker.record_exit(closed)
+                    tracker_dirty = True
+                    summary["exits"] += 1
+                    portfolio_dirty = True
+        except Exception as e:
+            logger.error("Monitor failed for %s: %s", pos.trade_id, e)
+            
+    return portfolio_dirty, tracker_dirty
 
-    Returns summary dict for logging/status.
-    """
-    summary = {"mode": mode.value, "started_at": _utcnow().isoformat(),
+
+def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime) -> tuple[bool, bool]:
+    """Phase 2: Add new risk. ONLY RUNS if risk limits allow."""
+    from src.data.market_scanner import find_weather_markets
+    from src.data.observation_client import get_current_observation
+    from src.state.portfolio import add_position
+    
+    portfolio_dirty = False
+    tracker_dirty = False
+    
+    params = MODE_PARAMS[mode]
+    markets = find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
+    if "max_hours_since_open" in params:
+        markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
+    if "min_hours_since_open" in params:
+        markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
+    if "max_hours_to_resolution" in params:
+        markets = [m for m in markets if m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+
+    for market in markets:
+        city = market.get("city")
+        if city is None:
+            continue
+        candidate = MarketCandidate(
+            city=city, target_date=market["target_date"], outcomes=market["outcomes"],
+            hours_since_open=market["hours_since_open"], hours_to_resolution=market["hours_to_resolution"],
+            event_id=market.get("event_id", ""), slug=market.get("slug", ""),
+            observation=get_current_observation(city) if mode == DiscoveryMode.DAY0_CAPTURE else None,
+            discovery_mode=mode.value,
+        )
+        summary["candidates"] += 1
+
+        try:
+            decisions = evaluate_candidate(candidate, conn, portfolio, clob, limits, entry_bankroll=entry_bankroll)
+            for d in decisions:
+                if d.should_trade and d.edge and d.tokens:
+                    intent = create_execution_intent(
+                        edge_context=d.edge_context,
+                        edge=d.edge,
+                        size_usd=d.size_usd,
+                        mode=mode.value,
+                        market_id=d.tokens["market_id"],
+                        token_id=d.tokens["token_id"],
+                        no_token_id=d.tokens["no_token_id"],
+                    )
+                    result = execute_intent(intent, d.edge.vwmp, d.edge.bin.label)
+                    artifact.add_trade({
+                        "decision_id": d.decision_id, "trade_id": result.trade_id, "status": result.status,
+                        "city": city.name, "target_date": candidate.target_date, "range_label": d.edge.bin.label,
+                        "direction": d.edge.direction, "edge": d.edge.edge, 
+                        "edge_source": d.edge_source or _classify_edge_source(mode, d.edge),
+                        "decision_snapshot_id": d.decision_snapshot_id, "selected_method": d.selected_method,
+                        "applied_validations": d.applied_validations,
+                    })
+                    if result.status in ("filled", "pending"):
+                        pos = _materialize_position(
+                            candidate, d, result, portfolio, city, mode,
+                            state="entered" if result.status == "filled" else "pending_tracked", 
+                            bankroll_at_entry=entry_bankroll,
+                        )
+                        add_position(portfolio, pos)
+                        portfolio_dirty = True
+                        if result.status == "filled":
+                            tracker.record_entry(pos)
+                            tracker_dirty = True
+                            summary["trades"] += 1
+                else:
+                    summary["no_trades"] += 1
+                    artifact.add_no_trade(NoTradeCase(
+                        decision_id=d.decision_id, city=city.name, target_date=candidate.target_date,
+                        range_label=d.edge.bin.label if d.edge else "", direction=d.edge.direction if d.edge else "",
+                        rejection_stage=d.rejection_stage, rejection_reasons=list(d.rejection_reasons),
+                        best_edge=d.edge.edge if d.edge else 0.0, model_prob=d.edge.p_posterior if d.edge else 0.0,
+                        market_price=d.edge.entry_price if d.edge else 0.0, timestamp=decision_time.isoformat(),
+                    ))
+        except Exception as e:
+            logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e)
+            
+    return portfolio_dirty, tracker_dirty
+
+
+def run_cycle(mode: DiscoveryMode) -> dict:
+    """Run one discovery cycle. Pure orchestration `< 50` lines."""
+    decision_time = _utcnow()
+    summary = {"mode": mode.value, "started_at": decision_time.isoformat(),
                 "monitors": 0, "exits": 0, "candidates": 0, "trades": 0, "no_trades": 0}
-    artifact = CycleArtifact(
-        mode=mode.value,
-        started_at=summary["started_at"],
-        summary=summary,
-    )
+    artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)
 
     try:
         from src.control.control_plane import process_commands
@@ -342,7 +462,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     except Exception as e:
         logger.warning("Control plane precheck failed: %s", e)
 
-    # 1. Risk precheck
+    # 1. Pipeline Initialization & Reconciliation
     risk_level = get_current_level()
     summary["risk_level"] = risk_level.value
 
@@ -358,8 +478,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         max_region_pct=settings["sizing"]["max_region_pct"],
         min_order_usd=settings["sizing"]["min_order_usd"],
     )
-    portfolio_dirty = False
-    tracker_dirty = False
+    portfolio_dirty, tracker_dirty = False, False
 
     pending_updates = _reconcile_pending_positions(portfolio, clob, tracker)
     portfolio_dirty = portfolio_dirty or pending_updates["dirty"]
@@ -380,201 +499,54 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 
-    # 2. MONITOR FIRST — protect existing value
-    from src.engine.monitor_refresh import refresh_position
-    for pos in list(portfolio.positions):
-        if pos.state == "pending_tracked":
-            continue
-        if pos.direction not in KNOWN_DIRECTIONS:
-            artifact.add_monitor_result(MonitorResult(
-                position_id=pos.trade_id,
-                fresh_prob=pos.last_monitor_prob or pos.p_posterior,
-                fresh_edge=pos.last_monitor_edge,
-                should_exit=False,
-                exit_reason="UNKNOWN_DIRECTION",
-                neg_edge_count=pos.neg_edge_count,
-            ))
-            summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
-            continue
-        try:
-            p_market, p_posterior = refresh_position(conn, clob, pos)
-            portfolio_dirty = True
-            decision = pos.evaluate_exit(current_p_posterior=p_posterior,
-                                          current_p_market=p_market)
-            artifact.add_monitor_result(MonitorResult(
-                position_id=pos.trade_id,
-                fresh_prob=p_posterior,
-                fresh_edge=pos.last_monitor_edge,
-                should_exit=decision.should_exit,
-                exit_reason=decision.reason,
-                neg_edge_count=pos.neg_edge_count,
-            ))
-            summary["monitors"] += 1
-            if decision.should_exit:
-                closed = close_position(portfolio, pos.trade_id, p_market, decision.reason)
-                if closed is not None:
-                    tracker.record_exit(closed)
-                    tracker_dirty = True
-                    summary["exits"] += 1
-                    portfolio_dirty = True
-        except Exception as e:
-            logger.error("Monitor failed for %s: %s", pos.trade_id, e)
+    # 2. MONITOR FIRST — unskippable existing position protection
+    p_dirty, t_dirty = _execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary)
+    portfolio_dirty, tracker_dirty = portfolio_dirty or p_dirty, tracker_dirty or t_dirty
 
+    # 3. Discovery Pipeline Execution Gates
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
-    exposure_gate_hit = (
-        entry_bankroll is not None
-        and entry_bankroll > 0
-        and current_heat >= limits.max_portfolio_heat_pct * 0.95
-    )
+    exposure_gate_hit = (entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95)
+    
     entries_blocked_reason = None
-    if not chain_ready:
-        entries_blocked_reason = "chain_sync_unavailable"
-    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
-        entries_blocked_reason = f"risk_level={risk_level.value}"
-    elif entry_bankroll is None:
-        entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
-    elif entry_bankroll <= 0:
-        entries_blocked_reason = "entry_bankroll_non_positive"
-    elif exposure_gate_hit:
-        entries_blocked_reason = "near_max_exposure"
+    if not chain_ready: entries_blocked_reason = "chain_sync_unavailable"
+    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED): entries_blocked_reason = f"risk_level={risk_level.value}"
+    elif entry_bankroll is None: entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
+    elif entry_bankroll <= 0: entries_blocked_reason = "entry_bankroll_non_positive"
+    elif exposure_gate_hit: entries_blocked_reason = "near_max_exposure"
 
-    # 3. Scan for new (only if GREEN and entry path is safe)
+    # 4. DISCOVERY — Add new risk only if strictly permitted
     entries_paused = is_entries_paused()
     if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:
-        params = MODE_PARAMS[mode]
-        markets = find_weather_markets(
-            min_hours_to_resolution=params.get("min_hours_to_resolution", 6),
-        )
-        # Apply mode-specific filtering
-        if "max_hours_since_open" in params:
-            markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
-        if "min_hours_since_open" in params:
-            markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
-        if "max_hours_to_resolution" in params:
-            markets = [m for m in markets if m["hours_to_resolution"] < params["max_hours_to_resolution"]]
-
-        from src.config import cities_by_name, cities_by_alias
-        for market in markets:
-            city = market.get("city")
-            if city is None:
-                continue
-            candidate = MarketCandidate(
-                city=city, target_date=market["target_date"],
-                outcomes=market["outcomes"],
-                hours_since_open=market["hours_since_open"],
-                hours_to_resolution=market["hours_to_resolution"],
-                event_id=market.get("event_id", ""),
-                slug=market.get("slug", ""),
-                observation=get_current_observation(city) if mode == DiscoveryMode.DAY0_CAPTURE else None,
-                discovery_mode=mode.value,
-            )
-            summary["candidates"] += 1
-
-            try:
-                decisions = evaluate_candidate(
-                    candidate,
-                    conn,
-                    portfolio,
-                    clob,
-                    limits,
-                    entry_bankroll=entry_bankroll,
-                )
-                for d in decisions:
-                    if d.should_trade and d.edge and d.tokens:
-                        result = execute_order(
-                            d.edge, d.size_usd, mode=mode.value,
-                            market_id=d.tokens["market_id"],
-                            token_id=d.tokens["token_id"],
-                            no_token_id=d.tokens["no_token_id"],
-                        )
-                        artifact.add_trade({
-                            "decision_id": d.decision_id,
-                            "trade_id": result.trade_id,
-                            "status": result.status,
-                            "city": city.name,
-                            "target_date": candidate.target_date,
-                            "range_label": d.edge.bin.label,
-                            "direction": d.edge.direction,
-                            "edge": d.edge.edge,
-                            "edge_source": d.edge_source or _classify_edge_source(mode, d.edge),
-                            "decision_snapshot_id": d.decision_snapshot_id,
-                            "selected_method": d.selected_method,
-                            "applied_validations": d.applied_validations,
-                        })
-                        if result.status == "filled":
-                            pos = _materialize_position(
-                                candidate, d, result, portfolio, city, mode,
-                                state="entered", bankroll_at_entry=entry_bankroll,
-                            )
-                            add_position(portfolio, pos)
-                            tracker.record_entry(pos)
-                            tracker_dirty = True
-                            summary["trades"] += 1
-                            portfolio_dirty = True
-                        elif result.status == "pending":
-                            pos = _materialize_position(
-                                candidate, d, result, portfolio, city, mode,
-                                state="pending_tracked", bankroll_at_entry=entry_bankroll,
-                            )
-                            add_position(portfolio, pos)
-                            portfolio_dirty = True
-                    else:
-                        summary["no_trades"] += 1
-                        artifact.add_no_trade(NoTradeCase(
-                            decision_id=d.decision_id,
-                            city=city.name,
-                            target_date=candidate.target_date,
-                            range_label=d.edge.bin.label if d.edge else "",
-                            direction=d.edge.direction if d.edge else "",
-                            rejection_stage=d.rejection_stage,
-                            rejection_reasons=list(d.rejection_reasons),
-                            best_edge=d.edge.edge if d.edge else 0.0,
-                            model_prob=d.edge.p_posterior if d.edge else 0.0,
-                            market_price=d.edge.entry_price if d.edge else 0.0,
-                            timestamp=datetime.now(timezone.utc).isoformat(),
-                        ))
-            except Exception as e:
-                logger.error("Evaluation failed for %s %s: %s",
-                             city.name, candidate.target_date, e)
+        p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
+        portfolio_dirty, tracker_dirty = portfolio_dirty or p_dirty, tracker_dirty or t_dirty
     else:
-        if entries_paused:
-            summary["entries_paused"] = True
+        if entries_paused: summary["entries_paused"] = True
         if entries_blocked_reason is not None:
             summary["entries_blocked_reason"] = entries_blocked_reason
-            if entries_blocked_reason == "near_max_exposure":
-                summary["near_max_exposure"] = True
+            if entries_blocked_reason == "near_max_exposure": summary["near_max_exposure"] = True
 
-    # 4. Save and record decision chain
+    # 5. Serialization and Chain Finalization
     if portfolio_dirty or summary["trades"] > 0 or summary["exits"] > 0:
         save_portfolio(portfolio)
     if tracker_dirty:
         save_tracker(tracker)
 
     artifact.completed_at = _utcnow().isoformat()
-
-    # Wire Decision Chain: store CycleArtifact to decision_log (Opus Gap 6)
     try:
         store_artifact(conn, artifact)
     except Exception as e:
         logger.warning("Decision chain recording failed: %s", e)
 
     conn.close()
-
     summary["completed_at"] = _utcnow().isoformat()
 
-    # 5. Observability: status summary + control plane
     try:
         from src.observability.status_summary import write_status
         write_status(summary)
     except Exception as e:
         logger.warning("Status summary write failed: %s", e)
-    try:
-        from src.control.control_plane import process_commands
-        process_commands()
-    except Exception as e:
-        logger.warning("Control plane processing failed: %s", e)
-
+        
     logger.info("Cycle %s: %d monitors, %d exits, %d candidates, %d trades",
                 mode.value, summary["monitors"], summary["exits"],
                 summary["candidates"], summary["trades"])

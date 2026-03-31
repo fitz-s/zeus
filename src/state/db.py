@@ -162,7 +162,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             bin_type TEXT,
             discovery_mode TEXT,
             market_hours_open REAL,
-            fill_quality REAL
+            -- Phase 2 Domain Object Snapshots (JSON flattened blobs)
+            settlement_semantics_json TEXT,
+            epistemic_context_json TEXT,
+            edge_context_json TEXT
         );
 
         -- Shadow signals for pre-trading validation
@@ -315,3 +318,39 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     if own_conn:
         conn.commit()
         conn.close()
+
+def record_shadow_attribution_trade(
+    conn: sqlite3.Connection,
+    trade_id: str,
+    market_id: str,
+    bin_label: str,
+    direction: str,
+    size_usd: float,
+    price: float,
+    p_raw: float,
+    p_posterior: float,
+    edge: float,
+    edge_source: str,
+    timestamp: str,
+    settlement_json: str = "",
+    epistemic_json: str = "",
+    edge_context_json: str = ""
+) -> None:
+    """Phase 3 Shadow Attribution: Persist new Phase 2 boundaries flattened."""
+    # Ensure backward compatibility by providing dummy values for non-null schema requirements 
+    # since not all fields are always present on initial insert.
+    conn.execute("""
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp, 
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, 
+            status, edge_source, 
+            settlement_semantics_json, epistemic_context_json, edge_context_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        market_id, bin_label, direction, size_usd, price, timestamp,
+        p_raw, p_posterior, edge, 0.0, 0.0, 0.0,
+        "filled", edge_source,
+        settlement_json, epistemic_json, edge_context_json
+    ))
+

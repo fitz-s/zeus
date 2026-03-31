@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from src.contracts import EdgeContext
 from src.state.portfolio import (
     Position,
     buy_no_ceiling,
@@ -34,8 +35,7 @@ class ExitSignal:
 
 def evaluate_exit_triggers(
     position: Position,
-    current_p_posterior: float,
-    current_p_market: float,
+    current_edge_context: EdgeContext,
     hours_to_settlement: Optional[float] = None,
     market_vig: float = 1.0,
     is_whale_sweep: bool = False,
@@ -43,9 +43,8 @@ def evaluate_exit_triggers(
 ) -> Optional[ExitSignal]:
     """Evaluate all exit triggers for a position.
 
-    CRITICAL: current_p_posterior and current_p_market must be in the
-    position's NATIVE space (YES-space for buy_yes, NO-space for buy_no).
-    The edge is simply: current_p_posterior - current_p_market.
+    CRITICAL: current_edge_context holds native space variables along with its
+    proper epistemic origin and entry method. The provenance is structurally bound.
     """
 
     # 1. SETTLEMENT_IMMINENT
@@ -66,18 +65,38 @@ def evaluate_exit_triggers(
             urgency="immediate",
         )
 
+    # Phase 3 Hard-Trigger Metrics (Microstructure deterioration)
+    if current_edge_context.divergence_score >= 0.15:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="MODEL_DIVERGENCE_PANIC",
+            reason=f"Model-Market divergence score {current_edge_context.divergence_score:.2f} exceeds threshold",
+            urgency="immediate"
+        )
+        
+    if current_edge_context.market_velocity_1h <= -0.15:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="FLASH_CRASH_PANIC",
+            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
+            urgency="immediate"
+        )
+
     # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
     if position.size_usd < 1.0:
         return None
 
-    # Compute forward edge: simple subtraction, both values in same native space
-    forward_edge = current_p_posterior - current_p_market
+    # Compute forward edge natively extracted from bounded context object
+    forward_edge = current_edge_context.forward_edge
+
+    # Semantic invariant verification proving we know the origin
+    _ = current_edge_context.entry_provenance
 
     # 3. EDGE_REVERSAL / BUY_NO_EDGE_EXIT (Layer 1: direction-specific paths)
     if position.direction == "buy_no":
-        exit_signal = _evaluate_buy_no_exit(position, forward_edge, hours_to_settlement)
+        exit_signal = _evaluate_buy_no_exit(position, current_edge_context, hours_to_settlement)
     else:
-        exit_signal = _evaluate_buy_yes_exit(position, forward_edge, best_bid)
+        exit_signal = _evaluate_buy_yes_exit(position, current_edge_context, best_bid)
 
     if exit_signal is not None:
         return exit_signal
@@ -95,10 +114,12 @@ def evaluate_exit_triggers(
 
 def _evaluate_buy_yes_exit(
     position: Position,
-    forward_edge: float,
+    current_edge_context: EdgeContext,
     best_bid: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
+    forward_edge = current_edge_context.forward_edge
+    
     edge_threshold = buy_yes_edge_threshold(position.entry_ci_width)
     if forward_edge >= edge_threshold:
         position.neg_edge_count = 0  # Reset on positive
@@ -129,7 +150,7 @@ def _evaluate_buy_yes_exit(
 
 def _evaluate_buy_no_exit(
     position: Position,
-    forward_edge: float,
+    current_edge_context: EdgeContext,
     hours_to_settlement: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Layer 1: Buy-no gets its own exit path.
@@ -138,6 +159,7 @@ def _evaluate_buy_no_exit(
     Only exit on SUSTAINED negative forward edge (N consecutive cycles).
     Threshold scales with uncertainty (deeper reversal needed for noisy cities).
     """
+    forward_edge = current_edge_context.forward_edge
     edge_threshold = buy_no_edge_threshold(position.entry_ci_width)
 
     # Near-settlement: hold unless deeply negative

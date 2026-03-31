@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import STATE_DIR, settings
-from src.contracts import HeldSideProbability, NativeSidePrice, compute_forward_edge
+from src.contracts import (
+    HeldSideProbability, 
+    NativeSidePrice, 
+    compute_forward_edge,
+    ExpiringAssumption,
+)
+from src.contracts.semantic_types import Direction, LifecycleState, ChainState, DirectionAlias
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +62,8 @@ class Position:
     cluster: str
     target_date: str
     bin_label: str
-    direction: str  # "buy_yes" | "buy_no" | "unknown" (quarantine only)
+    direction: DirectionAlias  # Forces use of Direction(Enum)
+
     unit: str = "F"  # Blueprint v2: carried, never inferred
 
     # Probability (always in held-side space — flipped exactly once at creation)
@@ -86,7 +93,7 @@ class Position:
     fill_quality: float = 0.0  # (exec_price - vwmp) / vwmp
 
     # Lifecycle state (Blueprint v2 §2)
-    state: str = "holding"  # pending_tracked | entered | holding | day0_window | settled | voided | admin_closed
+    state: str = LifecycleState.HOLDING.value
     exit_strategy: str = ""  # "buy_yes_standard" | "buy_no_conservative" (set from direction)
     order_id: str = ""
     order_status: str = ""
@@ -94,7 +101,7 @@ class Position:
     order_timeout_at: str = ""
 
     # Chain reconciliation (Blueprint v2 §5)
-    chain_state: str = "unknown"  # unknown | synced | local_only | chain_only | quarantined
+    chain_state: str = ChainState.UNKNOWN.value
     chain_shares: float = 0.0
     chain_verified_at: str = ""
 
@@ -116,9 +123,24 @@ class Position:
     exit_reason: str = ""
     admin_exit_reason: str = ""  # Separate from economic exit_reason
 
+    # JSON Object Snapshots (Phase 2 Object Persistence DTO)
+    settlement_semantics_json: Optional[str] = None
+    epistemic_context_json: Optional[str] = None
+    edge_context_json: Optional[str] = None
+
     # P&L (set on close)
     exit_price: float = 0.0
     pnl: float = 0.0
+
+    def __post_init__(self):
+        """CRITICAL: Enforce Enum strictness via coercion."""
+        if not isinstance(self.direction, Direction):
+            self.direction = Direction(self.direction)
+        if not isinstance(self.state, LifecycleState):
+            self.state = LifecycleState(self.state)
+        if not isinstance(self.chain_state, ChainState):
+            self.chain_state = ChainState(self.chain_state)
+
 
     @property
     def effective_shares(self) -> float:
@@ -618,60 +640,112 @@ def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -
     return any(p.city == city and p.bin_label == bin_label for p in state.positions)
 
 
-# HARDCODED(setting_key="exit.buy_no_scaling_factor", note_key="exit._buy_no_scaling_factor_note",
-#           tier=1, replace_after="200+ buy_no settlements",
-#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
+_V2_INTRODUCTION_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+_BUY_NO_SCALING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_scaling_factor"]),
+    fallback=1.5,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_SCALING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_scaling_factor"]),
+    fallback=1.0,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_NO_FLOOR = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_floor"]),
+    fallback=-0.03,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_NO_CEILING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_ceiling"]),
+    fallback=-0.15,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_FLOOR = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_floor"]),
+    fallback=-0.02,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_CEILING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_ceiling"]),
+    fallback=-0.10,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_CONSECUTIVE_CONFIRMS = ExpiringAssumption[int](
+    value=int(settings["exit"]["consecutive_confirmations"]),
+    fallback=2,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=365,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_NEAR_SETTLEMENT_HOURS = ExpiringAssumption[float](
+    value=float(settings["exit"]["near_settlement_hours"]),
+    fallback=48.0,
+    introduced_at=_V2_INTRODUCTION_DATE,
+    max_lifespan_days=365,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+
 def buy_no_scaling_factor() -> float:
-    return float(settings["exit"]["buy_no_scaling_factor"])
+    return _BUY_NO_SCALING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_scaling_factor", note_key="exit._buy_yes_scaling_factor_note",
-#           tier=1, replace_after="200+ buy_yes settlements",
-#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
 def buy_yes_scaling_factor() -> float:
-    return float(settings["exit"]["buy_yes_scaling_factor"])
+    return _BUY_YES_SCALING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_no_floor", note_key="exit._buy_no_floor_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge noise floor for buy_no exits")
 def buy_no_floor() -> float:
-    return float(settings["exit"]["buy_no_floor"])
+    return _BUY_NO_FLOOR.active_value
 
-
-# HARDCODED(setting_key="exit.buy_no_ceiling", note_key="exit._buy_no_ceiling_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge deep-reversal ceiling for buy_no exits")
 def buy_no_ceiling() -> float:
-    return float(settings["exit"]["buy_no_ceiling"])
+    return _BUY_NO_CEILING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_floor", note_key="exit._buy_yes_floor_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge noise floor for buy_yes exits")
 def buy_yes_floor() -> float:
-    return float(settings["exit"]["buy_yes_floor"])
+    return _BUY_YES_FLOOR.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_ceiling", note_key="exit._buy_yes_ceiling_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge deep-reversal ceiling for buy_yes exits")
 def buy_yes_ceiling() -> float:
-    return float(settings["exit"]["buy_yes_ceiling"])
+    return _BUY_YES_CEILING.active_value
 
-
-# HARDCODED(setting_key="exit.consecutive_confirmations", note_key="exit._consecutive_confirmations_note",
-#           tier=2, replace_after="500+ exit events",
-#           data_needed="1-cycle vs 2-cycle vs 3-cycle false positive rate")
 def consecutive_confirmations() -> int:
-    return int(settings["exit"]["consecutive_confirmations"])
+    return _CONSECUTIVE_CONFIRMS.active_value
 
-
-# HARDCODED(setting_key="exit.near_settlement_hours", note_key="exit._near_settlement_hours_note",
-#           tier=2, replace_after="100+ near-settlement trades per city",
-#           data_needed="per-city optimal near-settlement hold window")
 def near_settlement_hours() -> float:
-    return float(settings["exit"]["near_settlement_hours"])
+    return _NEAR_SETTLEMENT_HOURS.active_value
 
 
 def _clamp_negative_threshold(raw: float, floor: float, ceiling: float) -> float:

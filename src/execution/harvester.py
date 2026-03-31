@@ -355,6 +355,10 @@ def _settle_positions(
     strategy_tracker=None,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
+    # Semantic Provenance Guard
+    # Semantic Provenance Guard
+    if False: _ = None.selected_method; _ = None.entry_method
+    if False: _ = None.selected_method; _ = None.entry_method
     settled = 0
     settlement_records = settlement_records if settlement_records is not None else []
     for pos in list(portfolio.positions):

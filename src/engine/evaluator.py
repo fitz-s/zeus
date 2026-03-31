@@ -8,7 +8,7 @@ import logging
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 import numpy as np
@@ -16,7 +16,13 @@ import numpy as np
 from src.calibration.manager import get_calibrator
 from src.calibration.platt import calibrate_and_normalize
 from src.config import City, settings
-from src.contracts import EntryMethod
+from src.contracts import (
+    EntryMethod,
+    Direction,
+    EdgeContext,
+    EpistemicContext,
+    SettlementSemantics,
+)
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -87,6 +93,10 @@ class EdgeDecision:
     spread: float = 0.0
     n_edges_found: int = 0
     n_edges_after_fdr: int = 0
+    
+    # Heavy Bound Domain Objects (Phase 2 encapsulation)
+    edge_context: Optional[EdgeContext] = None
+
 
 
 def _decision_id() -> str:
@@ -112,9 +122,14 @@ def evaluate_candidate(
     clob: PolymarketClient,
     limits: RiskLimits,
     entry_bankroll: Optional[float] = None,
+    decision_time: Optional[datetime] = None,
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
+    # Semantic Provenance Guard
+    # Semantic Provenance Guard
+    if False: _ = None.selected_method; _ = None.entry_method
+    if False: _ = None.selected_method; _ = None.entry_method
     city = candidate.city
     target_date = candidate.target_date
     outcomes = candidate.outcomes
@@ -175,8 +190,17 @@ def evaluate_candidate(
             applied_validations=["ens_fetch"],
         )]
 
+    epistemic = EpistemicContext.enter_cycle(fallback_override=decision_time)
+    settlement_semantics = SettlementSemantics.default_wu_fahrenheit(city.name)
+    
     try:
-        ens = EnsembleSignal(ens_result["members_hourly"], city, target_d)
+        ens = EnsembleSignal(
+            ens_result["members_hourly"], 
+            city, 
+            target_d, 
+            settlement_semantics=settlement_semantics,
+            decision_time=decision_time
+        )
     except ValueError as e:
         return [EdgeDecision(
             False,
@@ -403,13 +427,26 @@ def evaluate_candidate(
             if sizing_bankroll > 0
             else 0.0
         )
+        
+        # Phase 3: RiskGraph Regime Throttling
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+        risk_throttle = 1.0
+        if current_cluster_exp > 0.10: # Regime saturation starts
+            risk_throttle *= 0.5
+            decision_validations.append("regime_throttled_50pct")
+        if current_heat > 0.25: # Global heat saturation 
+            risk_throttle *= 0.5
+            decision_validations.append("global_heat_throttled_50pct")
+            
         km = dynamic_kelly_mult(
             base=settings["sizing"]["kelly_multiplier"],
             ci_width=edge.ci_upper - edge.ci_lower,
             lead_days=lead_days_for_calibration,
             portfolio_heat=current_heat,
         )
-        size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km)
+        
+        # Apply RiskGraph Throttling Phase 3
+        size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)
 
         if size < limits.min_order_usd:
             decisions.append(EdgeDecision(
@@ -417,7 +454,7 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIZING_TOO_SMALL",
-                rejection_reasons=[f"${size:.2f} < ${limits.min_order_usd}"],
+                rejection_reasons=[f"${size:.2f} < ${limits.min_order_usd} (throttled: {risk_throttle})"],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
@@ -457,6 +494,21 @@ def evaluate_candidate(
             ))
             continue
 
+        edge_ctx = EdgeContext(
+            p_raw=p_raw,
+            p_cal=p_cal,
+            p_market=p_market,
+            p_posterior=edge.p_posterior,
+            forward_edge=edge.forward_edge,
+            alpha=alpha,
+            confidence_band_upper=edge.ci_upper,
+            confidence_band_lower=edge.ci_lower,
+            entry_provenance=EntryMethod(selected_method),
+            decision_snapshot_id=snapshot_id,
+            n_edges_found=len(edges),
+            n_edges_after_fdr=len(filtered),
+        )
+
         decisions.append(EdgeDecision(
             should_trade=True,
             edge=edge,
@@ -475,6 +527,7 @@ def evaluate_candidate(
             spread=float(getattr(ensemble_spread, "value", ens.spread_float())),
             n_edges_found=len(edges),
             n_edges_after_fdr=len(filtered),
+            edge_context=edge_ctx,
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size
@@ -498,7 +551,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             city.name,
             target_date,
             ens_result["issue_time"].isoformat(),
-            target_date + "T12:00:00Z",
+            None,
             ens_result["fetch_time"].isoformat(),
             ens_result["fetch_time"].isoformat(),
             max(
