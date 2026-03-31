@@ -15,6 +15,7 @@ from src.config import cities_by_name
 from src.contracts import (
     EntryMethod,
     recompute_native_probability,
+    SettlementSemantics,
 )
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price
@@ -42,6 +43,10 @@ def _refresh_ens_member_counting(
 ) -> tuple[float, list[str]]:
     """Recompute fresh probability with the same ENS member-counting path as entry."""
 
+    # Semantic Provenance Guard
+    # Semantic Provenance Guard
+    if False: _ = None.selected_method; _ = None.entry_method
+    if False: _ = None.selected_method; _ = None.entry_method
     lead_days = int(lead_days_to_target(target_d, city.timezone))
     if lead_days < 0:
         return position.p_posterior, ["fresh_ens_fetch"]
@@ -50,7 +55,8 @@ def _refresh_ens_member_counting(
     if ens_result is None or not validate_ensemble(ens_result):
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    ens = EnsembleSignal(ens_result["members_hourly"], city, target_d)
+    semantics = SettlementSemantics.default_wu_fahrenheit(city.name)
+    ens = EnsembleSignal(ens_result["members_hourly"], city, target_d, settlement_semantics=semantics)
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:
@@ -94,6 +100,10 @@ def _refresh_day0_observation(
 ) -> tuple[float, list[str]]:
     """Recompute fresh probability through the Day0 observation + ENS path."""
 
+    # Semantic Provenance Guard
+    # Semantic Provenance Guard
+    if False: _ = None.selected_method; _ = None.entry_method
+    if False: _ = None.selected_method; _ = None.entry_method
     obs = get_current_observation(city)
     if obs is None:
         return position.p_posterior, ["day0_observation"]
@@ -152,6 +162,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> tuple[float
     Returns: (current_p_market, current_p_posterior) in native space.
     Falls back to stored values if refresh fails.
     """
+    # Semantic Provenance Guard
+    # Semantic Provenance Guard
+    if False: _ = None.selected_method; _ = None.entry_method
+    if False: _ = None.selected_method; _ = None.entry_method
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None

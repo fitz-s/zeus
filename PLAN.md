@@ -58,13 +58,32 @@ Use the Zeus docs to extract the system's non-negotiable architectural laws, the
   - Files: `PLAN.md`
   - What: Carry the non-negotiable Zeus principles into a compact-safe artifact so future turns do not drift back toward signal-heavy / lifecycle-light thinking.
 
-- [ ] 3. Map doctrine to implementation workstreams
+- [x] 3. Map doctrine to implementation workstreams
   - Files: `PLAN.md`
   - What: Turn the doctrine into concrete workstreams around position identity, truth hierarchy, provenance, invariant testing, and fail-closed runtime behavior.
 
-- [ ] 4. Keep Codex execution strategy separate
+- [x] 4. Keep Codex execution strategy separate
   - Files: `PLAN.md`
   - What: If agent-team workflow guidance is needed later, record it as Codex operating practice rather than Zeus architecture.
+
+## Workstreams
+Based on the consolidated doctrine, the following concrete implementation workstreams are established.
+
+**Workstream 1: Data Provenance & Truth Hierarchy**
+- Ensure all ETL (`etl_*.py`) and snapshot insertions stamp immutable `decision_snapshot_id` references that the `Harvester` and `Evaluator` strictly consume.
+- Ensure any localized mismatch directly defaults to the authoritative chain state (Polymarket), utilizing `QUARANTINED` status if needed.
+
+**Workstream 2: Per-Strategy Edge Tracking & Degradation**
+- Establish distinct schemas and metrics components in `strategy_tracker.py` for 'Settlement Capture', 'Shoulder Sell', 'Center Buy', and 'Opening Inertia'.
+- Wire edge compression logic up to `RiskGuard` to dial down capital limits on a per-strategy basis when alpha decays.
+
+**Workstream 3: Fail-Closed Day 0 Settlement Capture**
+- Formally inject the Day0 3-minute check windows within `CycleRunner` orchestrated sweeps, bypassing the regular ENS delays safely, solely for observation reversals.
+
+## Codex Operative Guidelines (Execution Strategy)
+*This is explicitly separated from Zeus product architecture.*
+- **Delegation**: When delegating to subagents to implement workstreams (e.g., building out Day0 components), pass specific modules and interfaces (like `tests/test_cross_module_invariants.py` and `contracts/`) rather than broad "signal research" directives.
+- **Agent Roles**: Data generation, execution lifecycle, and diagnostic monitoring (via `healthcheck.py`) should remain segmented by agent role so that failures correspond to specific domains.
 
 ## Risks / Open Questions
 - Any future planning must keep a hard boundary between product architecture and delivery workflow; mixing them distorts both.
