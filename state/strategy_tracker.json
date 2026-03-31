@@ -1,0 +1,77 @@
+{
+  "strategies": {
+    "settlement_capture": {
+      "trades": []
+    },
+    "shoulder_sell": {
+      "trades": []
+    },
+    "center_buy": {
+      "trades": []
+    },
+    "opening_inertia": {
+      "trades": [
+        {
+          "trade_id": "f4e0d2a6-b8a",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 25.57,
+          "status": "exited",
+          "entered_at": "2026-03-30T09:53:02.731857+00:00",
+          "edge": 0.19980458827499237,
+          "direction": "buy_no",
+          "city": "NYC",
+          "target_date": "2026-04-02"
+        },
+        {
+          "trade_id": "b2086cca-a1a",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 22.84,
+          "status": "exited",
+          "entered_at": "2026-03-30T09:54:04.374569+00:00",
+          "edge": 0.17900984135132947,
+          "direction": "buy_no",
+          "city": "Atlanta",
+          "target_date": "2026-04-02"
+        },
+        {
+          "trade_id": "836270b8-2cc",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 22.16,
+          "status": "exited",
+          "entered_at": "2026-03-30T09:56:00.587555+00:00",
+          "edge": 0.07099875119360965,
+          "direction": "buy_no",
+          "city": "Austin",
+          "target_date": "2026-04-02"
+        },
+        {
+          "trade_id": "8d9071fa-fab",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 164.44,
+          "status": "exited",
+          "entered_at": "2026-03-30T12:05:07.977336+00:00",
+          "edge": 0.6402080802540643,
+          "direction": "buy_no",
+          "city": "San Francisco",
+          "target_date": "2026-04-01"
+        },
+        {
+          "trade_id": "eebdb911-99e",
+          "strategy": "",
+          "edge_source": "opening_inertia",
+          "pnl": 8.99,
+          "status": "exited",
+          "entered_at": "2026-03-30T12:06:20.496538+00:00",
+          "edge": 0.2678747340792591,
+          "direction": "buy_no",
+          "city": "Dallas",
+          "target_date": "2026-04-02"
+        }
+      ]
+    }
+  }
+}

@@ -20,6 +20,7 @@ from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
+from src.engine.time_context import lead_days_to_target
 from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
@@ -41,7 +42,7 @@ def _refresh_ens_member_counting(
 ) -> tuple[float, list[str]]:
     """Recompute fresh probability with the same ENS member-counting path as entry."""
 
-    lead_days = (target_d - date.today()).days
+    lead_days = int(lead_days_to_target(target_d, city.timezone))
     if lead_days < 0:
         return position.p_posterior, ["fresh_ens_fetch"]
 
@@ -157,6 +158,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> tuple[float
         else pos.entry_price
     )
     current_p_posterior = pos.p_posterior
+
+    if pos.direction not in {"buy_yes", "buy_no"}:
+        logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
+        return current_p_market, current_p_posterior
 
     # 1. Refresh market price
     market_refreshed = False
