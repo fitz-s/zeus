@@ -29,17 +29,17 @@ NYC = City(
 
 # Standard 11-bin structure for NYC winter
 NYC_BINS = [
-    Bin(low=None, high=32, label="32°F or below"),
-    Bin(low=33, high=34, label="33-34°F"),
-    Bin(low=35, high=36, label="35-36°F"),
-    Bin(low=37, high=38, label="37-38°F"),
-    Bin(low=39, high=40, label="39-40°F"),
-    Bin(low=41, high=42, label="41-42°F"),
-    Bin(low=43, high=44, label="43-44°F"),
-    Bin(low=45, high=46, label="45-46°F"),
-    Bin(low=47, high=48, label="47-48°F"),
-    Bin(low=49, high=50, label="49-50°F"),
-    Bin(low=51, high=None, label="51°F or higher"),
+    Bin(low=None, high=32, label="32°F or below", unit="F"),
+    Bin(low=33, high=34, label="33-34°F", unit="F"),
+    Bin(low=35, high=36, label="35-36°F", unit="F"),
+    Bin(low=37, high=38, label="37-38°F", unit="F"),
+    Bin(low=39, high=40, label="39-40°F", unit="F"),
+    Bin(low=41, high=42, label="41-42°F", unit="F"),
+    Bin(low=43, high=44, label="43-44°F", unit="F"),
+    Bin(low=45, high=46, label="45-46°F", unit="F"),
+    Bin(low=47, high=48, label="47-48°F", unit="F"),
+    Bin(low=49, high=50, label="49-50°F", unit="F"),
+    Bin(low=51, high=None, label="51°F or higher", unit="F"),
 ]
 
 # Minimal valid settlement semantics for NYC (WU integer °F rounding)

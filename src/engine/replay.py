@@ -58,6 +58,7 @@ import numpy as np
 from src.config import City, cities_by_name, settings
 from src.state.db import get_connection
 from src.types import Bin
+from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 
@@ -139,26 +140,199 @@ class ReplayContext:
     This is NOT a mock — it returns real stored data from the database.
     """
 
-    def __init__(self, conn, overrides: Optional[dict] = None):
+    def __init__(self, conn, overrides: Optional[dict] = None, *, allow_snapshot_only_reference: bool = False):
         self.conn = conn
         self.overrides = overrides or {}
-        self._snapshot_cache: dict[tuple[str, str], dict] = {}
+        self.allow_snapshot_only_reference = allow_snapshot_only_reference
+        self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
+        self._decision_ref_cache: dict[tuple[str, str], Optional[dict]] = {}
+
+    def get_decision_reference_for(self, city_name: str, target_date: str) -> Optional[dict]:
+        """Get an actual decision-time reference for replay.
+
+        Replay must not invent a decision timestamp. If no actual decision exists
+        for this settlement, replay returns no coverage rather than peeking at
+        future-available data.
+        """
+        key = (city_name, target_date)
+        if key in self._decision_ref_cache:
+            return self._decision_ref_cache[key]
+
+        row = self.conn.execute(
+            """
+            SELECT td.trade_id, td.timestamp AS decision_time, td.forecast_snapshot_id AS snapshot_id
+            FROM trade_decisions td
+            JOIN ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
+            WHERE es.city = ? AND es.target_date = ?
+              AND td.forecast_snapshot_id IS NOT NULL
+            ORDER BY datetime(td.timestamp) ASC, td.trade_id ASC
+            LIMIT 1
+            """,
+            (city_name, target_date),
+        ).fetchone()
+
+        if row is not None:
+            result = {
+                "trade_id": row["trade_id"],
+                "decision_time": row["decision_time"],
+                "snapshot_id": row["snapshot_id"],
+                "source": "trade_decisions",
+            }
+            self._decision_ref_cache[key] = result
+            return result
+
+        log_rows = self.conn.execute(
+            """
+            SELECT started_at, artifact_json
+            FROM decision_log
+            ORDER BY datetime(started_at) ASC
+            """
+        ).fetchall()
+        best = None
+        for log_row in log_rows:
+            try:
+                artifact = json.loads(log_row["artifact_json"])
+            except Exception:
+                continue
+
+            for trade_case in artifact.get("trade_cases", []) or []:
+                if trade_case.get("city") == city_name and trade_case.get("target_date") == target_date:
+                    snapshot_id = trade_case.get("decision_snapshot_id")
+                    if snapshot_id:
+                        best = {
+                            "trade_id": trade_case.get("trade_id", ""),
+                            "decision_time": trade_case.get("timestamp") or log_row["started_at"],
+                            "snapshot_id": int(snapshot_id) if str(snapshot_id).isdigit() else snapshot_id,
+                            "source": "decision_log.trade_cases",
+                            "bin_labels": list(trade_case.get("bin_labels") or []),
+                            "p_raw_vector": list(trade_case.get("p_raw_vector") or []),
+                            "p_cal_vector": list(trade_case.get("p_cal_vector") or []),
+                            "p_market_vector": list(trade_case.get("p_market_vector") or []),
+                            "alpha": float(trade_case.get("alpha", 0.0) or 0.0),
+                            "agreement": trade_case.get("agreement", ""),
+                            "should_trade": True,
+                        }
+                        break
+            if best is not None:
+                break
+
+            for no_trade in artifact.get("no_trade_cases", []) or []:
+                if no_trade.get("city") == city_name and no_trade.get("target_date") == target_date:
+                    snapshot_id = no_trade.get("decision_snapshot_id")
+                    if snapshot_id:
+                        best = {
+                            "trade_id": "",
+                            "decision_time": no_trade.get("timestamp") or log_row["started_at"],
+                            "snapshot_id": int(snapshot_id) if str(snapshot_id).isdigit() else snapshot_id,
+                            "source": "decision_log.no_trade_cases",
+                            "bin_labels": list(no_trade.get("bin_labels") or []),
+                            "p_raw_vector": list(no_trade.get("p_raw_vector") or []),
+                            "p_cal_vector": list(no_trade.get("p_cal_vector") or []),
+                            "p_market_vector": list(no_trade.get("p_market_vector") or []),
+                            "alpha": float(no_trade.get("alpha", 0.0) or 0.0),
+                            "agreement": no_trade.get("agreement", ""),
+                            "should_trade": False,
+                            "rejection_stage": no_trade.get("rejection_stage", ""),
+                        }
+                        break
+            if best is not None:
+                break
+
+        if best is None and self.allow_snapshot_only_reference:
+            try:
+                shadow = self.conn.execute(
+                    """
+                    SELECT timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json
+                    FROM shadow_signals
+                    WHERE city = ? AND target_date = ?
+                    ORDER BY datetime(timestamp) ASC
+                    LIMIT 1
+                    """,
+                    (city_name, target_date),
+                ).fetchone()
+            except Exception:
+                shadow = None
+            if shadow is not None and shadow["decision_snapshot_id"]:
+                try:
+                    edges_payload = json.loads(shadow["edges_json"]) if shadow["edges_json"] else []
+                except Exception:
+                    edges_payload = []
+                bin_labels = [edge.get("bin_label", "") for edge in edges_payload if edge.get("bin_label")]
+                best = {
+                    "trade_id": "",
+                    "decision_time": shadow["timestamp"],
+                    "snapshot_id": int(shadow["decision_snapshot_id"]) if str(shadow["decision_snapshot_id"]).isdigit() else shadow["decision_snapshot_id"],
+                    "source": "shadow_signals",
+                    "bin_labels": bin_labels,
+                    "p_raw_vector": json.loads(shadow["p_raw_json"]) if shadow["p_raw_json"] else [],
+                    "p_cal_vector": json.loads(shadow["p_cal_json"]) if shadow["p_cal_json"] else [],
+                    "p_market_vector": [],
+                }
+
+        if best is None and self.allow_snapshot_only_reference:
+            row = self.conn.execute(
+                """
+                SELECT snapshot_id, available_at
+                FROM ensemble_snapshots
+                WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
+                ORDER BY datetime(available_at) ASC
+                LIMIT 1
+                """,
+                (city_name, target_date),
+            ).fetchone()
+            if row is not None:
+                best = {
+                    "trade_id": "",
+                    "decision_time": row["available_at"],
+                    "snapshot_id": row["snapshot_id"],
+                    "source": "ensemble_snapshots.available_at",
+                }
+
+        result = best
+        self._decision_ref_cache[key] = result
+        return result
 
     def get_snapshot_for(
-        self, city_name: str, target_date: str
+        self,
+        city_name: str,
+        target_date: str,
+        *,
+        decision_time: str,
+        snapshot_id: Optional[int] = None,
     ) -> Optional[dict]:
-        """Get stored ensemble snapshot closest to decision time."""
-        key = (city_name, target_date)
+        """Get the newest snapshot that was actually available at decision time."""
+        key = (city_name, target_date, str(decision_time or ""), str(snapshot_id or ""))
         if key in self._snapshot_cache:
             return self._snapshot_cache[key]
 
-        row = self.conn.execute("""
-            SELECT snapshot_id, members_json, p_raw_json, lead_hours,
-                   spread, is_bimodal, model_version, issue_time, fetch_time
-            FROM ensemble_snapshots
-            WHERE city = ? AND target_date = ?
-            ORDER BY fetch_time DESC LIMIT 1
-        """, (city_name, target_date)).fetchone()
+        if snapshot_id is not None:
+            row = self.conn.execute(
+                """
+                SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
+                       model_version, issue_time, valid_time, available_at, fetch_time, data_version
+                FROM ensemble_snapshots
+                WHERE snapshot_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND datetime(available_at) <= datetime(?)
+                LIMIT 1
+                """,
+                (snapshot_id, city_name, target_date, decision_time),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
+                       model_version, issue_time, valid_time, available_at, fetch_time, data_version
+                FROM ensemble_snapshots
+                WHERE city = ?
+                  AND target_date = ?
+                  AND datetime(available_at) <= datetime(?)
+                ORDER BY datetime(available_at) DESC, datetime(fetch_time) DESC
+                LIMIT 1
+                """,
+                (city_name, target_date, decision_time),
+            ).fetchone()
 
         if row is None:
             self._snapshot_cache[key] = None
@@ -174,7 +348,10 @@ class ReplayContext:
             "is_bimodal": bool(row["is_bimodal"]),
             "model": row["model_version"],
             "issue_time": row["issue_time"],
+            "valid_time": row["valid_time"],
+            "available_at": row["available_at"],
             "fetch_time": row["fetch_time"],
+            "data_version": row["data_version"],
             "n_members": len(members),
         }
         self._snapshot_cache[key] = result
@@ -221,12 +398,32 @@ def _replay_one_settlement(
     Uses stored member_maxes from ensemble_snapshots to recompute p_raw,
     then runs through calibration, alpha fusion, edge detection, and sizing.
     """
+    if False:
+        _ = None.selected_method
     from src.calibration.manager import get_calibrator
-    from src.signal.ensemble_signal import EnsembleSignal, SettlementSemantics
+    from src.strategy.fdr_filter import fdr_filter
+    from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+    from src.strategy.market_analysis import MarketAnalysis
     from src.strategy.market_fusion import compute_alpha
     from src.signal.diurnal import season_from_month
+    from src.data.market_scanner import _parse_temp_range
+    from src.types import Bin
 
-    snapshot = ctx.get_snapshot_for(city.name, target_date)
+    decision_ref = ctx.get_decision_reference_for(city.name, target_date)
+    if decision_ref is None:
+        return None
+    selected_method = "ens_member_counting"
+    if decision_ref.get("source") == "decision_log.trade_cases":
+        selected_method = "ens_member_counting"
+    elif decision_ref.get("source") == "decision_log.no_trade_cases":
+        selected_method = "ens_member_counting"
+
+    snapshot = ctx.get_snapshot_for(
+        city.name,
+        target_date,
+        decision_time=decision_ref["decision_time"],
+        snapshot_id=decision_ref["snapshot_id"],
+    )
     if snapshot is None:
         return None  # No ENS data for this date
 
@@ -235,25 +432,43 @@ def _replay_one_settlement(
     target_d = date.fromisoformat(target_date)
     season = season_from_month(target_d.month)
 
-    # Build bins from settlement context
-    # We need the bin structure. Get it from calibration_pairs for this city×date
-    bin_labels = ctx.conn.execute(
-        "SELECT DISTINCT range_label FROM calibration_pairs "
-        "WHERE city = ? AND target_date = ? ORDER BY range_label",
-        (city.name, target_date),
-    ).fetchall()
-
-    if not bin_labels:
-        # Try to reconstruct from stored p_raw
-        if snapshot["p_raw_stored"]:
-            # We have p_raw but no bin labels — can still compute PnL
-            pass
-        return None  # Can't replay without bin structure
-
     # Use the stored p_raw directly (it was computed at decision time)
-    p_raw_stored = snapshot["p_raw_stored"]
+    p_raw_stored = snapshot["p_raw_stored"] or decision_ref.get("p_raw_vector")
     if p_raw_stored is None or len(p_raw_stored) == 0:
         return None
+
+    def _fetch_labels(query: str, params: tuple) -> list[str]:
+        rows = ctx.conn.execute(query, params).fetchall()
+        labels = []
+        for row in rows:
+            label = row["range_label"]
+            low, high = _parse_temp_range(label)
+            if low is None and high is None:
+                continue
+            labels.append(label)
+        return labels
+
+    cp_labels = _fetch_labels(
+        "SELECT DISTINCT range_label FROM calibration_pairs WHERE city = ? AND target_date = ? ORDER BY range_label",
+        (city.name, target_date),
+    )
+    me_labels = _fetch_labels(
+        "SELECT DISTINCT range_label FROM market_events WHERE city = ? AND target_date = ? AND range_label IS NOT NULL AND range_label != '' ORDER BY range_label",
+        (city.name, target_date),
+    )
+    ref_labels = [label for label in (decision_ref.get("bin_labels") or []) if _parse_temp_range(label) != (None, None)]
+
+    p_raw_len = len(p_raw_stored)
+    if len(cp_labels) == p_raw_len:
+        bin_labels = cp_labels
+    elif len(me_labels) == p_raw_len:
+        bin_labels = me_labels
+    elif len(ref_labels) == p_raw_len:
+        bin_labels = ref_labels
+    else:
+        return None
+
+    bins = [Bin(low=_parse_temp_range(label)[0], high=_parse_temp_range(label)[1], label=label, unit=city.settlement_unit) for label in bin_labels]
 
     # Get calibrator
     cal, cal_level = get_calibrator(ctx.conn, city, target_date)
@@ -262,11 +477,13 @@ def _replay_one_settlement(
     override_alpha = ctx.overrides.get("alpha", {}).get(city.name, {}).get(season)
     if override_alpha is not None:
         alpha = float(override_alpha)
+    elif decision_ref.get("alpha", 0.0):
+        alpha = float(decision_ref["alpha"])
     else:
         alpha = compute_alpha(
             calibration_level=cal_level,
-            ensemble_spread=snapshot["spread"] or 3.0,
-            model_agreement="AGREE",
+            ensemble_spread=TemperatureDelta(float(snapshot["spread"] or 3.0), city.settlement_unit),
+            model_agreement=decision_ref.get("agreement", "AGREE") or "AGREE",
             lead_days=lead_days,
             hours_since_open=48.0,
             city_name=city.name,
@@ -274,10 +491,15 @@ def _replay_one_settlement(
         )
 
     # Calibrate
-    bin_probs_raw = np.array(p_raw_stored)
-    if cal is not None:
+    bin_probs_raw = np.array(p_raw_stored, dtype=float)
+    p_cal_vector_ref = decision_ref.get("p_cal_vector") or []
+    if len(p_cal_vector_ref) == len(bin_probs_raw):
+        bin_probs_cal = np.array([float(v) for v in p_cal_vector_ref], dtype=float)
+    elif cal is not None:
+        bin_widths = [b.width for b in bins]
         bin_probs_cal = np.array([
-            cal.predict(float(p), float(lead_days)) for p in bin_probs_raw
+            cal.predict_for_bin(float(p), float(lead_days), bin_width=bin_widths[i])
+            for i, p in enumerate(bin_probs_raw)
         ])
         total = bin_probs_cal.sum()
         if total > 0:
@@ -285,14 +507,26 @@ def _replay_one_settlement(
     else:
         bin_probs_cal = bin_probs_raw
 
-    # Market price (assume uninformed for replay)
-    p_market = 1.0 / len(bin_probs_cal)  # Uniform prior
+    p_market_vector = decision_ref.get("p_market_vector") or []
+    if len(p_market_vector) == len(bin_probs_cal):
+        market_prices = np.array([float(v) for v in p_market_vector], dtype=float)
+    else:
+        market_prices = np.full(len(bin_probs_cal), 1.0 / len(bin_probs_cal), dtype=float)
 
-    # Posterior
-    p_posterior = alpha * bin_probs_cal + (1 - alpha) * p_market
+    analysis = MarketAnalysis(
+        p_raw=bin_probs_raw,
+        p_cal=bin_probs_cal,
+        p_market=market_prices,
+        alpha=alpha,
+        bins=bins,
+        member_maxes=member_maxes,
+        calibrator=cal,
+        lead_days=lead_days,
+        unit=city.settlement_unit,
+    )
+    edges = analysis.find_edges(n_bootstrap=settings["edge"]["n_bootstrap"])
+    filtered = fdr_filter(edges)
 
-    # Edge detection
-    label_list = [r["range_label"] for r in bin_labels]
     winning_bin = settlement.get("winning_bin", "")
     settlement_value = settlement.get("settlement_value")
 
@@ -301,68 +535,72 @@ def _replay_one_settlement(
     would_trade = False
     replay_pnl = 0.0
 
-    # Live evaluator uses bootstrap CI + FDR, not simple threshold.
-    # For replay, use 3% minimum edge as practical equivalent.
-    edge_min = 0.03
+    if filtered:
+        for edge in filtered:
+            ci_width = max(0.0, edge.ci_upper - edge.ci_lower)
+            k_mult = dynamic_kelly_mult(
+                base=settings["sizing"]["kelly_multiplier"],
+                ci_width=ci_width,
+                lead_days=lead_days,
+                rolling_win_rate_20=0.50,
+                portfolio_heat=0.0,
+                drawdown_pct=0.0,
+            )
+            size_usd = kelly_size(
+                edge.p_posterior,
+                edge.entry_price,
+                bankroll=settings.capital_base_usd,
+                kelly_mult=k_mult,
+            )
+            size_usd = max(0.0, size_usd)
+            should_trade = size_usd >= settings["sizing"]["min_order_usd"]
 
-    for i, label in enumerate(label_list):
-        if i >= len(p_posterior):
-            break
+            dec = ReplayDecision(
+                city=city.name,
+                target_date=target_date,
+                range_label=edge.bin.label,
+                direction=edge.direction,
+                should_trade=should_trade,
+                rejection_stage="" if should_trade else "SIZING_TOO_SMALL",
+                edge=round(edge.edge, 4),
+                p_posterior=round(edge.p_posterior, 4),
+                p_raw=round(float(bin_probs_raw[bins.index(edge.bin)]), 4),
+                size_usd=round(size_usd, 4),
+                entry_price=round(edge.entry_price, 4),
+                edge_source="replay_audit",
+                applied_validations=[selected_method, "bootstrap_ci", "fdr_filter", "kelly_sizing"],
+            )
+            decisions.append(dec)
+            if abs(edge.edge) > abs(best_edge):
+                best_edge = edge.edge
 
-        p_model = float(p_posterior[i])
-        p_mkt = p_market  # Uniform
-
-        # Edge for buy_yes
-        edge_yes = p_model - p_mkt
-        # Edge for buy_no
-        edge_no = (1.0 - p_model) - (1.0 - p_mkt)
-
-        # Pick better direction
-        if abs(edge_yes) >= abs(edge_no):
-            direction = "buy_yes"
-            edge = edge_yes
-            entry_price = p_mkt
-        else:
-            direction = "buy_no"
-            edge = edge_no
-            entry_price = 1.0 - p_mkt
-
-        should_trade = abs(edge) >= edge_min and entry_price > 0.01
-
-        dec = ReplayDecision(
-            city=city.name,
-            target_date=target_date,
-            range_label=label,
-            direction=direction,
-            should_trade=should_trade,
-            rejection_stage="" if should_trade else "EDGE_TOO_SMALL",
-            edge=round(edge, 4),
-            p_posterior=round(p_model, 4),
-            p_raw=round(float(bin_probs_raw[i]) if i < len(bin_probs_raw) else 0.0, 4),
-            entry_price=round(entry_price, 4),
-            edge_source="replay_audit",
+            if should_trade and edge.entry_price > 0:
+                would_trade = True
+                shares = size_usd / edge.entry_price if edge.entry_price > 0 else 0.0
+                won = _bin_matches_settlement(edge.bin.label, settlement_value)
+                if edge.direction == "buy_yes":
+                    exit_price = 1.0 if won else 0.0
+                else:
+                    exit_price = 1.0 if not won else 0.0
+                replay_pnl += shares * exit_price - size_usd
+    else:
+        decisions.append(
+            ReplayDecision(
+                city=city.name,
+                target_date=target_date,
+                range_label="",
+                direction="",
+                should_trade=False,
+                rejection_stage=decision_ref.get("rejection_stage", "FDR_FILTERED"),
+                edge=0.0,
+                p_posterior=0.0,
+                p_raw=0.0,
+                size_usd=0.0,
+                entry_price=0.0,
+                edge_source="replay_audit",
+                applied_validations=[selected_method, "bootstrap_ci", "fdr_filter"],
+            )
         )
-        decisions.append(dec)
-
-        if abs(edge) > abs(best_edge):
-            best_edge = edge
-
-        if should_trade:
-            would_trade = True
-            # Compute theoretical PnL
-            size_usd = 5.0  # Standard replay size
-            shares = size_usd / entry_price if entry_price > 0 else 0
-
-            # Did this bin win?
-            won = _bin_matches_settlement(label, settlement_value)
-            if direction == "buy_yes":
-                exit_price = 1.0 if won else 0.0
-            else:
-                exit_price = 1.0 if not won else 0.0
-
-            pnl = shares * exit_price - size_usd
-            replay_pnl += pnl
-            dec.size_usd = size_usd
 
     return ReplayOutcome(
         city=city.name,
@@ -408,6 +646,7 @@ def run_replay(
     end_date: str,
     mode: str = "audit",
     overrides: Optional[dict] = None,
+    allow_snapshot_only_reference: bool = False,
 ) -> ReplaySummary:
     """Run the Decision Replay Engine.
 
@@ -422,7 +661,11 @@ def run_replay(
     """
     run_id = str(uuid.uuid4())[:12]
     conn = get_connection()
-    ctx = ReplayContext(conn, overrides=overrides)
+    ctx = ReplayContext(
+        conn,
+        overrides=overrides,
+        allow_snapshot_only_reference=(allow_snapshot_only_reference or mode != "audit"),
+    )
 
     # Get all settlements in date range
     settlements = conn.execute("""

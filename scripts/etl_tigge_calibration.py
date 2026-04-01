@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.calibration.manager import season_from_date, bucket_key, CLUSTERS, SEASONS
 from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import cities_by_name
+from src.contracts import SettlementSemantics
 from src.data.market_scanner import _parse_temp_range
 from src.state.db import get_connection, init_schema
 
@@ -120,7 +121,7 @@ def run_etl() -> dict:
                 continue
 
             values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
-            values_int = np.round(values).astype(int)
+            values_measured = SettlementSemantics.for_city(city).round_values(values)
 
             # Store ensemble snapshot
             conn.execute("""
@@ -168,11 +169,11 @@ def run_etl() -> dict:
             for i, (label, low, high) in enumerate(bins):
                 # Compute P_raw for this bin
                 if low is None and high is not None:
-                    p_raw = float(np.sum(values_int <= high)) / 51
+                    p_raw = float(np.sum(values_measured <= high)) / 51
                 elif high is None and low is not None:
-                    p_raw = float(np.sum(values_int >= low)) / 51
+                    p_raw = float(np.sum(values_measured >= low)) / 51
                 elif low is not None and high is not None:
-                    p_raw = float(np.sum((values_int >= low) & (values_int <= high))) / 51
+                    p_raw = float(np.sum((values_measured >= low) & (values_measured <= high))) / 51
                 else:
                     continue
 

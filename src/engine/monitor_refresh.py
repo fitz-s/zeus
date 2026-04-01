@@ -67,7 +67,11 @@ def _refresh_ens_member_counting(
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:
-        p_cal_yes = cal.predict(p_raw_single, float(lead_days))
+        p_cal_yes = cal.predict_for_bin(
+            p_raw_single,
+            float(lead_days),
+            bin_width=single_bin[0].width,
+        )
         applied = ["fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
     else:
         p_cal_yes = p_raw_single
@@ -131,22 +135,40 @@ def _refresh_day0_observation(
     obs = get_current_observation(city)
     if obs is None:
         return position.p_posterior, ["day0_observation"]
+    if not obs.get("observation_time"):
+        return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
 
     ens_result = fetch_ensemble(city, forecast_days=2)
     if ens_result is None or not validate_ensemble(ens_result):
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
+
+    low, high = _parse_temp_range(position.bin_label)
+    if low is None and high is None:
+        return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
+
+    try:
+        from src.signal.diurnal import build_day0_temporal_context
+        temporal_context = build_day0_temporal_context(
+            city.name,
+            target_d,
+            city.timezone,
+            observation_time=obs.get("observation_time"),
+            observation_source=obs.get("source", ""),
+        )
+    except Exception:
+        temporal_context = None
+
+    if temporal_context is None:
+        return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
 
     remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
         ens_result["members_hourly"],
         ens_result["times"],
         city.timezone,
         target_d,
+        now=temporal_context.current_utc_timestamp,
     )
     if remaining_member_maxes.size == 0:
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
-
-    low, high = _parse_temp_range(position.bin_label)
-    if low is None and high is None:
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     day0 = Day0Signal(
@@ -155,13 +177,18 @@ def _refresh_day0_observation(
         hours_remaining=hours_remaining,
         member_maxes_remaining=remaining_member_maxes,
         unit=city.settlement_unit,
+        temporal_context=temporal_context,
     )
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
     p_raw_yes = float(day0.p_vector(single_bin, n_mc=5000)[0])
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:
-        p_cal_yes = cal.predict(p_raw_yes, 0.0)
+        p_cal_yes = cal.predict_for_bin(
+            p_raw_yes,
+            0.0,
+            bin_width=single_bin[0].width,
+        )
         applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
     else:
         p_cal_yes = p_raw_yes
@@ -387,15 +414,17 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             logger.debug("Failed to calculate market velocity for %s: %s", pos.trade_id, e)
 
     # Wrap into verified EdgeContext
+    current_forward_edge = current_p_posterior - current_p_market
+    ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
     return EdgeContext(
         p_raw=np.array([]),
         p_cal=np.array([]),
         p_market=np.array([current_p_market]),
         p_posterior=current_p_posterior,
-        forward_edge=current_p_posterior - current_p_market,
+        forward_edge=current_forward_edge,
         alpha=0.0, # Could be plucked from internal registry returns eventually
-        confidence_band_upper=pos.entry_ci_width,
-        confidence_band_lower=0.0,
+        confidence_band_upper=current_forward_edge + ci_half_width,
+        confidence_band_lower=current_forward_edge - ci_half_width,
         entry_provenance=EntryMethod(pos.entry_method),
         decision_snapshot_id=pos.decision_snapshot_id,
         n_edges_found=1,

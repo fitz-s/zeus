@@ -53,7 +53,7 @@ def vwmp(best_bid: float, best_ask: float,
 
 def compute_alpha(
     calibration_level: int,
-    ensemble_spread: TemperatureDelta | float,
+    ensemble_spread: TemperatureDelta,
     model_agreement: str,
     lead_days: float,
     hours_since_open: float,
@@ -75,9 +75,15 @@ def compute_alpha(
     Override lookup kept for manual experimentation but table is empty
     and no longer auto-populated by the weekly cycle.
 
-    ensemble_spread accepts both TemperatureDelta (preferred) and float (legacy).
-    When typed, thresholds auto-convert to the correct unit.
+    ensemble_spread must be a TemperatureDelta. This is a hard rule:
+    spread thresholds are unit-aware and must not silently fall back to bare floats.
     """
+    if not isinstance(ensemble_spread, TemperatureDelta):
+        raise TypeError(
+            "compute_alpha requires ensemble_spread to be TemperatureDelta. "
+            "Wrap raw spreads with the city settlement unit first."
+        )
+
     # Per-city override lookup (DEPRECATED — kept for manual experiments only)
     # Was part of the dynamic-α per-city approach. alpha_overrides has 0 rows.
     # Do NOT auto-populate this table; per-decision adjustments are superior.
@@ -90,21 +96,12 @@ def compute_alpha(
     # D4 analysis (2026-03-31): spread IS predictive of per-decision accuracy
     # (r=+0.214, tight Brier 0.114 vs wide 0.269). Sweep showed bonus=0.10
     # gives -0.00825 Brier improvement vs -0.00460 at the old bonus=0.05.
-    if isinstance(ensemble_spread, TemperatureDelta):
-        tight = SPREAD_TIGHT.to(ensemble_spread.unit)
-        wide = SPREAD_WIDE.to(ensemble_spread.unit)
-        if ensemble_spread < tight:
-            a += 0.10  # was 0.05, increased per D4
-        if ensemble_spread > wide:
-            a -= 0.15  # was 0.10, increased per D4
-    else:
-        # Legacy float path (will be removed after full migration)
-        tight_f = float(settings["edge"]["spread_tight_f"])
-        wide_f = float(settings["edge"]["spread_wide_f"])
-        if ensemble_spread < tight_f:
-            a += 0.10  # was 0.05
-        if ensemble_spread > wide_f:
-            a -= 0.15  # was 0.10
+    tight = SPREAD_TIGHT.to(ensemble_spread.unit)
+    wide = SPREAD_WIDE.to(ensemble_spread.unit)
+    if ensemble_spread < tight:
+        a += 0.10  # was 0.05, increased per D4
+    if ensemble_spread > wide:
+        a -= 0.15  # was 0.10, increased per D4
 
     # Model agreement adjustments
     if model_agreement == "SOFT_DISAGREE":

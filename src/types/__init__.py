@@ -5,5 +5,6 @@ Temperature types in src.types.temperature.
 """
 
 from src.types.market import Bin, BinEdge
+from src.types.solar import ObservationInstant, SolarDay, DaylightPhase, Day0TemporalContext
 
-__all__ = ["Bin", "BinEdge"]
+__all__ = ["Bin", "BinEdge", "ObservationInstant", "SolarDay", "DaylightPhase", "Day0TemporalContext"]

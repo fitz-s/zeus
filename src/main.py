@@ -80,6 +80,7 @@ def _etl_recalibrate():
 
     # 1. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
+        "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
         "etl_hourly_observations.py",
@@ -180,8 +181,11 @@ def _startup_data_health_check(conn):
         stale_tables = []
         for table, col in [
             ("asos_wu_offsets", None),
+            ("observation_instants", None),
             ("diurnal_curves", None),
+            ("diurnal_peak_prob", None),
             ("temp_persistence", None),
+            ("solar_daily", None),
         ]:
             try:
                 n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -195,6 +199,19 @@ def _startup_data_health_check(conn):
                 "⚠ DATA GAPS: %s — run ETL scripts to populate",
                 ", ".join(stale_tables),
             )
+
+        # 3. Assumption manifest validation
+        try:
+            from scripts.validate_assumptions import run_validation
+
+            validation = run_validation()
+            if not validation["valid"]:
+                logger.warning(
+                    "⚠ ASSUMPTION MISMATCHES: %s",
+                    " | ".join(validation["mismatches"]),
+                )
+        except Exception as e:
+            logger.warning("⚠ Assumption validation failed to run: %s", e)
 
     except Exception as e:
         logger.debug("Startup health check failed: %s", e)

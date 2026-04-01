@@ -52,10 +52,21 @@ def write_status(cycle_summary: dict = None) -> None:
             "effective_bankroll": round(portfolio.effective_bankroll, 2),
             "bankroll": round(portfolio.effective_bankroll, 2),
             "positions": [
-                {"trade_id": p.trade_id, "city": p.city, "direction": p.direction,
-                 "size": p.size_usd, "edge": p.edge, "bin": p.bin_label[:30],
-                 "mark_price": p.last_monitor_market_price,
-                 "unrealized_pnl": round(p.unrealized_pnl, 2)}
+                {
+                    "trade_id": p.trade_id,
+                    "city": p.city,
+                    "direction": p.direction,
+                    "strategy": p.strategy,
+                    "state": p.state,
+                    "size_usd": p.size_usd,
+                    "shares": p.effective_shares,
+                    "entry_price": p.entry_price,
+                    "edge": p.edge,
+                    "bin_label": p.bin_label,
+                    "decision_snapshot_id": p.decision_snapshot_id,
+                    "mark_price": p.last_monitor_market_price,
+                    "unrealized_pnl": round(p.unrealized_pnl, 2),
+                }
                 for p in portfolio.positions
             ],
         },

@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_connection, init_schema
 from src.calibration.platt import ExtendedPlattCalibrator
+from src.calibration.store import infer_bin_width_from_label
 
 
 def refit_all():
@@ -37,7 +38,7 @@ def refit_all():
         bucket_key = f"{cluster}_{season}"
 
         pairs = conn.execute("""
-            SELECT p_raw, lead_days, outcome FROM calibration_pairs
+            SELECT p_raw, lead_days, outcome, range_label FROM calibration_pairs
             WHERE cluster = ? AND season = ? AND p_raw > 0.001 AND p_raw < 0.999
         """, (cluster, season)).fetchall()
 
@@ -47,15 +48,27 @@ def refit_all():
         p_raw = np.array([p["p_raw"] for p in pairs])
         lead_days = np.array([p["lead_days"] for p in pairs])
         outcomes = np.array([p["outcome"] for p in pairs])
+        bin_widths = np.array([infer_bin_width_from_label(p["range_label"]) for p in pairs], dtype=object)
 
         try:
             cal = ExtendedPlattCalibrator()
             reg_C = 1.0 if len(pairs) >= 50 else 0.1
-            cal.fit(p_raw, lead_days, outcomes, n_bootstrap=200, regularization_C=reg_C)
+            cal.fit(
+                p_raw,
+                lead_days,
+                outcomes,
+                bin_widths=bin_widths,
+                n_bootstrap=200,
+                regularization_C=reg_C,
+            )
 
             brier_scores = []
             for i in range(len(p_raw)):
-                p_cal = cal.predict(float(p_raw[i]), float(lead_days[i]))
+                p_cal = cal.predict_for_bin(
+                    float(p_raw[i]),
+                    float(lead_days[i]),
+                    bin_width=bin_widths[i],
+                )
                 brier_scores.append((p_cal - outcomes[i]) ** 2)
             brier_insample = float(np.mean(brier_scores))
 
@@ -65,10 +78,10 @@ def refit_all():
             conn.execute("""
                 INSERT OR REPLACE INTO platt_models 
                 (bucket_key, param_A, param_B, param_C, bootstrap_params_json, 
-                 n_samples, brier_insample, fitted_at, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                 n_samples, brier_insample, fitted_at, is_active, input_space)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """, (bucket_key, cal.A, cal.B, cal.C, bootstrap_json,
-                  len(pairs), brier_insample, now_iso))
+                  len(pairs), brier_insample, now_iso, cal.input_space))
 
             refit_count += 1
             print(f"✅ {bucket_key:25} A={cal.A:+.3f} B={cal.B:+.3f} C={cal.C:+.3f} "
