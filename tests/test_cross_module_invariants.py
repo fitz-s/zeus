@@ -9,6 +9,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -25,8 +27,7 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
 
     bias_enabled = settings._data.get("bias_correction_enabled", False)
     if not bias_enabled:
-        print("SKIP: bias_correction_enabled = false. No invariant to check.")
-        return True
+        pytest.skip("bias_correction_enabled = false. No invariant to check.")
 
     from src.state.db import get_connection, init_schema
 
@@ -36,10 +37,11 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
     # Check if calibration_pairs has bias_corrected column
     cols = [r[1] for r in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()]
     if "bias_corrected" not in cols:
-        print("FAIL: bias_correction_enabled=true but calibration_pairs has no "
-              "'bias_corrected' column. Pairs were computed without bias correction.")
         conn.close()
-        return False
+        pytest.fail(
+            "bias_correction_enabled=true but calibration_pairs has no "
+            "'bias_corrected' column. Pairs were computed without bias correction."
+        )
 
     # Check recent pairs
     pairs = conn.execute("""
@@ -48,22 +50,20 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
     """).fetchall()
 
     if not pairs:
-        print("SKIP: No calibration pairs in database.")
         conn.close()
-        return True
+        pytest.skip("No calibration pairs in database.")
 
     uncorrected = [p for p in pairs if not p["bias_corrected"]]
     if uncorrected:
-        print(f"FAIL: {len(uncorrected)}/{len(pairs)} recent calibration pairs "
-              f"were computed WITHOUT bias correction, but live signal uses it.")
-        print(f"  First uncorrected pair ID: {uncorrected[0]['id']}")
-        print(f"  ACTION: Recompute all pairs with bias correction, then refit Platt.")
         conn.close()
-        return False
+        pytest.fail(
+            f"{len(uncorrected)}/{len(pairs)} recent calibration pairs were computed "
+            f"WITHOUT bias correction, but live signal uses it. "
+            f"First uncorrected pair ID: {uncorrected[0]['id']}. "
+            "Action: recompute all pairs with bias correction, then refit Platt."
+        )
 
-    print(f"PASS: All {len(pairs)} recent pairs have bias_corrected=true.")
     conn.close()
-    return True
 
 
 def test_model_bias_table_not_empty_if_bias_enabled():
@@ -72,8 +72,7 @@ def test_model_bias_table_not_empty_if_bias_enabled():
 
     bias_enabled = settings._data.get("bias_correction_enabled", False)
     if not bias_enabled:
-        print("SKIP: bias_correction_enabled = false.")
-        return True
+        pytest.skip("bias_correction_enabled = false.")
 
     from src.state.db import get_connection
 
@@ -82,11 +81,7 @@ def test_model_bias_table_not_empty_if_bias_enabled():
     conn.close()
 
     if count == 0:
-        print("FAIL: bias_correction_enabled=true but model_bias has 0 ECMWF rows.")
-        return False
-
-    print(f"PASS: model_bias has {count} ECMWF rows.")
-    return True
+        pytest.fail("bias_correction_enabled=true but model_bias has 0 ECMWF rows.")
 
 
 def test_platt_models_consistent_with_bias_flag():
@@ -96,8 +91,7 @@ def test_platt_models_consistent_with_bias_flag():
 
     bias_enabled = settings._data.get("bias_correction_enabled", False)
     if not bias_enabled:
-        print("SKIP: bias_correction_enabled = false.")
-        return True
+        pytest.skip("bias_correction_enabled = false.")
 
     from src.state.db import get_connection
 
@@ -107,23 +101,21 @@ def test_platt_models_consistent_with_bias_flag():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(platt_models)").fetchall()]
     
     if "trained_with_bias_correction" not in cols:
-        print("FAIL: bias_correction_enabled=true but platt_models has no "
-              "'trained_with_bias_correction' column.")
         conn.close()
-        return False
+        pytest.fail(
+            "bias_correction_enabled=true but platt_models has no "
+            "'trained_with_bias_correction' column."
+        )
 
     uncorrected = conn.execute(
         "SELECT COUNT(*) FROM platt_models WHERE is_active=1 AND trained_with_bias_correction=0"
     ).fetchone()[0]
     
     if uncorrected > 0:
-        print(f"FAIL: {uncorrected} active Platt models trained without bias correction.")
         conn.close()
-        return False
+        pytest.fail(f"{uncorrected} active Platt models trained without bias correction.")
 
-    print("PASS: All active Platt models trained with bias correction.")
     conn.close()
-    return True
 
 
 def test_structural_linter_gate():
@@ -149,24 +141,17 @@ def bad_function(obj):
         tree = ast.parse(py_file.read_text())
         analyzer = SemanticAnalyzer(py_file)
         analyzer.visit(tree)
-        if not analyzer.violations:
-            print("FAIL: Linter gate did NOT catch the intentional p_raw violation!")
-            return False
-        if not any('p_raw' in e and ('bias' in e.lower() or 'cal' in e.lower() or 'platt' in e.lower() or 'sigma' in e.lower()) for e in analyzer.violations):
-            print("FAIL: Linter gate caught errors, but not the p_raw rule as expected!")
-            return False
-        print("PASS: Linter gate correctly caught the intentional p_raw violation.")
+        assert analyzer.violations, "Linter gate did NOT catch the intentional p_raw violation."
+        assert any(
+            'p_raw' in e and ('bias' in e.lower() or 'cal' in e.lower() or 'platt' in e.lower() or 'sigma' in e.lower())
+            for e in analyzer.violations
+        ), "Linter gate caught errors, but not the p_raw rule as expected."
     finally:
         os.remove(test_file_path)
 
     # 2. Test entire repo passes
     repo_errors = run_linter(Path('src'))
-    if repo_errors != 0:
-        print("FAIL: Linter gate flagged existing code in src/:")
-        return False
-
-    print("PASS: Entire src/ repository passes the structural linter.")
-    return True
+    assert repo_errors == 0, "Linter gate flagged existing code in src/."
 
 if __name__ == "__main__":
     tests = [

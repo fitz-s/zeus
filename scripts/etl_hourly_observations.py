@@ -1,126 +1,122 @@
-"""ETL: Hourly observations from rainstorm.db → zeus.db:hourly_observations.
+"""ETL: observation_instants -> hourly_observations compatibility view.
 
-Source: rainstorm.db:observations WHERE granularity='hourly'
-  - openmeteo_archive_hourly: 114,168 rows
-  - meteostat_hourly: 105,351 rows
-Target: zeus.db:hourly_observations
-
-Validates:
-- local_hour in 0-23 range
-- temp value within sane bounds per unit
-- European cities → unit='C', US cities → unit='F'
+`observation_instants` is the authoritative DST-safe hourly timeline.
+`hourly_observations` remains a lossy compatibility table for older code that
+expects one row per local hour. Ambiguous fallback hours are excluded so legacy
+consumers do not silently treat repeated local hours as ordinary observations.
 """
 
-import sqlite3
+from __future__ import annotations
+
 import sys
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_connection, init_schema
-
-RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
-
-# European/Asian cities where unit is °C
-CELSIUS_CITIES = {
-    "London", "Paris", "Seoul", "Tokyo", "Shanghai", "Shenzhen",
-    "Munich", "Wellington", "Buenos Aires", "Hong Kong", "Singapore",
-    "Taipei", "Beijing", "Chengdu", "Chongqing", "Istanbul", "Madrid",
-    "Milan", "Moscow", "Sao Paulo", "Warsaw", "Wuhan", "Ankara",
-    "Lucknow", "Mexico City", "Tel Aviv",
-}
+from scripts.etl_observation_instants import infer_temp_unit
 
 
 def run_etl() -> dict:
-    rs = sqlite3.connect(str(RAINSTORM_DB))
-    rs.row_factory = sqlite3.Row
-
     zeus = get_connection()
     init_schema(zeus)
 
     existing = zeus.execute("SELECT COUNT(*) FROM hourly_observations").fetchone()[0]
-    print(f"hourly_observations has {existing} existing rows. Running incremental sync...")
+    print(f"hourly_observations has {existing} existing rows. Rebuilding from observation_instants...")
 
-    # Read hourly observations — use temp_current_f for hourly, fallback to temp_high_f
-    rows = rs.execute("""
-        SELECT city, target_date, local_hour, source,
-               COALESCE(temp_current_f, temp_high_f) as temp
-        FROM observations
-        WHERE granularity = 'hourly'
-          AND local_hour IS NOT NULL
-          AND COALESCE(temp_current_f, temp_high_f) IS NOT NULL
-    """).fetchall()
+    source_count = zeus.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0]
+    if source_count == 0:
+        zeus.close()
+        print("ERROR: observation_instants is empty. Run etl_observation_instants.py first.")
+        return {"imported": 0, "rejected": 0, "error": "no observation_instants"}
+
+    rows = zeus.execute(
+        """
+        SELECT city, target_date, source, local_timestamp, utc_timestamp,
+               temp_current, temp_unit, is_ambiguous_local_hour, is_missing_local_hour
+        FROM observation_instants
+        WHERE temp_current IS NOT NULL
+        ORDER BY city, target_date, source, utc_timestamp
+        """
+    ).fetchall()
 
     print(f"Source rows: {len(rows):,}")
 
-    imported = 0
     rejected = 0
-    batch = []
+    collapsed_ambiguous = 0
+    excluded_ambiguous = 0
+    canonical: dict[tuple[str, str, int, str], tuple[float, str, datetime]] = {}
 
-    for r in rows:
-        city = r["city"]
-        hour = int(r["local_hour"])
-        temp = r["temp"]
-        unit = "C" if city in CELSIUS_CITIES else "F"
+    for row in rows:
+        if row["is_ambiguous_local_hour"] or row["is_missing_local_hour"]:
+            excluded_ambiguous += 1
+            continue
 
-        # Validation: hour range
+        try:
+            local_ts = datetime.fromisoformat(str(row["local_timestamp"]))
+            utc_ts = datetime.fromisoformat(str(row["utc_timestamp"]))
+        except ValueError:
+            rejected += 1
+            continue
+
+        hour = int(local_ts.hour)
         if hour < 0 or hour > 23:
             rejected += 1
             continue
 
-        # Validation: temperature sanity
-        if unit == "C" and (temp > 55 or temp < -45):
+        city = str(row["city"])
+        temp = float(row["temp_current"])
+        unit = str(row["temp_unit"] or infer_temp_unit(city))
+
+        if unit == "C" and not (-45 <= temp <= 55):
             rejected += 1
             continue
-        if unit == "F" and (temp > 135 or temp < -50):
+        if unit == "F" and not (-50 <= temp <= 135):
             rejected += 1
             continue
 
-        batch.append((
-            city, r["target_date"], hour, temp, unit, r["source"]
-        ))
+        key = (city, str(row["target_date"]), hour, str(row["source"]))
+        existing_row = canonical.get(key)
+        if existing_row is not None:
+            collapsed_ambiguous += 1
+            _, _, existing_utc = existing_row
+            if utc_ts <= existing_utc:
+                continue
 
-        if len(batch) >= 10000:
-            zeus.executemany("""
-                INSERT OR IGNORE INTO hourly_observations
-                (city, obs_date, obs_hour, temp, temp_unit, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, batch)
-            imported += len(batch)
-            batch = []
+        canonical[key] = (temp, unit, utc_ts)
 
+    zeus.execute("DELETE FROM hourly_observations")
+    batch = [
+        (city, obs_date, obs_hour, temp, unit, source)
+        for (city, obs_date, obs_hour, source), (temp, unit, _) in sorted(canonical.items())
+    ]
     if batch:
-        zeus.executemany("""
-            INSERT OR IGNORE INTO hourly_observations
+        zeus.executemany(
+            """
+            INSERT OR REPLACE INTO hourly_observations
             (city, obs_date, obs_hour, temp, temp_unit, source)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, batch)
-        imported += len(batch)
+            """,
+            batch,
+        )
 
     zeus.commit()
-
     final = zeus.execute("SELECT COUNT(*) FROM hourly_observations").fetchone()[0]
-
-    rs.close()
     zeus.close()
 
-    print(f"Attempted: {imported:,}, Rejected: {rejected:,}")
-    print(f"Final row count: {final:,}")
-
-    # Show per-city breakdown
-    zeus2 = get_connection()
-    for row in zeus2.execute("""
-        SELECT city, source, COUNT(*) as n
-        FROM hourly_observations
-        GROUP BY city, source
-        ORDER BY n DESC
-        LIMIT 20
-    """).fetchall():
-        print(f"  {row['city']:20s} {row['source']:30s} {row['n']:,}")
-    zeus2.close()
-
-    return {"imported": final, "rejected": rejected}
+    print(
+        f"Canonical rows: {final:,}, Rejected: {rejected:,}, "
+        f"Collapsed ambiguous duplicates: {collapsed_ambiguous:,}, "
+        f"Excluded ambiguous rows: {excluded_ambiguous:,}"
+    )
+    return {
+        "imported": final,
+        "rejected": rejected,
+        "collapsed_ambiguous": collapsed_ambiguous,
+        "excluded_ambiguous": excluded_ambiguous,
+    }
 
 
 if __name__ == "__main__":

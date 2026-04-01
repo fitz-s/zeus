@@ -137,8 +137,12 @@ class Position:
 
     # Anti-churn
     last_exit_at: str = ""
+    exit_trigger: str = ""
     exit_reason: str = ""
     admin_exit_reason: str = ""  # Separate from economic exit_reason
+    exit_divergence_score: float = 0.0
+    exit_market_velocity_1h: float = 0.0
+    exit_forward_edge: float = 0.0
 
     # JSON Object Snapshots (Phase 2 Object Persistence DTO)
     settlement_semantics_json: Optional[str] = None
@@ -251,10 +255,11 @@ class Position:
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
         applied = list(applied or [])
+        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
         applied.append("ci_threshold")
         applied.append("consecutive_cycle_check")
-        if forward_edge >= edge_threshold:
+        if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -287,7 +292,7 @@ class Position:
         self.neg_edge_count = 0
         self.applied_validations = _dedupe_validations(applied)
         return ExitDecision(
-            True, f"EDGE_REVERSAL (edge={forward_edge:.4f})",
+            True, f"EDGE_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
             selected_method=self.selected_method or self.entry_method,
             applied_validations=list(self.applied_validations),
         )
@@ -298,6 +303,7 @@ class Position:
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
         applied = list(applied or [])
+        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
         near_threshold = buy_no_ceiling()
         applied.append("ci_threshold")
@@ -308,7 +314,7 @@ class Position:
             if forward_edge < near_threshold:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
-                    True, f"BUY_NO_NEAR_EXIT (edge={forward_edge:.4f})",
+                    True, f"BUY_NO_NEAR_EXIT (point={forward_edge:.4f})",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
@@ -320,7 +326,7 @@ class Position:
             )
 
         applied.append("consecutive_cycle_check")
-        if forward_edge < edge_threshold:
+        if evidence_edge < edge_threshold:
             self.neg_edge_count += 1
         else:
             self.neg_edge_count = 0
@@ -329,7 +335,7 @@ class Position:
             self.neg_edge_count = 0
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True, f"BUY_NO_EDGE_EXIT (edge={forward_edge:.4f})",
+                True, f"BUY_NO_EDGE_EXIT (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
             )
@@ -352,6 +358,7 @@ class PortfolioState:
     positions: list[Position] = field(default_factory=list)
     bankroll: float = 150.0
     updated_at: str = ""
+    audit_logging_enabled: bool = False
     daily_baseline_total: float = 150.0
     weekly_baseline_total: float = 150.0
     # Layer 5+6: recently closed positions for reentry/cooldown checks
@@ -404,7 +411,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """
     path = path or POSITIONS_PATH
     if not path.exists():
-        return PortfolioState()
+        return PortfolioState(audit_logging_enabled=True)
 
     with open(path) as f:
         data = json.load(f)
@@ -434,6 +441,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         positions=positions,
         bankroll=bankroll,
         updated_at=data.get("updated_at", ""),
+        audit_logging_enabled=True,
         daily_baseline_total=data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
         recent_exits=data.get("recent_exits", []),
@@ -571,6 +579,10 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
     CRITICAL: All fields required by profit_validation_replay.py must be
     persisted here. If a field is on Position but not in this dict, the
     replay engine will classify the exit as 'fully_skipped'.
+
+    This list is intentionally unbounded. Truncating exit history makes
+    realized PnL, weekly/daily loss checks, and future full-fidelity replay
+    depend on arbitrary retention rather than actual trading history.
     """
     state.recent_exits.append({
         # Identity
@@ -590,29 +602,40 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "edge": pos.edge,
         "entry_ci_width": pos.entry_ci_width,
         "entry_method": pos.entry_method,
+        "selected_method": pos.selected_method,
+        "applied_validations": list(pos.applied_validations),
         "decision_snapshot_id": pos.decision_snapshot_id,
         "entered_at": pos.entered_at,
         # Strategy attribution
         "strategy": pos.strategy,
         "edge_source": pos.edge_source,
         "discovery_mode": pos.discovery_mode,
+        "market_hours_open": pos.market_hours_open,
+        "fill_quality": pos.fill_quality,
+        "settlement_semantics_json": pos.settlement_semantics_json,
+        "epistemic_context_json": pos.epistemic_context_json,
+        "edge_context_json": pos.edge_context_json,
         # Exit context
+        "exit_trigger": pos.exit_trigger,
         "exit_reason": pos.exit_reason,
+        "admin_exit_reason": pos.admin_exit_reason,
+        "exit_divergence_score": pos.exit_divergence_score,
+        "exit_market_velocity_1h": pos.exit_market_velocity_1h,
+        "exit_forward_edge": pos.exit_forward_edge,
         "exit_price": pos.exit_price,
         "exited_at": pos.last_exit_at,
         "pnl": pos.pnl,
     })
-    if len(state.recent_exits) > 50:
-        state.recent_exits = state.recent_exits[-50:]
 
-    try:
-        from src.state.db import get_connection, log_trade_exit
-        conn = get_connection()
-        log_trade_exit(conn, pos)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning("Error logging trade exit to db: %s", e)
+    if state.audit_logging_enabled:
+        try:
+            from src.state.db import get_connection, log_trade_exit
+            conn = get_connection()
+            log_trade_exit(conn, pos)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Error logging trade exit to db: %s", e)
 
 
 def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
@@ -849,6 +872,42 @@ _NEAR_SETTLEMENT_HOURS = ExpiringAssumption[float](
     owner="risk_team"
 )
 
+_DIVERGENCE_SOFT_THRESHOLD = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_soft_threshold"]),
+    fallback=0.20,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
+_DIVERGENCE_HARD_THRESHOLD = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_hard_threshold"]),
+    fallback=0.30,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
+_DIVERGENCE_VELOCITY_CONFIRM = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_velocity_confirm"]),
+    fallback=-0.05,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
 
 def buy_no_scaling_factor() -> float:
     return _BUY_NO_SCALING.active_value
@@ -875,9 +934,26 @@ def near_settlement_hours() -> float:
     return _NEAR_SETTLEMENT_HOURS.active_value
 
 
+def divergence_soft_threshold() -> float:
+    return _DIVERGENCE_SOFT_THRESHOLD.active_value
+
+
+def divergence_hard_threshold() -> float:
+    return _DIVERGENCE_HARD_THRESHOLD.active_value
+
+
+def divergence_velocity_confirm() -> float:
+    return _DIVERGENCE_VELOCITY_CONFIRM.active_value
+
+
 def _clamp_negative_threshold(raw: float, floor: float, ceiling: float) -> float:
     """Clamp a negative threshold between a shallow floor and deep ceiling."""
     return max(ceiling, min(floor, raw))
+
+
+def conservative_forward_edge(forward_edge: float, ci_width: float) -> float:
+    """Conservative exit evidence: use the lower confidence bound of edge."""
+    return forward_edge - max(0.0, float(ci_width)) / 2.0
 
 
 def buy_no_edge_threshold(entry_ci_width: float) -> float:

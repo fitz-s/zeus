@@ -4,11 +4,13 @@ Contains ALL business logic for edge detection. Doesn't know about scheduling,
 portfolio state, or execution. Pure function: candidate -> decision.
 """
 
+import json
 import logging
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime
+from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -96,11 +98,30 @@ class EdgeDecision:
     
     # Heavy Bound Domain Objects (Phase 2 encapsulation)
     edge_context: Optional[EdgeContext] = None
+    settlement_semantics_json: Optional[str] = None
+    epistemic_context_json: Optional[str] = None
+    edge_context_json: Optional[str] = None
 
 
 
 def _decision_id() -> str:
     return str(uuid.uuid4())[:12]
+
+
+def _to_jsonable(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {f.name: _to_jsonable(getattr(value, f.name)) for f in fields(value)}
+    return value
+
+
+def _serialize_json(value) -> str:
+    return json.dumps(_to_jsonable(value), default=str, ensure_ascii=False)
 
 
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
@@ -115,15 +136,22 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     return "opening_inertia"
 
 
-def _get_post_peak_confidence(city: City, target_date: date) -> float:
-    """Get diurnal post-peak confidence for Day0 signal refinement."""
+def _get_day0_temporal_context(city: City, target_date: date, observation: Optional[dict] = None):
     try:
-        from src.signal.diurnal import get_peak_hour_context, get_current_local_hour
-        current_hour = get_current_local_hour(city.timezone)
-        peak_hr, conf, reason = get_peak_hour_context(city.name, target_date, current_hour)
-        return conf
+        if observation is not None and not observation.get("observation_time"):
+            return None
+        from src.signal.diurnal import build_day0_temporal_context
+        observation_time = observation.get("observation_time") if observation else None
+        observation_source = observation.get("source", "") if observation else ""
+        return build_day0_temporal_context(
+            city.name,
+            target_date,
+            city.timezone,
+            observation_time=observation_time,
+            observation_source=observation_source,
+        )
     except Exception:
-        return 0.0  # No data → no extra confidence
+        return None
 
 
 def evaluate_candidate(
@@ -228,11 +256,23 @@ def evaluate_candidate(
     # Store ENS snapshot (time-irreversible data collection)
     snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
     if is_day0_mode:
+        temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
+        if temporal_context is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["Solar/DST context unavailable for Day0"],
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "solar_context"],
+            )]
+
         remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],
             city.timezone,
             target_d,
+            now=temporal_context.current_utc_timestamp,
         )
         if remaining_member_maxes.size == 0:
             return [EdgeDecision(
@@ -250,7 +290,7 @@ def evaluate_candidate(
             hours_remaining=hours_remaining,
             member_maxes_remaining=remaining_member_maxes,
             unit=city.settlement_unit,
-            diurnal_peak_confidence=_get_post_peak_confidence(city, target_d),
+            temporal_context=temporal_context,
         )
         p_raw = day0.p_vector(bins)
         ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
@@ -267,7 +307,12 @@ def evaluate_candidate(
     # Calibration
     cal, cal_level = get_calibrator(conn, city, target_date)
     if cal is not None:
-        p_cal = calibrate_and_normalize(p_raw, cal, lead_days_for_calibration)
+        p_cal = calibrate_and_normalize(
+            p_raw,
+            cal,
+            lead_days_for_calibration,
+            bin_widths=[b.width for b in bins],
+        )
         entry_validations.extend(["platt_calibration", "normalization"])
     else:
         p_cal = p_raw.copy()
@@ -315,6 +360,9 @@ def evaluate_candidate(
                     selected_method=selected_method,
                     applied_validations=entry_validations,
                     decision_snapshot_id=snapshot_id,
+                    p_raw=p_raw,
+                    p_cal=p_cal,
+                    p_market=p_market,
                 )]
             p_market[idx] = o["price"]
 
@@ -326,16 +374,16 @@ def evaluate_candidate(
                 gfs_maxes = gfs_result["members_hourly"][
                     :, :min(24, gfs_result["members_hourly"].shape[1])
                 ].max(axis=1)
-                gfs_ints = np.round(gfs_maxes).astype(int)
-                n_gfs = len(gfs_ints)
+                gfs_measured = settlement_semantics.round_values(gfs_maxes)
+                n_gfs = len(gfs_measured)
                 gfs_p = np.zeros(len(bins))
                 for i, b in enumerate(bins):
                     if b.is_open_low:
-                        gfs_p[i] = np.sum(gfs_ints <= b.high) / n_gfs
+                        gfs_p[i] = np.sum(gfs_measured <= b.high) / n_gfs
                     elif b.is_open_high:
-                        gfs_p[i] = np.sum(gfs_ints >= b.low) / n_gfs
+                        gfs_p[i] = np.sum(gfs_measured >= b.low) / n_gfs
                     elif b.low is not None and b.high is not None:
-                        gfs_p[i] = np.sum((gfs_ints >= b.low) & (gfs_ints <= b.high)) / n_gfs
+                        gfs_p[i] = np.sum((gfs_measured >= b.low) & (gfs_measured <= b.high)) / n_gfs
                 total = gfs_p.sum()
                 if total > 0:
                     gfs_p /= total
@@ -352,6 +400,9 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=[*entry_validations, "model_agreement"],
             decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            p_market=p_market,
             agreement=agreement,
         )]
 
@@ -572,6 +623,9 @@ def evaluate_candidate(
             n_edges_found=len(edges),
             n_edges_after_fdr=len(filtered),
             edge_context=edge_ctx,
+            settlement_semantics_json=_serialize_json(settlement_semantics),
+            epistemic_context_json=_serialize_json(epistemic),
+            edge_context_json=_serialize_json(edge_ctx),
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

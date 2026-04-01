@@ -28,6 +28,15 @@ class NoTradeCase:
     best_edge: float = 0.0
     model_prob: float = 0.0
     market_price: float = 0.0
+    decision_snapshot_id: str = ""
+    selected_method: str = ""
+    applied_validations: list[str] = field(default_factory=list)
+    bin_labels: list[str] = field(default_factory=list)
+    p_raw_vector: list[float] = field(default_factory=list)
+    p_cal_vector: list[float] = field(default_factory=list)
+    p_market_vector: list[float] = field(default_factory=list)
+    alpha: float = 0.0
+    agreement: str = ""
     timestamp: str = ""
     
     def __post_init__(self):

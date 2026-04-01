@@ -21,8 +21,36 @@ class Bin:
     """
     low: float | None
     high: float | None
+    unit: str  # "F" or "C" — carried, never inferred
     label: str = ""
-    unit: str = "F"  # "F" or "C" — carried, never inferred
+
+    def __post_init__(self) -> None:
+        if self.unit not in {"F", "C"}:
+            raise ValueError(f"Bin.unit must be 'F' or 'C', got {self.unit!r}")
+
+        label = self.label or ""
+        if "°F" in label and self.unit != "F":
+            raise ValueError(f"Bin label {label!r} is Fahrenheit but unit={self.unit!r}")
+        if "°C" in label and self.unit != "C":
+            raise ValueError(f"Bin label {label!r} is Celsius but unit={self.unit!r}")
+
+        if self.low is None and self.high is None:
+            raise ValueError("Bin cannot have both low and high unset")
+
+        if self.is_shoulder:
+            return
+
+        width = self.width
+        if self.unit == "F" and width != 2:
+            raise ValueError(
+                f"Fahrenheit non-shoulder bins must cover exactly 2 settled degrees; "
+                f"{label!r} has width={width}"
+            )
+        if self.unit == "C" and width != 1:
+            raise ValueError(
+                f"Celsius non-shoulder bins must cover exactly 1 settled degree; "
+                f"{label!r} has width={width}"
+            )
 
     @property
     def is_open_low(self) -> bool:

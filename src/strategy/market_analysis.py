@@ -167,7 +167,10 @@ class MarketAnalysis:
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_clamped = np.clip(p_raw_boot, P_CLAMP_LOW, P_CLAMP_HIGH)
+                p_input = p_raw_boot
+                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
+                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
+                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
                 logit = np.log(p_clamped / (1.0 - p_clamped))
                 z = A * logit + B * self._lead_days + C
                 p_cal_boot = 1.0 / (1.0 + np.exp(-z))
@@ -212,7 +215,10 @@ class MarketAnalysis:
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_clamped = np.clip(p_raw_boot, P_CLAMP_LOW, P_CLAMP_HIGH)
+                p_input = p_raw_boot
+                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
+                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
+                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
                 logit = np.log(p_clamped / (1.0 - p_clamped))
                 z = A * logit + B * self._lead_days + C
                 p_cal_boot = 1.0 / (1.0 + np.exp(-z))

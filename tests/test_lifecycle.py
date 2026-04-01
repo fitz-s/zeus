@@ -73,6 +73,49 @@ class TestExitTriggers:
         assert signal is not None
         assert signal.trigger == "WHALE_TOXICITY"
 
+    def test_soft_divergence_requires_adverse_velocity_confirmation(self):
+        pos = _make_position()
+        edge_ctx = EdgeContext(
+            p_raw=np.array([1.0]),
+            p_cal=np.array([1.0]),
+            p_market=np.array([0.40]),
+            p_posterior=0.20,
+            forward_edge=-0.20,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=0.0,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.20,
+        )
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+        assert signal is None
+
+    def test_hard_divergence_panics_without_velocity_confirmation(self):
+        pos = _make_position()
+        edge_ctx = EdgeContext(
+            p_raw=np.array([1.0]),
+            p_cal=np.array([1.0]),
+            p_market=np.array([0.40]),
+            p_posterior=0.20,
+            forward_edge=-0.20,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=0.0,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.31,
+        )
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+        assert signal is not None
+        assert signal.trigger == "MODEL_DIVERGENCE_PANIC"
+
     def test_edge_reversal_needs_two_confirmations(self):
         """CLAUDE.md §4.2: EDGE_REVERSAL needs 2 confirmations, 1st doesn't trigger."""
         pos = _make_position()

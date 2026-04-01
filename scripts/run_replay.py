@@ -50,6 +50,11 @@ def main():
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--override", action="append", default=[],
                         help="Parameter override (e.g., 'alpha.London.JJA=0.70')")
+    parser.add_argument(
+        "--allow-snapshot-only-reference",
+        action="store_true",
+        help="Allow replay to use snapshot-only fallback references when no trade/decision_log reference exists.",
+    )
 
     args = parser.parse_args()
 
@@ -74,6 +79,7 @@ def main():
         end_date=args.end,
         mode=args.mode,
         overrides=overrides,
+        allow_snapshot_only_reference=args.allow_snapshot_only_reference,
     )
 
     # Report

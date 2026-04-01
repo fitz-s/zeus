@@ -90,7 +90,13 @@
     "buy_yes_floor": -0.01,
     "_buy_yes_floor_note": "HARDCODED. Replace after analyzing historical forward-edge noise floor for buy_yes exits.",
     "buy_yes_ceiling": -0.1,
-    "_buy_yes_ceiling_note": "HARDCODED. Replace after observing deep buy_yes reversals and false-hold rate."
+    "_buy_yes_ceiling_note": "HARDCODED. Replace after observing deep buy_yes reversals and false-hold rate.",
+    "divergence_soft_threshold": 0.2,
+    "_divergence_soft_threshold_note": "HARDCODED. Soft divergence trigger requires confirmation from adverse market velocity. Replace after replay + live divergence audit.",
+    "divergence_hard_threshold": 0.3,
+    "_divergence_hard_threshold_note": "HARDCODED. Hard divergence panic threshold. Replace after replay + live divergence audit.",
+    "divergence_velocity_confirm": -0.05,
+    "_divergence_velocity_confirm_note": "HARDCODED. Minimum adverse 1h market velocity required to confirm soft divergence panic."
   },
   "riskguard": {
     "brier_yellow": 0.25,
