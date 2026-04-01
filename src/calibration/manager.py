@@ -118,6 +118,11 @@ def get_calibrator(
     bk = bucket_key(cluster, season)
     model_data = load_platt_model(conn, bk)
     if model_data is not None:
+        if model_data.get("input_space") != "width_normalized_density":
+            refit = _fit_from_pairs(conn, cluster, season)
+            if refit is not None:
+                level = maturity_level(refit.n_samples)
+                return refit, level
         cal = _model_data_to_calibrator(model_data)
         level = maturity_level(model_data["n_samples"])
         return cal, level
@@ -156,6 +161,7 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
     cal.bootstrap_params = [
         tuple(p) for p in model_data["bootstrap_params"]
     ]
+    cal.input_space = model_data.get("input_space", "raw_probability")
     return cal
 
 
@@ -170,13 +176,20 @@ def _fit_from_pairs(
     p_raw = np.array([p["p_raw"] for p in pairs])
     lead_days = np.array([p["lead_days"] for p in pairs])
     outcomes = np.array([p["outcome"] for p in pairs])
+    bin_widths = np.array([p.get("bin_width") for p in pairs], dtype=object)
 
     level = maturity_level(len(pairs))
     reg_C = regularization_for_level(level)
 
     cal = ExtendedPlattCalibrator()
     try:
-        cal.fit(p_raw, lead_days, outcomes, regularization_C=reg_C)
+        cal.fit(
+            p_raw,
+            lead_days,
+            outcomes,
+            bin_widths=bin_widths,
+            regularization_C=reg_C,
+        )
     except Exception as e:
         logger.warning("Platt fit failed for %s_%s: %s", cluster, season, e)
         return None
@@ -188,6 +201,7 @@ def _fit_from_pairs(
         cal.A, cal.B, cal.C,
         cal.bootstrap_params,
         cal.n_samples,
+        input_space=cal.input_space,
     )
     conn.commit()
 

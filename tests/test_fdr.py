@@ -16,7 +16,7 @@ from src.types import Bin, BinEdge
 def _make_edge(p_value: float) -> BinEdge:
     """Helper: create a BinEdge with given p_value."""
     return BinEdge(
-        bin=Bin(low=40, high=42),
+        bin=Bin(low=40, high=41, unit="F"),
         direction="buy_yes",
         edge=0.05,
         ci_lower=0.01,

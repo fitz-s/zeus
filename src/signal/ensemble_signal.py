@@ -111,20 +111,7 @@ class EnsembleSignal:
         self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_maxes)
 
     def _simulate_settlement(self, values: np.ndarray) -> np.ndarray:
-        s = self.settlement_semantics
-        inv = 1.0 / s.precision if s.precision > 0 else 1.0
-        scaled = values * inv
-        
-        if s.rounding_rule == "round_half_to_even":
-            rounded = np.round(scaled)
-        elif s.rounding_rule == "floor":
-            rounded = np.floor(scaled)
-        elif s.rounding_rule == "ceil":
-            rounded = np.ceil(scaled)
-        else:
-            rounded = np.round(scaled)
-            
-        return rounded / inv
+        return self.settlement_semantics.round_values(values)
 
     @staticmethod
     def _apply_bias_correction(

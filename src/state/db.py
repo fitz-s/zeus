@@ -4,6 +4,7 @@ All tables enforce the 4-timestamp constraint where applicable.
 Settlement truth = Polymarket settlement result (spec §1.3).
 """
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -138,7 +139,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             n_samples INTEGER NOT NULL,
             brier_insample REAL,
             fitted_at TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
+            is_active INTEGER NOT NULL DEFAULT 1,
+            input_space TEXT NOT NULL DEFAULT 'raw_probability'
         );
 
         -- Trade decisions with full audit trail
@@ -162,11 +164,28 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             filled_at TEXT,
             fill_price REAL,
+            runtime_trade_id TEXT,
+            order_id TEXT,
+            order_status_text TEXT,
+            order_posted_at TEXT,
+            entered_at_ts TEXT,
+            chain_state TEXT,
             -- Attribution fields (CLAUDE.md: mandatory on every trade)
+            strategy TEXT,
             edge_source TEXT,
             bin_type TEXT,
             discovery_mode TEXT,
             market_hours_open REAL,
+            fill_quality REAL,
+            entry_method TEXT,
+            selected_method TEXT,
+            applied_validations_json TEXT,
+            exit_trigger TEXT,
+            exit_reason TEXT,
+            admin_exit_reason TEXT,
+            exit_divergence_score REAL DEFAULT 0.0,
+            exit_market_velocity_1h REAL DEFAULT 0.0,
+            exit_forward_edge REAL DEFAULT 0.0,
             -- Phase 2 Domain Object Snapshots (JSON flattened blobs)
             settlement_semantics_json TEXT,
             epistemic_context_json TEXT,
@@ -185,6 +204,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             timestamp TEXT NOT NULL,
+            decision_snapshot_id TEXT,
             p_raw_json TEXT NOT NULL,
             p_cal_json TEXT,
             edges_json TEXT,
@@ -253,7 +273,35 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(token_id, recorded_at)
         );
 
-        -- Hourly observations for diurnal curves
+        -- DST-safe hourly observation timeline
+        CREATE TABLE IF NOT EXISTS observation_instants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            timezone_name TEXT NOT NULL,
+            local_hour REAL,
+            local_timestamp TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            utc_offset_minutes INTEGER NOT NULL,
+            dst_active INTEGER NOT NULL DEFAULT 0,
+            is_ambiguous_local_hour INTEGER NOT NULL DEFAULT 0,
+            is_missing_local_hour INTEGER NOT NULL DEFAULT 0,
+            time_basis TEXT NOT NULL,
+            temp_current REAL,
+            running_max REAL,
+            delta_rate_per_h REAL,
+            temp_unit TEXT NOT NULL,
+            station_id TEXT,
+            observation_count INTEGER,
+            raw_response TEXT,
+            source_file TEXT,
+            imported_at TEXT NOT NULL,
+            UNIQUE(city, source, utc_timestamp)
+        );
+
+        -- Legacy compatibility table derived from observation_instants.
+        -- New time-sensitive logic must prefer observation_instants/diurnal tables.
         CREATE TABLE IF NOT EXISTS hourly_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
@@ -265,6 +313,22 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, obs_date, obs_hour, source)
         );
 
+        -- Daily sunrise/sunset context for Day0 and DST-aware timing
+        CREATE TABLE IF NOT EXISTS solar_daily (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            timezone TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            sunrise_local TEXT NOT NULL,
+            sunset_local TEXT NOT NULL,
+            sunrise_utc TEXT NOT NULL,
+            sunset_utc TEXT NOT NULL,
+            utc_offset_minutes INTEGER NOT NULL,
+            dst_active INTEGER NOT NULL,
+            UNIQUE(city, target_date)
+        );
+
         -- Diurnal temperature curves per city×season
         CREATE TABLE IF NOT EXISTS diurnal_curves (
             city TEXT NOT NULL,
@@ -273,7 +337,17 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             avg_temp REAL NOT NULL,
             std_temp REAL NOT NULL,
             n_samples INTEGER NOT NULL,
+            p_high_set REAL,
             UNIQUE(city, season, hour)
+        );
+
+        CREATE TABLE IF NOT EXISTS diurnal_peak_prob (
+            city TEXT NOT NULL,
+            month INTEGER NOT NULL,
+            hour INTEGER NOT NULL,
+            p_high_set REAL NOT NULL,
+            n_obs INTEGER NOT NULL,
+            UNIQUE(city, month, hour)
         );
 
         -- Historical forecast values (5 NWP models)
@@ -316,6 +390,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON settlements(city, target_date);
         CREATE INDEX IF NOT EXISTS idx_observations_city_date
             ON observations(city, target_date, source);
+        CREATE INDEX IF NOT EXISTS idx_observation_instants_city_date
+            ON observation_instants(city, target_date, utc_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_observation_instants_source
+            ON observation_instants(source, city, target_date);
         CREATE INDEX IF NOT EXISTS idx_token_price_token
             ON token_price_log(token_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_market_events_slug
@@ -359,6 +437,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         except sqlite3.OperationalError:
             pass
 
+    try:
+        conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")
+    except sqlite3.OperationalError:
+        pass
+
     # Provenance: env column on trade-facing tables (Decision 2)
     # Existing rows default to 'paper' — all historical data is from paper trading.
     _env_tables = ["trade_decisions", "chronicle", "decision_log"]
@@ -370,6 +453,42 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN edge_source TEXT;")
+    except sqlite3.OperationalError:
+        pass
+
+    # Backfill missing trade_decisions attribution / snapshot columns on older DBs.
+    for ddl in [
+        "ALTER TABLE trade_decisions ADD COLUMN runtime_trade_id TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN order_id TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN order_status_text TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN order_posted_at TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN entered_at_ts TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN chain_state TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN bin_type TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN discovery_mode TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN market_hours_open REAL;",
+        "ALTER TABLE trade_decisions ADD COLUMN fill_quality REAL;",
+        "ALTER TABLE trade_decisions ADD COLUMN strategy TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN entry_method TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN selected_method TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN applied_validations_json TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN exit_trigger TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN exit_reason TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN admin_exit_reason TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN exit_divergence_score REAL DEFAULT 0.0;",
+        "ALTER TABLE trade_decisions ADD COLUMN exit_market_velocity_1h REAL DEFAULT 0.0;",
+        "ALTER TABLE trade_decisions ADD COLUMN exit_forward_edge REAL DEFAULT 0.0;",
+        "ALTER TABLE trade_decisions ADD COLUMN settlement_semantics_json TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN epistemic_context_json TEXT;",
+        "ALTER TABLE trade_decisions ADD COLUMN edge_context_json TEXT;",
+    ]:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    try:
+        conn.execute("ALTER TABLE shadow_signals ADD COLUMN decision_snapshot_id TEXT;")
     except sqlite3.OperationalError:
         pass
 
@@ -452,35 +571,102 @@ def log_microstructure(conn, token_id: str, city: str, target_date: str, range_l
         import logging
         logging.getLogger(__name__).warning('Failed to log microstructure: %s', e)
 
+
+def log_shadow_signal(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    timestamp: str,
+    decision_snapshot_id: str,
+    p_raw_json: str,
+    p_cal_json: str,
+    edges_json: str,
+    lead_hours: float,
+) -> None:
+    try:
+        conn.execute(
+            """
+            INSERT INTO shadow_signals
+            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours),
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to log shadow signal: %s", e)
+
+
+def _bin_type_for_label(label: str) -> str:
+    lower = (label or "").lower()
+    if "or below" in lower:
+        return "shoulder_low"
+    if "or higher" in lower or "or above" in lower:
+        return "shoulder_high"
+    return "center"
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         env = getattr(pos, "env", None) or settings.mode
-        conn.execute("""
-            INSERT INTO trade_decisions (
-                market_id, bin_label, direction, size_usd, price, timestamp,
-                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                status, edge_source, env
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+        status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
+        timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
+        filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
+        fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+        values = (
             pos.market_id,
             pos.bin_label,
             pos.direction,
             pos.size_usd,
             pos.entry_price,
-            pos.entered_at,
+            timestamp,
+            getattr(pos, "decision_snapshot_id", None) or None,
+            getattr(pos, "calibration_version", "") or None,
             pos.p_posterior,
             pos.p_posterior,
             pos.edge,
             pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
             pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
             0.0,
-            "entered",
+            status,
+            filled_at,
+            fill_price,
+            getattr(pos, "trade_id", ""),
+            getattr(pos, "order_id", ""),
+            getattr(pos, "order_status", ""),
+            getattr(pos, "order_posted_at", ""),
+            getattr(pos, "entered_at", ""),
+            getattr(pos, "chain_state", ""),
+            getattr(pos, "strategy", ""),
             pos.edge_source,
+            _bin_type_for_label(pos.bin_label),
             env
-        ))
+            ,
+            getattr(pos, "discovery_mode", ""),
+            getattr(pos, "market_hours_open", 0.0),
+            getattr(pos, "fill_quality", 0.0),
+            getattr(pos, "entry_method", ""),
+            getattr(pos, "selected_method", ""),
+            json.dumps(getattr(pos, "applied_validations", []) or []),
+            getattr(pos, "settlement_semantics_json", None),
+            getattr(pos, "epistemic_context_json", None),
+            getattr(pos, "edge_context_json", None),
+        )
+        placeholders = ", ".join(["?"] * len(values))
+        conn.execute(f"""
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                forecast_snapshot_id, calibration_model_version,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
+                strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
+                fill_quality, entry_method, selected_method, applied_validations_json,
+                settlement_semantics_json, epistemic_context_json, edge_context_json
+            )
+            VALUES ({placeholders})
+        """, values)
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
@@ -491,18 +677,102 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     try:
         from datetime import datetime
         env = getattr(pos, "env", None) or settings.mode
-        conn.execute("""
+        status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
+        values = (
+            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
+            getattr(pos, "decision_snapshot_id", None) or None,
+            getattr(pos, "calibration_version", "") or None,
+            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
+            status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
+            getattr(pos, "trade_id", ""),
+            getattr(pos, "order_id", ""),
+            getattr(pos, "order_status", ""),
+            getattr(pos, "order_posted_at", ""),
+            getattr(pos, "entered_at", ""),
+            getattr(pos, "chain_state", ""),
+            getattr(pos, "discovery_mode", ""),
+            getattr(pos, "market_hours_open", 0.0),
+            getattr(pos, "fill_quality", 0.0),
+            getattr(pos, "entry_method", ""),
+            getattr(pos, "selected_method", ""),
+            json.dumps(getattr(pos, "applied_validations", []) or []),
+            getattr(pos, "exit_trigger", ""),
+            getattr(pos, "exit_reason", ""),
+            getattr(pos, "admin_exit_reason", ""),
+            getattr(pos, "exit_divergence_score", 0.0),
+            getattr(pos, "exit_market_velocity_1h", 0.0),
+            getattr(pos, "exit_forward_edge", 0.0),
+            getattr(pos, "settlement_semantics_json", None),
+            getattr(pos, "epistemic_context_json", None),
+            getattr(pos, "edge_context_json", None),
+        )
+        placeholders = ", ".join(["?"] * len(values))
+        conn.execute(f"""
             INSERT INTO trade_decisions (
                 market_id, bin_label, direction, size_usd, price, timestamp,
+                forecast_snapshot_id, calibration_model_version,
                 p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                status, edge_source, env, filled_at, fill_price, settlement_edge_usd
+                status, strategy, edge_source, bin_type, env, filled_at, fill_price, settlement_edge_usd,
+                runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
+                discovery_mode, market_hours_open, fill_quality,
+                entry_method, selected_method, applied_validations_json,
+                exit_trigger, exit_reason, admin_exit_reason,
+                exit_divergence_score, exit_market_velocity_1h, exit_forward_edge,
+                settlement_semantics_json, epistemic_context_json, edge_context_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
-            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
-            "exited", pos.edge_source, env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0)
-        ))
+            VALUES ({placeholders})
+        """, values)
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
+
+
+def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
+    """Update the lifecycle state of the latest DB row for a runtime trade."""
+    runtime_trade_id = getattr(pos, "trade_id", "")
+    if not runtime_trade_id:
+        return
+
+    row = conn.execute(
+        """
+        SELECT trade_id FROM trade_decisions
+        WHERE runtime_trade_id = ?
+        ORDER BY trade_id DESC
+        LIMIT 1
+        """,
+        (runtime_trade_id,),
+    ).fetchone()
+    if row is None:
+        return
+
+    status = getattr(pos, "state", "") or "entered"
+    timestamp = getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
+    filled_at = getattr(pos, "entered_at", "") if status == "entered" else None
+    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    conn.execute(
+        """
+        UPDATE trade_decisions
+        SET status = ?,
+            timestamp = COALESCE(NULLIF(?, ''), timestamp),
+            filled_at = COALESCE(?, filled_at),
+            fill_price = COALESCE(?, fill_price),
+            order_id = COALESCE(NULLIF(?, ''), order_id),
+            order_status_text = COALESCE(NULLIF(?, ''), order_status_text),
+            order_posted_at = COALESCE(NULLIF(?, ''), order_posted_at),
+            entered_at_ts = COALESCE(NULLIF(?, ''), entered_at_ts),
+            chain_state = COALESCE(NULLIF(?, ''), chain_state)
+        WHERE trade_id = ?
+        """,
+        (
+            status,
+            timestamp,
+            filled_at,
+            fill_price,
+            getattr(pos, "order_id", ""),
+            getattr(pos, "order_status", ""),
+            getattr(pos, "order_posted_at", ""),
+            getattr(pos, "entered_at", ""),
+            getattr(pos, "chain_state", ""),
+            row["trade_id"],
+        ),
+    )

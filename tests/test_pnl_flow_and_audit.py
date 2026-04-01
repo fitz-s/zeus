@@ -31,6 +31,7 @@ from src.state.portfolio import (
     Position,
     buy_no_edge_threshold,
     buy_yes_edge_threshold,
+    close_position,
 )
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
@@ -213,6 +214,9 @@ def test_hardcoded_constants_documented():
         "exit._buy_yes_ceiling_note",
         "exit._consecutive_confirmations_note",
         "exit._near_settlement_hours_note",
+        "exit._divergence_soft_threshold_note",
+        "exit._divergence_hard_threshold_note",
+        "exit._divergence_velocity_confirm_note",
     ]:
         value = _lookup_nested(settings, note_key)
         assert value is not MISSING
@@ -223,6 +227,27 @@ def test_inv_unrealized_pnl_computed():
     pos = _position()
     pos.last_monitor_market_price = 0.12
     assert pos.unrealized_pnl == pytest.approx(1.0)
+
+
+def test_exit_telemetry_persists_to_recent_exits():
+    portfolio = PortfolioState()
+    pos = _position(
+        trade_id="tx1",
+        market_id="m1",
+        direction="buy_no",
+        exit_trigger="MODEL_DIVERGENCE_PANIC",
+        exit_divergence_score=0.34,
+        exit_market_velocity_1h=-0.12,
+        exit_forward_edge=-0.08,
+    )
+    portfolio.positions.append(pos)
+
+    close_position(portfolio, "tx1", 0.12, "Model-Market divergence score 0.34 exceeds hard threshold")
+    ex = portfolio.recent_exits[-1]
+    assert ex["exit_trigger"] == "MODEL_DIVERGENCE_PANIC"
+    assert ex["exit_divergence_score"] == pytest.approx(0.34)
+    assert ex["exit_market_velocity_1h"] == pytest.approx(-0.12)
+    assert ex["exit_forward_edge"] == pytest.approx(-0.08)
 
 
 def test_inv_monitor_updates_market_price(monkeypatch):
@@ -588,7 +613,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
         lambda *args, **kwargs: [EdgeDecision(
             should_trade=True,
             edge=BinEdge(
-                bin=Bin(low=39, high=40, label="39-40°F"),
+                bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,

@@ -41,7 +41,7 @@ def test_monitoring_chain_trigger():
         confidence_band_upper=0.05, confidence_band_lower=0.0,
         entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
         decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
-        market_velocity_1h=0.0, divergence_score=0.20 # High divergence!
+        market_velocity_1h=-0.10, divergence_score=0.20
     )
     
     signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
@@ -82,7 +82,7 @@ def test_full_monitoring_pipeline(monkeypatch):
             confidence_band_upper=0.05, confidence_band_lower=0.0,
             entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
             decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
-            market_velocity_1h=0.0, divergence_score=0.20 # High divergence!
+            market_velocity_1h=-0.10, divergence_score=0.20
         )
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
     
@@ -92,7 +92,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     assert p_dirty is True
     assert t_dirty is True
     assert len(tracker.exits) == 1
-    assert tracker.exits[0].exit_reason == "Model-Market divergence score 0.20 exceeds threshold"
+    assert "Model-Market divergence score 0.20" in tracker.exits[0].exit_reason
     assert len(portfolio.positions) == 0 # Closed
 
 def test_refresh_position_true_metrics(monkeypatch):

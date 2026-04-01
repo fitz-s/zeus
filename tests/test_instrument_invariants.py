@@ -54,6 +54,18 @@ def test_range_bin_width_is_two():
     assert b.width == 2
     assert b.settlement_values == [50, 51]
 
+def test_fahrenheit_center_bin_rejects_non_two_degree_width():
+    with pytest.raises(ValueError, match="Fahrenheit non-shoulder bins must cover exactly 2"):
+        Bin(low=50.0, high=52.0, label="50-52°F", unit="F")
+
+def test_celsius_center_bin_rejects_non_point_width():
+    with pytest.raises(ValueError, match="Celsius non-shoulder bins must cover exactly 1"):
+        Bin(low=10.0, high=11.0, label="10-11°C", unit="C")
+
+def test_bin_label_unit_mismatch_is_rejected():
+    with pytest.raises(ValueError, match="label .* Fahrenheit but unit='C'"):
+        Bin(low=50.0, high=51.0, label="50-51°F", unit="C")
+
 
 # ---- Settlement Semantics Per City ----
 
@@ -70,7 +82,6 @@ def test_celsius_cities_get_celsius_semantics():
         )
 
 
-@pytest.mark.xfail(reason="SettlementSemantics factory for °C cities not implemented")
 def test_settlement_semantics_factory_covers_all_cities():
     """Every configured city must have a matching SettlementSemantics factory."""
     for name, city in cities_by_name.items():
@@ -83,7 +94,6 @@ def test_settlement_semantics_factory_covers_all_cities():
 
 # ---- p_raw Must Respect Bin Structure ----
 
-@pytest.mark.xfail(reason="p_raw normalization by bin width not implemented")
 def test_p_raw_density_normalization():
     """p_raw for a 5°F bin and a 1°C point bin should not be directly comparable.
 
@@ -94,8 +104,13 @@ def test_p_raw_density_normalization():
     (a) be trained separately for each bin-width type, or
     (b) receive density-normalized inputs
     """
-    # This test documents the requirement, not the implementation
-    assert False, "Platt calibration must account for bin width differences"
+    from src.calibration.platt import normalize_bin_probability_for_calibration
+
+    range_bin = Bin(low=50.0, high=51.0, label="50-51°F", unit="F")
+    point_bin = Bin(low=10.0, high=10.0, label="10°C", unit="C")
+
+    assert normalize_bin_probability_for_calibration(0.40, bin_width=range_bin.width) == pytest.approx(0.20)
+    assert normalize_bin_probability_for_calibration(0.08, bin_width=point_bin.width) == pytest.approx(0.08)
 
 
 # ---- Settlement Rounding Must Match City Contract ----
@@ -107,7 +122,6 @@ def test_fahrenheit_settlement_rounds_to_integer():
     assert sem.measurement_unit == "F"
 
 
-@pytest.mark.xfail(reason="°C SettlementSemantics not yet defined")
 def test_celsius_settlement_precision():
     """°C settlement precision must be determined from Polymarket contract.
 
@@ -115,11 +129,14 @@ def test_celsius_settlement_precision():
     one decimal (18.3°C)? This determines whether point bins (4°C)
     cover exactly 1 value or a range of 0.1° increments.
     """
-    # When implemented, something like:
-    # sem = SettlementSemantics.for_city("London")
-    # assert sem.measurement_unit == "C"
-    # assert sem.precision in (1.0, 0.1)
-    assert False
+    celsius_cities = [c for c in cities_by_name.values() if c.settlement_unit == "C"]
+    if not celsius_cities:
+        pytest.skip("No °C cities configured")
+
+    for city in celsius_cities:
+        sem = SettlementSemantics.for_city(city)
+        assert sem.measurement_unit == "C"
+        assert sem.precision == 1.0
 
 
 # ---- Day0: Observation → ENS Transition ----
@@ -212,7 +229,6 @@ def test_monitor_mc_count_matches_entry():
         )
 
 
-@pytest.mark.xfail(reason="CI-aware exit threshold not implemented")
 def test_exit_uses_ci_not_raw_edge():
     """Exit should compare ci_lower of forward_edge against threshold,
     not the raw forward_edge point estimate.
@@ -220,7 +236,46 @@ def test_exit_uses_ci_not_raw_edge():
     Entry uses bootstrap CI to quantify edge uncertainty.
     Exit should use the same epistemic rigor.
     """
-    assert False
+    from src.execution.exit_triggers import evaluate_exit_triggers
+    from src.contracts import EdgeContext, EntryMethod
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="ci-exit-1",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        entry_ci_width=0.10,
+    )
+    ctx = EdgeContext(
+        p_raw=np.array([0.45]),
+        p_cal=np.array([0.45]),
+        p_market=np.array([0.40]),
+        p_posterior=0.32,
+        forward_edge=-0.08,
+        alpha=0.55,
+        confidence_band_upper=-0.03,
+        confidence_band_lower=-0.13,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="snap-ci",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+    )
+
+    # Raw point estimate (-0.08) is not below the current buy-yes threshold (-0.10),
+    # but the conservative lower bound (-0.13) is. CI-aware exits should therefore trigger
+    # after the usual 2-cycle confirmation.
+    assert evaluate_exit_triggers(pos, ctx) is None
+    signal = evaluate_exit_triggers(pos, ctx)
+    assert signal is not None
+    assert signal.trigger == "EDGE_REVERSAL"
 
 
 # ---- Data Confidence ----

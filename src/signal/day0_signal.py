@@ -8,7 +8,7 @@ This constraint dramatically narrows probability distribution near settlement.
 import numpy as np
 
 from src.signal.ensemble_signal import sigma_instrument
-from src.types import Bin
+from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
 
 
 class Day0Signal:
@@ -26,7 +26,11 @@ class Day0Signal:
         hours_remaining: float,
         member_maxes_remaining: np.ndarray,
         unit: str = "F",
+        temporal_context: Day0TemporalContext | None = None,
         diurnal_peak_confidence: float = 0.0,
+        solar_day: SolarDay | None = None,
+        current_local_hour: float | None = None,
+        daylight_progress: float | None = None,
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
     ):
         """
@@ -45,13 +49,24 @@ class Day0Signal:
         self.ens_remaining = member_maxes_remaining
         self.unit = unit
         self._precision = precision
+        if temporal_context is not None:
+            diurnal_peak_confidence = temporal_context.post_peak_confidence
+            solar_day = temporal_context.solar_day
+            current_local_hour = temporal_context.current_local_hour
+            daylight_progress = temporal_context.daylight_progress
         self._peak_confidence = diurnal_peak_confidence
+        self._solar_day = solar_day
+        self._current_local_hour = current_local_hour
+        if solar_day is not None and current_local_hour is not None:
+            self._daylight_progress = solar_day.daylight_progress(current_local_hour)
+        else:
+            self._daylight_progress = daylight_progress
 
-        # Post-peak: observation floor is more reliable, reduce MC noise.
-        # Continuous reduction: sigma scales from base (peak=0) down to 0.5×base (peak=1).
-        # Previous binary threshold (>0.7 → halve) caused abrupt signal jump.
+        # Sigma shrinkage remains tied specifically to post-peak confidence.
+        # Broader temporal closure now flows through observation_weight() and
+        # remaining-window selection, not through a second implicit sigma policy.
         base_sigma = sigma_instrument(unit).value
-        self._sigma = base_sigma * (1.0 - diurnal_peak_confidence * 0.5)
+        self._sigma = base_sigma * (1.0 - self._peak_confidence * 0.5)
 
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
@@ -66,7 +81,7 @@ class Day0Signal:
         inv = 1.0 / self._precision if self._precision > 0 else 1.0
         return np.round(arr * inv) / inv
 
-    def p_vector(self, bins: list[Bin], n_mc: int = 3000) -> np.ndarray:
+    def p_vector(self, bins: list[Bin], n_mc: int = 5000) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.
 
         For each MC iteration:
@@ -84,14 +99,18 @@ class Day0Signal:
 
         rng = np.random.default_rng()
         obs_settled = self._settle(self.obs_high)
+        obs_weight = self.observation_weight()
 
         for _ in range(n_mc):
             # Sample residual ENS member
             remaining = rng.choice(self.ens_remaining, size=n_members, replace=True)
             noised = remaining + rng.normal(0, self._sigma, n_members)
 
-            # Final high = max(observed, remaining forecast)
-            final_highs = np.maximum(noised, self.obs_high)
+            # Day0 fusion: the observed high is a hard floor, while residual upside
+            # above that floor should shrink continuously as the observation becomes
+            # more dominant later in the day.
+            residual_excess = np.maximum(0.0, noised - self.obs_high)
+            final_highs = self.obs_high + residual_excess * (1.0 - obs_weight)
             final_settled = self._settle(final_highs)
 
             for i, b in enumerate(bins):
@@ -118,19 +137,45 @@ class Day0Signal:
     def observation_weight(self) -> float:
         """Continuous 0→1 weight for how much observation dominates over ENS.
 
-        Increases monotonically as hours_remaining decreases and
-        diurnal_peak_confidence increases.
-
-        - At 0h remaining: weight = 1.0 (observation is final fact)
-        - At 12h+ remaining, low confidence: weight ≈ 0 (ENS dominant)
-        - Diurnal peak already passed: peak_confidence pushes weight up by ≤ 0.5
-
-        Does NOT attempt to model evening-colder-than-morning reversal edge cases
-        (those require diurnal_peak_confidence < 0 or explicit flag — caller's job).
+        The fusion is intentionally monotone and multiplicative:
+        independent closure signals reduce the remaining forecast freedom rather
+        than being added as disconnected heuristics.
         """
-        time_weight = max(0.0, 1.0 - self.hours_remaining / 12.0)
-        peak_weight = self._peak_confidence * 0.5
-        return min(1.0, time_weight + peak_weight)
+        base = self._temporal_closure_weight()
+
+        if self._solar_day is not None and self._current_local_hour is not None:
+            phase = self._solar_day.phase(self._current_local_hour)
+            if phase == DaylightPhase.PRE_SUNRISE:
+                return min(base, 0.05)
+            if phase == DaylightPhase.POST_SUNSET:
+                return 1.0
+
+        if self._daylight_progress is None:
+            return base
+        if self._daylight_progress <= 0.0:
+            return min(base, 0.05)
+        if self._daylight_progress >= 1.0:
+            return 1.0
+        return max(base, self._daylight_progress * 0.35)
+
+    def _temporal_closure_weight(self) -> float:
+        """Monotone fusion of residual-time, diurnal, solar, and ENS-dominance evidence."""
+        time_closure = float(np.clip(1.0 - self.hours_remaining / 12.0, 0.0, 1.0))
+        peak_signal = float(np.clip(self._peak_confidence, 0.0, 1.0))
+        daylight_signal = (
+            float(np.clip(self._daylight_progress, 0.0, 1.0))
+            if self._daylight_progress is not None
+            else time_closure
+        )
+        ens_dominance = float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0))
+
+        residual_freedom = (
+            (1.0 - time_closure)
+            * (1.0 - 0.75 * peak_signal)
+            * (1.0 - 0.50 * daylight_signal)
+            * (1.0 - 0.35 * ens_dominance)
+        )
+        return float(np.clip(1.0 - residual_freedom, 0.0, 1.0))
 
     def obs_dominates(self) -> bool:
         """True if observation already exceeds most ENS remaining forecasts.

@@ -22,6 +22,8 @@ SEMANTIC_RULES = {
     }
 }
 
+TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py"}
+
 
 class SemanticAnalyzer(ast.NodeVisitor):
     def __init__(self, filepath: Path):
@@ -58,9 +60,63 @@ class SemanticAnalyzer(ast.NodeVisitor):
 
         self.current_function = prev_function
 
+    def _check_time_semantics_symbol(self, symbol: str, lineno: int) -> None:
+        if self.filepath.name in TIME_SEMANTICS_ALLOWED_FILES:
+            return
+        if symbol in {"local_hour", "current_local_hour"} and "tests" not in self.filepath.parts:
+            self.violations.append(
+                f"{self.filepath}:{lineno}:\n"
+                "  [ERROR] Raw local-hour semantics must stay inside the approved "
+                "time-semantics layer (solar.py / diurnal.py / day0_signal.py).\n"
+                "  Use ObservationInstant / Day0TemporalContext instead.\n"
+            )
+
     def visit_Attribute(self, node: ast.Attribute):
+        self._check_time_semantics_symbol(node.attr, node.lineno)
         if self.current_function:
             self.function_attributes[self.current_function].add(node.attr)
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name):
+        self._check_time_semantics_symbol(node.id, node.lineno)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call):
+        func_name = ""
+        attr_name = ""
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            attr_name = node.func.attr
+            func_name = attr_name
+
+        if func_name == "Bin":
+            has_unit_keyword = any(k.arg == "unit" for k in node.keywords if k.arg is not None)
+            if not has_unit_keyword:
+                self.violations.append(
+                    f"{self.filepath}:{node.lineno}:\n"
+                    "  [ERROR] Bin construction must specify unit= explicitly.\n"
+                    "  Missing required keyword: unit\n"
+                )
+
+        if attr_name in {"default_wu_fahrenheit", "default_wu_celsius"}:
+            if self.filepath.name != "settlement_semantics.py":
+                self.violations.append(
+                    f"{self.filepath}:{node.lineno}:\n"
+                    "  [ERROR] Do not call SettlementSemantics.default_wu_* outside "
+                    "settlement_semantics.py. Use SettlementSemantics.for_city() instead.\n"
+                )
+
+        if func_name == "build_day0_temporal_context":
+            has_observation_time = any(k.arg == "observation_time" for k in node.keywords if k.arg is not None)
+            in_tests = "tests" in self.filepath.parts or self.filepath.name.startswith("test_")
+            if not has_observation_time and not in_tests and self.filepath.name != "diurnal.py":
+                self.violations.append(
+                    f"{self.filepath}:{node.lineno}:\n"
+                    "  [ERROR] build_day0_temporal_context must receive observation_time= "
+                    "outside tests so Day0 runtime logic does not fall back to blind clock time.\n"
+                )
+
         self.generic_visit(node)
 
 

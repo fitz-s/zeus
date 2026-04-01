@@ -17,7 +17,11 @@ from src.state.portfolio import (
     buy_no_ceiling,
     buy_no_edge_threshold,
     buy_yes_edge_threshold,
+    conservative_forward_edge,
     consecutive_confirmations,
+    divergence_hard_threshold,
+    divergence_soft_threshold,
+    divergence_velocity_confirm,
     near_settlement_hours,
 )
 
@@ -66,12 +70,25 @@ def evaluate_exit_triggers(
         )
 
     # Phase 3 Hard-Trigger Metrics (Microstructure deterioration)
-    if current_edge_context.divergence_score >= 0.15:
+    if current_edge_context.divergence_score >= divergence_hard_threshold():
         return ExitSignal(
             trade_id=position.trade_id,
             trigger="MODEL_DIVERGENCE_PANIC",
-            reason=f"Model-Market divergence score {current_edge_context.divergence_score:.2f} exceeds threshold",
+            reason=f"Model-Market divergence score {current_edge_context.divergence_score:.2f} exceeds hard threshold",
             urgency="immediate"
+        )
+    if (
+        current_edge_context.divergence_score >= divergence_soft_threshold()
+        and current_edge_context.market_velocity_1h <= divergence_velocity_confirm()
+    ):
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="MODEL_DIVERGENCE_PANIC",
+            reason=(
+                f"Model-Market divergence score {current_edge_context.divergence_score:.2f} "
+                f"with adverse velocity {current_edge_context.market_velocity_1h:.2f}/hr"
+            ),
+            urgency="immediate",
         )
         
     if current_edge_context.market_velocity_1h <= -0.15:
@@ -120,9 +137,10 @@ def _evaluate_buy_yes_exit(
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
     if False: _ = position.entry_method
     forward_edge = current_edge_context.forward_edge
-    
+    evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
+
     edge_threshold = buy_yes_edge_threshold(position.entry_ci_width)
-    if forward_edge >= edge_threshold:
+    if evidence_edge >= edge_threshold:
         position.neg_edge_count = 0  # Reset on positive
         return None
 
@@ -145,7 +163,10 @@ def _evaluate_buy_yes_exit(
     return ExitSignal(
         trade_id=position.trade_id,
         trigger="EDGE_REVERSAL",
-        reason=f"Buy-yes edge reversed for 2 cycles (edge={forward_edge:.4f})",
+        reason=(
+            f"Buy-yes edge reversed for 2 cycles "
+            f"(ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})"
+        ),
     )
 
 
@@ -163,6 +184,7 @@ def _evaluate_buy_no_exit(
     """
     if False: _ = position.entry_method  # Semantic provenance guard
     forward_edge = current_edge_context.forward_edge
+    evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
     edge_threshold = buy_no_edge_threshold(position.entry_ci_width)
 
     # Near-settlement: hold unless deeply negative
@@ -172,11 +194,14 @@ def _evaluate_buy_no_exit(
             return ExitSignal(
                 trade_id=position.trade_id,
                 trigger="BUY_NO_NEAR_EXIT",
-                reason=f"Buy-no near settlement, deeply negative edge={forward_edge:.4f}",
+                reason=(
+                    f"Buy-no near settlement, deeply negative "
+                    f"point={forward_edge:.4f}"
+                ),
             )
         return None  # Near settlement: hold unless extreme
 
-    if forward_edge < edge_threshold:
+    if evidence_edge < edge_threshold:
         position.neg_edge_count += 1
     else:
         position.neg_edge_count = 0  # Reset on ANY non-negative cycle
@@ -202,7 +227,7 @@ def _evaluate_buy_no_exit(
             trade_id=position.trade_id,
             trigger="BUY_NO_EDGE_EXIT",
             reason=f"Buy-no edge negative for {consecutive_needed} cycles "
-                   f"(edge={forward_edge:.4f}, threshold={edge_threshold})",
+                   f"(ci_lower={evidence_edge:.4f}, point={forward_edge:.4f}, threshold={edge_threshold})",
         )
 
     return None

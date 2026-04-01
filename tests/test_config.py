@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.config import Settings, City, load_cities
+from src.contracts.settlement_semantics import SettlementSemantics
 
 
 def test_settings_loads_all_required_keys():
@@ -108,3 +109,18 @@ def test_city_aliases():
     assert "New York City" in by_name["NYC"].aliases
     assert "LA" in by_name["Los Angeles"].aliases
     assert "SF" in by_name["San Francisco"].aliases
+
+
+def test_settlement_semantics_matches_city_metadata():
+    for city in load_cities():
+        sem = SettlementSemantics.for_city(city)
+        assert sem.measurement_unit == city.settlement_unit
+        assert sem.finalization_time == "12:00:00Z"
+
+        if "wunderground.com" in city.settlement_source:
+            assert sem.resolution_source == f"WU_{city.wu_station}"
+        else:
+            pytest.fail(
+                f"{city.name} uses non-WU settlement_source={city.settlement_source!r}. "
+                "SettlementSemantics.for_city() must be upgraded before this city is valid."
+            )

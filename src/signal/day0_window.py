@@ -8,6 +8,13 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 
+def _parse_forecast_timestamp(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def remaining_member_maxes_for_day0(
     members_hourly: np.ndarray,
     times: list[str],
@@ -22,7 +29,7 @@ def remaining_member_maxes_for_day0(
     now_local = (now or datetime.now(tz)).astimezone(tz)
     idxs: list[int] = []
     for idx, ts in enumerate(times):
-        dt_utc = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        dt_utc = _parse_forecast_timestamp(ts)
         dt_local = dt_utc.astimezone(tz)
         if dt_local.date() != target_d:
             continue
@@ -32,7 +39,7 @@ def remaining_member_maxes_for_day0(
 
     if not idxs:
         for idx, ts in enumerate(times):
-            dt_utc = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+            dt_utc = _parse_forecast_timestamp(ts)
             if dt_utc.astimezone(tz).date() == target_d:
                 idxs.append(idx)
 

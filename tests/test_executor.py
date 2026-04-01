@@ -89,7 +89,7 @@ class TestPortfolio:
 class TestExecutor:
     def test_paper_fill(self):
         edge = BinEdge(
-            bin=Bin(low=39, high=40, label="39-40"),
+            bin=Bin(low=39, high=40, label="39-40", unit="F"),
             direction="buy_yes", edge=0.10,
             ci_lower=0.03, ci_upper=0.17,
             p_model=0.50, p_market=0.40, p_posterior=0.50,

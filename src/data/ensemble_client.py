@@ -22,6 +22,27 @@ API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 # Retry config per CLAUDE.md: retry 3× with 10s backoff
 MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
+CACHE_TTL_SECONDS = 15 * 60
+_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str], dict] = {}
+
+
+def _cache_key(city: City, model: str) -> tuple[str, float, float, str, str]:
+    return (
+        city.name,
+        float(city.lat),
+        float(city.lon),
+        city.settlement_unit,
+        model,
+    )
+
+
+def _clone_result(result: dict) -> dict:
+    cloned = dict(result)
+    if "members_hourly" in cloned:
+        cloned["members_hourly"] = np.array(cloned["members_hourly"], copy=True)
+    if "times" in cloned:
+        cloned["times"] = list(cloned["times"])
+    return cloned
 
 
 def fetch_ensemble(
@@ -53,6 +74,13 @@ def fetch_ensemble(
 
     fetch_time = datetime.now(timezone.utc)
     last_error = None
+    cache_key = _cache_key(city, model)
+    cached = _ENSEMBLE_CACHE.get(cache_key)
+    if cached is not None:
+        age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
+        cached_days = int(cached.get("forecast_days", 0))
+        if age_seconds <= CACHE_TTL_SECONDS and cached_days >= int(forecast_days):
+            return _clone_result(cached)
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -63,9 +91,19 @@ def fetch_ensemble(
             resp.raise_for_status()
             data = resp.json()
             quota_tracker.record_call("ensemble")
-            return _parse_response(data, model, fetch_time)
+            parsed = _parse_response(data, model, fetch_time)
+            parsed["forecast_days"] = int(forecast_days)
+            _ENSEMBLE_CACHE[cache_key] = parsed
+            return _clone_result(parsed)
         except (httpx.HTTPError, KeyError, ValueError) as e:
             last_error = e
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
+                retry_after = e.response.headers.get("Retry-After")
+                try:
+                    retry_after_seconds = int(retry_after) if retry_after else None
+                except ValueError:
+                    retry_after_seconds = None
+                quota_tracker.note_rate_limited(retry_after_seconds)
             if attempt < MAX_RETRIES - 1:
                 import time
                 time.sleep(RETRY_BACKOFF_S)
@@ -128,3 +166,7 @@ def validate_ensemble(result: dict, expected_members: int = 51) -> bool:
         print(f"  WARN ensemble has {n} members, expected {expected_members}. REJECTED.")
         return False
     return True
+
+
+def _clear_cache() -> None:
+    _ENSEMBLE_CACHE.clear()

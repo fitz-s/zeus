@@ -14,6 +14,7 @@ from src.strategy.market_fusion import vwmp, compute_alpha, compute_posterior
 from src.strategy.market_analysis import MarketAnalysis
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.types import Bin, BinEdge
+from src.types.temperature import TemperatureDelta
 
 
 class TestVWMP:
@@ -40,33 +41,39 @@ class TestVWMP:
 
 class TestComputeAlpha:
     def test_level_1_base(self):
-        a = compute_alpha(1, 3.0, "AGREE", 3, 24.0)
+        a = compute_alpha(1, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0)
         assert a == pytest.approx(0.65, abs=0.01)
 
     def test_level_4_base(self):
-        a = compute_alpha(4, 3.0, "AGREE", 3, 24.0)
+        a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0)
         assert a == pytest.approx(0.25, abs=0.01)
 
     def test_conflict_reduces_alpha(self):
-        a_agree = compute_alpha(1, 3.0, "AGREE", 3, 24.0)
-        a_conflict = compute_alpha(1, 3.0, "CONFLICT", 3, 24.0)
+        spread = TemperatureDelta(3.0, "F")
+        a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0)
+        a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0)
         assert a_conflict < a_agree
 
     def test_fresh_market_increases_alpha(self):
         """hours_since_open < 6 → +0.15 total (0.10 + 0.05)."""
-        a_old = compute_alpha(2, 3.0, "AGREE", 3, 48.0)
-        a_fresh = compute_alpha(2, 3.0, "AGREE", 3, 4.0)
+        spread = TemperatureDelta(3.0, "F")
+        a_old = compute_alpha(2, spread, "AGREE", 3, 48.0)
+        a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0)
         assert a_fresh > a_old
 
     def test_clamped_floor(self):
         """Alpha should never go below 0.20."""
-        a = compute_alpha(4, 8.0, "CONFLICT", 7, 48.0)
+        a = compute_alpha(4, TemperatureDelta(8.0, "F"), "CONFLICT", 7, 48.0)
         assert a >= 0.20
 
     def test_clamped_ceiling(self):
         """Alpha should never exceed 0.85."""
-        a = compute_alpha(1, 1.0, "AGREE", 1, 2.0)
+        a = compute_alpha(1, TemperatureDelta(1.0, "F"), "AGREE", 1, 2.0)
         assert a <= 0.85
+
+    def test_rejects_float_spread(self):
+        with pytest.raises(TypeError):
+            compute_alpha(1, 3.0, "AGREE", 3, 24.0)
 
 
 class TestComputePosterior:
@@ -88,17 +95,17 @@ class TestComputePosterior:
 class TestMarketAnalysis:
     def _make_bins(self) -> list[Bin]:
         return [
-            Bin(low=None, high=32, label="32 or below"),
-            Bin(low=33, high=34, label="33-34"),
-            Bin(low=35, high=36, label="35-36"),
-            Bin(low=37, high=38, label="37-38"),
-            Bin(low=39, high=40, label="39-40"),
-            Bin(low=41, high=42, label="41-42"),
-            Bin(low=43, high=44, label="43-44"),
-            Bin(low=45, high=46, label="45-46"),
-            Bin(low=47, high=48, label="47-48"),
-            Bin(low=49, high=50, label="49-50"),
-            Bin(low=51, high=None, label="51 or higher"),
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=34, label="33-34", unit="F"),
+            Bin(low=35, high=36, label="35-36", unit="F"),
+            Bin(low=37, high=38, label="37-38", unit="F"),
+            Bin(low=39, high=40, label="39-40", unit="F"),
+            Bin(low=41, high=42, label="41-42", unit="F"),
+            Bin(low=43, high=44, label="43-44", unit="F"),
+            Bin(low=45, high=46, label="45-46", unit="F"),
+            Bin(low=47, high=48, label="47-48", unit="F"),
+            Bin(low=49, high=50, label="49-50", unit="F"),
+            Bin(low=51, high=None, label="51 or higher", unit="F"),
         ]
 
     def test_mispriced_market_finds_edges(self):
