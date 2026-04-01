@@ -21,6 +21,7 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.semantic_types import Direction, LifecycleState, ChainState, DirectionAlias
+from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,11 @@ class PortfolioModeError(RuntimeError):
     pass
 
 
+class DeprecatedStateFileError(RuntimeError):
+    """Raised when a deprecated unsuffixed truth file is accessed."""
+    pass
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """Load portfolio from JSON file. Returns empty state if file missing.
 
@@ -415,6 +421,11 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
 
     with open(path) as f:
         data = json.load(f)
+    if data.get("truth", {}).get("deprecated") is True:
+        raise DeprecatedStateFileError(
+            f"{path} is a deprecated legacy truth file. "
+            "Use the mode-suffixed positions file instead."
+        )
 
     import os
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
@@ -464,6 +475,7 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "recent_exits": state.recent_exits,
         "ignored_tokens": state.ignored_tokens,
     }
+    data = annotate_truth_payload(data, path, mode=settings.mode, generated_at=state.updated_at)
 
     # Atomic write pattern per OpenClaw conventions
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")

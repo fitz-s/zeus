@@ -1,154 +1,148 @@
 #!/usr/bin/env python3
-"""
-Build an equity curve for Zeus paper trading.
-Timeline: initial $150 -> each realized trade P&L -> open positions marked to market.
-"""
+"""Build a mode-aware equity curve from current truth files."""
+
+from __future__ import annotations
+
+import argparse
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    matplotlib = None
+    mdates = None
+    plt = None
 
-BASE = Path.home() / ".openclaw" / "workspace-venus"
-ZEUS_DB = BASE / "zeus" / "state" / "zeus.db"
-STRACKER = BASE / "zeus" / "state" / "strategy_tracker.json"
-OUT = BASE / "zeus" / "equity_curve.png"
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-INITIAL = 150.0
+from src.state.truth_files import current_mode, read_mode_truth_json
 
-# ── Load strategy tracker ────────────────────────────────────────────────────
-with open(STRACKER) as f:
-    tracker = json.load(f)
 
-all_trades = []
-for strat_name, strat_data in tracker.get("strategies", {}).items():
-    for t in strat_data.get("trades", []):
-        all_trades.append(t)
+OUT = PROJECT_ROOT / "equity_curve.png"
 
-trade_pnl = {t["trade_id"]: t for t in all_trades}
-realized_ids = {t["trade_id"] for t in all_trades if t["status"] == "exited"}
 
-# ── Load chronicle ────────────────────────────────────────────────────────────
-conn = sqlite3.connect(str(ZEUS_DB))
-conn.row_factory = sqlite3.Row
-cur = conn.cursor()
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
-chronicle = cur.execute(
-    "SELECT id, event_type, trade_id, timestamp, details_json FROM chronicle ORDER BY id"
-).fetchall()
 
-# ── Build ordered list of events we can pin to a time ─────────────────────────
-# Each entry: (datetime, description, realized_pnl_delta, unrealized_mtm_delta, cumulative_realized)
-events = []
+def build_equity_curve(mode: str) -> dict:
+    status, status_truth = read_mode_truth_json("status_summary.json", mode=mode)
+    portfolio, portfolio_truth = read_mode_truth_json("positions.json", mode=mode)
+    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json", mode=mode)
 
-# Start
-start_dt = datetime(2026, 3, 30, 8, 0, tzinfo=timezone.utc)
-events.append((start_dt, "Start", 0.0, 0.0, 0.0))
+    initial = float(status["portfolio"]["initial_bankroll"])
+    realized_now = float(status["portfolio"]["realized_pnl"])
+    unrealized_now = float(status["portfolio"]["unrealized_pnl"])
+    total_now = float(status["portfolio"]["effective_bankroll"])
 
-for row in chronicle:
-    tid = row["trade_id"]
-    ev_type = row["event_type"]
-    ts_str = row["timestamp"]
-    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-    details = json.loads(row["details_json"]) if row["details_json"] else {}
+    recent_exits = sorted(
+        [
+            row for row in portfolio.get("recent_exits", [])
+            if not str(row.get("market_id", "")).startswith("mock_")
+        ],
+        key=lambda row: row.get("exited_at", ""),
+    )
+    timestamps = [
+        dt for dt in (
+            _parse_ts(row.get("entered_at")) for row in portfolio.get("positions", [])
+        )
+        if dt is not None
+    ]
+    timestamps.extend(
+        dt for dt in (_parse_ts(row.get("exited_at")) for row in recent_exits) if dt is not None
+    )
+    generated_at = _parse_ts(status_truth.get("generated_at")) or datetime.now(timezone.utc)
+    start_dt = min(timestamps) if timestamps else generated_at
 
-    if ev_type == "ENTRY":
-        if tid in trade_pnl and tid in realized_ids:
-            pnl = trade_pnl[tid]["pnl"]
-            events.append((ts, f"+${pnl:.2f} ({tid[:8]})", pnl, 0.0, None))
-        elif tid in trade_pnl and tid not in realized_ids:
-            # open position — record as entry marker but no realized pnl yet
-            events.append((ts, f"OPEN {tid[:8]}", 0.0, 0.0, None))
+    events: list[tuple[datetime, float, str]] = [(start_dt, initial, "Start")]
+    running_realized = 0.0
+    for exit_row in recent_exits:
+        ts = _parse_ts(exit_row.get("exited_at"))
+        if ts is None:
+            continue
+        pnl = float(exit_row.get("pnl", 0.0) or 0.0)
+        running_realized += pnl
+        label = (
+            f"{exit_row.get('city', '?')} {exit_row.get('bin_label', '')} "
+            f"{exit_row.get('direction', '')} {pnl:+.2f}"
+        ).strip()
+        events.append((ts, initial + running_realized, label))
 
-# ── Sort and compute running realized P&L ────────────────────────────────────
-events.sort(key=lambda x: x[0])
+    events.append((generated_at, total_now, f"Current {total_now:+.2f}"))
+    events.sort(key=lambda row: row[0])
 
-running_realized = 0.0
-equity_curve = []  # (datetime, equity, label)
+    return_pct = (total_now / initial - 1.0) * 100.0 if initial > 0 else 0.0
+    report = {
+        "mode": mode,
+        "initial_bankroll": initial,
+        "realized_pnl": realized_now,
+        "unrealized_pnl": unrealized_now,
+        "total_pnl": total_now - initial,
+        "bankroll": total_now,
+        "return_pct": round(return_pct, 2),
+        "status_truth": status_truth,
+        "portfolio_truth": portfolio_truth,
+        "tracker_truth": tracker_truth,
+        "output_path": str(OUT) if plt is not None else None,
+        "n_realized_events": len(recent_exits),
+        "matplotlib_available": plt is not None,
+    }
+    if plt is None:
+        return report
 
-for ts, desc, pnl_delta, mtm_delta, _ in events:
-    if pnl_delta != 0.0:
-        running_realized += pnl_delta
-    equity = INITIAL + running_realized
-    equity_curve.append((ts, equity, desc))
+    fig, ax = plt.subplots(figsize=(13, 7))
+    times = [row[0] for row in events]
+    equity = [row[1] for row in events]
 
-# Current unrealized from status_summary (open positions)
-UNREALIZED_NOW = 13.29
-CURRENT_DT = datetime(2026, 3, 31, 6, 58, tzinfo=timezone.utc)
-final_equity = INITIAL + running_realized + UNREALIZED_NOW
-equity_curve.append((CURRENT_DT, final_equity, f"Current ${final_equity:.2f}"))
+    ax.step(times, equity, where="post", color="#00D4AA", linewidth=2.5)
+    ax.fill_between(times, initial, equity, step="post", alpha=0.12, color="#00D4AA")
+    ax.axhline(initial, color="red", linewidth=1.2, linestyle="--", alpha=0.6, label=f"Initial ${initial:.2f}")
+    ax.axhline(initial + realized_now, color="steelblue", linewidth=1.2, linestyle=":", alpha=0.7, label=f"Realized ${initial + realized_now:.2f}")
+    ax.axhline(total_now, color="#00D4AA", linewidth=1.2, linestyle="-", alpha=0.8, label=f"Total ${total_now:.2f}")
 
-# ── Plot ─────────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(13, 7))
+    ax.set_title(f"Zeus {mode} Equity Curve", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Bankroll (USD)", fontsize=11)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    plt.xticks(rotation=30, fontsize=8)
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="upper left", fontsize=9)
 
-times = [p[0] for p in equity_curve]
-values = [p[1] for p in equity_curve]
+    summary = (
+        f"env={mode} | generated_at={status_truth.get('generated_at')} | "
+        f"status_source={status_truth.get('source_path')} | "
+        f"status_stale_age_seconds={status_truth.get('stale_age_seconds')} | "
+        f"realized=${realized_now:.2f} | unrealized=${unrealized_now:.2f} | "
+        f"total=${total_now:.2f} | return={return_pct:+.1f}%"
+    )
+    ax.text(0.5, -0.16, summary, transform=ax.transAxes, ha="center", fontsize=9, color="dimgray")
 
-# Step chart
-ax.step(times, values, where="post", color="#00D4AA", linewidth=2.5)
+    plt.tight_layout()
+    plt.savefig(str(OUT), dpi=150, bbox_inches="tight")
+    return report
 
-# Fill
-ax.fill_between(times, INITIAL, values, step="post", alpha=0.12, color="#00D4AA")
 
-# Markers for realized trade events
-for ts, eq, desc in equity_curve:
-    if desc.startswith("+"):
-        ax.axvline(ts, color="#00D4AA", linewidth=0.8, linestyle="--", alpha=0.35)
-        ax.scatter([ts], [eq], color="#00D4AA", zorder=5, s=30)
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default=None)
+    args = parser.parse_args()
 
-# Initial / final / unrealized lines
-ax.axhline(INITIAL, color="red", linewidth=1.2, linestyle="--", alpha=0.6, label=f"Initial ${INITIAL:.2f}")
-ax.axhline(INITIAL + running_realized, color="steelblue", linewidth=1.2,
-           linestyle=":", alpha=0.7, label=f"Realised only ${INITIAL + running_realized:.2f}")
-ax.axhline(final_equity, color="#00D4AA", linewidth=1.2, linestyle="-",
-           alpha=0.8, label=f"Total w/ unrealized ${final_equity:.2f}")
+    mode = current_mode(args.mode)
+    report = build_equity_curve(mode)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
-# Annotations
-ax.annotate(f"Start\n${INITIAL:.2f}",
-            xy=(times[0], INITIAL), xytext=(times[0], INITIAL - 28),
-            fontsize=9, color="red",
-            arrowprops=dict(arrowstyle="->", color="red", alpha=0.6))
 
-ax.annotate(f"Total\n${final_equity:.2f}",
-            xy=(CURRENT_DT, final_equity), xytext=(CURRENT_DT, final_equity + 22),
-            fontsize=9, color="#00D4AA",
-            arrowprops=dict(arrowstyle="->", color="#00D4AA", alpha=0.8))
-
-# Annotate big trade
-big = next((e for e in equity_curve if "+$164" in e[2]), None)
-if big:
-    ax.annotate(f"SF win\n+${164.44:.2f}",
-                xy=(big[0], big[1]), xytext=(big[0], big[1] + 18),
-                fontsize=8, color="orange",
-                arrowprops=dict(arrowstyle="->", color="orange", alpha=0.8))
-
-ax.set_title("Zeus Paper Trading — Equity Curve\n2026-03-30 → 2026-03-31",
-             fontsize=14, fontweight="bold")
-ax.set_ylabel("Bankroll (USD)", fontsize=11)
-ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-plt.xticks(rotation=30, fontsize=8)
-ax.grid(True, alpha=0.2)
-ax.legend(loc="upper left", fontsize=9)
-
-ret = (final_equity / INITIAL - 1) * 100
-summary = (f"Initial: ${INITIAL:.2f}  |  "
-           f"Realised P&L: ${running_realized:.2f}  |  "
-           f"Unrealised: ${UNREALIZED_NOW:.2f}  |  "
-           f"Total: ${final_equity:.2f}  |  "
-           f"Return: {ret:+.1f}%")
-ax.text(0.5, -0.13, summary, transform=ax.transAxes,
-        ha="center", fontsize=10, color="dimgray")
-
-plt.tight_layout()
-plt.savefig(str(OUT), dpi=150, bbox_inches="tight")
-print(f"Saved → {OUT}")
-
-# Print the equity table
-print("\nEquity timeline:")
-for ts, eq, desc in equity_curve:
-    print(f"  {ts.strftime('%Y-%m-%d %H:%M')}  ${eq:8.2f}  {desc}")
-print(f"\n  Return: {ret:+.1f}%  |  Realised: ${running_realized:.2f}  |  Unrealised: ${UNREALIZED_NOW:.2f}  |  Total: ${final_equity:.2f}")
+if __name__ == "__main__":
+    main()

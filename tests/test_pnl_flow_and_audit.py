@@ -293,6 +293,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["portfolio"]["total_pnl"] == pytest.approx(-0.8)
     assert status["portfolio"]["effective_bankroll"] == pytest.approx(149.2)
+    assert status["truth"]["source_path"] == str(status_path)
+    assert status["truth"]["deprecated"] is False
 
 
 def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
@@ -374,7 +376,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -421,6 +423,10 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
         "fetch_ensemble",
         lambda city, forecast_days=8, model=None: None if model == "gfs025" else {
             "members_hourly": np.ones((51, 48)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc).isoformat()
+                for _ in range(48)
+            ],
             "issue_time": datetime.now(timezone.utc),
             "fetch_time": datetime.now(timezone.utc),
             "model": "ecmwf_ifs025",

@@ -18,6 +18,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import state_path
 from src.state.db import get_connection
 
 REPLAY_REQUIRED_FIELDS = [
@@ -47,9 +48,9 @@ FIELD_STAGE = {
 
 
 def run_audit():
-    positions_file = PROJECT_ROOT / "state" / "positions.json"
+    positions_file = state_path("positions.json")
     if not positions_file.exists():
-        print("ERROR: No positions.json found.")
+        print(f"ERROR: No mode-qualified positions file found: {positions_file}")
         return
 
     with open(positions_file) as f:

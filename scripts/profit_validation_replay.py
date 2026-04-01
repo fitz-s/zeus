@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_connection
 from src.state.portfolio import load_portfolio, Position
+from src.config import state_path
 from src.contracts.edge_context import EdgeContext
 from src.contracts.semantic_types import EntryMethod
 from src.execution.exit_triggers import evaluate_exit_triggers
@@ -30,9 +31,9 @@ def run_profit_validation_replay():
     """Phase 3.1: Validate new Phase 2 semantic boundaries using historical trades."""
     logger.info("Initializing Phase 3 Validation Replay...")
     
-    positions_file = PROJECT_ROOT / "state" / "positions.json"
+    positions_file = state_path("positions.json")
     if not positions_file.exists():
-        logger.error("No positions.json found for replay.")
+        logger.error("No mode-qualified positions file found for replay: %s", positions_file)
         return
 
     portfolio = load_portfolio()

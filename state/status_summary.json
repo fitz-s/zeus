@@ -1,52 +1,15 @@
 {
-  "timestamp": "2026-03-31T11:42:27.151130+00:00",
-  "process": {
-    "pid": 5785,
-    "mode": "paper",
-    "version": "zeus_v2"
-  },
-  "risk": {
-    "level": "GREEN"
-  },
-  "portfolio": {
-    "open_positions": 1,
-    "total_exposure_usd": 6.99,
-    "heat_pct": 1.7,
-    "initial_bankroll": 150.0,
-    "realized_pnl": 250.04,
-    "unrealized_pnl": 9.21,
-    "total_pnl": 259.25,
-    "effective_bankroll": 409.25,
-    "bankroll": 409.25,
-    "positions": [
-      {
-        "trade_id": "83651497-7e0",
-        "city": "Denver",
-        "direction": "buy_no",
-        "size": 6.988829628388125,
-        "edge": 0.1437875576505696,
-        "bin": "Will the highest temperature i",
-        "mark_price": 0.815,
-        "unrealized_pnl": 9.21
-      }
-    ]
-  },
-  "cycle": {
-    "mode": "opening_hunt",
-    "started_at": "2026-03-31T11:41:49.079961+00:00",
-    "monitors": 1,
-    "exits": 0,
-    "candidates": 0,
-    "trades": 0,
-    "no_trades": 0,
-    "pending_voids": 0,
-    "chain_sync": {
-      "skipped": "paper_mode"
-    },
-    "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 409.35280844137026,
-    "dynamic_cap_usd": 150.0,
-    "portfolio_heat_pct": 4.66,
-    "completed_at": "2026-03-31T11:42:27.151040+00:00"
+  "error": "status_summary.json is deprecated and must not be used as current truth. Use the mode-suffixed state files instead.",
+  "truth": {
+    "mode": "deprecated",
+    "generated_at": "2026-04-01T10:56:05.111684+00:00",
+    "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
+    "stale_age_seconds": 0.0,
+    "deprecated": true,
+    "archived_to": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/legacy_state_archive/status_summary.json.20260401T105605Z",
+    "replacement_paths": {
+      "paper": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-paper.json",
+      "live": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json"
+    }
   }
 }

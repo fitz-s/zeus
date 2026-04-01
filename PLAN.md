@@ -112,6 +112,34 @@
   - `refit_count = 13`
 - Post-backfill real `platt_models` now use the new taxonomy, e.g. `Europe-Maritime_DJF`, `Europe-Continental_MAM`, `US-GreatLakes_MAM`, `US-Texas-Triangle_DJF`.
 - Full-suite verification after the taxonomy migration is green: `355 passed, 3 skipped`.
+- Unsuffixed legacy Zeus truth files are no longer readable as current truth:
+  - `state/status_summary.json`
+  - `state/positions.json`
+  - `state/strategy_tracker.json`
+  have been archived into `state/legacy_state_archive/` and replaced with explicit tombstones.
+- Mode-suffixed truth files now carry explicit truth metadata:
+  - `mode`
+  - `generated_at`
+  - `source_path`
+  - `stale_age_seconds`
+  - `deprecated`
+- Loader-level fail-fast is now in place:
+  - `load_portfolio()` rejects deprecated legacy truth files
+  - `load_tracker()` rejects deprecated legacy truth files
+- Reporting scripts that previously read unsuffixed truth files have been migrated to mode-aware sources:
+  - [scripts/equity_curve.py](/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/equity_curve.py)
+  - [scripts/analyze_paper_trading.py](/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/analyze_paper_trading.py)
+  - [scripts/profit_validation_replay.py](/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/profit_validation_replay.py)
+  - [scripts/data_completeness_audit.py](/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/data_completeness_audit.py)
+- Host operator guidance now explicitly forbids using unsuffixed Zeus state files as current truth; see [OPERATOR_RUNBOOK.md](/Users/leofitz/.openclaw/workspace-venus/OPERATOR_RUNBOOK.md).
+- Divergence exit counterfactual tooling has been hardened into [scripts/audit_divergence_exit_counterfactual.py](/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/audit_divergence_exit_counterfactual.py), which now reports `+1h / +3h / +6h / settlement` deltas and honest coverage counts.
+- Current counterfactual coverage truth is:
+  - `divergence_exits_analyzed = 22`
+  - `with_held_token_id = 22`
+  - `with_any_future_tick = 0`
+  - `with_settlement_truth = 0`
+  meaning the tool exists and is correct, but the current price/settlement estate still cannot validate those exits post-hoc.
+- Full-suite verification after the truth-layer cleanup is green: `362 passed, 3 skipped`.
 - Full-suite verification after the single-source cleanup is green: `353 passed, 3 skipped`.
 
 ## Framework-Level Missing Pieces Found This Round
@@ -132,6 +160,14 @@
    Replay engine.
    Regression guard:
    Replay audit scripts plus final promotion gate.
+
+3. Divergence counterfactual validation is now tool-complete but still data-empty.
+   Root cause:
+   The audit path now measures `+1h / +3h / +6h / settlement` honestly, but the current token-price / settlement estate provides zero post-exit future ticks and zero settlement closes for the 22 divergence exits under review.
+   Repair layer:
+   Audit / observability / historical evidence.
+   Regression guard:
+   `scripts/audit_divergence_exit_counterfactual.py` + `tests/test_divergence_exit_counterfactual.py`.
 
 ## Exact Next Actions Already In Progress
 1. Re-audit divergence-driven exits against the split soft/hard rule once post-change real samples appear.

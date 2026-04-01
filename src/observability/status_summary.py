@@ -1,7 +1,7 @@
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
-Written to state/status_summary.json for Venus/OpenClaw to read.
+Written to the mode-qualified truth file for Venus/OpenClaw to read.
 """
 
 import json
@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
 from src.state.portfolio import PortfolioState, load_portfolio, portfolio_heat
+from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,10 @@ def _get_risk_level() -> str:
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
+    generated_at = datetime.now(timezone.utc).isoformat()
 
     status = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": generated_at,
         "process": {
             "pid": os.getpid(),
             "mode": settings.mode,
@@ -72,6 +74,7 @@ def write_status(cycle_summary: dict = None) -> None:
         },
         "cycle": cycle_summary or {},
     }
+    status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
 
     # Atomic write
     import tempfile

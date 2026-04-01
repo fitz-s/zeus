@@ -14,12 +14,25 @@ from typing import Any, Optional
 import numpy as np
 
 from src.config import STATE_DIR, state_path
+from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
 STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
 TRACKER_PATH = state_path("strategy_tracker.json")
 _TRACKER_SINGLETON: "StrategyTracker | None" = None
+
+
+def _default_accounting(path: Path | None = None) -> dict[str, Any]:
+    status_path = state_path("status_summary.json")
+    return {
+        "accounting_scope": "current_regime",
+        "performance_headline_authority": str(status_path),
+        "tracker_role": "attribution_surface",
+        "includes_legacy_history": False,
+        "current_regime_started_at": "",
+        "history_archive_path": "",
+    }
 
 
 class StrategyMetrics:
@@ -86,6 +99,7 @@ class StrategyTracker:
         self.strategies: dict[str, StrategyMetrics] = {
             s: StrategyMetrics() for s in STRATEGIES
         }
+        self.accounting: dict[str, Any] = _default_accounting()
 
     def record_trade(self, trade: dict) -> None:
         strategy = trade.get("strategy") or trade.get("edge_source", "")
@@ -139,12 +153,27 @@ class StrategyTracker:
             for name, m in self.strategies.items()
         }
 
+    def set_accounting_metadata(
+        self,
+        *,
+        current_regime_started_at: str = "",
+        includes_legacy_history: bool = False,
+        history_archive_path: str = "",
+    ) -> None:
+        self.accounting = _default_accounting()
+        self.accounting.update({
+            "current_regime_started_at": current_regime_started_at,
+            "includes_legacy_history": includes_legacy_history,
+            "history_archive_path": history_archive_path,
+        })
+
     def to_dict(self) -> dict:
         return {
             "strategies": {
                 name: metrics.to_dict()
                 for name, metrics in self.strategies.items()
-            }
+            },
+            "accounting": dict(self.accounting),
         }
 
     @classmethod
@@ -153,6 +182,9 @@ class StrategyTracker:
         strategies = data.get("strategies", {})
         for name in STRATEGIES:
             tracker.strategies[name] = StrategyMetrics.from_dict(strategies.get(name, {}))
+        accounting = data.get("accounting", {})
+        if isinstance(accounting, dict):
+            tracker.accounting.update(accounting)
         return tracker
 
 
@@ -181,7 +213,14 @@ def load_tracker(path: Optional[Path] = None) -> StrategyTracker:
 
         with open(path) as f:
             data = json.load(f)
+        if data.get("truth", {}).get("deprecated") is True:
+            raise RuntimeError(
+                f"{path} is a deprecated legacy truth file. "
+                "Use the mode-suffixed strategy tracker instead."
+            )
         return StrategyTracker.from_dict(data)
+    except RuntimeError:
+        raise
     except Exception as exc:
         logger.warning("Strategy tracker load failed: %s", exc)
         return StrategyTracker()
@@ -191,11 +230,17 @@ def save_tracker(tracker: StrategyTracker, path: Optional[Path] = None) -> None:
     path = path or TRACKER_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     import json
+    generated_at = datetime.now(timezone.utc).isoformat()
+    payload = annotate_truth_payload(
+        tracker.to_dict(),
+        path,
+        generated_at=generated_at,
+    )
 
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(tracker.to_dict(), f, indent=2)
+            json.dump(payload, f, indent=2)
         os.replace(tmp_path, str(path))
     except Exception:
         os.unlink(tmp_path)
