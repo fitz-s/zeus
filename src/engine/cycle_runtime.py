@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 
+from src.engine.time_context import lead_hours_to_target
+
 
 def parse_iso(value: str) -> datetime | None:
     if not value:
@@ -314,7 +316,7 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
 
 def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps):
     from src.engine.monitor_refresh import refresh_position
-    from src.execution.exit_lifecycle import check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
+    from src.execution.exit_lifecycle import ExitContext, check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
     from src.execution.exit_triggers import evaluate_exit_triggers
 
     paper_mode = getattr(clob, "paper_mode", True)
@@ -322,7 +324,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     tracker_dirty = False
 
     if not paper_mode:
-        exit_stats = check_pending_exits(portfolio, clob)
+        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
         if exit_stats["filled"] or exit_stats["retried"]:
             portfolio_dirty = True
 
@@ -333,7 +335,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 filled_pos.exit_price or 0.0,
                 "sell_filled",
             )
-            tracker.record_trade_result(filled_pos)
+            tracker.record_exit(filled_pos)
             tracker_dirty = True
 
         summary["pending_exits_filled"] = exit_stats["filled"]
@@ -352,7 +354,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if is_exit_cooldown_active(pos):
             continue
 
-        check_pending_retries(pos)
+        check_pending_retries(pos, conn=conn)
 
         if pos.direction not in {"buy_yes", "buy_no"}:
             artifact.add_monitor_result(
@@ -373,7 +375,18 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             p_market = edge_ctx.p_market[0]
             portfolio_dirty = True
 
-            exit_signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+            city = deps.cities_by_name.get(pos.city)
+            hours_to_settlement = None
+            if city is not None:
+                hours_to_settlement = lead_hours_to_target(
+                    pos.target_date,
+                    city.timezone,
+                    deps._utcnow(),
+                )
+                if hours_to_settlement <= 6.0 and pos.state in {"entered", "holding"}:
+                    pos.state = "day0_window"
+                    portfolio_dirty = True
+            exit_signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=hours_to_settlement)
             should_exit = exit_signal is not None
             exit_reason = exit_signal.reason if exit_signal else ""
 
@@ -399,11 +412,14 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 outcome = execute_exit(
                     portfolio=portfolio,
                     position=pos,
-                    exit_reason=exit_reason,
-                    current_market_price=p_market,
+                    exit_context=ExitContext(
+                        exit_reason=exit_reason,
+                        current_market_price=p_market,
+                        best_bid=best_bid,
+                    ),
                     paper_mode=paper_mode,
                     clob=clob,
-                    best_bid=best_bid,
+                    conn=conn,
                 )
                 if "paper_exit" in outcome or "exit_filled" in outcome:
                     tracker.record_exit(pos)
@@ -567,9 +583,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             deps=deps,
                         )
                         deps.add_position(portfolio, pos)
-                        from src.state.db import log_trade_entry
+                        from src.state.db import log_execution_report, log_trade_entry
 
                         log_trade_entry(conn, pos)
+                        log_execution_report(conn, pos, result)
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)

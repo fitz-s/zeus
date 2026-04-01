@@ -59,6 +59,17 @@ class MonitorResult:
 
 
 @dataclass
+class ExitRecord:
+    """Per-position durable exit stage record embedded in the cycle artifact."""
+
+    trade_id: str
+    exit_reason: str
+    exit_price: float
+    outcome: str
+    timestamp: str = ""
+
+
+@dataclass
 class CycleArtifact:
     """One per cycle. Links all decisions. Blueprint v2 §3."""
     mode: str
@@ -68,6 +79,7 @@ class CycleArtifact:
     trade_cases: list[dict] = field(default_factory=list)
     no_trade_cases: list[NoTradeCase] = field(default_factory=list)
     monitor_results: list[MonitorResult] = field(default_factory=list)
+    exit_cases: list[ExitRecord] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
     def add_no_trade(self, ntc: NoTradeCase):
@@ -78,6 +90,17 @@ class CycleArtifact:
 
     def add_trade(self, trade_info: dict):
         self.trade_cases.append(trade_info)
+
+    def add_exit(self, trade_id: str, exit_reason: str, exit_price: float, outcome: str, timestamp: str = ""):
+        self.exit_cases.append(
+            ExitRecord(
+                trade_id=trade_id,
+                exit_reason=exit_reason,
+                exit_price=exit_price,
+                outcome=outcome,
+                timestamp=timestamp,
+            )
+        )
 
 
 @dataclass
@@ -150,7 +173,15 @@ def store_settlement_records(
 
 
 def query_settlement_records(conn, limit: int = 50) -> list[dict]:
-    """Load recent settlement records written into decision_log."""
+    """Load settlement records, preferring canonical stage events over legacy blobs."""
+    from src.state.db import query_authoritative_settlement_rows
+
+    return query_authoritative_settlement_rows(conn, limit=limit)
+
+
+
+def query_legacy_settlement_records(conn, limit: int = 50) -> list[dict]:
+    """Load recent settlement records written into legacy decision_log blobs only."""
     rows = conn.execute(
         """
         SELECT artifact_json FROM decision_log
