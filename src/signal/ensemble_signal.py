@@ -9,7 +9,6 @@ Simple member counting ignores measurement uncertainty at bin boundaries.
 """
 
 from datetime import date, datetime, timezone
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -55,7 +54,7 @@ class EnsembleSignal:
     def __init__(
         self,
         members_hourly: np.ndarray,
-        times: list[str] | None,
+        times: list[str],
         city: City,
         target_date: date,
         settlement_semantics: SettlementSemantics,
@@ -75,7 +74,7 @@ class EnsembleSignal:
                 f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "
                 f"Per CLAUDE.md: reject entirely, do not pad."
             )
-        if times is not None and len(times) != members_hourly.shape[1]:
+        if len(times) != members_hourly.shape[1]:
             raise ValueError(
                 f"Forecast times length {len(times)} does not match members_hourly hours "
                 f"{members_hourly.shape[1]}."
@@ -86,8 +85,6 @@ class EnsembleSignal:
             target_date,
             tz,
             times=times,
-            n_hours=members_hourly.shape[1],
-            decision_time=decision_time,
         )
 
         if len(tz_hours) == 0:
@@ -188,38 +185,25 @@ class EnsembleSignal:
         target_date: date,
         tz: ZoneInfo,
         *,
-        times: list[str] | None,
-        n_hours: int,
-        decision_time: datetime | None = None,
+        times: list[str],
     ) -> np.ndarray:
         """Select hourly indices belonging to target_date in the city's timezone.
 
-        Primary path uses actual forecast timestamps. The old lead-day slice is
-        retained only as a compatibility fallback for synthetic tests that do not
-        provide times.
+        This is a hard time-semantics contract: hourly forecast timestamps must be
+        present and the local-day window is selected from those actual timestamps.
+        Approximate lead-day slicing is forbidden here because it can drift from
+        the decision-reference semantics used elsewhere in the pipeline.
         """
-        if times is not None:
-            idxs = [
-                idx
-                for idx, ts in enumerate(times)
-                if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
-            ]
-            if idxs:
-                return np.array(idxs, dtype=int)
-            raise ValueError(
-                f"No forecast hours map to local target date {target_date} in {tz.key}."
-            )
-
-        if decision_time is None:
-            return np.arange(min(24, n_hours))
-
-        decision_local = decision_time.astimezone(tz)
-        lead_days = max(0, (target_date - decision_local.date()).days)
-        start_h = max(0, int(lead_days * 24))
-        end_h = min(n_hours, start_h + 24)
-        if end_h <= start_h:
-            return np.arange(max(0, n_hours - 24), n_hours)
-        return np.arange(start_h, end_h)
+        idxs = [
+            idx
+            for idx, ts in enumerate(times)
+            if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
+        ]
+        if idxs:
+            return np.array(idxs, dtype=int)
+        raise ValueError(
+            f"No forecast hours map to local target date {target_date} in {tz.key}."
+        )
 
     def p_raw_vector(
         self, bins: list[Bin], n_mc: int | None = None

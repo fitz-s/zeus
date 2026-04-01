@@ -72,6 +72,11 @@ def _make_local_day_times(target_date: date, timezone_name: str, total_hours: in
 
 
 class TestEnsembleSignalInit:
+    def test_rejects_missing_forecast_times(self):
+        members = _make_constant_members(40.0)
+        with pytest.raises(TypeError):
+            EnsembleSignal(members, None, NYC, TARGET_DATE, NYC_SEMANTICS)  # type: ignore[arg-type]
+
     def test_rejects_less_than_51_members(self):
         """CLAUDE.md: ENS response < 51 members → reject entirely."""
         members = np.zeros((30, 24), dtype=np.float64)
@@ -92,7 +97,7 @@ class TestEnsembleSignalInit:
         times = _make_local_day_times(target_date, NYC.timezone, total_hours=120, days_before=2)
         ens = EnsembleSignal(members, times, NYC, target_date, NYC_SEMANTICS)
         tz = ZoneInfo(NYC.timezone)
-        tz_hours = EnsembleSignal._select_hours_for_date(target_date, tz, times=times, n_hours=120)
+        tz_hours = EnsembleSignal._select_hours_for_date(target_date, tz, times=times)
         expected = members[:, tz_hours].max(axis=1)
         np.testing.assert_array_almost_equal(ens.member_maxes, expected)
 
@@ -101,7 +106,7 @@ class TestEnsembleSignalInit:
         members = np.zeros((51, 72), dtype=np.float64)
         times = _make_local_day_times(target_date, NYC.timezone, total_hours=72, days_before=1)
         tz = ZoneInfo(NYC.timezone)
-        target_idxs = EnsembleSignal._select_hours_for_date(target_date, tz, times=times, n_hours=72)
+        target_idxs = EnsembleSignal._select_hours_for_date(target_date, tz, times=times)
         members[:, target_idxs] = 55.0
         ens = EnsembleSignal(
             members,
@@ -112,6 +117,12 @@ class TestEnsembleSignalInit:
             decision_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         assert np.all(ens.member_maxes == 55.0)
+
+    def test_raises_when_target_date_is_absent_from_real_times(self):
+        members = _make_constant_members(40.0, n_hours=24)
+        times = _make_local_day_times(TARGET_DATE - timedelta(days=1), NYC.timezone)
+        with pytest.raises(ValueError, match="No forecast hours map to local target date"):
+            EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
 
 
 class TestPRawVector:
