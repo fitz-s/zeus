@@ -220,6 +220,29 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
         );
 
+        -- Durable stage-level runtime spine for position lifecycle events
+        CREATE TABLE IF NOT EXISTS position_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            runtime_trade_id TEXT NOT NULL,
+            position_state TEXT,
+            order_id TEXT,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            market_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            strategy TEXT,
+            edge_source TEXT,
+            source TEXT NOT NULL DEFAULT 'runtime',
+            details_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL DEFAULT 'paper'
+        );
+        CREATE INDEX IF NOT EXISTS idx_position_events_trade_ts
+            ON position_events(runtime_trade_id, timestamp);
+
         -- Decision chain: every cycle's artifacts (Blueprint v2 §3)
         CREATE TABLE IF NOT EXISTS decision_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -444,7 +467,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
 
     # Provenance: env column on trade-facing tables (Decision 2)
     # Existing rows default to 'paper' — all historical data is from paper trading.
-    _env_tables = ["trade_decisions", "chronicle", "decision_log"]
+    _env_tables = ["trade_decisions", "chronicle", "decision_log", "position_events"]
     for table in _env_tables:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'paper';")
@@ -642,8 +665,7 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             getattr(pos, "strategy", ""),
             pos.edge_source,
             _bin_type_for_label(pos.bin_label),
-            env
-            ,
+            env,
             getattr(pos, "discovery_mode", ""),
             getattr(pos, "market_hours_open", 0.0),
             getattr(pos, "fill_quality", 0.0),
@@ -667,9 +689,1891 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             )
             VALUES ({placeholders})
         """, values)
+        log_position_event(
+            conn,
+            "POSITION_ENTRY_RECORDED",
+            pos,
+            details={
+                "status": status,
+                "fill_price": fill_price,
+                "submitted_price": getattr(pos, "entry_price", None),
+                "shares": getattr(pos, "shares", 0.0),
+                "chain_state": getattr(pos, "chain_state", ""),
+                "entry_method": getattr(pos, "entry_method", ""),
+                "selected_method": getattr(pos, "selected_method", ""),
+            },
+            timestamp=timestamp or None,
+            source="trade_decisions",
+        )
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
+
+
+def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
+    """Append an execution telemetry event tied to the runtime trade."""
+    if not getattr(pos, "trade_id", ""):
+        return
+    submitted_price = getattr(result, "submitted_price", None)
+    fill_price = getattr(result, "fill_price", None)
+    fill_quality = getattr(pos, "fill_quality", None)
+    if fill_quality is None and fill_price not in (None, 0) and submitted_price not in (None, 0):
+        try:
+            fill_quality = (float(fill_price) - float(submitted_price)) / float(submitted_price)
+        except (TypeError, ValueError, ZeroDivisionError):
+            fill_quality = None
+
+    details = {
+        "status": getattr(result, "status", ""),
+        "reason": getattr(result, "reason", None),
+        "submitted_price": submitted_price,
+        "fill_price": fill_price,
+        "shares": getattr(result, "shares", None),
+        "timeout_seconds": getattr(result, "timeout_seconds", None),
+        "fill_quality": fill_quality,
+        "order_status": getattr(pos, "order_status", ""),
+    }
+    event_type = "ORDER_FILLED" if getattr(result, "status", "") == "filled" else "ORDER_ATTEMPTED"
+    log_position_event(
+        conn,
+        event_type,
+        pos,
+        details=details,
+        timestamp=getattr(result, "filled_at", None) or getattr(pos, "order_posted_at", None),
+        source="execution",
+    )
+
+
+def log_settlement_event(conn: sqlite3.Connection, pos, *, winning_bin: str, won: bool, outcome: int) -> None:
+    """Append a durable settlement event for learning/risk consumers."""
+    log_position_event(
+        conn,
+        "POSITION_SETTLED",
+        pos,
+        details={
+            "winning_bin": winning_bin,
+            "position_bin": getattr(pos, "bin_label", ""),
+            "won": won,
+            "outcome": outcome,
+            "exit_price": getattr(pos, "exit_price", None),
+            "pnl": getattr(pos, "pnl", None),
+            "exit_reason": getattr(pos, "exit_reason", ""),
+        },
+        timestamp=getattr(pos, "last_exit_at", None),
+        source="settlement",
+    )
+
+
+def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
+    """Evidence spine: Update or insert exit fill evidence."""
+    if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    try:
+        from datetime import datetime
+        env = getattr(pos, "env", None) or settings.mode
+        status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
+        values = (
+            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
+            getattr(pos, "decision_snapshot_id", None) or None,
+            getattr(pos, "calibration_version", "") or None,
+            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
+            status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
+            getattr(pos, "trade_id", ""),
+            getattr(pos, "order_id", ""),
+            getattr(pos, "order_status", ""),
+            getattr(pos, "order_posted_at", ""),
+            getattr(pos, "entered_at", ""),
+            getattr(pos, "chain_state", ""),
+            getattr(pos, "discovery_mode", ""),
+            getattr(pos, "market_hours_open", 0.0),
+            getattr(pos, "fill_quality", 0.0),
+            getattr(pos, "entry_method", ""),
+            getattr(pos, "selected_method", ""),
+            json.dumps(getattr(pos, "applied_validations", []) or []),
+            getattr(pos, "exit_trigger", ""),
+            getattr(pos, "exit_reason", ""),
+            getattr(pos, "admin_exit_reason", ""),
+            getattr(pos, "exit_divergence_score", 0.0),
+            getattr(pos, "exit_market_velocity_1h", 0.0),
+            getattr(pos, "exit_forward_edge", 0.0),
+            getattr(pos, "settlement_semantics_json", None),
+            getattr(pos, "epistemic_context_json", None),
+            getattr(pos, "edge_context_json", None),
+        )
+        placeholders = ", ".join(["?"] * len(values))
+        conn.execute(f"""
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                forecast_snapshot_id, calibration_model_version,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, strategy, edge_source, bin_type, env, filled_at, fill_price, settlement_edge_usd,
+                runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
+                discovery_mode, market_hours_open, fill_quality,
+                entry_method, selected_method, applied_validations_json,
+                exit_trigger, exit_reason, admin_exit_reason,
+                exit_divergence_score, exit_market_velocity_1h, exit_forward_edge,
+                settlement_semantics_json, epistemic_context_json, edge_context_json
+            )
+            VALUES ({placeholders})
+        """, values)
+        log_position_event(
+            conn,
+            "POSITION_EXIT_RECORDED",
+            pos,
+            details={
+                "status": status,
+                "exit_price": getattr(pos, "exit_price", None),
+                "pnl": getattr(pos, "pnl", None),
+                "exit_trigger": getattr(pos, "exit_trigger", ""),
+                "exit_reason": getattr(pos, "exit_reason", ""),
+                "admin_exit_reason": getattr(pos, "admin_exit_reason", ""),
+            },
+            timestamp=getattr(pos, "last_exit_at", None),
+            source="trade_decisions",
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
+
+
+def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
+    """Update the lifecycle state of the latest DB row for a runtime trade."""
+    runtime_trade_id = getattr(pos, "trade_id", "")
+    if not runtime_trade_id:
+        return
+
+    row = conn.execute(
+        """
+        SELECT trade_id FROM trade_decisions
+        WHERE runtime_trade_id = ?
+        ORDER BY trade_id DESC
+        LIMIT 1
+        """,
+        (runtime_trade_id,),
+    ).fetchone()
+    if row is None:
+        return
+
+    status = getattr(pos, "state", "") or "entered"
+    timestamp = getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
+    filled_at = getattr(pos, "entered_at", "") if status == "entered" else None
+    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    conn.execute(
+        """
+        UPDATE trade_decisions
+        SET status = ?,
+            timestamp = COALESCE(NULLIF(?, ''), timestamp),
+            filled_at = COALESCE(?, filled_at),
+            fill_price = COALESCE(?, fill_price),
+            order_id = COALESCE(NULLIF(?, ''), order_id),
+            order_status_text = COALESCE(NULLIF(?, ''), order_status_text),
+            order_posted_at = COALESCE(NULLIF(?, ''), order_posted_at),
+            entered_at_ts = COALESCE(NULLIF(?, ''), entered_at_ts),
+            chain_state = COALESCE(NULLIF(?, ''), chain_state)
+        WHERE trade_id = ?
+        """,
+        (
+            status,
+            timestamp,
+            filled_at,
+            fill_price,
+            getattr(pos, "order_id", ""),
+            getattr(pos, "order_status", ""),
+            getattr(pos, "order_posted_at", ""),
+            getattr(pos, "entered_at", ""),
+            getattr(pos, "chain_state", ""),
+            row["trade_id"],
+        ),
+    )
+
+    log_position_event(
+        conn,
+        "POSITION_LIFECYCLE_UPDATED",
+        pos,
+        details={
+            "status": status,
+            "filled_at": filled_at,
+            "fill_price": fill_price,
+            "order_status": getattr(pos, "order_status", ""),
+            "chain_state": getattr(pos, "chain_state", ""),
+        },
+        timestamp=timestamp or None,
+        source="trade_decisions",
+    )
+
+
+def _decode_position_event_rows(rows) -> list[dict]:
+    results: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.pop("details_json") or "{}")
+        except json.JSONDecodeError:
+            item["details"] = {}
+        results.append(item)
+    return results
+
+
+def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
+    """Load recent durable position events for one runtime trade."""
+    rows = conn.execute(
+        """
+        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+               city, target_date, market_id, bin_label, direction, strategy, edge_source,
+               source, details_json, timestamp, env
+        FROM position_events
+        WHERE runtime_trade_id = ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (runtime_trade_id, limit),
+    ).fetchall()
+    return _decode_position_event_rows(rows)
+
+
+def query_settlement_events(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Load recent canonical settlement stage events from the durable event spine."""
+    rows = conn.execute(
+        """
+        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+               city, target_date, market_id, bin_label, direction, strategy, edge_source,
+               source, details_json, timestamp, env
+        FROM position_events
+        WHERE event_type = 'POSITION_SETTLED'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return _decode_position_event_rows(rows)
+
+
+def query_authoritative_settlement_rows(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
+    stage_events = query_settlement_events(conn, limit=limit)
+    if stage_events:
+        normalized: list[dict] = []
+        for event in stage_events:
+            details = event.get("details", {})
+            normalized.append({
+                "trade_id": event.get("runtime_trade_id", ""),
+                "city": event.get("city", ""),
+                "target_date": event.get("target_date", ""),
+                "range_label": event.get("bin_label", ""),
+                "direction": event.get("direction", ""),
+                "p_posterior": details.get("p_posterior"),
+                "outcome": details.get("outcome"),
+                "pnl": details.get("pnl"),
+                "decision_snapshot_id": event.get("decision_snapshot_id", ""),
+                "edge_source": event.get("edge_source", ""),
+                "strategy": event.get("strategy", ""),
+                "settled_at": event.get("timestamp", ""),
+                "source": "position_events",
+            })
+        return normalized[:limit]
+
+    from src.state.decision_chain import query_legacy_settlement_records
+    legacy_rows = query_legacy_settlement_records(conn, limit=limit)
+    for row in legacy_rows:
+        row.setdefault("source", "decision_log")
+    return legacy_rows[:limit]
+
+
+def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
+    """Report which settlement source is currently authoritative for readers."""
+    row = conn.execute(
+        "SELECT 1 FROM position_events WHERE event_type = 'POSITION_SETTLED' LIMIT 1"
+    ).fetchone()
+    return "position_events" if row is not None else "decision_log"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Update or insert exit fill evidence."""
@@ -727,52 +2631,264 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
         logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
 
 
-def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
-    """Update the lifecycle state of the latest DB row for a runtime trade."""
+def log_position_event(
+    conn: sqlite3.Connection,
+    event_type: str,
+    pos,
+    *,
+    details: dict | None = None,
+    timestamp: str | None = None,
+    source: str = "runtime",
+    order_id: str | None = None,
+) -> None:
+    """Append a stage-level position event without changing open-position authority."""
     runtime_trade_id = getattr(pos, "trade_id", "")
     if not runtime_trade_id:
         return
 
-    row = conn.execute(
-        """
-        SELECT trade_id FROM trade_decisions
-        WHERE runtime_trade_id = ?
-        ORDER BY trade_id DESC
-        LIMIT 1
-        """,
-        (runtime_trade_id,),
-    ).fetchone()
-    if row is None:
-        return
-
-    status = getattr(pos, "state", "") or "entered"
-    timestamp = getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
-    filled_at = getattr(pos, "entered_at", "") if status == "entered" else None
-    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    env = getattr(pos, "env", None) or settings.mode
+    event_timestamp = (
+        timestamp
+        or getattr(pos, "last_exit_at", "")
+        or getattr(pos, "entered_at", "")
+        or getattr(pos, "order_posted_at", "")
+        or datetime.utcnow().isoformat()
+    )
+    payload = details or {}
+    event_order_id = (
+        order_id
+        or getattr(pos, "order_id", "")
+        or getattr(pos, "last_exit_order_id", "")
+        or None
+    )
     conn.execute(
         """
-        UPDATE trade_decisions
-        SET status = ?,
-            timestamp = COALESCE(NULLIF(?, ''), timestamp),
-            filled_at = COALESCE(?, filled_at),
-            fill_price = COALESCE(?, fill_price),
-            order_id = COALESCE(NULLIF(?, ''), order_id),
-            order_status_text = COALESCE(NULLIF(?, ''), order_status_text),
-            order_posted_at = COALESCE(NULLIF(?, ''), order_posted_at),
-            entered_at_ts = COALESCE(NULLIF(?, ''), entered_at_ts),
-            chain_state = COALESCE(NULLIF(?, ''), chain_state)
-        WHERE trade_id = ?
+        INSERT INTO position_events (
+            event_type,
+            runtime_trade_id,
+            position_state,
+            order_id,
+            decision_snapshot_id,
+            city,
+            target_date,
+            market_id,
+            bin_label,
+            direction,
+            strategy,
+            edge_source,
+            source,
+            details_json,
+            timestamp,
+            env
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            status,
-            timestamp,
-            filled_at,
-            fill_price,
-            getattr(pos, "order_id", ""),
-            getattr(pos, "order_status", ""),
-            getattr(pos, "order_posted_at", ""),
-            getattr(pos, "entered_at", ""),
-            getattr(pos, "chain_state", ""),
-            row["trade_id"],
+            event_type,
+            runtime_trade_id,
+            getattr(pos, "state", "") or None,
+            event_order_id,
+            getattr(pos, "decision_snapshot_id", "") or None,
+            getattr(pos, "city", "") or None,
+            getattr(pos, "target_date", "") or None,
+            getattr(pos, "market_id", "") or None,
+            getattr(pos, "bin_label", "") or None,
+            getattr(pos, "direction", "") or None,
+            getattr(pos, "strategy", "") or None,
+            getattr(pos, "edge_source", "") or None,
+            source,
+            json.dumps(payload, default=str),
+            event_timestamp,
+            env,
         ),
     )
+
+
+def log_exit_lifecycle_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    event_type: str,
+    reason: str = "",
+    error: str = "",
+    status: str = "",
+    order_id: str | None = None,
+    details: dict | None = None,
+    timestamp: str | None = None,
+) -> None:
+    """Append sell-side lifecycle telemetry without changing exit authority."""
+    payload = {
+        "status": status or getattr(pos, "exit_state", ""),
+        "exit_reason": getattr(pos, "exit_reason", "") or reason,
+        "error": error or getattr(pos, "last_exit_error", ""),
+        "retry_count": getattr(pos, "exit_retry_count", 0),
+        "next_retry_at": getattr(pos, "next_exit_retry_at", ""),
+        "last_exit_order_id": getattr(pos, "last_exit_order_id", ""),
+    }
+    if details:
+        payload.update(details)
+    log_position_event(
+        conn,
+        event_type,
+        pos,
+        details=payload,
+        timestamp=timestamp,
+        source="exit_lifecycle",
+        order_id=order_id,
+    )
+
+
+def log_exit_retry_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    reason: str,
+    error: str = "",
+    timestamp: str | None = None,
+) -> None:
+    """Append retry/backoff telemetry after exit retry state is updated."""
+    event_type = "EXIT_BACKOFF_EXHAUSTED" if getattr(pos, "exit_state", "") == "backoff_exhausted" else "EXIT_RETRY_SCHEDULED"
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type=event_type,
+        reason=reason,
+        error=error,
+        timestamp=timestamp,
+    )
+
+
+def log_pending_exit_status_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    status: str,
+    timestamp: str | None = None,
+) -> None:
+    """Append fill-check telemetry for an already placed exit order."""
+    event_type = "EXIT_FILL_CONFIRMED" if status in {"MATCHED", "FILLED"} else "EXIT_FILL_CHECKED"
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type=event_type,
+        status=status,
+        timestamp=timestamp,
+    )
+
+
+def log_exit_attempt_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    order_id: str,
+    status: str,
+    current_market_price: float,
+    best_bid: float | None,
+    shares: float,
+    details: dict | None = None,
+    timestamp: str | None = None,
+) -> None:
+    """Append sell-order attempt telemetry at placement time."""
+    payload = {
+        "status": status,
+        "current_market_price": current_market_price,
+        "best_bid": best_bid,
+        "shares": shares,
+    }
+    if details:
+        payload.update(details)
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_ATTEMPTED",
+        status=status,
+        order_id=order_id,
+        details=payload,
+        timestamp=timestamp,
+    )
+
+
+def log_exit_fill_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    order_id: str,
+    fill_price: float,
+    current_market_price: float,
+    best_bid: float | None,
+    timestamp: str | None = None,
+) -> None:
+    """Append terminal sell-fill telemetry for live exits."""
+    payload = {
+        "status": "FILLED",
+        "fill_price": fill_price,
+        "current_market_price": current_market_price,
+        "best_bid": best_bid,
+        "shares": getattr(pos, "effective_shares", getattr(pos, "shares", None)),
+    }
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_FILLED",
+        status="FILLED",
+        order_id=order_id,
+        details=payload,
+        timestamp=timestamp,
+    )
+
+
+def log_exit_fill_check_error_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    order_id: str,
+    timestamp: str | None = None,
+) -> None:
+    """Append telemetry when sell fill status cannot be read."""
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type="EXIT_FILL_CHECK_FAILED",
+        status="",
+        order_id=order_id,
+        timestamp=timestamp,
+    )
+
+
+def log_exit_retry_released_event(conn: sqlite3.Connection, pos, *, timestamp: str | None = None) -> None:
+    """Append telemetry when cooldown expires and exit can be re-evaluated."""
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type="EXIT_RETRY_RELEASED",
+        status="ready",
+        timestamp=timestamp,
+    )
+
+
+def log_pending_exit_recovery_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    event_type: str,
+    reason: str,
+    error: str,
+    timestamp: str | None = None,
+) -> None:
+    """Append telemetry for recovery of malformed/stranded pending exits."""
+    log_exit_lifecycle_event(
+        conn,
+        pos,
+        event_type=event_type,
+        reason=reason,
+        error=error,
+        timestamp=timestamp,
+    )
+
+
+
+
+
+
+
+
