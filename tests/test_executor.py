@@ -56,7 +56,7 @@ class TestPortfolio:
         ))
         add_position(state, Position(
             trade_id="t2", market_id="m2", city="Chicago",
-            cluster="US-Midwest", target_date="2026-01-15",
+            cluster="US-GreatLakes", target_date="2026-01-15",
             bin_label="30-32", direction="buy_yes",
             size_usd=5.0, entry_price=0.30, p_posterior=0.50,
             edge=0.20, entered_at="2026-01-12T00:00:00Z",

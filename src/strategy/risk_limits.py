@@ -2,16 +2,24 @@
 
 from dataclasses import dataclass
 
+from src.config import sizing_defaults
+
 
 @dataclass(frozen=True)
 class RiskLimits:
     """Hard caps from settings.json. Spec §5.4."""
-    max_single_position_pct: float = 0.10
-    max_portfolio_heat_pct: float = 0.50
-    max_correlated_pct: float = 0.25
-    max_city_pct: float = 0.20
-    max_region_pct: float = 0.35
-    min_order_usd: float = 1.00
+    max_single_position_pct: float | None = None
+    max_portfolio_heat_pct: float | None = None
+    max_correlated_pct: float | None = None
+    max_city_pct: float | None = None
+    max_region_pct: float | None = None
+    min_order_usd: float | None = None
+
+    def __post_init__(self) -> None:
+        defaults = sizing_defaults()
+        for field_name, default_value in defaults.items():
+            if getattr(self, field_name) is None:
+                object.__setattr__(self, field_name, default_value)
 
 
 def check_position_allowed(

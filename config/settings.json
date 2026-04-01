@@ -25,11 +25,21 @@
   "ensemble": {
     "primary": "ecmwf_ifs025",
     "crosscheck": "gfs025",
+    "primary_members": 51,
+    "crosscheck_members": 31,
+    "n_mc": 5000,
+    "instrument_noise_f": 0.5,
+    "instrument_noise_c": 0.28,
+    "bimodal_kde_order": 10,
+    "bimodal_gap_ratio": 0.3,
+    "boundary_window": 0.5,
+    "unimodal_range_epsilon": 0.5,
     "conflict_kl_threshold": 0.15
   },
   "calibration": {
     "method": "platt",
     "refit_every_n": 50,
+    "n_bootstrap": 200,
     "seasonal_dates": [
       "03-20",
       "06-21",
@@ -41,6 +51,10 @@
       "level2": 50,
       "level3": 15
     }
+  },
+  "day0": {
+    "n_mc": 5000,
+    "obs_dominates_threshold": 0.8
   },
   "edge": {
     "n_bootstrap": 500,
@@ -69,6 +83,97 @@
     "max_city_pct": 0.2,
     "max_region_pct": 0.35,
     "min_order_usd": 1.0
+  },
+  "correlation": {
+    "default_cross_cluster": 0.1,
+    "matrix": {
+      "US-Northeast": {
+        "US-GreatLakes": 0.6,
+        "US-Southeast-Inland": 0.4,
+        "US-Florida": 0.25,
+        "US-Texas-Triangle": 0.25,
+        "US-California-Coast": 0.1,
+        "US-Pacific-Northwest": 0.1,
+        "US-Rockies": 0.2,
+        "Europe-Maritime": 0.15,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-GreatLakes": {
+        "US-Southeast-Inland": 0.35,
+        "US-Florida": 0.15,
+        "US-Texas-Triangle": 0.45,
+        "US-California-Coast": 0.15,
+        "US-Pacific-Northwest": 0.15,
+        "US-Rockies": 0.4,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Pacific-Northwest": {
+        "US-California-Coast": 0.45,
+        "US-Rockies": 0.35,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Southeast-Inland": {
+        "US-Florida": 0.6,
+        "US-Texas-Triangle": 0.45,
+        "US-California-Coast": 0.1,
+        "US-Rockies": 0.15,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Florida": {
+        "US-Texas-Triangle": 0.25,
+        "US-California-Coast": 0.1,
+        "US-Rockies": 0.1,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Texas-Triangle": {
+        "US-California-Coast": 0.15,
+        "US-Rockies": 0.35,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-California-Coast": {
+        "US-Rockies": 0.25,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.15,
+        "Asia-East-China": 0.1
+      },
+      "US-Rockies": {
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Europe-Maritime": {
+        "Europe-Continental": 0.45,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Europe-Continental": {
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Asia-Northeast": {
+        "Asia-East-China": 0.45
+      },
+      "Asia-East-China": {}
+    }
   },
   "exit": {
     "reversal_confirmations": 2,

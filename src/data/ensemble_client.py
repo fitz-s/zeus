@@ -13,7 +13,7 @@ from typing import Optional
 import httpx
 import numpy as np
 
-from src.config import City
+from src.config import City, ensemble_member_count
 from src.data.openmeteo_quota import quota_tracker
 
 
@@ -157,8 +157,10 @@ def _parse_response(data: dict, model: str, fetch_time: datetime) -> dict:
     }
 
 
-def validate_ensemble(result: dict, expected_members: int = 51) -> bool:
+def validate_ensemble(result: dict, expected_members: int | None = None) -> bool:
     """Validate ensemble response. Per CLAUDE.md: reject if < expected members."""
+    if expected_members is None:
+        expected_members = ensemble_member_count()
     if result is None:
         return False
     n = result["n_members"]

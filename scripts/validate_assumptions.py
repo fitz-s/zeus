@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import sys
 from pathlib import Path
@@ -12,10 +11,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import cities
+from src.config import cities, day0_n_mc, ensemble_member_count, ensemble_n_mc
 from src.contracts import SettlementSemantics
-from src.data.ensemble_client import validate_ensemble
-from src.signal.day0_signal import Day0Signal
 from src.signal.ensemble_signal import DEFAULT_N_MC
 
 ASSUMPTIONS_PATH = PROJECT_ROOT / "state" / "assumptions.json"
@@ -56,7 +53,7 @@ def run_validation() -> dict:
             mismatches.append(f"{city.name} rounding mismatch: {semantics.rounding_rule}")
     checks.append("SettlementSemantics.for_city matches config units/precision/rounding")
 
-    expected_members = inspect.signature(validate_ensemble).parameters["expected_members"].default
+    expected_members = ensemble_member_count()
     if expected_members != assumptions["signal"]["ens_member_count"]:
         mismatches.append(f"validate_ensemble expected_members={expected_members}, assumptions={assumptions['signal']['ens_member_count']}")
     else:
@@ -67,17 +64,22 @@ def run_validation() -> dict:
     else:
         checks.append("EnsembleSignal entry MC matches assumptions")
 
-    day0_mc = inspect.signature(Day0Signal.p_vector).parameters["n_mc"].default
+    day0_mc = day0_n_mc()
     if day0_mc != assumptions["signal"]["mc_count_entry"]:
-        mismatches.append(f"day0 entry MC mismatch: Day0Signal.p_vector default={day0_mc}, assumptions={assumptions['signal']['mc_count_entry']}")
+        mismatches.append(f"day0 entry MC mismatch: day0_n_mc()={day0_mc}, assumptions={assumptions['signal']['mc_count_entry']}")
     else:
         checks.append("Day0Signal entry MC matches assumptions")
 
     monitor_source = MONITOR_PATH.read_text(encoding="utf-8")
-    if "n_mc=5000" not in monitor_source:
-        mismatches.append("monitor_refresh does not explicitly use 5000 MC")
+    if "ensemble_n_mc()" not in monitor_source or "day0_n_mc()" not in monitor_source:
+        mismatches.append("monitor_refresh does not source MC counts from config helpers")
+    elif ensemble_n_mc() != assumptions["signal"]["mc_count_entry"] or day0_n_mc() != assumptions["signal"]["mc_count_entry"]:
+        mismatches.append(
+            "monitor_refresh MC helpers diverge from assumptions: "
+            f"ensemble={ensemble_n_mc()}, day0={day0_n_mc()}, assumptions={assumptions['signal']['mc_count_entry']}"
+        )
     else:
-        checks.append("monitor_refresh explicit MC count matches assumptions")
+        checks.append("monitor_refresh MC counts are sourced from config helpers")
 
     main_source = MAIN_PATH.read_text(encoding="utf-8")
     for required_script in [

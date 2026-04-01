@@ -13,6 +13,8 @@ import logging
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
+from src.config import calibration_n_bootstrap
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,8 +22,8 @@ logger = logging.getLogger(__name__)
 P_CLAMP_LOW = 0.01
 P_CLAMP_HIGH = 0.99
 
-# Default bootstrap iterations for parameter uncertainty
-DEFAULT_N_BOOTSTRAP = 200
+# Compatibility alias for tests and assumption audits.
+DEFAULT_N_BOOTSTRAP = calibration_n_bootstrap()
 RAW_PROBABILITY_SPACE = "raw_probability"
 WIDTH_NORMALIZED_SPACE = "width_normalized_density"
 
@@ -65,7 +67,7 @@ class ExtendedPlattCalibrator:
         lead_days: np.ndarray,
         outcomes: np.ndarray,
         bin_widths: np.ndarray | None = None,
-        n_bootstrap: int = DEFAULT_N_BOOTSTRAP,
+        n_bootstrap: int | None = None,
         regularization_C: float = 1.0,
     ) -> None:
         """Fit Platt model on (p_raw, lead_days, outcome) triples.
@@ -83,6 +85,8 @@ class ExtendedPlattCalibrator:
             n_bootstrap: number of bootstrap parameter sets
             regularization_C: sklearn LogisticRegression C parameter
         """
+        if n_bootstrap is None:
+            n_bootstrap = calibration_n_bootstrap()
         if len(p_raw) < 15:
             raise ValueError(
                 f"Cannot fit Platt with n={len(p_raw)} < 15. "

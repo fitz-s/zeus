@@ -17,7 +17,7 @@ import numpy as np
 
 from src.calibration.manager import get_calibrator
 from src.calibration.platt import calibrate_and_normalize
-from src.config import City, settings
+from src.config import City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -369,7 +369,10 @@ def evaluate_candidate(
     agreement = "AGREE"
     if not is_day0_mode:
         gfs_result = fetch_ensemble(city, forecast_days=ens_forecast_days, model="gfs025")
-        if gfs_result is not None and validate_ensemble(gfs_result, expected_members=31):
+        if gfs_result is not None and validate_ensemble(
+            gfs_result,
+            expected_members=ensemble_crosscheck_member_count(),
+        ):
             try:
                 gfs_maxes = gfs_result["members_hourly"][
                     :, :min(24, gfs_result["members_hourly"].shape[1])
@@ -430,7 +433,7 @@ def evaluate_candidate(
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
     )
-    edges = analysis.find_edges(n_bootstrap=settings["edge"]["n_bootstrap"])
+    edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     entry_validations.append("bootstrap_ci")
 
     # FDR filter

@@ -55,7 +55,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.config import City, cities_by_name, settings
+from src.config import City, cities_by_name, edge_n_bootstrap, settings
 from src.state.db import get_connection
 from src.types import Bin
 from src.types.temperature import TemperatureDelta
@@ -524,7 +524,7 @@ def _replay_one_settlement(
         lead_days=lead_days,
         unit=city.settlement_unit,
     )
-    edges = analysis.find_edges(n_bootstrap=settings["edge"]["n_bootstrap"])
+    edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     filtered = fdr_filter(edges)
 
     winning_bin = settlement.get("winning_bin", "")

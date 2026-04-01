@@ -218,14 +218,13 @@ def test_monitor_mc_count_matches_entry():
     """
     from src.signal.ensemble_signal import DEFAULT_N_MC
     # Check what monitor_refresh actually uses
-    import ast, inspect
+    import inspect
     from src.engine import monitor_refresh
     source = inspect.getsource(monitor_refresh)
-    # Look for n_mc= in the source
-    if "n_mc=1000" in source or "n_mc = 1000" in source:
+    if "ensemble_n_mc()" not in source or "day0_n_mc()" not in source:
         pytest.fail(
-            f"monitor_refresh uses n_mc=1000 but entry uses {DEFAULT_N_MC}. "
-            f"This 5x asymmetry causes false EDGE_REVERSAL."
+            "monitor_refresh does not source MC counts from config helpers. "
+            f"Entry uses {DEFAULT_N_MC}, so monitor must route through the same single source."
         )
 
 

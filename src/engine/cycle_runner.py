@@ -161,14 +161,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     portfolio = load_portfolio()
     clob = PolymarketClient(paper_mode=(settings.mode == "paper"))
     tracker = get_tracker()
-    limits = RiskLimits(
-        max_single_position_pct=settings["sizing"]["max_single_position_pct"],
-        max_portfolio_heat_pct=settings["sizing"]["max_portfolio_heat_pct"],
-        max_correlated_pct=settings["sizing"]["max_correlated_pct"],
-        max_city_pct=settings["sizing"]["max_city_pct"],
-        max_region_pct=settings["sizing"]["max_region_pct"],
-        min_order_usd=settings["sizing"]["min_order_usd"],
-    )
+    limits = RiskLimits()
     portfolio_dirty = False
     tracker_dirty = False
 

@@ -7,6 +7,7 @@ This constraint dramatically narrows probability distribution near settlement.
 
 import numpy as np
 
+from src.config import day0_n_mc, day0_obs_dominates_threshold
 from src.signal.ensemble_signal import sigma_instrument
 from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
 
@@ -81,7 +82,7 @@ class Day0Signal:
         inv = 1.0 / self._precision if self._precision > 0 else 1.0
         return np.round(arr * inv) / inv
 
-    def p_vector(self, bins: list[Bin], n_mc: int = 5000) -> np.ndarray:
+    def p_vector(self, bins: list[Bin], n_mc: int | None = None) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.
 
         For each MC iteration:
@@ -93,6 +94,9 @@ class Day0Signal:
 
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
+        if n_mc is None:
+            n_mc = day0_n_mc()
+
         n_bins = len(bins)
         n_members = len(self.ens_remaining)
         p = np.zeros(n_bins)
@@ -182,4 +186,4 @@ class Day0Signal:
 
         Legacy boolean interface. Prefer observation_weight() for continuous blending.
         """
-        return float(np.mean(self.ens_remaining < self.obs_high)) > 0.8
+        return float(np.mean(self.ens_remaining < self.obs_high)) > day0_obs_dominates_threshold()
