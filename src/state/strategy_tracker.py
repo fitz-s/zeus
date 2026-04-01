@@ -1,7 +1,7 @@
-"""Per-strategy P&L tracking. Document 5: F3.
+"""Derived strategy attribution tracking.
 
-Four strategies, independently tracked. RiskGuard monitors per-strategy,
-not per-portfolio. Strategy C's degradation should NOT halt Strategy A.
+This file is an attribution surface only. It is not runtime authority and it is
+not RiskGuard input authority.
 """
 
 import logging
@@ -50,13 +50,6 @@ class StrategyMetrics:
                     return
         self.trades.append(dict(trade))
 
-    def win_rate(self) -> float:
-        settled = [t for t in self.trades if t.get("pnl") is not None]
-        if not settled:
-            return 0.5
-        wins = sum(1 for t in settled if t["pnl"] > 0)
-        return wins / len(settled)
-
     def cumulative_pnl(self) -> float:
         return sum(t.get("pnl", 0) for t in self.trades if t.get("pnl") is not None)
 
@@ -72,12 +65,6 @@ class StrategyMetrics:
             return 0.0
         slope = np.polyfit(x, edges, 1)[0]
         return float(slope)
-
-    def fill_rate(self) -> float:
-        if not self.trades:
-            return 1.0
-        filled = sum(1 for t in self.trades if t.get("status") == "filled")
-        return filled / len(self.trades)
 
     def count(self) -> int:
         return len(self.trades)
@@ -146,9 +133,7 @@ class StrategyTracker:
         return {
             name: {
                 "trades": m.count(),
-                "win_rate": round(m.win_rate(), 3),
                 "pnl": round(m.cumulative_pnl(), 2),
-                "fill_rate": round(m.fill_rate(), 3),
             }
             for name, m in self.strategies.items()
         }

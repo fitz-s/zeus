@@ -71,3 +71,22 @@ def test_portfolio_and_tracker_save_truth_metadata(tmp_path):
     assert portfolio_data["truth"]["source_path"] == str(portfolio_path)
     assert tracker_data["truth"]["deprecated"] is False
     assert tracker_data["truth"]["source_path"] == str(tracker_path)
+
+
+def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl():
+    tracker = StrategyTracker()
+    tracker.record_trade({
+        "trade_id": "t1",
+        "strategy": "opening_inertia",
+        "pnl": 2.5,
+    })
+
+    summary = tracker.summary()
+
+    assert summary["opening_inertia"] == {"trades": 1, "pnl": 2.5}
+    assert "win_rate" not in summary["opening_inertia"]
+    assert summary["shoulder_sell"] == {"trades": 0, "pnl": 0}
+    assert "win_rate" not in summary["shoulder_sell"]
+    assert tracker.to_dict()["strategies"]["opening_inertia"]["trades"][0]["trade_id"] == "t1"
+    assert "trades" in tracker.to_dict()["strategies"]["opening_inertia"]
+    assert "win_rate" not in tracker.to_dict()["strategies"]["opening_inertia"]
