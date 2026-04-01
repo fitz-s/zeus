@@ -5,7 +5,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -32,8 +32,9 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
     positions.json → positions-paper.json / positions-live.json
     """
     import os
+
     mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
-    dot = filename.rfind('.')
+    dot = filename.rfind(".")
     if dot > 0:
         stem, ext = filename[:dot], filename[dot:]
     else:
@@ -62,6 +63,7 @@ class City:
     Coordinates MUST correspond to the WU settlement station (airport),
     not city center. This affects ENS grid point selection.
     """
+
     name: str
     lat: float
     lon: float
@@ -88,8 +90,18 @@ class Settings:
         path = path or (CONFIG_DIR / "settings.json")
         self._data = _load_json(path)
         required = [
-            "capital_base_usd", "mode", "discovery", "ensemble",
-            "calibration", "day0", "edge", "sizing", "correlation", "exit", "riskguard", "execution"
+            "capital_base_usd",
+            "mode",
+            "discovery",
+            "ensemble",
+            "calibration",
+            "day0",
+            "edge",
+            "sizing",
+            "correlation",
+            "exit",
+            "riskguard",
+            "execution",
         ]
         for key in required:
             if key not in self._data:
@@ -105,6 +117,18 @@ class Settings:
     @property
     def capital_base_usd(self) -> float:
         return float(self._data["capital_base_usd"])
+
+
+def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
+    """Select the unit-matching diurnal amplitude without truthiness bugs."""
+    preferred_key = "diurnal_amplitude_c" if unit == "C" else "diurnal_amplitude_f"
+    fallback_key = "diurnal_amplitude_f" if preferred_key == "diurnal_amplitude_c" else "diurnal_amplitude_c"
+
+    if preferred_key in city_row and city_row[preferred_key] is not None:
+        return float(city_row[preferred_key])
+    if fallback_key in city_row and city_row[fallback_key] is not None:
+        return float(city_row[fallback_key])
+    return 12.0
 
 
 def load_cities(path: Optional[Path] = None) -> list[City]:
@@ -131,9 +155,8 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
             noaa_gx = None
             noaa_gy = None
 
-        # Diurnal amplitude: °F or °C depending on unit
         unit = c["unit"]
-        amp = c.get("diurnal_amplitude_f") or c.get("diurnal_amplitude_c") or 12.0
+        amp = _unit_diurnal_amplitude(c, unit)
 
         if "cluster" not in c:
             raise KeyError(
@@ -142,25 +165,27 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
             )
         cluster = c["cluster"]
 
-        result.append(City(
-            name=name,
-            lat=float(lat),
-            lon=float(lon),
-            timezone=c["timezone"],
-            settlement_unit=unit,
-            cluster=cluster,
-            wu_station=c["wu_station"],
-            aliases=tuple(c.get("aliases", [])),
-            slug_names=tuple(c.get("slug_names", [])),
-            wu_pws=c.get("wu_pws"),
-            meteostat_station=c.get("meteostat_station"),
-            airport_name=c.get("airport_name", ""),
-            settlement_source=c.get("settlement_source", ""),
-            diurnal_amplitude=float(amp),
-            noaa_office=noaa_office,
-            noaa_gridX=noaa_gx,
-            noaa_gridY=noaa_gy,
-        ))
+        result.append(
+            City(
+                name=name,
+                lat=float(lat),
+                lon=float(lon),
+                timezone=c["timezone"],
+                settlement_unit=unit,
+                cluster=cluster,
+                wu_station=c["wu_station"],
+                aliases=tuple(c.get("aliases", [])),
+                slug_names=tuple(c.get("slug_names", [])),
+                wu_pws=c.get("wu_pws"),
+                meteostat_station=c.get("meteostat_station"),
+                airport_name=c.get("airport_name", ""),
+                settlement_source=c.get("settlement_source", ""),
+                diurnal_amplitude=amp,
+                noaa_office=noaa_office,
+                noaa_gridX=noaa_gx,
+                noaa_gridY=noaa_gy,
+            )
+        )
 
     return result
 
