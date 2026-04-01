@@ -234,7 +234,8 @@ def evaluate_candidate(
     
     try:
         ens = EnsembleSignal(
-            ens_result["members_hourly"], 
+            ens_result["members_hourly"],
+            ens_result["times"],
             city, 
             target_d, 
             settlement_semantics=settlement_semantics,
