@@ -47,16 +47,24 @@ def _refresh_ens_member_counting(
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
-    lead_days = int(lead_days_to_target(target_d, city.timezone))
-    if lead_days < 0:
+    requested_lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
+    if requested_lead_days < 0:
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    ens_result = fetch_ensemble(city, forecast_days=lead_days + 2)
+    ens_result = fetch_ensemble(city, forecast_days=int(requested_lead_days) + 2)
     if ens_result is None or not validate_ensemble(ens_result):
         return position.p_posterior, ["fresh_ens_fetch"]
+    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, ens_result.get("fetch_time")))
 
     semantics = SettlementSemantics.for_city(city)
-    ens = EnsembleSignal(ens_result["members_hourly"], city, target_d, settlement_semantics=semantics)
+    ens = EnsembleSignal(
+        ens_result["members_hourly"],
+        ens_result["times"],
+        city,
+        target_d,
+        settlement_semantics=semantics,
+        decision_time=ens_result.get("fetch_time"),
+    )
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:

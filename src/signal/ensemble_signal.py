@@ -8,7 +8,7 @@ Settlement = round(member_max + instrument_noise) → integer.
 Simple member counting ignores measurement uncertainty at bin boundaries.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -55,6 +55,7 @@ class EnsembleSignal:
     def __init__(
         self,
         members_hourly: np.ndarray,
+        times: list[str] | None,
         city: City,
         target_date: date,
         settlement_semantics: SettlementSemantics,
@@ -63,6 +64,7 @@ class EnsembleSignal:
         """
         Args:
             members_hourly: shape (n_members, hours), city's settlement unit
+            times: UTC timestamps corresponding to hourly columns
             city: City config with timezone
             target_date: the settlement date
             settlement_semantics: Exact resolution constraints for this target market
@@ -73,10 +75,19 @@ class EnsembleSignal:
                 f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "
                 f"Per CLAUDE.md: reject entirely, do not pad."
             )
+        if times is not None and len(times) != members_hourly.shape[1]:
+            raise ValueError(
+                f"Forecast times length {len(times)} does not match members_hourly hours "
+                f"{members_hourly.shape[1]}."
+            )
 
         tz = ZoneInfo(city.timezone)
         tz_hours = self._select_hours_for_date(
-            target_date, tz, members_hourly.shape[1], decision_time
+            target_date,
+            tz,
+            times=times,
+            n_hours=members_hourly.shape[1],
+            decision_time=decision_time,
         )
 
         if len(tz_hours) == 0:
@@ -111,6 +122,13 @@ class EnsembleSignal:
 
     def _simulate_settlement(self, values: np.ndarray) -> np.ndarray:
         return self.settlement_semantics.round_values(values)
+
+    @staticmethod
+    def _parse_forecast_timestamp(value: str) -> datetime:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     @staticmethod
     def _apply_bias_correction(
@@ -167,46 +185,40 @@ class EnsembleSignal:
 
     @staticmethod
     def _select_hours_for_date(
-        target_date: date, tz: ZoneInfo, n_hours: int, decision_time: datetime | None = None
+        target_date: date,
+        tz: ZoneInfo,
+        *,
+        times: list[str] | None,
+        n_hours: int,
+        decision_time: datetime | None = None,
     ) -> np.ndarray:
         """Select hourly indices belonging to target_date in the city's timezone.
 
-        P0-1 FIX: Open-Meteo returns hourly data from midnight UTC on the
-        first forecast day. For T+3 targets, hours 0-23 are day 0 — WRONG.
-        We must select the 24-hour window that corresponds to target_date
-        in the city's local timezone.
+        Primary path uses actual forecast timestamps. The old lead-day slice is
+        retained only as a compatibility fallback for synthetic tests that do not
+        provide times.
         """
-        from datetime import datetime, timedelta
+        if times is not None:
+            idxs = [
+                idx
+                for idx, ts in enumerate(times)
+                if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
+            ]
+            if idxs:
+                return np.array(idxs, dtype=int)
+            raise ValueError(
+                f"No forecast hours map to local target date {target_date} in {tz.key}."
+            )
 
-        # Get UTC offset for the target date (midday avoids DST edge)
-        midday = datetime(target_date.year, target_date.month, target_date.day,
-                          12, 0, 0, tzinfo=tz)
-        offset_hours = midday.utcoffset().total_seconds() / 3600.0
+        if decision_time is None:
+            return np.arange(min(24, n_hours))
 
-        # Open-Meteo starts at midnight UTC of the issue date (today or close to it)
-        # The target_date in local time spans from (midnight_local - offset) in UTC hours
-        # We approximate: local midnight = UTC hour (-offset)
-        # Local 23:59 = UTC hour (23 - offset)
-
-        # Estimate which forecast hour index corresponds to target_date midnight local
-        # If issue date = today, target_date = today + lead_days
-        today = decision_time.date() if decision_time else date.today()
-        lead_days = (target_date - today).days
-        if lead_days < 0:
-            lead_days = 0
-
-        # Start hour in the forecast array for target_date local midnight
-        start_h = int(lead_days * 24 - offset_hours)
-        end_h = start_h + 24
-
-        # Clamp to valid range
-        start_h = max(0, start_h)
-        end_h = min(n_hours, end_h)
-
+        decision_local = decision_time.astimezone(tz)
+        lead_days = max(0, (target_date - decision_local.date()).days)
+        start_h = max(0, int(lead_days * 24))
+        end_h = min(n_hours, start_h + 24)
         if end_h <= start_h:
-            # Fallback: if calculation fails, use last 24 hours available
             return np.arange(max(0, n_hours - 24), n_hours)
-
         return np.arange(start_h, end_h)
 
     def p_raw_vector(

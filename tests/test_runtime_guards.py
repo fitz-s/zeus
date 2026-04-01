@@ -566,7 +566,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=3000):
@@ -731,7 +731,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             return np.array([0.60, 0.30, 0.10])
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 44.0)
 
         def spread(self):
