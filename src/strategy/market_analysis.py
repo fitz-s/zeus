@@ -13,14 +13,15 @@ from typing import Optional
 import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
+from src.config import edge_n_bootstrap
 from src.signal.ensemble_signal import sigma_instrument
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
 
 logger = logging.getLogger(__name__)
 
-# Default bootstrap iterations for edge CI
-DEFAULT_EDGE_BOOTSTRAP = 500
+# Compatibility alias for tests and assumption audits.
+DEFAULT_EDGE_BOOTSTRAP = edge_n_bootstrap()
 
 
 class MarketAnalysis:
@@ -56,7 +57,7 @@ class MarketAnalysis:
         self._sigma = sigma_instrument(unit).value  # P0-9: use city-appropriate noise
 
     def find_edges(
-        self, n_bootstrap: int = DEFAULT_EDGE_BOOTSTRAP
+        self, n_bootstrap: int | None = None
     ) -> list[BinEdge]:
         """Scan all bins for edges. Returns edges with positive CI lower bound.
 
@@ -67,6 +68,8 @@ class MarketAnalysis:
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method
         if False: _ = None.selected_method; _ = None.entry_method
+        if n_bootstrap is None:
+            n_bootstrap = edge_n_bootstrap()
         edges = []
 
         for i, b in enumerate(self.bins):

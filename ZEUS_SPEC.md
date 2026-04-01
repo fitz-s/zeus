@@ -345,15 +345,19 @@ This is not optional — without `bootstrap_params`, the edge CI only captures e
 ```
 Bucket = cluster × season  (lead_days is a Platt INPUT FEATURE, not a bucket dimension)
 
-Clusters:       US-Northeast (NYC), US-Midwest (Chicago),
-                US-Southeast (Atlanta, Miami), US-SouthCentral (Dallas),
-                US-Pacific (Seattle, SF, LA), Europe (London, Paris)
+Clusters:       US-Northeast (NYC), US-GreatLakes (Chicago),
+                US-Pacific-Northwest (Seattle),
+                US-Southeast-Inland (Atlanta), US-Florida (Miami),
+                US-Texas-Triangle (Dallas, Austin, Houston),
+                US-California-Coast (SF, LA), US-Rockies (Denver),
+                Europe-Maritime (London), Europe-Continental (Paris),
+                Asia-Northeast (Seoul, Tokyo), Asia-East-China (Shanghai)
 Seasons:        DJF, MAM, JJA, SON
 
-Total:          6 × 4 = 24 buckets
+Total:          12 × 4 = 48 buckets
 ```
 
-**Why 24, not 72:** Third-party review identified that 72 buckets (with lead_band as a dimension) yields only ~45 positive samples per bucket. Each settlement produces 1 outcome=1 and 10 outcome=0 per market. The headline "496 pairs per bucket" masks that only ~45 are positive — and Platt's sigmoid upper segment is anchored by positive samples.
+**Why cluster×season, not 72 lead-banded buckets:** Third-party review identified that 72 buckets (with lead_band as a dimension) yields only ~45 positive samples per bucket. Each settlement produces 1 outcome=1 and 10 outcome=0 per market. The headline "496 pairs per bucket" masks that only ~45 are positive — and Platt's sigmoid upper segment is anchored by positive samples.
 
 Removing lead_band as a bucket dimension and adding `lead_days` as a second input feature triples positive samples per bucket (45→135) while adding only 1 parameter (2→3):
 
@@ -417,9 +421,10 @@ def calibrate_and_normalize(p_raw: np.ndarray, calibrator: PlattCalibrator) -> n
 
 ### 3.6 Data Volume Assessment
 
-Current settlement counts per bucket estimate (1,634 settlements × 11 bins = ~18,000 potential pairs):
+Current settlement counts per bucket estimate (1,634 settlements × 11 bins = ~18,000 potential pairs).
+The bucket arithmetic below predates the current 8-cluster taxonomy and should be read as an older conservative estimate, not the canonical cluster count:
 
-| Season | Settlements | × 11 bins | Buckets (6 clusters × 3 leads) | Avg per bucket |
+| Season | Settlements | × 11 bins | Historical estimate buckets (6 clusters × 3 leads) | Avg per bucket |
 |--------|-------------|-----------|-------------------------------|---------------|
 | Winter (DJF) | 811 | 8,921 | 18 | **496** ✓ Level 1 |
 | Spring (MAM) | 457 | 5,027 | 18 | **279** ✓ Level 1 |
@@ -1651,7 +1656,7 @@ Expected yield:
   5,026 vectors × match rate vs 1,643 settlements ≈ 1,000-2,000 matched
   × 11 bins = 11,000-22,000 new calibration pairs
   Current: 1,126 pairs, 6 MAM Platt models
-  After: 12,000-23,000 pairs, up to 24 models (all clusters × all seasons)
+  After: 12,000-23,000 pairs, up to 32 models (all configured clusters × all seasons)
 
 Per-season bucket estimate:
   DJF: 4,032 vectors → ~8,800 pairs → ~1,467/bucket → Level 1

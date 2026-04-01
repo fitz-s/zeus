@@ -25,7 +25,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Europe', '2026-04-02T08:00:00Z', 12.0)
+        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Europe-Continental', '2026-04-02T08:00:00Z', 12.0)
         """
     )
     conn.commit()

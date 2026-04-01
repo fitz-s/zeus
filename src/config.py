@@ -15,7 +15,11 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 STATE_DIR = PROJECT_ROOT / "state"
 
 
-def state_path(filename: str) -> Path:
+def legacy_state_path(filename: str) -> Path:
+    return STATE_DIR / filename
+
+
+def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
     """Mode-qualified path for per-process state files.
 
     This is the single control point for process state isolation.
@@ -28,7 +32,7 @@ def state_path(filename: str) -> Path:
     positions.json → positions-paper.json / positions-live.json
     """
     import os
-    mode = os.environ.get("ZEUS_MODE", settings.mode)
+    mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
     dot = filename.rfind('.')
     if dot > 0:
         stem, ext = filename[:dot], filename[dot:]
@@ -37,22 +41,18 @@ def state_path(filename: str) -> Path:
     return STATE_DIR / f"{stem}-{mode}{ext}"
 
 
+def state_path(filename: str) -> Path:
+    return mode_state_path(filename)
+
+
 def _load_json(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
 
 
-# Cluster assignment by city name. Calibration uses 6 clusters × 4 seasons = 24 buckets.
-CITY_CLUSTERS = {
-    "NYC": "US-Northeast",
-    "Chicago": "US-Midwest",
-    "Atlanta": "US-Southeast", "Miami": "US-Southeast",
-    "Dallas": "US-SouthCentral", "Austin": "US-SouthCentral", "Houston": "US-SouthCentral",
-    "Seattle": "US-Pacific", "Los Angeles": "US-Pacific", "San Francisco": "US-Pacific",
-    "Denver": "US-Mountain",
-    "London": "Europe", "Paris": "Europe",
-    "Seoul": "Asia", "Shanghai": "Asia", "Tokyo": "Asia",
-}
+_DEFAULT_CITY_DATA = _load_json(CONFIG_DIR / "cities.json")["cities"]
+ALL_CLUSTERS = tuple(dict.fromkeys(city["cluster"] for city in _DEFAULT_CITY_DATA))
+CALIBRATION_SEASONS = ("DJF", "MAM", "JJA", "SON")
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ class Settings:
         self._data = _load_json(path)
         required = [
             "capital_base_usd", "mode", "discovery", "ensemble",
-            "calibration", "edge", "sizing", "exit", "riskguard", "execution"
+            "calibration", "day0", "edge", "sizing", "correlation", "exit", "riskguard", "execution"
         ]
         for key in required:
             if key not in self._data:
@@ -135,7 +135,12 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
         unit = c["unit"]
         amp = c.get("diurnal_amplitude_f") or c.get("diurnal_amplitude_c") or 12.0
 
-        cluster = CITY_CLUSTERS.get(name, "Other")
+        if "cluster" not in c:
+            raise KeyError(
+                f"City {name!r} missing from city metadata cluster field. "
+                "Cluster taxonomy must be explicit and single-sourced."
+            )
+        cluster = c["cluster"]
 
         result.append(City(
             name=name,
@@ -169,3 +174,103 @@ cities_by_alias: dict[str, City] = {}
 for c in cities:
     for alias in c.aliases:
         cities_by_alias[alias.lower()] = c
+
+
+def calibration_clusters() -> tuple[str, ...]:
+    return ALL_CLUSTERS
+
+
+def calibration_seasons() -> tuple[str, ...]:
+    return CALIBRATION_SEASONS
+
+
+def calibration_maturity_thresholds() -> tuple[int, int, int]:
+    maturity = settings["calibration"]["maturity"]
+    return int(maturity["level1"]), int(maturity["level2"]), int(maturity["level3"])
+
+
+def calibration_n_bootstrap() -> int:
+    return int(settings["calibration"]["n_bootstrap"])
+
+
+def edge_n_bootstrap() -> int:
+    return int(settings["edge"]["n_bootstrap"])
+
+
+def ensemble_member_count() -> int:
+    return int(settings["ensemble"]["primary_members"])
+
+
+def ensemble_crosscheck_member_count() -> int:
+    return int(settings["ensemble"]["crosscheck_members"])
+
+
+def ensemble_n_mc() -> int:
+    return int(settings["ensemble"]["n_mc"])
+
+
+def day0_n_mc() -> int:
+    return int(settings["day0"]["n_mc"])
+
+
+def day0_obs_dominates_threshold() -> float:
+    return float(settings["day0"]["obs_dominates_threshold"])
+
+
+def ensemble_instrument_noise(unit: str) -> float:
+    if unit == "C":
+        return float(settings["ensemble"]["instrument_noise_c"])
+    return float(settings["ensemble"]["instrument_noise_f"])
+
+
+def ensemble_bimodal_kde_order() -> int:
+    return int(settings["ensemble"]["bimodal_kde_order"])
+
+
+def ensemble_bimodal_gap_ratio() -> float:
+    return float(settings["ensemble"]["bimodal_gap_ratio"])
+
+
+def ensemble_boundary_window() -> float:
+    return float(settings["ensemble"]["boundary_window"])
+
+
+def ensemble_unimodal_range_epsilon() -> float:
+    return float(settings["ensemble"]["unimodal_range_epsilon"])
+
+
+def sizing_defaults() -> dict[str, float]:
+    sizing = settings["sizing"]
+    return {
+        "max_single_position_pct": float(sizing["max_single_position_pct"]),
+        "max_portfolio_heat_pct": float(sizing["max_portfolio_heat_pct"]),
+        "max_correlated_pct": float(sizing["max_correlated_pct"]),
+        "max_city_pct": float(sizing["max_city_pct"]),
+        "max_region_pct": float(sizing["max_region_pct"]),
+        "min_order_usd": float(sizing["min_order_usd"]),
+    }
+
+
+def correlation_default_cross_cluster() -> float:
+    return float(settings["correlation"]["default_cross_cluster"])
+
+
+def correlation_matrix() -> dict[str, dict[str, float]]:
+    matrix = {
+        cluster: {other: float(value) for other, value in mapping.items()}
+        for cluster, mapping in settings["correlation"]["matrix"].items()
+    }
+    missing = set(ALL_CLUSTERS) - set(matrix)
+    unknown = set(matrix) - set(ALL_CLUSTERS)
+    if missing or unknown:
+        raise KeyError(
+            "correlation.matrix must match canonical cluster taxonomy. "
+            f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    for cluster, mapping in matrix.items():
+        bad_targets = set(mapping) - set(ALL_CLUSTERS)
+        if bad_targets:
+            raise KeyError(
+                f"correlation.matrix[{cluster!r}] has unknown cluster targets: {sorted(bad_targets)}"
+            )
+    return matrix

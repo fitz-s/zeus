@@ -17,33 +17,32 @@ from scipy.signal import argrelextrema
 from scipy.stats import gaussian_kde
 
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.config import City
+from src.config import (
+    City,
+    ensemble_bimodal_gap_ratio,
+    ensemble_bimodal_kde_order,
+    ensemble_boundary_window,
+    ensemble_instrument_noise,
+    ensemble_member_count,
+    ensemble_n_mc,
+    ensemble_unimodal_range_epsilon,
+)
 from src.types import Bin
 from src.types.temperature import TemperatureDelta, Unit
 
 
 def sigma_instrument(unit: Unit) -> TemperatureDelta:
     """ASOS sensor precision. °C value independently calibrated, not °F/1.8."""
-    if unit == "C":
-        return TemperatureDelta(0.28, "C")
-    return TemperatureDelta(0.5, "F")
+    return TemperatureDelta(ensemble_instrument_noise(unit), unit)
 
 
-# Legacy constant for tests that don't pass city. Will be removed after full migration.
-SIGMA_INSTRUMENT = 0.5
-
-# Default MC iterations for p_raw_vector
-DEFAULT_N_MC = 5000
-
-# KDE bimodality detection: argrelextrema order parameter
-BIMODAL_KDE_ORDER = 10
-
-# Fallback bimodality: gap/range threshold
-BIMODAL_GAP_RATIO = 0.3
-
-# Boundary sensitivity window: members within ±0.5° of boundary
-BOUNDARY_WINDOW = 0.5
-UNIMODAL_RANGE_EPSILON = 0.5
+# Compatibility aliases for tests and assumption audits.
+SIGMA_INSTRUMENT = ensemble_instrument_noise("F")
+DEFAULT_N_MC = ensemble_n_mc()
+BIMODAL_KDE_ORDER = ensemble_bimodal_kde_order()
+BIMODAL_GAP_RATIO = ensemble_bimodal_gap_ratio()
+BOUNDARY_WINDOW = ensemble_boundary_window()
+UNIMODAL_RANGE_EPSILON = ensemble_unimodal_range_epsilon()
 
 
 class EnsembleSignal:
@@ -69,9 +68,9 @@ class EnsembleSignal:
             settlement_semantics: Exact resolution constraints for this target market
             decision_time: Exact time the orchestrator began the evaluation cycle
         """
-        if members_hourly.shape[0] < 51:
+        if members_hourly.shape[0] < ensemble_member_count():
             raise ValueError(
-                f"Expected ≥51 ensemble members, got {members_hourly.shape[0]}. "
+                f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "
                 f"Per CLAUDE.md: reject entirely, do not pad."
             )
 
@@ -211,7 +210,7 @@ class EnsembleSignal:
         return np.arange(start_h, end_h)
 
     def p_raw_vector(
-        self, bins: list[Bin], n_mc: int = DEFAULT_N_MC
+        self, bins: list[Bin], n_mc: int | None = None
     ) -> np.ndarray:
         """Probability vector over all bins with instrument noise.
 
@@ -220,6 +219,9 @@ class EnsembleSignal:
 
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
+        if n_mc is None:
+            n_mc = ensemble_n_mc()
+
         n_bins = len(bins)
         n_members = len(self.member_maxes)
         p = np.zeros(n_bins)
@@ -278,13 +280,13 @@ class EnsembleSignal:
             kde = gaussian_kde(maxes)
             x = np.linspace(maxes.min() - 1, maxes.max() + 1, 200)
             density = kde(x)
-            peaks = argrelextrema(density, np.greater, order=BIMODAL_KDE_ORDER)[0]
+            peaks = argrelextrema(density, np.greater, order=ensemble_bimodal_kde_order())[0]
             return len(peaks) >= 2
         except Exception:
             # Fallback: gap heuristic
             sorted_maxes = np.sort(maxes)
             gaps = np.diff(sorted_maxes)
-            return rng > 0 and float(gaps.max()) / rng > BIMODAL_GAP_RATIO
+            return rng > 0 and float(gaps.max()) / rng > ensemble_bimodal_gap_ratio()
 
     def boundary_sensitivity(self, boundary: float) -> float:
         """Fraction of 51 members within ±σ_instrument of a bin boundary.

@@ -11,7 +11,7 @@ import numpy as np
 
 from src.calibration.manager import get_calibrator
 from src.calibration.platt import calibrate_and_normalize
-from src.config import cities_by_name
+from src.config import cities_by_name, day0_n_mc, ensemble_n_mc
 from src.contracts import (
     EntryMethod,
     recompute_native_probability,
@@ -63,7 +63,7 @@ def _refresh_ens_member_counting(
         return position.p_posterior, ["fresh_ens_fetch"]
 
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
-    p_raw_single = float(ens.p_raw_vector(single_bin, n_mc=5000)[0])
+    p_raw_single = float(ens.p_raw_vector(single_bin, n_mc=ensemble_n_mc())[0])
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:
@@ -180,7 +180,7 @@ def _refresh_day0_observation(
         temporal_context=temporal_context,
     )
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
-    p_raw_yes = float(day0.p_vector(single_bin, n_mc=5000)[0])
+    p_raw_yes = float(day0.p_vector(single_bin, n_mc=day0_n_mc())[0])
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
     if cal is not None:

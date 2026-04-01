@@ -16,6 +16,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_connection, init_schema
+from src.config import calibration_n_bootstrap
+from src.calibration.manager import maturity_level, regularization_for_level
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.store import infer_bin_width_from_label
 
@@ -52,13 +54,13 @@ def refit_all():
 
         try:
             cal = ExtendedPlattCalibrator()
-            reg_C = 1.0 if len(pairs) >= 50 else 0.1
+            reg_C = regularization_for_level(maturity_level(len(pairs)))
             cal.fit(
                 p_raw,
                 lead_days,
                 outcomes,
                 bin_widths=bin_widths,
-                n_bootstrap=200,
+                n_bootstrap=calibration_n_bootstrap(),
                 regularization_C=reg_C,
             )
 
