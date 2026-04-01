@@ -416,6 +416,14 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     return portfolio_dirty, tracker_dirty
 
 
+def fetch_day0_observation(city, target_date: str, decision_time, *, deps):
+    getter = deps.get_current_observation
+    try:
+        return getter(city, target_date=target_date, reference_time=decision_time)
+    except TypeError:
+        return getter(city)
+
+
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, deps):
     portfolio_dirty = False
     tracker_dirty = False
@@ -439,7 +447,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             if not (outcome.get("range_low") is None and outcome.get("range_high") is None)
         ]
         try:
-            obs = deps.get_current_observation(city) if mode == deps.DiscoveryMode.DAY0_CAPTURE else None
+            obs = (
+                fetch_day0_observation(city, market["target_date"], decision_time, deps=deps)
+                if mode == deps.DiscoveryMode.DAY0_CAPTURE
+                else None
+            )
         except Exception as e:
             from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 
