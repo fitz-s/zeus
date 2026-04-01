@@ -126,6 +126,14 @@ def _refresh_ens_member_counting(
     return current_p_posterior, [*applied, "alpha_posterior"]
 
 
+def _fetch_day0_observation(city: Position | object, target_d: date):
+    reference_time = datetime.now(timezone.utc)
+    try:
+        return get_current_observation(city, target_date=target_d, reference_time=reference_time)
+    except TypeError:
+        return get_current_observation(city)
+
+
 def _refresh_day0_observation(
     *,
     position: Position,
@@ -140,7 +148,7 @@ def _refresh_day0_observation(
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
-    obs = get_current_observation(city)
+    obs = _fetch_day0_observation(city, target_d)
     if obs is None:
         return position.p_posterior, ["day0_observation"]
     if not obs.get("observation_time"):
@@ -311,6 +319,7 @@ def _check_persistence_anomaly(
 
 from src.contracts.edge_context import EdgeContext
 
+
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
     """Fetch fresh market price and recompute P_posterior for a held position.
 
@@ -350,9 +359,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
                 current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
                 market_refreshed = True
-                
+
                 # Injection Point 7: Data completeness - record microstructure snapshot
                 from src.state.db import log_microstructure
+
                 log_microstructure(
                     conn,
                     token_id=tid,
@@ -364,7 +374,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                     bid=float(bid),
                     ask=float(ask),
                     spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                    source_timestamp=datetime.now(timezone.utc).isoformat()
+                    source_timestamp=datetime.now(timezone.utc).isoformat(),
                 )
             except Exception as e:
                 logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
@@ -404,7 +414,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     divergence_score = abs(current_p_posterior - current_p_market)
     market_velocity_1h = 0.0
-    
+
     # Try fetching 1h velocity if we know the token
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
     if tid:
@@ -413,7 +423,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
             row = conn.execute(
                 "SELECT price FROM token_price_log WHERE token_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
-                (tid, one_hour_ago)
+                (tid, one_hour_ago),
             ).fetchone()
             if row:
                 old_native_p = row["price"]
@@ -430,7 +440,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         p_market=np.array([current_p_market]),
         p_posterior=current_p_posterior,
         forward_edge=current_forward_edge,
-        alpha=0.0, # Could be plucked from internal registry returns eventually
+        alpha=0.0,
         confidence_band_upper=current_forward_edge + ci_half_width,
         confidence_band_lower=current_forward_edge - ci_half_width,
         entry_provenance=EntryMethod(pos.entry_method),
@@ -438,5 +448,5 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         n_edges_found=1,
         n_edges_after_fdr=1,
         market_velocity_1h=market_velocity_1h,
-        divergence_score=divergence_score
+        divergence_score=divergence_score,
     )
