@@ -25,7 +25,7 @@ def test_init_schema_creates_all_tables():
     expected = {
         "settlements", "observations", "market_events", "token_price_log",
         "ensemble_snapshots", "calibration_pairs", "platt_models",
-        "trade_decisions", "shadow_signals", "chronicle", "solar_daily",
+        "trade_decisions", "shadow_signals", "chronicle", "position_events", "solar_daily",
         "observation_instants", "diurnal_peak_prob"
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
@@ -205,8 +205,56 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.2}'
 
 
+def test_log_trade_entry_emits_position_event(tmp_path):
+    from src.state.db import log_trade_entry, query_position_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-entry",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        entry_ci_width=0.10,
+        decision_snapshot_id="snap-1",
+        strategy="center_buy",
+        edge_source="center_buy",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_id="o1",
+        order_status="pending",
+        state="pending_tracked",
+    )
+
+    log_trade_entry(conn, pos)
+    conn.commit()
+
+    events = query_position_events(conn, "rt-entry")
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "POSITION_ENTRY_RECORDED"
+    assert events[0]["position_state"] == "pending_tracked"
+    assert events[0]["decision_snapshot_id"] == "snap-1"
+    assert events[0]["details"]["status"] == "pending_tracked"
+    assert events[0]["details"]["entry_method"] == "ens_member_counting"
+
+
+
 def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
-    from src.state.db import log_trade_exit
+    from src.state.db import log_trade_exit, query_position_events
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -268,9 +316,14 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
         ORDER BY trade_id DESC LIMIT 1
         """
     ).fetchone()
+    events = query_position_events(conn, "t2")
     conn.close()
 
     assert row["forecast_snapshot_id"] == 456
+    assert any(event["event_type"] == "POSITION_EXIT_RECORDED" for event in events)
+    exit_event = next(event for event in events if event["event_type"] == "POSITION_EXIT_RECORDED")
+    assert exit_event["details"]["exit_reason"] == "EDGE_REVERSAL"
+    assert exit_event["details"]["status"] == "exited"
     assert row["calibration_model_version"] == "platt_v2"
     assert row["strategy"] == "shoulder_sell"
     assert row["edge_source"] == "shoulder_sell"
@@ -284,6 +337,355 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     assert row["settlement_semantics_json"] == '{"measurement_unit":"F"}'
     assert row["epistemic_context_json"] == '{"decision_time_utc":"2026-04-01T05:00:00Z"}'
     assert row["edge_context_json"] == '{"forward_edge":0.12}'
+
+
+def test_update_trade_lifecycle_emits_position_event(tmp_path):
+    from src.state.db import log_trade_entry, query_position_events, update_trade_lifecycle
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-life",
+        market_id="m3",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=15.0,
+        entry_price=0.41,
+        p_posterior=0.61,
+        edge=0.20,
+        decision_snapshot_id="snap-life",
+        strategy="center_buy",
+        edge_source="center_buy",
+        order_id="o-life",
+        order_status="pending",
+        order_posted_at="2026-04-01T01:00:00Z",
+        state="pending_tracked",
+    )
+    log_trade_entry(conn, pos)
+
+    pos.state = "entered"
+    pos.entered_at = "2026-04-01T01:05:00Z"
+    pos.order_status = "filled"
+    pos.chain_state = "synced"
+    update_trade_lifecycle(conn, pos)
+    conn.commit()
+
+    events = query_position_events(conn, "rt-life")
+    conn.close()
+
+    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
+    assert len(lifecycle_events) == 1
+    assert lifecycle_events[0]["details"]["status"] == "entered"
+    assert lifecycle_events[0]["details"]["order_status"] == "filled"
+    assert lifecycle_events[0]["details"]["chain_state"] == "synced"
+
+
+def test_log_execution_report_emits_fill_telemetry(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_report, query_position_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-exec",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        order_posted_at="2026-04-01T01:00:00Z",
+        order_status="filled",
+        state="entered",
+    )
+    result = OrderResult(
+        trade_id="rt-exec",
+        status="filled",
+        fill_price=0.42,
+        filled_at="2026-04-01T01:00:05Z",
+        submitted_price=0.40,
+        shares=25.0,
+        timeout_seconds=60,
+    )
+
+    log_execution_report(conn, pos, result)
+    conn.commit()
+
+    events = query_position_events(conn, "rt-exec")
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "ORDER_FILLED"
+    assert events[0]["details"]["submitted_price"] == pytest.approx(0.40)
+    assert events[0]["details"]["fill_price"] == pytest.approx(0.42)
+    assert events[0]["details"]["fill_quality"] == pytest.approx(0.05)
+
+
+def test_log_settlement_event_emits_durable_record(tmp_path):
+    from src.state.db import log_settlement_event, query_position_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-settle",
+        market_id="m5",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+
+    events = query_position_events(conn, "rt-settle")
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "POSITION_SETTLED"
+    assert events[0]["details"]["winning_bin"] == "39-40°F"
+    assert events[0]["details"]["won"] is True
+    assert events[0]["details"]["outcome"] == 1
+    assert events[0]["details"]["pnl"] == pytest.approx(15.0)
+
+
+def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
+    from src.state.db import log_settlement_event, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-settle-auth",
+        market_id="m6",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        edge=0.21,
+        decision_snapshot_id="snap-auth",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+
+    rows = query_authoritative_settlement_rows(conn, limit=10)
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "rt-settle-auth"
+    assert rows[0]["source"] == "position_events"
+    assert rows[0]["outcome"] == 1
+    assert rows[0]["pnl"] == pytest.approx(15.0)
+
+
+def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path):
+    from src.state.db import query_authoritative_settlement_rows
+    from src.state.decision_chain import SettlementRecord, store_settlement_records
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    store_settlement_records(
+        conn,
+        [
+            SettlementRecord(
+                trade_id="legacy-settle",
+                city="NYC",
+                target_date="2026-04-01",
+                range_label="39-40°F",
+                direction="buy_yes",
+                p_posterior=0.58,
+                outcome=1,
+                pnl=12.5,
+                decision_snapshot_id="legacy-snap",
+                edge_source="center_buy",
+                strategy="center_buy",
+                settled_at="2026-04-01T23:00:00Z",
+            )
+        ],
+    )
+
+    rows = query_authoritative_settlement_rows(conn, limit=10)
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "legacy-settle"
+    assert rows[0]["source"] == "decision_log"
+    assert rows[0]["outcome"] == 1
+    assert rows[0]["pnl"] == pytest.approx(12.5)
+
+
+def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
+    from src.state.db import (
+        log_exit_attempt_event,
+        log_exit_fill_event,
+        log_exit_retry_event,
+        log_pending_exit_recovery_event,
+        log_pending_exit_status_event,
+        query_position_events,
+    )
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-exit-events",
+        market_id="m7",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_reason="EDGE_REVERSAL",
+        state="holding",
+        exit_state="sell_pending",
+        shares=25.0,
+        last_exit_order_id="sell-1",
+        exit_retry_count=2,
+        next_exit_retry_at="2026-04-01T01:10:00Z",
+        last_monitor_market_price=0.43,
+    )
+
+    log_exit_attempt_event(
+        conn,
+        pos,
+        order_id="sell-1",
+        status="placed",
+        current_market_price=0.44,
+        best_bid=0.43,
+        shares=25.0,
+    )
+    log_pending_exit_status_event(conn, pos, status="OPEN")
+    log_exit_retry_event(conn, pos, reason="SELL_REJECTED", error="REJECTED")
+    log_pending_exit_recovery_event(
+        conn,
+        pos,
+        event_type="EXIT_INTENT_RECOVERED",
+        reason="STRANDED_EXIT_INTENT",
+        error="exception_during_sell",
+    )
+    pos.last_exit_at = "2026-04-01T01:05:00Z"
+    log_exit_fill_event(
+        conn,
+        pos,
+        order_id="sell-1",
+        fill_price=0.43,
+        current_market_price=0.43,
+        best_bid=0.43,
+        timestamp=pos.last_exit_at,
+    )
+    conn.commit()
+
+    events = query_position_events(conn, "rt-exit-events")
+    conn.close()
+
+    event_types = [event["event_type"] for event in events]
+    assert "EXIT_ORDER_ATTEMPTED" in event_types
+    assert "EXIT_FILL_CHECKED" in event_types
+    assert "EXIT_RETRY_SCHEDULED" in event_types
+    assert "EXIT_INTENT_RECOVERED" in event_types
+    assert "EXIT_ORDER_FILLED" in event_types
+
+    retry_event = next(event for event in events if event["event_type"] == "EXIT_RETRY_SCHEDULED")
+    assert retry_event["details"]["error"] == "REJECTED"
+    assert retry_event["details"]["retry_count"] == 2
+
+    fill_event = next(event for event in events if event["event_type"] == "EXIT_ORDER_FILLED")
+    assert fill_event["order_id"] == "sell-1"
+    assert fill_event["details"]["fill_price"] == pytest.approx(0.43)
+
+
+def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
+    from src.state.db import log_exit_retry_event, query_position_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-exit-backoff",
+        market_id="m8",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        state="holding",
+        exit_state="backoff_exhausted",
+        exit_retry_count=10,
+    )
+
+    log_exit_retry_event(conn, pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+    conn.commit()
+
+    events = query_position_events(conn, "rt-exit-backoff")
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "EXIT_BACKOFF_EXHAUSTED"
+    assert events[0]["details"]["error"] == "3_consecutive_unknown"
 
 
 def test_log_trade_entry_persists_pending_lifecycle_state(tmp_path):
