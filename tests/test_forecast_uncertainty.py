@@ -1,6 +1,7 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
     day0_blended_highs,
+    analysis_member_maxes,
     analysis_bootstrap_sigma,
     analysis_lead_sigma_multiplier,
     analysis_spread_sigma_multiplier,
@@ -41,6 +42,12 @@ def test_analysis_spread_sigma_multiplier_is_bounded_and_monotone():
     assert analysis_spread_sigma_multiplier(0.0, unit="F") == 1.0
     assert analysis_spread_sigma_multiplier(1.0, unit="F") == 1.05
     assert analysis_spread_sigma_multiplier(3.0, unit="F") == 1.1
+
+
+def test_analysis_member_maxes_is_identity_for_now():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(raw, unit="F", lead_days=5.0)
+    assert list(adjusted) == raw
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():

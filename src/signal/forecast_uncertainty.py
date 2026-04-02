@@ -8,7 +8,24 @@ signal consumers.
 
 from __future__ import annotations
 
+import numpy as np
+
 from src.signal.ensemble_signal import sigma_instrument
+
+
+def analysis_member_maxes(
+    member_maxes,
+    *,
+    unit: str,
+    lead_days: float | None = None,
+):
+    """Phase-1 seam for future lead-continuous mean/location correction.
+
+    This slice is intentionally behavior-preserving: it carries the member-max
+    surface through a named forecast-layer boundary without changing values yet.
+    """
+    _ = unit, lead_days
+    return np.asarray(member_maxes, dtype=float)
 
 
 def analysis_lead_sigma_multiplier(lead_days: float | None) -> float:

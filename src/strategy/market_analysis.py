@@ -14,7 +14,10 @@ import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
 from src.config import edge_n_bootstrap
-from src.signal.forecast_uncertainty import analysis_bootstrap_sigma
+from src.signal.forecast_uncertainty import (
+    analysis_bootstrap_sigma,
+    analysis_member_maxes,
+)
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
 
@@ -48,7 +51,11 @@ class MarketAnalysis:
         self.p_market = p_market
         self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
         self.vig = float(p_market.sum())
-        self._member_maxes = member_maxes
+        self._member_maxes = analysis_member_maxes(
+            member_maxes,
+            unit=unit,
+            lead_days=lead_days,
+        )
         self._calibrator = calibrator
         self._alpha = alpha
         self._lead_days = lead_days
@@ -57,7 +64,7 @@ class MarketAnalysis:
         self._sigma = analysis_bootstrap_sigma(
             unit,
             lead_days=lead_days,
-            ensemble_spread=float(np.std(member_maxes)) if len(member_maxes) else None,
+            ensemble_spread=float(np.std(self._member_maxes)) if len(self._member_maxes) else None,
         )  # centralized forecast-uncertainty seam
 
     def find_edges(

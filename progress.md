@@ -1187,3 +1187,21 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma'` → `11 passed`
   - `./.venv/bin/pytest -q` → `477 passed, 3 skipped`
+
+## 2026-04-02 — P2-H mean/location seam extraction
+- After the first sigma-side behavior changes, the next clean forecast-layer move was to stop passing raw `member_maxes` straight into `MarketAnalysis` without any named boundary. The system now has an explicit seam for future lead-continuous mean/location correction, while keeping current behavior unchanged.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_member_maxes(member_maxes, unit=..., lead_days=...)`
+    - current behavior is identity / no-op
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - now routes member maxima through that seam before bootstrap analysis
+- Why this slice matters:
+  - it opens the correct boundary for future lead-continuous mean/location correction
+  - it prevents future de-hardcode work from being forced directly into `MarketAnalysis`
+  - it keeps this slice behavior-preserving while moving more of forecast policy into one place
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that `analysis_member_maxes(...)` is identity for now.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes'` → `12 passed`
+  - `./.venv/bin/pytest -q` → `478 passed, 3 skipped`
