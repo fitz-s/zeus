@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
+from src.state.db import get_connection, query_execution_event_summary
 from src.state.portfolio import PortfolioState, load_portfolio, portfolio_heat
 from src.state.truth_files import annotate_truth_payload
 
@@ -77,8 +78,15 @@ def write_status(cycle_summary: dict = None) -> None:
                 for p in portfolio.positions
             ],
         },
+        "execution": {},
         "cycle": cycle_summary or {},
     }
+    try:
+        conn = get_connection()
+        status["execution"] = query_execution_event_summary(conn)
+        conn.close()
+    except Exception:
+        status["execution"] = {"error": "execution_summary_unavailable"}
     status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
 
     # Atomic write

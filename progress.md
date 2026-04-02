@@ -210,6 +210,18 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - RiskGuard still does not yet gate on strategy/execution deterioration; it now surfaces the evidence but remains mostly portfolio/settlement reactive;
   - broader post-entry execution attribution (`entry_alpha_usd`, slippage decomposition, downstream strategy/risk consumers) can still be tightened further.
 
+## Execution Consumer Slice 2 (canonical execution read model)
+- Landed protections:
+  - `query_execution_event_summary()` now provides a canonical aggregated read model over `position_events` for entry- and exit-side execution surfaces, instead of leaving `position_events` readable only per-trade;
+  - `status_summary.write_status()` now exposes an `execution` section backed by that canonical read model, so operator/diagnosis surfaces no longer have to infer execution backlog from scattered flags;
+  - this makes the execution spine usable as a real consumer surface, not just a write-only audit log.
+- Validation evidence for this slice:
+  - targeted DB/status tests after the slice: `51 passed`
+  - full suite after landing the slice: `435 passed, 3 skipped`
+- Residual consumer/risk backlog after this slice:
+  - strategy-aware / execution-aware RiskGuard still surfaces evidence more than it gates on it;
+  - higher-order strategy/current-regime truth (edge compression, current heat by strategy, consumer-facing strategy state) still remains to be built on top of these cleaner execution and settlement readers.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

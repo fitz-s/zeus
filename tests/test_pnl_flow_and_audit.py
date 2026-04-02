@@ -283,6 +283,10 @@ def test_inv_monitor_updates_market_price(monkeypatch):
 
 def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
     portfolio = PortfolioState(
         bankroll=150.0,
         recent_exits=[_recent_exit(-2.3)],
@@ -294,6 +298,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
 
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
@@ -306,6 +311,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["positions"][0]["exit_state"] == open_pos.exit_state
     assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
     assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
+    assert "overall" in status["execution"]
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
 

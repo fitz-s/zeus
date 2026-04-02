@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing execution-aware RiskGuard details"
+      "goal": "Drive the next truth/consumer slice after landing the canonical execution read model and status execution surface"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the execution-aware RiskGuard detail slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, and execution surfaces",
+  "last_decision": "CLOSE the canonical execution read-model slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, and execution surfaces",
   "backlog_source": "task.md"
 }
