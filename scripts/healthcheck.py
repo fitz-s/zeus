@@ -16,6 +16,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import settings, state_path
+from src.state.db import get_connection
+from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
@@ -35,6 +37,10 @@ def _status_path() -> Path:
 
 def _risk_state_path() -> Path:
     return state_path("risk_state.db")
+
+
+def _zeus_db_path() -> Path:
+    return state_path("zeus.db").parent / "zeus.db"
 
 
 def _riskguard_label() -> str:
@@ -176,6 +182,18 @@ def check() -> dict:
     else:
         result["riskguard_state"] = "missing"
         result["riskguard_fresh"] = False
+
+    try:
+        conn = get_connection(_zeus_db_path())
+        no_trade_cases = query_no_trade_cases(conn, hours=24)
+        conn.close()
+        stage_counts: dict[str, int] = {}
+        for case in no_trade_cases:
+            stage = str(case.get("rejection_stage") or "UNKNOWN")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        result["recent_no_trade_stage_counts"] = stage_counts
+    except Exception:
+        result["recent_no_trade_stage_counts"] = {}
 
     try:
         from scripts.validate_assumptions import run_validation
