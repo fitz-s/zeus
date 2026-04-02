@@ -1096,6 +1096,71 @@ def test_buy_yes_edge_exit_requires_best_bid():
     assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
 
 
+def test_day0_buy_yes_uses_single_confirmation_observation_reversal():
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.25,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=0.54,
+            hours_to_settlement=4.0,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL"
+    assert "day0_observation_gate" in decision.applied_validations
+
+
+def test_day0_buy_no_uses_single_confirmation_observation_reversal():
+    pos = _make_position(direction="buy_no", size_usd=5.0, entry_price=0.60, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.20,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.70,
+            current_market_price_is_fresh=True,
+            best_bid=0.69,
+            hours_to_settlement=4.0,
+            position_state="day0_window",
+            day0_active=True,
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL"
+    assert "day0_observation_gate" in decision.applied_validations
+
+
+def test_day0_observation_can_hold_through_near_settlement_and_panic_signals():
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.80,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=0.54,
+            hours_to_settlement=0.5,
+            position_state="day0_window",
+            day0_active=True,
+            divergence_score=0.40,
+            market_velocity_1h=-0.20,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert "day0_observation_authority" in decision.applied_validations
+    assert "near_settlement_gate" not in decision.applied_validations
+
+
 def test_live_execute_exit_blocks_incomplete_context():
     """Direct execute_exit callers must also fail closed on missing market price."""
     pos = _make_position(state="holding")
