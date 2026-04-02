@@ -185,7 +185,8 @@ def run_audit():
     print(report_text)
 
     # Write to file
-    report_path = PROJECT_ROOT / "data_completeness_report.md"
+    report_path = PROJECT_ROOT / "docs" / "reports" / "data_completeness_report.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     with open(report_path, "w") as f:
         f.write(report_text)
     print(f"\nReport written to: {report_path}")

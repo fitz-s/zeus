@@ -247,7 +247,8 @@ def run_profit_validation_replay():
     logger.info(f"Gross Advantage vs V1 Path (High Conf): ${stats['gross_delta_high_confidence_only']:.2f}")
 
     # Generate Report File
-    report_path = PROJECT_ROOT / "shadow_replay_report.md"
+    report_path = PROJECT_ROOT / "docs" / "reports" / "shadow_replay_report.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(report_path, "w") as f:
             f.write(f"# Zeus Measurement Spine: Operational PnL Replay\n\n")
