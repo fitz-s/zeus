@@ -357,6 +357,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["runtime"]["day0_positions"] == 1
     assert "overall" in status["execution"]
     assert status["no_trade"]["recent_stage_counts"]["EDGE_INSUFFICIENT"] == 1
+    assert status["learning"]["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["strategy"]["center_buy"]["gated"] is False
