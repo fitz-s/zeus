@@ -452,6 +452,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual control/operator backlog after this slice:
   - the remaining question is no longer “can we see the drift?”, but whether any of that drift should auto-resolve or remain an operator decision.
 
+## Risk Loop Slice 3 (strategy-specific recommendations from execution truth)
+- Landed protections:
+  - RiskGuard recommendations now incorporate per-strategy execution decay, so a strategy can be specifically recommended for gating when its own durable fill/reject evidence is poor enough.
+- Validation evidence for this slice:
+  - targeted RiskGuard tests after the slice: `19 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual risk-loop backlog after this slice:
+  - the remaining question is whether these strategy-specific recommendations should stay advisory or become direct automated control mutations.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:

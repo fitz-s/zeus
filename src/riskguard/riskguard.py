@@ -182,13 +182,17 @@ def tick() -> RiskLevel:
     if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
         execution_quality_level = RiskLevel.YELLOW
     strategy_signal_level = RiskLevel.YELLOW if edge_compression_alerts else RiskLevel.GREEN
-    recommended_strategy_gates = sorted(
-        {
-            alert.split(": ", 1)[1].split(" edge", 1)[0]
-            for alert in edge_compression_alerts
-            if alert.startswith("EDGE_COMPRESSION: ")
-        }
-    )
+    recommended_strategy_gate_set = {
+        alert.split(": ", 1)[1].split(" edge", 1)[0]
+        for alert in edge_compression_alerts
+        if alert.startswith("EDGE_COMPRESSION: ")
+    }
+    for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
+        observed = bucket["filled"] + bucket["rejected"]
+        fill_rate = bucket.get("fill_rate")
+        if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
+            recommended_strategy_gate_set.add(strategy)
+    recommended_strategy_gates = sorted(recommended_strategy_gate_set)
     recommended_controls = []
     if execution_quality_level == RiskLevel.YELLOW:
         recommended_controls.append("tighten_risk")
