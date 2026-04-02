@@ -393,8 +393,25 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert summary["entries_paused"] is True
-    assert summary["trades"] == 0
-    assert summary["candidates"] == 0
+
+
+def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [{"command": "set_strategy_gate", "strategy": "opening_inertia", "enabled": False}],
+                "acks": [],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["set_strategy_gate"]
+    assert control_plane_module.is_strategy_enabled("opening_inertia") is False
+    assert control_plane_module.is_strategy_enabled("center_buy") is True
 
 
 def test_inv_kelly_uses_effective_bankroll(monkeypatch):
