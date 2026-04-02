@@ -112,6 +112,12 @@ def write_status(cycle_summary: dict = None) -> None:
         strategy for strategy, enabled in current_strategy_gates.items()
         if enabled is False and strategy not in recommended_strategy_gates
     )
+    recommended_controls = list(risk_details.get("recommended_controls", []))
+    recommended_controls_not_applied: list[str] = []
+    if "tighten_risk" in recommended_controls and get_edge_threshold_multiplier() <= 1.0:
+        recommended_controls_not_applied.append("tighten_risk")
+    if "review_strategy_gates" in recommended_controls and recommended_but_not_gated:
+        recommended_controls_not_applied.append("review_strategy_gates")
 
     chain_state_counts: dict[str, int] = {}
     exit_state_counts: dict[str, int] = {}
@@ -132,10 +138,11 @@ def write_status(cycle_summary: dict = None) -> None:
             "entries_paused": is_entries_paused(),
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": strategy_gates(),
-            "recommended_controls": risk_details.get("recommended_controls", []),
+            "recommended_controls": recommended_controls,
             "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
             "recommended_but_not_gated": recommended_but_not_gated,
             "gated_but_not_recommended": gated_but_not_recommended,
+            "recommended_controls_not_applied": recommended_controls_not_applied,
         },
         "risk": {
             "level": _get_risk_level(),
