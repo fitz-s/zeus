@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Decide whether to continue deeper policy-ladder work or start formal review/acceptance now that runtime authority surfaces are healthy and current"
+      "goal": "Continue remaining P0/P1 closure now that runtime authority is healthy and the opening_inertia edge-compression alert has been defused as insufficient evidence"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the operational refresh plus launchctl-fallback hardening and continue P1-E toward either stronger learned policy-ladder work or formal review/acceptance from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the edge-compression robustness hardening and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

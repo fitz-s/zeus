@@ -810,3 +810,27 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - paper daemon alive: `PID 74917`
   - RiskGuard alive: `PID 74919`
   - current healthcheck is now GREEN on process truth, with `risk_level: YELLOW` and one review-required strategy gate command visible: disable `opening_inertia` because of `edge_compression`
+
+## 2026-04-02 — edge-compression robustness hardening
+- Operator decision recorded: `opening_inertia` remains unchanged for now because the current `edge_compression` evidence is too thin to justify a gate. The warning class stays alive, but the present sample/time profile is now treated as insufficient evidence for policy action.
+- Main root-cause finding: `StrategyTracker.edge_compression_check()` was too eager. It could emit `EDGE_COMPRESSION` from a short burst of trades because the trend used trade-order indexing and only a count floor, so a few early oversized edges could look like regime decay before enough real elapsed time had passed.
+- Main contract decision: edge compression now requires both **enough samples** and **enough real elapsed time**. Trend is computed over actual elapsed days from `entered_at`, not trade index. Alerting now requires:
+  - `EDGE_COMPRESSION_MIN_TRADES = 20`
+  - `EDGE_COMPRESSION_MIN_SPAN_DAYS = 3.0`
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/strategy_tracker.py` now adds `recent_edge_points()`, computes `edge_trend()` over real days, and gates `edge_compression_check()` on both sample count and time span.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_strategy_tracker_regime.py` now locks:
+    - enough trades but insufficient elapsed span → no compression alert
+    - enough trades and enough span with shrinking edge → alert still fires
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_strategy_tracker_regime.py tests/test_riskguard.py -k 'edge_compression or strategy_edge_compression_alert'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `460 passed, 3 skipped`
+- Runtime truth after one-shot refresh under the new rule:
+  - `./.venv/bin/python - <<'PY' ... tick(); write_status() ... PY` updated paper state
+  - `./.venv/bin/python scripts/healthcheck.py` then returned:
+    - `healthy: true`
+    - `risk_level: GREEN`
+    - `recommended_strategy_gates: []`
+    - `recommended_commands: []`
+  - `opening_inertia` is no longer recommended for gating, matching the recorded operator decision.
