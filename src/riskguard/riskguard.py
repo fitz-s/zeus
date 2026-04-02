@@ -166,10 +166,12 @@ def tick() -> RiskLevel:
         tracker_summary = tracker.summary()
         edge_compression_alerts = tracker.edge_compression_check()
         tracker_accounting = dict(getattr(tracker, "accounting", {}))
-    except Exception:
+        strategy_tracker_error = ""
+    except Exception as exc:
         tracker_summary = {}
         edge_compression_alerts = []
         tracker_accounting = {}
+        strategy_tracker_error = str(exc)
 
     # Compute metrics from authoritative settlement rows only.
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
@@ -194,7 +196,7 @@ def tick() -> RiskLevel:
             "tighten_risk",
             f"execution_decay(fill_rate={execution_overall['fill_rate']}, observed={execution_observed})",
         )
-    strategy_signal_level = RiskLevel.YELLOW if edge_compression_alerts else RiskLevel.GREEN
+    strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
     for alert in edge_compression_alerts:
         if not alert.startswith("EDGE_COMPRESSION: "):
             continue
@@ -275,6 +277,7 @@ def tick() -> RiskLevel:
             "strategy_tracker_summary": tracker_summary,
             "strategy_edge_compression_alerts": edge_compression_alerts,
             "strategy_tracker_accounting": tracker_accounting,
+            "strategy_tracker_error": strategy_tracker_error,
             "recommended_strategy_gates": recommended_strategy_gates,
             "recommended_strategy_gate_reasons": {
                 strategy: sorted(reasons)
