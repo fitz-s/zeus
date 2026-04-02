@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P0-D",
-      "goal": "Drive the next runtime-spine closure slice after landing Day0 exit authority"
+      "goal": "Drive the next runtime-spine closure slice after landing normal fill accounting convergence"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-D slice 4 (Day0 exit authority), keep P0-D active for the remaining runtime-spine gaps",
+  "last_decision": "CLOSE P0-D slice 5 (normal fill accounting convergence), keep P0-D active for the remaining runtime-spine gaps",
   "backlog_source": "task.md"
 }
