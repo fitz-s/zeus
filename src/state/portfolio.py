@@ -277,6 +277,40 @@ class Position:
         elif exit_context.chain_is_fresh is False:
             applied.append("chain_freshness_stale")
 
+        forward_edge = compute_forward_edge(
+            HeldSideProbability(float(exit_context.fresh_prob), self.direction),
+            NativeSidePrice(float(exit_context.current_market_price), self.direction),
+        )
+        applied.append("forward_edge_compute")
+
+        if exit_context.day0_active:
+            applied.append("day0_observation_authority")
+            if self.direction == "buy_no":
+                day0_decision = self._buy_no_exit(
+                    forward_edge,
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    current_market_price=float(exit_context.current_market_price),
+                    hours_to_settlement=exit_context.hours_to_settlement,
+                    day0_active=True,
+                    applied=applied,
+                )
+            else:
+                day0_decision = self._buy_yes_exit(
+                    forward_edge,
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    best_bid=exit_context.best_bid,
+                    day0_active=True,
+                    applied=applied,
+                )
+            if day0_decision.should_exit:
+                return day0_decision
+            self.applied_validations = _dedupe_validations(day0_decision.applied_validations)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
         # Settlement imminent
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
             applied.append("near_settlement_gate")
@@ -367,18 +401,13 @@ class Position:
             )
 
         # Direction-specific exit logic
-        forward_edge = compute_forward_edge(
-            HeldSideProbability(float(exit_context.fresh_prob), self.direction),
-            NativeSidePrice(float(exit_context.current_market_price), self.direction),
-        )
-        applied.append("forward_edge_compute")
-
         if self.direction == "buy_no":
             return self._buy_no_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
                 current_market_price=float(exit_context.current_market_price),
                 hours_to_settlement=exit_context.hours_to_settlement,
+                day0_active=bool(exit_context.day0_active),
                 applied=applied,
             )
         else:
@@ -386,6 +415,7 @@ class Position:
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=exit_context.best_bid,
+                day0_active=bool(exit_context.day0_active),
                 applied=applied,
             )
 
@@ -394,6 +424,7 @@ class Position:
         forward_edge: float,
         current_p_posterior: float,
         best_bid: Optional[float] = None,
+        day0_active: bool = False,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
@@ -410,6 +441,27 @@ class Position:
         evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
         applied.append("ci_threshold")
+        if day0_active and evidence_edge < edge_threshold:
+            applied.append("day0_observation_gate")
+            applied.append("ev_gate")
+            shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
+            if shares * best_bid <= shares * current_p_posterior:
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="DAY0_OBSERVATION_REVERSAL",
+            )
         applied.append("consecutive_cycle_check")
         if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0
@@ -456,6 +508,7 @@ class Position:
         current_p_posterior: float,
         current_market_price: float,
         hours_to_settlement: Optional[float] = None,
+        day0_active: bool = False,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
@@ -464,6 +517,29 @@ class Position:
         edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
         near_threshold = buy_no_ceiling()
         applied.append("ci_threshold")
+
+        if day0_active and evidence_edge < edge_threshold:
+            applied.append("day0_observation_gate")
+            if self.entry_price > 0:
+                applied.append("ev_gate")
+                shares = self.size_usd / self.entry_price
+                if shares * current_market_price <= shares * current_p_posterior:
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                    )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="DAY0_OBSERVATION_REVERSAL",
+            )
 
         # Near-settlement hold (unless deeply negative)
         if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():

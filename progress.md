@@ -115,6 +115,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `day0_window` is still not a durable event-owned lifecycle phase;
   - normal fill accounting still does not fully reconcile authoritative `cost_basis_usd/size_usd` to actual execution telemetry / chain truth.
 
+## P0-D Slice 4 (Day0 exit authority)
+- Landed protections:
+  - `day0_active` now actually changes exit authority inside `Position.evaluate_exit()` instead of being a passive field on `ExitContext`;
+  - both `buy_yes` and `buy_no` now support a single-confirmation `DAY0_OBSERVATION_REVERSAL` path in Day0, matching the trading-rule requirement that Day0 observation overrides ENS;
+  - when Day0 observation continues to support the position, the system now holds through `SETTLEMENT_IMMINENT`, divergence-panic, and flash-crash branches rather than letting those generic triggers override Day0 authority.
+- Validation evidence for this slice:
+  - targeted runtime/day0 tests after the slice: `84 passed`
+  - full suite after landing the slice: `425 passed, 3 skipped`
+  - adversarial merge gate on the narrow Day0 authority surface: **ACCEPT**
+- Residual P0-D backlog after slice 4:
+  - `day0_window` still is not durably emitted as an explicit event-owned lifecycle phase;
+  - normal fill accounting still does not fully reconcile `cost_basis_usd/size_usd` to executed truth before chain confirmation;
+  - entry execution telemetry for normal fill still remains thinner than the exit-side telemetry spine.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
