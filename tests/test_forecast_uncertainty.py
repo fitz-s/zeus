@@ -3,6 +3,7 @@ from src.signal.forecast_uncertainty import (
     analysis_mean_context,
     analysis_mean_offset,
     analysis_sigma_context,
+    analysis_spread_context,
     day0_backbone_context,
     day0_backbone_residual_adjustment,
     day0_backbone_high,
@@ -52,6 +53,14 @@ def test_analysis_spread_sigma_multiplier_is_bounded_and_monotone():
     assert analysis_spread_sigma_multiplier(3.0, unit="F") == 1.1
 
 
+def test_analysis_spread_context_explains_multiplier():
+    ctx = analysis_spread_context(1.0, unit="F")
+    assert ctx["base_sigma"] == sigma_instrument("F").value
+    assert ctx["reference_spread"] == sigma_instrument("F").value * 4.0
+    assert ctx["spread_ratio"] == 0.5
+    assert ctx["spread_multiplier"] == 1.05
+
+
 def test_analysis_member_maxes_is_identity_for_now():
     raw = [40.0, 42.0, 41.5]
     adjusted = analysis_member_maxes(raw, unit="F", lead_days=5.0)
@@ -95,6 +104,8 @@ def test_analysis_sigma_context_explains_components():
     assert ctx["base_sigma"] == sigma_instrument("F").value
     assert ctx["lead_multiplier"] == 1.1
     assert ctx["spread_multiplier"] == 1.05
+    assert ctx["reference_spread"] == sigma_instrument("F").value * 4.0
+    assert ctx["spread_ratio"] == 0.5
     assert ctx["final_sigma"] == sigma_instrument("F").value * 1.1 * 1.05
 
 
