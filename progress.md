@@ -943,3 +943,26 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_healthcheck.py tests/test_riskguard.py -k 'risk_state_has_no_rows or healthcheck'` → `8 passed`
   - `./.venv/bin/pytest -q` → `466 passed, 3 skipped`
 - Small delegated side update: a subagent aligned `~/workspace-venus/memory/known_gaps.md` so stale settlement/status claims were retired and the DST item was narrowed to its still-open historical rebuild question.
+
+## 2026-04-02 — remove regime-scoped sample caps from learning summaries
+- Final detailed review found one remaining P1 inconsistency in the current-regime learning surface: once `not_before=current_regime_started_at` was introduced, `query_learning_surface_summary()` still silently capped regime-scoped truth (`settlement_limit=50`, `execution_limit=200`, and `query_no_trade_cases()` default 200-row scan). That meant the surface was “regime-aligned” but still not full current-regime truth.
+- Main contract decision: when a real regime boundary is provided, learning summaries must scan the full regime window rather than truncating at legacy convenience caps. Limits remain for generic recent-window queries, but **not** for regime-scoped operator truth.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` now allows uncapped reads for:
+    - `query_settlement_events(limit=None, not_before=...)`
+    - `query_authoritative_settlement_rows(limit=None, not_before=...)`
+    - `query_execution_event_summary(limit=None, not_before=...)`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/decision_chain.py` now allows:
+    - `query_legacy_settlement_records(limit=None, not_before=...)`
+    - uncapped `query_no_trade_cases(..., not_before=...)`
+    - `query_learning_surface_summary()` to disable the legacy caps whenever `not_before` is present
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_db.py` now proves that a regime window containing:
+    - 55 settlements
+    - 55 no-trades
+    - 205 execution events
+    is reported in full rather than truncated to 50/200.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary_does_not_cap_regime_scoped_samples or learning_surface_summary_respects_current_regime_start or learning_surface_summary'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
+- Residual note: this closes the remaining “boundary-aware but still truncated” learning-surface blocker from detailed review. Remaining P0/P1 work is now much closer to formal acceptance/closure than to further semantic rewiring.

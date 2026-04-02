@@ -262,7 +262,7 @@ def query_settlement_records(
 
 def query_legacy_settlement_records(
     conn,
-    limit: int = 50,
+    limit: int | None = 50,
     *,
     city: str | None = None,
     target_date: str | None = None,
@@ -271,16 +271,17 @@ def query_legacy_settlement_records(
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
     query_env = settings.mode if env is None else env
-    rows = conn.execute(
-        """
+    sql = """
         SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'
           AND env = ?
         ORDER BY timestamp DESC
-        LIMIT ?
-        """,
-        (query_env, max(limit * 10, 50)),
-    ).fetchall()
+        """
+    params: list[object] = [query_env]
+    if limit is not None:
+        sql += "\n        LIMIT ?"
+        params.append(max(limit * 10, 50))
+    rows = conn.execute(sql, params).fetchall()
 
     results: list[dict] = []
     cutoff_dt = None
@@ -317,9 +318,9 @@ def query_legacy_settlement_records(
             if target_date is not None and normalized["target_date"] != target_date:
                 continue
             results.append(normalized)
-            if len(results) >= limit:
+            if limit is not None and len(results) >= limit:
                 return results[:limit]
-    return results[:limit]
+    return results[:limit] if limit is not None else results
 
 
 def _normalize_legacy_settlement_record(
@@ -395,11 +396,15 @@ def query_no_trade_cases(
             cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
     else:
         cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
-    rows = conn.execute("""
+    sql = """
         SELECT artifact_json, timestamp FROM decision_log
         WHERE env = ?
-        ORDER BY timestamp DESC LIMIT 200
-    """, (query_env,)).fetchall()
+        ORDER BY timestamp DESC
+    """
+    params: list[object] = [query_env]
+    if not_before is None:
+        sql += "\n        LIMIT 200"
+    rows = conn.execute(sql, params).fetchall()
 
     results = []
     for r in rows:
@@ -427,12 +432,19 @@ def query_learning_surface_summary(
 ) -> dict:
     from src.state.db import query_authoritative_settlement_rows, query_execution_event_summary
 
-    settlements = query_authoritative_settlement_rows(conn, limit=settlement_limit, env=env, not_before=not_before)
+    settlement_query_limit = None if not_before is not None else settlement_limit
+    execution_query_limit = None if not_before is not None else execution_limit
+    settlements = query_authoritative_settlement_rows(
+        conn,
+        limit=settlement_query_limit,
+        env=env,
+        not_before=not_before,
+    )
     no_trades = query_no_trade_cases(conn, hours=hours, env=env, not_before=not_before)
     execution_summary = query_execution_event_summary(
         conn,
         env=env,
-        limit=execution_limit,
+        limit=execution_query_limit,
         not_before=not_before,
     )
 

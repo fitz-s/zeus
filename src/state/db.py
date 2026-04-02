@@ -1083,7 +1083,7 @@ def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit
 
 def query_settlement_events(
     conn: sqlite3.Connection,
-    limit: int = 50,
+    limit: int | None = 50,
     *,
     city: str | None = None,
     target_date: str | None = None,
@@ -1106,25 +1106,24 @@ def query_settlement_events(
     if not_before is not None:
         filters.append("timestamp >= ?")
         params.append(not_before)
-    params.append(limit)
-    rows = conn.execute(
-        f"""
+    query = f"""
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
                city, target_date, market_id, bin_label, direction, strategy, edge_source,
                source, details_json, timestamp, env
         FROM position_events
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
-        LIMIT ?
-        """,
-        params,
-    ).fetchall()
+        """
+    if limit is not None:
+        query += "\n        LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(query, params).fetchall()
     return _decode_position_event_rows(rows)
 
 
 def query_authoritative_settlement_rows(
     conn: sqlite3.Connection,
-    limit: int = 50,
+    limit: int | None = 50,
     *,
     city: str | None = None,
     target_date: str | None = None,
@@ -1146,7 +1145,7 @@ def query_authoritative_settlement_rows(
         if (normalized := _normalize_position_settlement_event(event)) is not None
     ]
     if normalized_stage:
-        return normalized_stage[:limit]
+        return normalized_stage[:limit] if limit is not None else normalized_stage
 
     from src.state.decision_chain import query_legacy_settlement_records
     legacy_rows = query_legacy_settlement_records(
@@ -1157,7 +1156,7 @@ def query_authoritative_settlement_rows(
         env=env,
         not_before=not_before,
     )
-    return legacy_rows[:limit]
+    return legacy_rows[:limit] if limit is not None else legacy_rows
 
 
 def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
@@ -1172,7 +1171,7 @@ def query_execution_event_summary(
     conn: sqlite3.Connection,
     *,
     env: str | None = None,
-    limit: int = 500,
+    limit: int | None = 500,
     not_before: str | None = None,
 ) -> dict:
     query_env = settings.mode if env is None else env
@@ -1190,17 +1189,16 @@ def query_execution_event_summary(
     if not_before is not None:
         filters.append("timestamp >= ?")
         params.append(not_before)
-    params.append(limit)
-    rows = conn.execute(
-        f"""
+    query = f"""
         SELECT event_type, strategy
         FROM position_events
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
-        LIMIT ?
-        """,
-        params,
-    ).fetchall()
+        """
+    if limit is not None:
+        query += "\n        LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(query, params).fetchall()
 
     def _blank() -> dict:
         return {

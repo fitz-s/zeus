@@ -1185,6 +1185,98 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
+def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_path):
+    from src.state.db import log_position_event, log_settlement_event
+    from src.state.decision_chain import query_learning_surface_summary
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    current_regime_started_at = "2026-04-03T00:00:00+00:00"
+    for i in range(55):
+        ts = f"2026-04-03T12:{i%60:02d}:00+00:00"
+        artifact = {
+            "no_trade_cases": [
+                {
+                    "decision_id": f"nt-{i}",
+                    "city": "NYC",
+                    "target_date": "2026-04-03",
+                    "range_label": "39-40°F",
+                    "direction": "buy_yes",
+                    "strategy": "center_buy",
+                    "edge_source": "center_buy",
+                    "rejection_stage": "RISK_REJECTED",
+                    "rejection_reasons": ["risk"],
+                }
+            ]
+        }
+        conn.execute(
+            "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+            ("opening_hunt", ts, ts, json.dumps(artifact), ts, "paper"),
+        )
+        pos = Position(
+            trade_id=f"settle-{i}",
+            market_id=f"m{i}",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-03",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            strategy="center_buy",
+            edge_source="center_buy",
+            decision_snapshot_id=f"snap-{i}",
+            exit_price=1.0,
+            pnl=1.0,
+            exit_reason="SETTLEMENT",
+            last_exit_at=ts,
+            state="settled",
+            env="paper",
+            size_usd=10.0,
+            entry_price=0.4,
+            p_posterior=0.7,
+            edge=0.2,
+        )
+        log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    for i in range(205):
+        pos = Position(
+            trade_id=f"exec-{i}",
+            market_id=f"mx{i}",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-03",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            strategy="center_buy",
+            edge_source="center_buy",
+            env="paper",
+        )
+        log_position_event(
+            conn,
+            "ORDER_REJECTED",
+            pos,
+            details={"status": "rejected"},
+            source="execution",
+            timestamp=f"2026-04-03T13:{i%60:02d}:00+00:00",
+        )
+    conn.commit()
+
+    summary = query_learning_surface_summary(
+        conn,
+        env="paper",
+        not_before=current_regime_started_at,
+    )
+    conn.close()
+
+    assert summary["settlement_sample_size"] == 55
+    assert summary["by_strategy"]["center_buy"]["settlement_count"] == 55
+    assert summary["by_strategy"]["center_buy"]["no_trade_count"] == 55
+    assert summary["execution"]["event_sample_size"] == 205
+    assert summary["execution"]["overall"]["entry_rejected"] == 205
+    assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 205
+
+
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
