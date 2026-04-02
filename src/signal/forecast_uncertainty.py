@@ -18,6 +18,8 @@ def analysis_member_maxes(
     *,
     unit: str,
     lead_days: float | None = None,
+    bias_corrected: bool | None = None,
+    bias_reference: dict | None = None,
 ):
     """Phase-1 seam for future lead-continuous mean/location correction.
 
@@ -25,11 +27,13 @@ def analysis_member_maxes(
     surface through a named forecast-layer boundary without changing values yet.
     """
     values = np.asarray(member_maxes, dtype=float)
-    offset = analysis_mean_context(
+    offset = analysis_mean_offset(
         unit=unit,
         lead_days=lead_days,
         ensemble_mean=float(values.mean()) if values.size else None,
-    )["offset"]
+        bias_corrected=bias_corrected,
+        bias_reference=bias_reference,
+    )
     return values + offset
 
 
@@ -68,11 +72,15 @@ def analysis_mean_offset(
     unit: str,
     lead_days: float | None = None,
     ensemble_mean: float | None = None,
+    bias_corrected: bool | None = None,
+    bias_reference: dict | None = None,
 ) -> float:
     return analysis_mean_context(
         unit=unit,
         lead_days=lead_days,
         ensemble_mean=ensemble_mean,
+        bias_corrected=bias_corrected,
+        bias_reference=bias_reference,
     )["offset"]
 
 

@@ -62,6 +62,8 @@ class MarketAnalysis:
             member_maxes,
             unit=unit,
             lead_days=lead_days,
+            bias_corrected=bias_corrected,
+            bias_reference=bias_reference,
         )
         self._mean_context = analysis_mean_context(
             unit=unit,
