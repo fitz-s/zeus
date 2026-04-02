@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H after opening the mean-offset seam, moving next toward richer forecast-layer behavior changes"
+      "goal": "Continue P2-H after opening the day0 residual-update seam, moving next toward richer forecast-layer behavior changes"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the mean-offset seam slice and continue deeper into forecast-layer de-hardcode",
+  "last_decision": "CLOSE the day0 residual-update seam slice and continue deeper into forecast-layer de-hardcode",
   "backlog_source": "task.md"
 }

@@ -1,6 +1,7 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
     analysis_mean_offset,
+    day0_backbone_residual_adjustment,
     day0_backbone_high,
     day0_blended_highs,
     analysis_member_maxes,
@@ -112,3 +113,11 @@ def test_day0_backbone_high_is_observed_high_for_now():
         current_temp=43.0,
         daylight_progress=0.5,
     ) == 45.0
+
+
+def test_day0_backbone_residual_adjustment_is_neutral_for_now():
+    assert day0_backbone_residual_adjustment(
+        observed_high=45.0,
+        current_temp=43.0,
+        daylight_progress=0.5,
+    ) == 0.0

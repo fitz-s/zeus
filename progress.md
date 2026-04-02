@@ -1239,3 +1239,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset'` → `14 passed`
   - `./.venv/bin/pytest -q` → `480 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 residual-update seam
+- This slice finishes the other half of the day0 backbone architecture: not just where the backbone anchor comes from, but where a future online residual correction would enter that backbone.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `day0_backbone_residual_adjustment(...)`
+    - `day0_backbone_high(...)` now composes:
+      - observed-high anchor
+      - residual adjustment seam
+    - current residual adjustment is neutral (`0.0`)
+- Why this matters:
+  - it opens the exact insertion point for a future online residual / Kalman-style update
+  - it keeps `Day0Signal` free of yet another future policy embed
+  - current behavior remains unchanged
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that the new residual adjustment seam is neutral for now.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or residual_adjustment'` → `15 passed`
+  - `./.venv/bin/pytest -q` → `481 passed, 3 skipped`

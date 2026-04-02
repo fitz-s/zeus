@@ -163,8 +163,26 @@ def day0_backbone_high(
 
     Current behavior is unchanged: the observed high remains the anchor.
     """
-    _ = current_temp, daylight_progress
-    return float(observed_high)
+    return float(observed_high) + day0_backbone_residual_adjustment(
+        observed_high=observed_high,
+        current_temp=current_temp,
+        daylight_progress=daylight_progress,
+    )
+
+
+def day0_backbone_residual_adjustment(
+    *,
+    observed_high: float,
+    current_temp: float,
+    daylight_progress: float | None,
+) -> float:
+    """Phase-1 seam for future online residual correction on the day0 backbone.
+
+    Current behavior is neutral; later work can make this a learned or filtered
+    residual update without changing `Day0Signal` again.
+    """
+    _ = observed_high, current_temp, daylight_progress
+    return 0.0
 
 
 def analysis_bootstrap_sigma(
