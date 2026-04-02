@@ -472,6 +472,7 @@ def evaluate_candidate(
         city_name=city.name,
         season=season_from_date(target_date),
         forecast_source=str(ens_result.get("model") or "ecmwf_ifs025"),
+        bias_corrected=bool(getattr(ens, "bias_corrected", False)),
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()
