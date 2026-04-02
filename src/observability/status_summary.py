@@ -69,6 +69,7 @@ def write_status(cycle_summary: dict = None) -> None:
     portfolio = load_portfolio()
     generated_at = datetime.now(timezone.utc).isoformat()
     risk_details = _get_risk_details()
+    riskguard_level = _get_risk_level()
     if cycle_summary is None and STATUS_PATH.exists():
         try:
             with open(STATUS_PATH) as f:
@@ -172,7 +173,8 @@ def write_status(cycle_summary: dict = None) -> None:
             "recommended_controls_not_applied": recommended_controls_not_applied,
         },
         "risk": {
-            "level": _get_risk_level(),
+            "level": riskguard_level,
+            "riskguard_level": riskguard_level,
             "details": risk_details,
         },
         "portfolio": {
@@ -254,6 +256,29 @@ def write_status(cycle_summary: dict = None) -> None:
         status["execution"] = {"error": "execution_summary_unavailable"}
         status["learning"] = {"error": "learning_summary_unavailable"}
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
+
+    consistency_issues: list[str] = []
+    cycle_risk_level = str((cycle_summary or {}).get("risk_level") or "")
+    if cycle_risk_level and cycle_risk_level != riskguard_level:
+        consistency_issues.append(
+            f"cycle_risk_level_mismatch:{cycle_risk_level}->{riskguard_level}"
+        )
+    if bool((cycle_summary or {}).get("failed", False)):
+        consistency_issues.append("cycle_failed")
+    if status.get("execution", {}).get("error"):
+        consistency_issues.append("execution_summary_unavailable")
+    if status.get("learning", {}).get("error"):
+        consistency_issues.append("learning_summary_unavailable")
+    if status.get("no_trade", {}).get("error"):
+        consistency_issues.append("no_trade_summary_unavailable")
+
+    status["risk"]["consistency_check"] = {
+        "ok": not consistency_issues,
+        "issues": consistency_issues,
+        "cycle_risk_level": cycle_risk_level or None,
+    }
+    if consistency_issues:
+        status["risk"]["level"] = "RED"
 
     learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
     for name, learning_bucket in learning_by_strategy.items():

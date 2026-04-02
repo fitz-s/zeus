@@ -420,6 +420,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     ]
     assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)
     assert status["strategy"]["opening_inertia"]["gated"] is True
+    assert status["risk"]["level"] == "GREEN"
+    assert status["risk"]["riskguard_level"] == "GREEN"
+    assert status["risk"]["consistency_check"]["ok"] is True
     assert status["risk"]["details"]["execution_quality_level"] == "YELLOW"
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
@@ -438,6 +441,42 @@ def test_inv_run_mode_writes_failure_status(monkeypatch):
     assert captured["summary"]["mode"] == DiscoveryMode.OPENING_HUNT.value
     assert captured["summary"]["failed"] is True
     assert captured["summary"]["failure_reason"] == "boom"
+
+
+def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    portfolio = PortfolioState(bankroll=150.0)
+
+    class BrokenConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: BrokenConn())
+    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: type("T", (), {"accounting": {}})())
+
+    def _boom(_conn):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", _boom)
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test", "risk_level": "ORANGE", "failed": True, "failure_reason": "boom"})
+    status = json.loads(status_path.read_text())
+
+    assert status["risk"]["level"] == "RED"
+    assert status["risk"]["riskguard_level"] == "GREEN"
+    assert status["risk"]["consistency_check"]["ok"] is False
+    assert "cycle_risk_level_mismatch:ORANGE->GREEN" in status["risk"]["consistency_check"]["issues"]
+    assert "cycle_failed" in status["risk"]["consistency_check"]["issues"]
+    assert "execution_summary_unavailable" in status["risk"]["consistency_check"]["issues"]
 
 
 def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):

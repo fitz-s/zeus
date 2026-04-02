@@ -925,3 +925,21 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'enum_backed_runtime_keys or status_passes_current_regime_start_to_learning_surface or status_strategy_merges_learning_surface'` → `3 passed`
   - `./.venv/bin/pytest -q` → `466 passed, 3 skipped`
 - Residual note: this closes the specific multi-surface enum/value mismatch that review found in `status_summary`. Remaining work is now less about representational drift and more about final acceptance/review closure plus any deeper current-regime policy semantics we still choose to land.
+
+## 2026-04-02 — status risk consistency fail-closed
+- Adversarial review found a concrete operator-truth seam: `status_summary` could still show headline `risk.level = GREEN` while the embedded cycle already declared `failed=true` and key learning/execution surfaces were unavailable. That made the first risk color look calmer than the actual system state.
+- Main contract decision: top-level `status.risk` is an operator-facing headline, not a raw RiskGuard mirror. When the cycle has failed, when cycle risk disagrees with RiskGuard risk, or when execution/learning/no-trade summaries are unavailable, `status.risk.level` must fail closed and the inconsistency must be explicit.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now writes:
+    - `risk.riskguard_level` = underlying RiskGuard value
+    - `risk.consistency_check = { ok, issues, cycle_risk_level }`
+    - `risk.level = "RED"` whenever cycle failure or summary-surface inconsistency exists
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks both:
+    - normal GREEN path with `riskguard_level` + `consistency_check.ok=true`
+    - fail-closed RED escalation when cycle failed / cycle risk mismatched / execution summary unavailable
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status_escalates_risk_when_cycle_failed_or_query_errors or enum_backed_runtime_keys or status_passes_current_regime_start_to_learning_surface or status_strategy_merges_learning_surface'` → `4 passed`
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py tests/test_riskguard.py -k 'risk_state_has_no_rows or healthcheck'` → `8 passed`
+  - `./.venv/bin/pytest -q` → `466 passed, 3 skipped`
+- Small delegated side update: a subagent aligned `~/workspace-venus/memory/known_gaps.md` so stale settlement/status claims were retired and the DST item was narrowed to its still-open historical rebuild question.
