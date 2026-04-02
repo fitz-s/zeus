@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H after landing the lead/spread-aware sigma seam, moving next toward the first behavior-changing forecast de-hardcode step"
+      "goal": "Continue P2-H after extracting day0 residual-blend policy, moving next toward the first behavior-changing forecast de-hardcode step"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the lead/spread-aware sigma interface slice and continue into the first behavior-changing forecast-layer de-hardcode step",
+  "last_decision": "CLOSE the day0 residual-blend seam slice and continue into the first behavior-changing forecast-layer de-hardcode step",
   "backlog_source": "task.md"
 }
