@@ -43,9 +43,10 @@ def analysis_sigma_context(
     forecast_source: str | None = None,
 ) -> dict:
     """Explain how the current analysis sigma was constructed."""
-    base_sigma = sigma_instrument(unit).value
+    spread_context = analysis_spread_context(ensemble_spread, unit=unit)
+    base_sigma = spread_context["base_sigma"]
     lead_multiplier = analysis_lead_sigma_multiplier(lead_days)
-    spread_multiplier = analysis_spread_sigma_multiplier(ensemble_spread, unit=unit)
+    spread_multiplier = spread_context["spread_multiplier"]
     return {
         "unit": unit,
         "city_name": city_name,
@@ -56,6 +57,8 @@ def analysis_sigma_context(
         "base_sigma": base_sigma,
         "lead_multiplier": lead_multiplier,
         "spread_multiplier": spread_multiplier,
+        "reference_spread": spread_context["reference_spread"],
+        "spread_ratio": spread_context["spread_ratio"],
         "final_sigma": base_sigma * lead_multiplier * spread_multiplier,
     }
 
@@ -116,6 +119,28 @@ def analysis_lead_sigma_multiplier(lead_days: float | None) -> float:
     return 1.0 + 0.2 * (lead / 6.0)
 
 
+def analysis_spread_context(
+    ensemble_spread: float | None,
+    *,
+    unit: str,
+) -> dict:
+    base_sigma = sigma_instrument(unit).value
+    reference_spread = base_sigma * 4.0
+    spread = None if ensemble_spread is None else max(0.0, float(ensemble_spread))
+    ratio = (
+        0.0
+        if spread is None or reference_spread <= 0
+        else min(1.0, spread / reference_spread)
+    )
+    return {
+        "base_sigma": base_sigma,
+        "reference_spread": reference_spread,
+        "ensemble_spread": ensemble_spread,
+        "spread_ratio": ratio,
+        "spread_multiplier": 1.0 + 0.1 * ratio if spread is not None else 1.0,
+    }
+
+
 def analysis_spread_sigma_multiplier(
     ensemble_spread: float | None,
     *,
@@ -127,13 +152,7 @@ def analysis_spread_sigma_multiplier(
     covariate through a named policy boundary but still returns the neutral
     multiplier until a later P2-H behavior change is chosen.
     """
-    if ensemble_spread is None:
-        return 1.0
-    base_sigma = sigma_instrument(unit).value
-    reference_spread = base_sigma * 4.0
-    spread = max(0.0, float(ensemble_spread))
-    ratio = min(1.0, spread / reference_spread) if reference_spread > 0 else 1.0
-    return 1.0 + 0.1 * ratio
+    return analysis_spread_context(ensemble_spread, unit=unit)["spread_multiplier"]
 
 
 def day0_temporal_closure_weight(
