@@ -135,6 +135,7 @@ def test_day0_backbone_high_is_observed_high_for_now():
         daylight_progress=0.5,
         hours_remaining=4.0,
         observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
     ) == 45.0
 
 
@@ -145,4 +146,5 @@ def test_day0_backbone_residual_adjustment_is_neutral_for_now():
         daylight_progress=0.5,
         hours_remaining=4.0,
         observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
     ) == 0.0
