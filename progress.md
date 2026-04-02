@@ -470,6 +470,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual automation backlog after this slice:
   - the remaining choice is policy: whether to keep this builder as a manual/outer-automation hook or wire it into stronger automatic behaviors.
 
+## Automation Contract Slice 3 (apply recommended controls helper)
+- Landed protections:
+  - `scripts/apply_recommended_controls.py` now reads the status surface, uses the stable recommended-command builder, and enqueues explicit control-plane commands without silently mutating runtime state itself.
+- Validation evidence for this slice:
+  - targeted automation/control tests after the slice: `32 passed`
+  - full suite after landing the slice: `449 passed, 3 skipped`
+- Residual automation backlog after this slice:
+  - the remaining automation decision is whether this helper stays manual/operator-invoked or becomes part of an automatic loop.
+
 ## Risk Loop Slice 3 (strategy-specific recommendations from execution truth)
 - Landed protections:
   - RiskGuard recommendations now incorporate per-strategy execution decay, so a strategy can be specifically recommended for gating when its own durable fill/reject evidence is poor enough.

@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing a stable builder for explicit recommended commands"
+      "goal": "Drive the next truth/consumer slice after landing a helper that enqueues recommended commands from status"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the recommended-command-builder slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the apply-recommended-controls helper slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
