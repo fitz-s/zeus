@@ -765,3 +765,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status_strategy_merges_learning_surface'` → `1 passed`
   - `./.venv/bin/pytest -q` → `454 passed, 3 skipped`
 - Residual P1-E truth after this slice: the operator surface can now see a unified by-strategy regime picture, but policy remains advisory. The next real step is to decide whether any of that richer current-regime evidence should promote or suppress strategy gates automatically, and under what contract.
+
+## 2026-04-02 — P1-E bidirectional gate-drift review commands
+- Main review delta: once `status.strategy` unified the current-regime picture, the next ladder gap was asymmetry in review-required gate commands. The control-plane builder could propose “disable this strategy” when evidence recommended a new gate, but it could not propose the symmetric “re-enable this strategy” action when a strategy stayed gated after the recommendation disappeared (`gated_but_not_recommended` drift).
+- Main contract decision: review-required gate commands are now **bidirectional**. The operator/automation contract should surface both sides of gate drift: disable strategies whose evidence newly warrants gating, and review re-enable strategies whose manual gate now lacks current supporting evidence. This is still review-required, not auto-applied.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/control/control_plane.py` now turns `control.gated_but_not_recommended` into explicit review-required `set_strategy_gate(..., enabled=True)` commands with `note='recommended_by=gate_drift_resolved'`, alongside the existing review-required disable commands.
+  - Existing auto-safe behavior remains unchanged: default automation still enqueues only auto-safe commands unless explicitly opted into review-required actions.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that the full review-required command builder and `--include-review-required` apply path generate both disable and re-enable gate commands with stable notes.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'recommended_commands_from_status or apply_recommended_controls'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `454 passed, 3 skipped`
+- Residual P1-E truth after this slice: gate drift is now surfaced symmetrically as explicit review-required commands, but the actual decision logic for when a strategy should graduate from review-required enable/disable recommendations to stronger executable policy still remains open.

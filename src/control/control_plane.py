@@ -282,6 +282,15 @@ def review_required_commands_from_status(status: dict) -> list[dict]:
         if reasons:
             command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
         commands.append(command)
+    for strategy in control.get("gated_but_not_recommended", []) or []:
+        commands.append(
+            {
+                "command": "set_strategy_gate",
+                "strategy": strategy,
+                "enabled": True,
+                "note": "recommended_by=gate_drift_resolved",
+            }
+        )
     return commands
 
 
