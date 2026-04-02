@@ -1000,3 +1000,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `P1-F` detailed review lane can close as DONE for the current P0/P1 base.
   - `P1-G` adversarial review lane can close as DONE for the current P0/P1 base.
   - `P0-D` is no longer “active unresolved blocker work”; it moves to REVIEW as a structurally closed runtime base with only optional future tightening left.
+
+## 2026-04-02 — P0-D runtime base accepted
+- After the remaining runtime-truth fixes landed (enum normalization, bootstrap risk fail-close, top-level status risk fail-close) and the runtime was recovered to a healthy state, there are no longer concrete unresolved blockers inside the P0-D runtime spine itself.
+- Acceptance evidence at this point:
+  - daemon/riskguard healthy in launchd
+  - `status_contract_valid: true`
+  - `riskguard_contract_valid: true`
+  - `risk_level: GREEN`
+  - no recommended commands outstanding
+  - full suite `468 passed, 3 skipped`
+- Queue consequence:
+  - `P0-D` can now close as DONE for the current base
+  - remaining active work is P1-E policy/learning semantics, not runtime-spine correctness

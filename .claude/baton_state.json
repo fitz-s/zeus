@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Continue the remaining P1-E policy/learning work from a now review-cleared P0/P1 runtime base"
+      "goal": "Continue the remaining P1-E policy/learning semantics now that P0 runtime-spine correctness is closed for the current base"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the final current-regime/truth blockers, mark detailed+adversarial review lanes done for the current P0/P1 base, and continue only the remaining P1-E policy/learning work",
+  "last_decision": "CLOSE P0-D as done for the current base, keep P1-E as the only active remaining P0/P1 program lane, and continue policy/learning semantics work",
   "backlog_source": "task.md"
 }
