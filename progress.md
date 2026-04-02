@@ -1371,3 +1371,28 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment'` → `17 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
+
+## 2026-04-02 — P2-H first bounded day0 backbone behavior change
+- This is the first actual behavior change on the day0 backbone side. The residual-adjustment seam no longer returns a hardcoded zero in all cases.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_backbone_residual_adjustment(...)` now returns a **small positive adjustment** when:
+      - daylight progress is between 0 and 1
+      - current temperature is within roughly one instrument-sigma of the observed high
+      - there is still time remaining in the day0 window
+    - magnitude is bounded by `0.5 * sigma_instrument(unit)` and scaled by:
+      - proximity to the observed high
+      - remaining daylight progress
+      - hours remaining
+      - the future nowcast-blend seam (currently neutral)
+- Why this is acceptable as the first day0 behavior change:
+  - bounded and monotone
+  - still anchored on observed high
+  - preserves the hard-floor property
+  - creates a real, but very small, solar/intraday backbone effect before any heavier day0 model lands
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that the adjustment remains zero in neutral cases and becomes small-positive in the near-high / before-peak case.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment'` → `18 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `484 passed, 3 skipped`

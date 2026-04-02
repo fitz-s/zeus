@@ -193,6 +193,7 @@ def day0_blended_highs(
 
 def day0_backbone_high(
     *,
+    unit: str,
     observed_high: float,
     current_temp: float,
     daylight_progress: float | None,
@@ -205,6 +206,7 @@ def day0_backbone_high(
     Current behavior is unchanged: the observed high remains the anchor.
     """
     return float(observed_high) + day0_backbone_residual_adjustment(
+        unit=unit,
         observed_high=observed_high,
         current_temp=current_temp,
         daylight_progress=daylight_progress,
@@ -216,6 +218,7 @@ def day0_backbone_high(
 
 def day0_backbone_residual_adjustment(
     *,
+    unit: str,
     observed_high: float,
     current_temp: float,
     daylight_progress: float | None,
@@ -228,12 +231,28 @@ def day0_backbone_residual_adjustment(
     Current behavior is neutral; later work can make this a learned or filtered
     residual update without changing `Day0Signal` again.
     """
-    _ = observed_high, current_temp, daylight_progress
-    return day0_nowcast_blend_weight(
+    if daylight_progress is None:
+        return 0.0
+    progress = min(1.0, max(0.0, float(daylight_progress)))
+    if progress <= 0.0 or progress >= 1.0:
+        return 0.0
+
+    base_sigma = sigma_instrument(unit).value
+    if base_sigma <= 0:
+        return 0.0
+
+    temp_gap = max(0.0, float(observed_high) - float(current_temp))
+    proximity = max(0.0, 1.0 - min(1.0, temp_gap / base_sigma))
+    remaining_factor = min(1.0, max(0.0, float(hours_remaining) / 6.0))
+    solar_factor = 1.0 - progress
+    nowcast_neutrality = 1.0 - day0_nowcast_blend_weight(
         hours_remaining=hours_remaining,
         observation_source=observation_source,
         observation_time=observation_time,
-    ) * 0.0
+    )
+    max_adjustment = base_sigma * 0.5
+    adjustment = max_adjustment * proximity * solar_factor * remaining_factor * nowcast_neutrality
+    return max(0.0, float(adjustment))
 
 
 def day0_nowcast_blend_weight(

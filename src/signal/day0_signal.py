@@ -119,6 +119,7 @@ class Day0Signal:
             remaining = rng.choice(self.ens_remaining, size=n_members, replace=True)
             noised = remaining + rng.normal(0, self._sigma, n_members)
             backbone_high = day0_backbone_high(
+                unit=self.unit,
                 observed_high=self.obs_high,
                 current_temp=self.current_temp,
                 daylight_progress=self._daylight_progress,

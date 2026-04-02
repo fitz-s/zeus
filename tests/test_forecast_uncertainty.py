@@ -130,6 +130,7 @@ def test_day0_blended_highs_preserves_hard_floor_and_weight_endpoints():
 
 def test_day0_backbone_high_is_observed_high_for_now():
     assert day0_backbone_high(
+        unit="F",
         observed_high=45.0,
         current_temp=43.0,
         daylight_progress=0.5,
@@ -141,6 +142,7 @@ def test_day0_backbone_high_is_observed_high_for_now():
 
 def test_day0_backbone_residual_adjustment_is_neutral_for_now():
     assert day0_backbone_residual_adjustment(
+        unit="F",
         observed_high=45.0,
         current_temp=43.0,
         daylight_progress=0.5,
@@ -148,3 +150,16 @@ def test_day0_backbone_residual_adjustment_is_neutral_for_now():
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
     ) == 0.0
+
+
+def test_day0_backbone_residual_adjustment_is_small_positive_when_temp_is_near_high_before_peak():
+    adj = day0_backbone_residual_adjustment(
+        unit="F",
+        observed_high=45.0,
+        current_temp=44.8,
+        daylight_progress=0.5,
+        hours_remaining=4.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+    )
+    assert 0.0 < adj < 0.25
