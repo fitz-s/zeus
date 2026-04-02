@@ -28,6 +28,7 @@ class ChainState(str, Enum):
     SYNCED = "synced"
     LOCAL_ONLY = "local_only"
     CHAIN_ONLY = "chain_only"
+    EXIT_PENDING_MISSING = "exit_pending_missing"
     QUARANTINED = "quarantined"
     QUARANTINE_EXPIRED = "quarantine_expired"
 

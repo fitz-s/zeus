@@ -376,6 +376,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import ExitContext, check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
     from src.state.chain_reconciliation import quarantine_resolution_reason
+    exit_lifecycle_owned_states = {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+    exit_lifecycle_recovery_states = {"exit_intent", "retry_pending", "backoff_exhausted"}
 
     paper_mode = getattr(clob, "paper_mode", True)
     portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
@@ -405,6 +407,17 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
+        if pos.chain_state == "exit_pending_missing" and pos.exit_state in exit_lifecycle_recovery_states:
+            closed = deps.void_position(portfolio, pos.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
+            if closed is not None:
+                tracker.record_exit(closed)
+                tracker_dirty = True
+                portfolio_dirty = True
+                summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
+            continue
+        if pos.chain_state == "exit_pending_missing" and pos.exit_state in exit_lifecycle_owned_states:
+            summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
+            continue
         if pos.exit_state in ("sell_placed", "sell_pending"):
             continue
         if pos.exit_state == "backoff_exhausted":

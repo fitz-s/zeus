@@ -60,6 +60,27 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - **Validation evidence**
   - project venv full suite now passes: `./.venv/bin/pytest -q` → **409 passed, 3 skipped**
   - this round also kept targeted runtime/harvester/risk/time-semantics tests green while blocker fixes were applied.
+- **VCS trace**
+  - committed on branch `pre-live`: `d00a329` — `Close runtime authority and time-semantics blockers`
+  - pushed to remote `origin/pre-live`
+
+## P0-D Slice 1 (runtime-spine live-risk closure)
+- Landed protections:
+  - chain reconciliation no longer phantom-voids exit-lifecycle-owned positions in `exit_intent`, `sell_placed`, `sell_pending`, or `retry_pending` when chain truth temporarily disappears;
+  - the new `exit_pending_missing` chain state now separates “missing while exit ownership is still active” from ordinary phantom/local-only semantics;
+  - incomplete chain snapshots (`0` chain positions while active locals exist) no longer escalate retrying exits into `exit_pending_missing`;
+  - `retry_pending` / `exit_intent` / `backoff_exhausted` positions that are already `exit_pending_missing` now resolve through explicit admin closure (`EXIT_CHAIN_MISSING_REVIEW_REQUIRED`) instead of looping forever or placing duplicate sells;
+  - Day0 refresh fallback now preserves stale probability truth via `last_monitor_prob_is_fresh=False` rather than silently marking reused posterior values as fresh.
+- Validation evidence for this slice:
+  - targeted runtime tests: `76 passed`
+  - full suite after landing the slice: `417 passed, 3 skipped`
+- Review outcome:
+  - detailed verification passed after the final incomplete-chain-response fix
+  - adversarial review accepted the slice for merge/push
+- Residual P0-D backlog after this slice:
+  - Day0 still is not a full terminal-phase exit authority
+  - pending/live entry verification still has split-brain ownership (`cycle_runtime` vs `fill_tracker`)
+  - `day0_window` lifecycle still is not yet a durable event-owned phase
 
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
