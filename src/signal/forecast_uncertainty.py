@@ -82,6 +82,7 @@ def analysis_mean_context(
     season: str | None = None,
     forecast_source: str | None = None,
     bias_corrected: bool | None = None,
+    bias_reference: dict | None = None,
 ) -> dict:
     """Phase-1 seam for future lead-continuous mean/location correction.
 
@@ -94,6 +95,7 @@ def analysis_mean_context(
         "season": season,
         "forecast_source": forecast_source,
         "bias_corrected": bias_corrected,
+        "bias_reference": bias_reference or {},
         "lead_days": lead_days,
         "ensemble_mean": ensemble_mean,
         "offset": 0.0,

@@ -126,6 +126,44 @@ def _serialize_json(value) -> str:
     return json.dumps(_to_jsonable(value), default=str, ensure_ascii=False)
 
 
+def _forecast_source_key(model_name: str | None) -> str:
+    text = str(model_name or "ecmwf_ifs025").strip().lower()
+    if text.startswith("ecmwf"):
+        return "ecmwf"
+    if text.startswith("gfs"):
+        return "gfs"
+    if text.startswith("icon"):
+        return "icon"
+    if text.startswith("openmeteo"):
+        return "openmeteo"
+    return text
+
+
+def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
+    if conn is None:
+        return {}
+    try:
+        row = conn.execute(
+            """
+            SELECT bias, mae, n_samples, discount_factor
+            FROM model_bias
+            WHERE city = ? AND season = ? AND source = ?
+            """,
+            (city_name, season, forecast_source),
+        ).fetchone()
+    except Exception:
+        return {}
+    if row is None:
+        return {}
+    return {
+        "source": forecast_source,
+        "bias": float(row["bias"]),
+        "mae": float(row["mae"]),
+        "n_samples": int(row["n_samples"]),
+        "discount_factor": float(row["discount_factor"]),
+    }
+
+
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
         return "settlement_capture"
@@ -458,6 +496,15 @@ def evaluate_candidate(
         entry_validations.append("model_agreement")
     entry_validations.append("alpha_posterior")
 
+    forecast_source = _forecast_source_key(ens_result.get("model"))
+    season = season_from_date(target_date)
+    bias_reference = _load_model_bias_reference(
+        conn,
+        city_name=city.name,
+        season=season,
+        forecast_source=forecast_source,
+    )
+
     # Edge detection
     analysis = MarketAnalysis(
         p_raw=p_raw,
@@ -470,9 +517,10 @@ def evaluate_candidate(
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
         city_name=city.name,
-        season=season_from_date(target_date),
-        forecast_source=str(ens_result.get("model") or "ecmwf_ifs025"),
+        season=season,
+        forecast_source=forecast_source,
         bias_corrected=bool(getattr(ens, "bias_corrected", False)),
+        bias_reference=bias_reference,
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()

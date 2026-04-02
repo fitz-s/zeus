@@ -48,6 +48,7 @@ class MarketAnalysis:
         season: str = "",
         forecast_source: str = "",
         bias_corrected: bool | None = None,
+        bias_reference: dict | None = None,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -70,6 +71,7 @@ class MarketAnalysis:
             season=season or None,
             forecast_source=forecast_source or None,
             bias_corrected=bias_corrected,
+            bias_reference=bias_reference,
         )
         self._calibrator = calibrator
         self._alpha = alpha

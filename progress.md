@@ -1576,3 +1576,29 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
   - `./.venv/bin/pytest -q` → `489 passed, 3 skipped`
+
+## 2026-04-02 — model-bias reference surfaced into forecast context
+- The latest metadata slice makes one more future-relevant distinction explicit in evaluator artifacts: when forecast-layer mean work happens later, artifacts can now say which historical `model_bias` row was available for the decision, rather than only whether upstream bias correction happened.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - new `_forecast_source_key(...)`
+    - new `_load_model_bias_reference(...)`
+    - evaluator now looks up `model_bias` for the current city/season/source when `conn` is available
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_mean_context(...)` now carries `bias_reference`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - now accepts and propagates `bias_reference` through mean context
+- Why this matters:
+  - future mean/location behavior changes can be compared against the exact bias row that was available at decision time
+  - artifacts now distinguish:
+    - forecast source
+    - season/city
+    - whether bias correction was already applied
+    - which bias-reference row existed
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks `bias_reference` in mean context
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks evaluator artifact inclusion of the reference bias row
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `21 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or evaluator_epistemic_context_includes_model_bias_reference or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors' tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `490 passed, 3 skipped`
