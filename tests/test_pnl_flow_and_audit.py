@@ -14,6 +14,7 @@ import src.control.control_plane as control_plane_module
 import src.engine.cycle_runner as cycle_runner
 import src.engine.evaluator as evaluator_module
 import src.engine.monitor_refresh as monitor_refresh
+import src.main as main_module
 import src.execution.harvester as harvester_module
 import src.observability.status_summary as status_summary_module
 import src.riskguard.riskguard as riskguard_module
@@ -301,8 +302,27 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["portfolio"]["total_pnl"] == pytest.approx(-0.8)
     assert status["portfolio"]["effective_bankroll"] == pytest.approx(149.2)
+    assert status["portfolio"]["positions"][0]["chain_state"] == open_pos.chain_state
+    assert status["portfolio"]["positions"][0]["exit_state"] == open_pos.exit_state
+    assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
+    assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
+
+
+def test_inv_run_mode_writes_failure_status(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(main_module, "run_cycle", lambda mode: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        "src.observability.status_summary.write_status",
+        lambda cycle_summary=None: captured.setdefault("summary", cycle_summary),
+    )
+
+    main_module._run_mode(DiscoveryMode.OPENING_HUNT)
+
+    assert captured["summary"]["mode"] == DiscoveryMode.OPENING_HUNT.value
+    assert captured["summary"]["failed"] is True
+    assert captured["summary"]["failure_reason"] == "boom"
 
 
 def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):

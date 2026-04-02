@@ -35,6 +35,18 @@ def _run_mode(mode: DiscoveryMode):
         logger.info("%s: %s", mode.value, summary)
     except Exception as e:
         logger.error("%s failed: %s", mode.value, e, exc_info=True)
+        try:
+            from src.observability.status_summary import write_status
+
+            write_status(
+                {
+                    "mode": mode.value,
+                    "failed": True,
+                    "failure_reason": str(e),
+                }
+            )
+        except Exception:
+            logger.debug("failed to write error status for %s", mode.value, exc_info=True)
     finally:
         _cycle_lock.release()
 

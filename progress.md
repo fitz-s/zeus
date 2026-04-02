@@ -170,6 +170,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - some remaining operator surfaces still compress too much runtime truth into status summaries;
   - chain rescue vs normal fill remains a deliberate two-path runtime authority model even though the sharpest seams are now reduced.
 
+## Operator Truth Slice 1 (status/failure surface)
+- Landed protections:
+  - `status_summary.write_status()` now exposes the runtime states operators actually need during recovery and diagnosis:
+    - `chain_state`
+    - `exit_state`
+    - `entry_fill_verified`
+    - `admin_exit_reason`
+    - `day0_entered_at`
+  - `_run_mode()` now writes an explicit failure status snapshot when a cycle throws instead of only logging and leaving the last success snapshot stale.
+- Validation evidence for this slice:
+  - targeted status/failure tests after the slice: `25 passed`
+  - full suite after landing the slice: `431 passed, 3 skipped`
+- Residual operator/risk backlog after this slice:
+  - strategy-aware / execution-aware RiskGuard behavior is still not yet a full protective loop;
+  - some operator surfaces still summarize rather than diagnose (for example strategy/execution breakdowns are still thinner than runtime internals).
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
