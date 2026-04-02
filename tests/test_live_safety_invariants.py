@@ -164,6 +164,49 @@ def test_pending_tracked_voids_after_cancel():
     assert len(portfolio.positions) == 0  # void_position removes from portfolio
 
 
+def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
+    """Normal CLOB fill verifies locally first; chain ownership arrives later."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        chain_state="unknown",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class Tracker:
+        def __init__(self):
+            self.entries = []
+
+        def record_entry(self, position):
+            self.entries.append(position.trade_id)
+
+    tracker = Tracker()
+    clob = _make_clob(order_status="FILLED")
+    clob.get_order_status.return_value = {
+        "status": "FILLED",
+        "avgPrice": 0.44,
+        "filledSize": 25.0,
+    }
+
+    stats = check_pending_entries(portfolio, clob, tracker=tracker)
+
+    assert stats["entered"] == 1
+    assert stats["dirty"] is True
+    assert stats["tracker_dirty"] is True
+    assert pos.state == "entered"
+    assert pos.entry_order_id == "buy_123"
+    assert pos.entry_fill_verified is True
+    assert pos.order_status == "filled"
+    assert pos.chain_state == "local_only"
+    assert pos.entered_at != ""
+    assert tracker.entries == ["test_001"]
+
+
 def test_chain_reconciliation_rescues_pending_tracked_fill():
     """Chain truth must rescue pending_tracked when order-status path is unavailable."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -196,6 +239,72 @@ def test_chain_reconciliation_rescues_pending_tracked_fill():
     assert pos.cost_basis_usd == 11.0
     assert pos.condition_id == "cond-1"
     assert portfolio.positions == [pos]
+
+
+def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="rescue-db-1",
+        state="pending_tracked",
+        direction="buy_yes",
+        token_id="tok_yes_db_001",
+        no_token_id="tok_no_db_001",
+        order_id="",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+    )
+    portfolio = _make_portfolio(pos)
+    log_trade_entry(conn, pos)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_yes_db_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")],
+        conn=conn,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT status, order_id, order_status_text, chain_state, entered_at_ts, filled_at
+        FROM trade_decisions
+        WHERE runtime_trade_id = ?
+        ORDER BY trade_id DESC
+        LIMIT 1
+        """,
+        ("rescue-db-1",),
+    ).fetchone()
+    events = query_position_events(conn, "rescue-db-1")
+    conn.close()
+
+    assert stats["rescued_pending"] == 1
+    assert row["status"] == "entered"
+    assert row["order_id"] == "buy_123"
+    assert row["order_status_text"] == "filled"
+    assert row["chain_state"] == "synced"
+    assert row["entered_at_ts"] != ""
+    assert row["filled_at"] != ""
+
+    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
+    trade_events = [event for event in lifecycle_events if event["source"] == "trade_decisions"]
+    rescue_events = [event for event in lifecycle_events if event["source"] == "chain_reconciliation"]
+
+    assert len(trade_events) == 1
+    assert trade_events[0]["order_id"] == "buy_123"
+    assert trade_events[0]["details"]["entry_order_id"] == "buy_123"
+    assert trade_events[0]["details"]["entry_fill_verified"] is True
+    assert trade_events[0]["details"]["chain_state"] == "synced"
+
+    assert len(rescue_events) == 1
+    assert rescue_events[0]["order_id"] == "buy_123"
+    assert rescue_events[0]["details"]["entry_order_id"] == "buy_123"
+    assert rescue_events[0]["details"]["entry_fill_verified"] is True
+    assert rescue_events[0]["details"]["chain_state"] == "synced"
 
 
 def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
