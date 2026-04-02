@@ -292,8 +292,10 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
         recent_exits=[_recent_exit(-2.3)],
     )
     open_pos = _position()
+    open_pos.strategy = "center_buy"
     open_pos.last_monitor_market_price = 0.13
     portfolio.positions.append(open_pos)
+    portfolio.recent_exits[0]["strategy"] = "opening_inertia"
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
@@ -312,6 +314,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
     assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
     assert "overall" in status["execution"]
+    assert status["strategy"]["center_buy"]["open_positions"] == 1
+    assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
+    assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
 

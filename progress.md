@@ -222,6 +222,23 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - strategy-aware / execution-aware RiskGuard still surfaces evidence more than it gates on it;
   - higher-order strategy/current-regime truth (edge compression, current heat by strategy, consumer-facing strategy state) still remains to be built on top of these cleaner execution and settlement readers.
 
+## Strategy Consumer Slice 1 (current-regime strategy truth surface)
+- Landed protections:
+  - `status_summary.write_status()` now emits a `strategy` section derived from the actual current book plus non-admin recent exits, rather than forcing operators to reconstruct strategy state from raw positions and exit history;
+  - each strategy bucket now carries at least:
+    - `open_positions`
+    - `open_exposure_usd`
+    - `realized_pnl`
+    - `unrealized_pnl`
+    - `total_pnl`
+  - this gives operators a first current-regime strategy surface without pretending the legacy tracker itself is authority.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `25 passed`
+  - full suite after landing the slice: `435 passed, 3 skipped`
+- Residual strategy/risk backlog after this slice:
+  - strategy-aware / execution-aware RiskGuard still does not gate on this truth yet;
+  - edge-compression and current-regime strategy health still need a stronger consumer than the derived tracker summary alone.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

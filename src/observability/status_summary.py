@@ -12,7 +12,7 @@ from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
 from src.state.db import get_connection, query_execution_event_summary
-from src.state.portfolio import PortfolioState, load_portfolio, portfolio_heat
+from src.state.portfolio import ADMIN_EXITS, PortfolioState, load_portfolio, portfolio_heat
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,43 @@ def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
     generated_at = datetime.now(timezone.utc).isoformat()
+
+    strategy_summary: dict[str, dict] = {}
+    for pos in portfolio.positions:
+        strategy = pos.strategy or "unclassified"
+        bucket = strategy_summary.setdefault(
+            strategy,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+            },
+        )
+        bucket["open_positions"] += 1
+        bucket["open_exposure_usd"] += float(pos.size_usd)
+        bucket["unrealized_pnl"] += float(pos.unrealized_pnl)
+
+    for exit_row in portfolio.recent_exits:
+        if exit_row.get("exit_reason") in ADMIN_EXITS:
+            continue
+        strategy = exit_row.get("strategy") or "unclassified"
+        bucket = strategy_summary.setdefault(
+            strategy,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+            },
+        )
+        bucket["realized_pnl"] += float(exit_row.get("pnl", 0.0) or 0.0)
+
+    for bucket in strategy_summary.values():
+        bucket["open_exposure_usd"] = round(bucket["open_exposure_usd"], 2)
+        bucket["realized_pnl"] = round(bucket["realized_pnl"], 2)
+        bucket["unrealized_pnl"] = round(bucket["unrealized_pnl"], 2)
+        bucket["total_pnl"] = round(bucket["realized_pnl"] + bucket["unrealized_pnl"], 2)
 
     status = {
         "timestamp": generated_at,
@@ -78,6 +115,7 @@ def write_status(cycle_summary: dict = None) -> None:
                 for p in portfolio.positions
             ],
         },
+        "strategy": strategy_summary,
         "execution": {},
         "cycle": cycle_summary or {},
     }
