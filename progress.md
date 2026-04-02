@@ -1481,6 +1481,31 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `488 passed, 3 skipped`
 
+## 2026-04-02 — P2-H day0 nowcast context decomposition
+- The day0 nowcast seam is now not just a scalar weight. It has its own inspectable decomposition surface, mirroring what sigma and mean already got on the analysis side.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `day0_nowcast_context(...)`
+    - exposes:
+      - source factor
+      - short-lead progress
+      - observation age in hours
+      - freshness factor
+      - final blend weight
+  - `day0_nowcast_blend_weight(...)` now delegates to that context instead of recomputing inline
+  - `day0_backbone_context(...)` now nests the full nowcast context instead of only exposing the final scalar
+- Why this matters:
+  - future day0 blending changes can be debugged from artifacts with actual subcomponents
+  - day0 seams are now closer in shape to the analysis-side context surfaces
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks:
+    - the new nowcast context fields
+    - equivalence between `day0_nowcast_context()["blend_weight"]` and `day0_nowcast_blend_weight(...)`
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context or nowcast_context'` → `23 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `489 passed, 3 skipped`
+
 ## 2026-04-02 — P2-H context metadata enrichment
 - The latest P2-H slices enrich forecast-context metadata instead of widening behavior further:
   - dayN forecast contexts now carry `city_name`, `season`, and `forecast_source`

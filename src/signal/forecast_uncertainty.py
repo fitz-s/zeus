@@ -243,7 +243,7 @@ def day0_backbone_context(
     observation_time: str | None,
     current_utc_timestamp: str | None,
 ) -> dict:
-    nowcast_weight = day0_nowcast_blend_weight(
+    nowcast_context = day0_nowcast_context(
         hours_remaining=hours_remaining,
         observation_source=observation_source,
         observation_time=observation_time,
@@ -268,7 +268,8 @@ def day0_backbone_context(
         "observation_source": observation_source,
         "observation_time": observation_time,
         "current_utc_timestamp": current_utc_timestamp,
-        "nowcast_blend_weight": nowcast_weight,
+        "nowcast": nowcast_context,
+        "nowcast_blend_weight": nowcast_context["blend_weight"],
         "residual_adjustment": residual_adjustment,
         "backbone_high": float(observed_high) + residual_adjustment,
     }
@@ -327,26 +328,57 @@ def day0_nowcast_blend_weight(
     Current behavior is neutral; later work can turn this into a learned or
     rule-based blend without reopening the day0 call sites.
     """
+    return day0_nowcast_context(
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
+        observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
+    )["blend_weight"]
+
+
+def day0_nowcast_context(
+    *,
+    hours_remaining: float,
+    observation_source: str,
+    observation_time: str | None,
+    current_utc_timestamp: str | None,
+) -> dict:
     from datetime import datetime, timezone
 
-    if not observation_source or not observation_time or not current_utc_timestamp:
-        return 0.0
-    source = str(observation_source).lower()
-    source_factor = 1.0 if any(tag in source for tag in ("wu", "asos", "obs")) else 0.5
+    source = str(observation_source or "")
+    source_lower = source.lower()
+    trusted = any(tag in source_lower for tag in ("wu", "asos", "obs"))
+    source_factor = 1.0 if trusted else (0.5 if source else 0.0)
     hours = min(6.0, max(0.0, float(hours_remaining)))
     short_lead_progress = 1.0 - (hours / 6.0)
-    try:
-        observed_at = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
-        current_at = datetime.fromisoformat(str(current_utc_timestamp).replace("Z", "+00:00"))
-        if observed_at.tzinfo is None:
-            observed_at = observed_at.replace(tzinfo=timezone.utc)
-        if current_at.tzinfo is None:
-            current_at = current_at.replace(tzinfo=timezone.utc)
-        age_hours = max(0.0, (current_at - observed_at).total_seconds() / 3600.0)
-    except ValueError:
-        return 0.0
-    freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / 3.0))
-    return 0.25 * short_lead_progress * source_factor * freshness_factor
+    age_hours = None
+    freshness_factor = 0.0
+
+    if observation_time and current_utc_timestamp:
+        try:
+            observed_at = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
+            current_at = datetime.fromisoformat(str(current_utc_timestamp).replace("Z", "+00:00"))
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            if current_at.tzinfo is None:
+                current_at = current_at.replace(tzinfo=timezone.utc)
+            age_hours = max(0.0, (current_at - observed_at).total_seconds() / 3600.0)
+            freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / 3.0))
+        except ValueError:
+            age_hours = None
+            freshness_factor = 0.0
+
+    return {
+        "hours_remaining": float(hours_remaining),
+        "observation_source": source,
+        "observation_time": observation_time,
+        "current_utc_timestamp": current_utc_timestamp,
+        "source_factor": source_factor,
+        "short_lead_progress": short_lead_progress,
+        "age_hours": age_hours,
+        "freshness_factor": freshness_factor,
+        "blend_weight": 0.25 * short_lead_progress * source_factor * freshness_factor,
+    }
 
 
 def analysis_bootstrap_sigma(
