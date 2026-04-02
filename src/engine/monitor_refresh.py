@@ -211,6 +211,7 @@ def _refresh_day0_observation(
         unit=city.settlement_unit,
         observation_source=str(obs.get("source", "")),
         observation_time=obs.get("observation_time"),
+        current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
         temporal_context=temporal_context,
     )
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
