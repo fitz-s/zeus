@@ -721,3 +721,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary or authoritative_settlement or execution_event_summary'` → `6 passed`
   - `./.venv/bin/pytest -q` → `453 passed, 3 skipped`
 - Residual P1-E truth after this slice: the operator/automation contract is now conservative by default, but the system still lacks a stronger, data-backed rule for when a recommended strategy gate should graduate from review-required diagnosis into durable executable policy. That remains the next strategy/current-regime ladder question rather than a control-plane visibility issue.
+
+## 2026-04-02 — P1-E recommendation-rationale slice
+- Main review delta: once auto-safe vs review-required commands were separated, the next truth gap was **why** those commands existed. `recommended_strategy_gates` and `recommended_controls` were still naked names; operator surfaces and queued command payloads could say *what* to do, but not the authoritative evidence that produced the recommendation.
+- Main contract decision: recommendation surfaces now carry structured rationale. RiskGuard owns the evidence for why a control or strategy gate is recommended; status mirrors that rationale; generated command payloads carry a stable audit note built from that same rationale. This keeps review-required policy work tied to authoritative execution/edge signals instead of naked action names.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/riskguard/riskguard.py` now persists `recommended_strategy_gate_reasons` and `recommended_control_reasons`, including explicit execution-decay and edge-compression rationales.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now mirrors those reason maps into `status.control` and per-strategy summaries via `recommended_gate_reasons`.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/control/control_plane.py` now injects stable `note` fields into generated commands so default automation and review-required commands carry their `recommended_by=...` provenance into the control queue.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_riskguard.py` now locks both the strategy-gate reason map and control-reason map for execution-decay and edge-compression recommendations.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks status-surface reason mirroring plus note-bearing generated commands in both auto-safe and review-required apply paths.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_riskguard.py tests/test_pnl_flow_and_audit.py -k 'recommended_commands_from_status or recommended_autosafe_commands or apply_recommended_controls or execution_decay or edge_compression or write_status_writes_runtime_truth'` → `6 passed`
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py` → `89 passed`
+  - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary or authoritative_settlement or execution_event_summary'` → `6 passed`
+  - `./.venv/bin/pytest -q` → `453 passed, 3 skipped`
+- Residual P1-E truth after this slice: recommendation payloads are now explainable and auditable, but the system still stops at rationale-bearing recommendation rather than a fully learned policy ladder. The next step is not more note fields; it is deciding how the learned current-regime surface should elevate or suppress strategy gates with stronger structural authority.

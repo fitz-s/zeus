@@ -100,10 +100,16 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["unrealized_pnl"] = round(bucket["unrealized_pnl"], 2)
         bucket["total_pnl"] = round(bucket["realized_pnl"] + bucket["unrealized_pnl"], 2)
     recommended_strategy_gates = set(risk_details.get("recommended_strategy_gates", []) or [])
+    recommended_strategy_gate_reasons = {
+        str(strategy): list(reasons)
+        for strategy, reasons in (risk_details.get("recommended_strategy_gate_reasons", {}) or {}).items()
+        if isinstance(reasons, list)
+    }
     current_strategy_gates = strategy_gates()
     for name, bucket in strategy_summary.items():
         bucket["gated"] = not current_strategy_gates.get(name, True)
         bucket["recommended_gate"] = name in recommended_strategy_gates
+        bucket["recommended_gate_reasons"] = list(recommended_strategy_gate_reasons.get(name, []))
     recommended_but_not_gated = sorted(
         strategy for strategy in recommended_strategy_gates
         if current_strategy_gates.get(strategy, True)
@@ -113,6 +119,11 @@ def write_status(cycle_summary: dict = None) -> None:
         if enabled is False and strategy not in recommended_strategy_gates
     )
     recommended_controls = list(risk_details.get("recommended_controls", []))
+    recommended_control_reasons = {
+        str(control): list(reasons)
+        for control, reasons in (risk_details.get("recommended_control_reasons", {}) or {}).items()
+        if isinstance(reasons, list)
+    }
     recommended_controls_not_applied: list[str] = []
     if "tighten_risk" in recommended_controls and get_edge_threshold_multiplier() <= 1.0:
         recommended_controls_not_applied.append("tighten_risk")
@@ -139,7 +150,9 @@ def write_status(cycle_summary: dict = None) -> None:
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": strategy_gates(),
             "recommended_controls": recommended_controls,
+            "recommended_control_reasons": recommended_control_reasons,
             "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
+            "recommended_strategy_gate_reasons": recommended_strategy_gate_reasons,
             "recommended_but_not_gated": recommended_but_not_gated,
             "gated_but_not_recommended": gated_but_not_recommended,
             "recommended_controls_not_applied": recommended_controls_not_applied,

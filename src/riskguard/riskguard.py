@@ -25,6 +25,12 @@ from src.state.strategy_tracker import load_tracker
 logger = logging.getLogger(__name__)
 
 
+def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
+    reasons = bucket.setdefault(key, [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
 def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     summary: dict[str, dict] = {}
     for row in rows:
@@ -179,25 +185,41 @@ def tick() -> RiskLevel:
     execution_quality_level = RiskLevel.GREEN
     execution_overall = entry_execution_summary["overall"]
     execution_observed = execution_overall["filled"] + execution_overall["rejected"]
+    recommended_control_reasons: dict[str, list[str]] = {}
+    recommended_strategy_gate_reasons: dict[str, list[str]] = {}
     if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
         execution_quality_level = RiskLevel.YELLOW
+        _append_reason(
+            recommended_control_reasons,
+            "tighten_risk",
+            f"execution_decay(fill_rate={execution_overall['fill_rate']}, observed={execution_observed})",
+        )
     strategy_signal_level = RiskLevel.YELLOW if edge_compression_alerts else RiskLevel.GREEN
-    recommended_strategy_gate_set = {
-        alert.split(": ", 1)[1].split(" edge", 1)[0]
-        for alert in edge_compression_alerts
-        if alert.startswith("EDGE_COMPRESSION: ")
-    }
+    for alert in edge_compression_alerts:
+        if not alert.startswith("EDGE_COMPRESSION: "):
+            continue
+        strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
+        _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
     for strategy, bucket in entry_execution_summary.get("by_strategy", {}).items():
         observed = bucket["filled"] + bucket["rejected"]
         fill_rate = bucket.get("fill_rate")
         if fill_rate is not None and observed >= 10 and fill_rate < 0.3:
-            recommended_strategy_gate_set.add(strategy)
-    recommended_strategy_gates = sorted(recommended_strategy_gate_set)
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                strategy,
+                f"execution_decay(fill_rate={fill_rate}, observed={observed})",
+            )
+    recommended_strategy_gates = sorted(recommended_strategy_gate_reasons)
     recommended_controls = []
     if execution_quality_level == RiskLevel.YELLOW:
         recommended_controls.append("tighten_risk")
     if recommended_strategy_gates:
         recommended_controls.append("review_strategy_gates")
+        review_gate_reasons = [
+            f"{strategy}:{'|'.join(sorted(recommended_strategy_gate_reasons.get(strategy, [])))}"
+            for strategy in recommended_strategy_gates
+        ]
+        recommended_control_reasons["review_strategy_gates"] = review_gate_reasons
 
     daily_loss_level = (
         RiskLevel.RED
@@ -254,7 +276,15 @@ def tick() -> RiskLevel:
             "strategy_edge_compression_alerts": edge_compression_alerts,
             "strategy_tracker_accounting": tracker_accounting,
             "recommended_strategy_gates": recommended_strategy_gates,
+            "recommended_strategy_gate_reasons": {
+                strategy: sorted(reasons)
+                for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
+            },
             "recommended_controls": recommended_controls,
+            "recommended_control_reasons": {
+                control: list(reasons)
+                for control, reasons in sorted(recommended_control_reasons.items())
+            },
         }),
         now,
     ))

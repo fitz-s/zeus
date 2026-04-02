@@ -333,7 +333,17 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW", "recommended_strategy_gates": ["center_buy"], "recommended_controls": ["tighten_risk"]})
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_risk_details",
+        lambda: {
+            "execution_quality_level": "YELLOW",
+            "recommended_strategy_gates": ["center_buy"],
+            "recommended_strategy_gate_reasons": {"center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]},
+            "recommended_controls": ["tighten_risk"],
+            "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
+        },
+    )
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
@@ -354,7 +364,13 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["control"]["edge_threshold_multiplier"] == 2.0
     assert status["control"]["strategy_gates"]["opening_inertia"] is False
     assert status["control"]["recommended_controls"] == ["tighten_risk"]
+    assert status["control"]["recommended_control_reasons"]["tighten_risk"] == [
+        "execution_decay(fill_rate=0.2, observed=12)"
+    ]
     assert status["control"]["recommended_strategy_gates"] == ["center_buy"]
+    assert status["control"]["recommended_strategy_gate_reasons"]["center_buy"] == [
+        "execution_decay(fill_rate=0.2, observed=12)"
+    ]
     assert status["control"]["recommended_but_not_gated"] == ["center_buy"]
     assert status["control"]["gated_but_not_recommended"] == ["opening_inertia"]
     assert status["control"]["recommended_controls_not_applied"] == []
@@ -370,6 +386,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["strategy"]["center_buy"]["gated"] is False
     assert status["strategy"]["center_buy"]["recommended_gate"] is True
+    assert status["strategy"]["center_buy"]["recommended_gate_reasons"] == [
+        "execution_decay(fill_rate=0.2, observed=12)"
+    ]
     assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)
     assert status["strategy"]["opening_inertia"]["gated"] is True
     assert status["risk"]["details"]["execution_quality_level"] == "YELLOW"
@@ -538,7 +557,12 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
     status = {
         "control": {
             "recommended_controls_not_applied": ["tighten_risk"],
+            "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
             "recommended_but_not_gated": ["center_buy", "opening_inertia"],
+            "recommended_strategy_gate_reasons": {
+                "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"],
+                "opening_inertia": ["edge_compression"],
+            },
         }
     }
 
@@ -548,9 +572,22 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
     )
 
     assert commands == [
-        {"command": "tighten_risk"},
-        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
-        {"command": "set_strategy_gate", "strategy": "opening_inertia", "enabled": False},
+        {
+            "command": "tighten_risk",
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "center_buy",
+            "enabled": False,
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "opening_inertia",
+            "enabled": False,
+            "note": "recommended_by=edge_compression",
+        },
     ]
 
 
@@ -558,6 +595,7 @@ def test_inv_recommended_autosafe_commands_excludes_review_required_strategy_gat
     status = {
         "control": {
             "recommended_controls_not_applied": ["tighten_risk"],
+            "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
             "recommended_but_not_gated": ["center_buy", "opening_inertia"],
         }
     }
@@ -565,7 +603,10 @@ def test_inv_recommended_autosafe_commands_excludes_review_required_strategy_gat
     commands = control_plane_module.recommended_autosafe_commands_from_status(status)
 
     assert commands == [
-        {"command": "tighten_risk"},
+        {
+            "command": "tighten_risk",
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
     ]
 
 
@@ -594,7 +635,11 @@ def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatc
             {
                 "control": {
                     "recommended_controls_not_applied": ["tighten_risk"],
+                    "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
                     "recommended_but_not_gated": ["center_buy"],
+                    "recommended_strategy_gate_reasons": {
+                        "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
+                    },
                 }
             }
         )
@@ -614,7 +659,10 @@ def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatc
     assert output["include_review_required"] is False
     assert output["added"] == 1
     assert payload["commands"] == [
-        {"command": "tighten_risk"},
+        {
+            "command": "tighten_risk",
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
     ]
 
 
@@ -626,7 +674,11 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
             {
                 "control": {
                     "recommended_controls_not_applied": ["tighten_risk"],
+                    "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
                     "recommended_but_not_gated": ["center_buy"],
+                    "recommended_strategy_gate_reasons": {
+                        "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
+                    },
                 }
             }
         )
@@ -646,8 +698,16 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
     assert output["include_review_required"] is True
     assert output["added"] == 2
     assert payload["commands"] == [
-        {"command": "tighten_risk"},
-        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
+        {
+            "command": "tighten_risk",
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "center_buy",
+            "enabled": False,
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
     ]
 
 
