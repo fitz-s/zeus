@@ -1107,28 +1107,10 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             return [edge]
 
         def sigma_context(self):
-            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+            return {"city_name": "NYC", "season": "MAM", "forecast_source": "ecmwf_ifs025", "base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
 
         def mean_context(self):
-            return {"offset": 0.0, "lead_days": 1.5}
-
-        def sigma_context(self):
-            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
-
-        def mean_context(self):
-            return {"offset": 0.0, "lead_days": 1.5}
-
-        def sigma_context(self):
-            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
-
-        def mean_context(self):
-            return {"offset": 0.0, "lead_days": 1.5}
-
-        def sigma_context(self):
-            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
-
-        def mean_context(self):
-            return {"offset": 0.0, "lead_days": 1.5}
+            return {"city_name": "NYC", "season": "MAM", "forecast_source": "ecmwf_ifs025", "offset": 0.0, "lead_days": 1.5}
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
@@ -1182,7 +1164,9 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     assert decisions[0].should_trade is True
     assert captured["bankroll"] == pytest.approx(portfolio.effective_bankroll)
     epistemic = json.loads(decisions[0].epistemic_context_json)
+    assert epistemic["forecast_context"]["uncertainty"]["forecast_source"] == "ecmwf_ifs025"
     assert epistemic["forecast_context"]["uncertainty"]["final_sigma"] == pytest.approx(0.5775)
+    assert epistemic["forecast_context"]["location"]["season"] == "MAM"
     assert epistemic["forecast_context"]["location"]["offset"] == 0.0
 
 

@@ -44,6 +44,9 @@ class MarketAnalysis:
         lead_days: float = 3.0,
         unit: str = "F",  # P0-9 baseline bootstrap sigma still depends on settlement unit
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        city_name: str = "",
+        season: str = "",
+        forecast_source: str = "",
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -62,6 +65,9 @@ class MarketAnalysis:
             unit=unit,
             lead_days=lead_days,
             ensemble_mean=float(self._member_maxes.mean()) if len(self._member_maxes) else None,
+            city_name=city_name or None,
+            season=season or None,
+            forecast_source=forecast_source or None,
         )
         self._calibrator = calibrator
         self._alpha = alpha
@@ -73,6 +79,9 @@ class MarketAnalysis:
             unit=unit,
             lead_days=lead_days,
             ensemble_spread=ensemble_spread,
+            city_name=city_name or None,
+            season=season or None,
+            forecast_source=forecast_source or None,
         )
         self._sigma = analysis_bootstrap_sigma(
             unit,

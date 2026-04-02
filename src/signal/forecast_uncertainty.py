@@ -38,6 +38,9 @@ def analysis_sigma_context(
     unit: str,
     lead_days: float | None,
     ensemble_spread: float | None,
+    city_name: str | None = None,
+    season: str | None = None,
+    forecast_source: str | None = None,
 ) -> dict:
     """Explain how the current analysis sigma was constructed."""
     base_sigma = sigma_instrument(unit).value
@@ -45,6 +48,9 @@ def analysis_sigma_context(
     spread_multiplier = analysis_spread_sigma_multiplier(ensemble_spread, unit=unit)
     return {
         "unit": unit,
+        "city_name": city_name,
+        "season": season,
+        "forecast_source": forecast_source,
         "lead_days": lead_days,
         "ensemble_spread": ensemble_spread,
         "base_sigma": base_sigma,
@@ -72,6 +78,9 @@ def analysis_mean_context(
     unit: str,
     lead_days: float | None = None,
     ensemble_mean: float | None = None,
+    city_name: str | None = None,
+    season: str | None = None,
+    forecast_source: str | None = None,
 ) -> dict:
     """Phase-1 seam for future lead-continuous mean/location correction.
 
@@ -80,6 +89,9 @@ def analysis_mean_context(
     """
     return {
         "unit": unit,
+        "city_name": city_name,
+        "season": season,
+        "forecast_source": forecast_source,
         "lead_days": lead_days,
         "ensemble_mean": ensemble_mean,
         "offset": 0.0,
