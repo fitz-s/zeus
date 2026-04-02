@@ -294,6 +294,7 @@ class TestRiskGuardSettlementSource:
         assert level == RiskLevel.YELLOW
         assert row["level"] == RiskLevel.YELLOW.value
         assert details["execution_quality_level"] == "YELLOW"
+        assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "tighten_risk" in details["recommended_controls"]
 
     def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
