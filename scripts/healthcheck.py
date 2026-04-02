@@ -16,7 +16,11 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import settings, state_path
-from src.control.control_plane import recommended_commands_from_status
+from src.control.control_plane import (
+    recommended_autosafe_commands_from_status,
+    recommended_commands_from_status,
+    review_required_commands_from_status,
+)
 from src.state.db import get_connection
 from src.state.decision_chain import query_no_trade_cases
 
@@ -127,7 +131,14 @@ def check() -> dict:
         try:
             with open(status_path) as f:
                 status = json.load(f)
-            result["recommended_commands"] = recommended_commands_from_status(status)
+            result["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
+            result["review_required_commands"] = review_required_commands_from_status(status)
+            result["recommended_commands"] = recommended_commands_from_status(
+                status,
+                include_review_required=True,
+            )
+            result["action_required"] = bool(result["recommended_commands"])
+            result["auto_action_available"] = bool(result["recommended_auto_commands"])
             result["last_cycle"] = status.get("timestamp", "unknown")
             result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
             risk_details = status.get("risk", {}).get("details", {}) or {}
@@ -166,6 +177,7 @@ def check() -> dict:
             result["status_summary"] = "corrupt"
     else:
         result["status_summary"] = "missing"
+        result["action_required"] = False
 
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)

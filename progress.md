@@ -703,3 +703,21 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_healthcheck.py tests/test_riskguard.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py` → `108 passed`
   - `./.venv/bin/pytest -q` → `451 passed, 3 skipped`
 - Residual P1-E truth after this slice: control recommendations and temporary global controls now survive restarts, but deeper learning-loop migration plus stronger strategy/current-regime policy automation still remain open. The next valuable slice is no longer “make control surfaces visible”; it is “decide how much of the learned/recommended strategy ladder should become durable executable policy rather than manual recommendation.”
+
+## 2026-04-02 — P1-E automation-policy freeze slice
+- Main review delta: after temporary controls became durable, the next unsafe seam was the automation helper contract itself. `scripts/apply_recommended_controls.py` treated review-required strategy-gate flips the same as auto-safe global controls, so one helper invocation could silently enqueue `set_strategy_gate` actions meant for operator judgment rather than low-regret automation.
+- Main contract decision: the policy surface is now explicitly split into **auto-safe commands** and **review-required commands**. Auto-safe commands may be enqueued by default automation; review-required commands remain visible and queryable, but default automation must not silently apply them. For now, `tighten_risk` / `pause_entries` are auto-safe; recommended strategy-gate flips remain review-required until a stronger learned policy ladder exists.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/control/control_plane.py` now exposes `recommended_autosafe_commands_from_status()`, `review_required_commands_from_status()`, and a parameterized `recommended_commands_from_status(..., include_review_required=...)`.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/apply_recommended_controls.py` now defaults to auto-safe-only command enqueue and requires explicit `--include-review-required` to enqueue strategy gate changes.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/healthcheck.py` now surfaces `recommended_auto_commands`, `review_required_commands`, and `auto_action_available`, while still preserving the full combined `recommended_commands` surface for operators.
+  - Adversarial follow-up hardening: `recommended_commands_from_status()` now defaults to **auto-safe-only** and `healthcheck.py` explicitly opts into the full combined set, so future callers must say when they want review-required commands instead of silently inheriting them by default.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that auto-safe recommendation builders exclude strategy-gate flips by default and that the helper script only enqueues those review-required commands when explicitly opted in.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_healthcheck.py` now locks the split between `recommended_auto_commands`, `review_required_commands`, and combined `recommended_commands`.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'recommended_commands_from_status or recommended_autosafe_commands or apply_recommended_controls or pause_entries_survives or tighten_risk_survives' tests/test_healthcheck.py` → `6 passed`
+  - `./.venv/bin/pytest -q tests/test_riskguard.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py` → `103 passed`
+  - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary or authoritative_settlement or execution_event_summary'` → `6 passed`
+  - `./.venv/bin/pytest -q` → `453 passed, 3 skipped`
+- Residual P1-E truth after this slice: the operator/automation contract is now conservative by default, but the system still lacks a stronger, data-backed rule for when a recommended strategy gate should graduate from review-required diagnosis into durable executable policy. That remains the next strategy/current-regime ladder question rather than a control-plane visibility issue.

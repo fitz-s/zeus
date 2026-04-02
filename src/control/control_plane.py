@@ -246,17 +246,22 @@ def enqueue_commands(new_commands: list[dict]) -> int:
     return added
 
 
-def recommended_commands_from_status(status: dict) -> list[dict]:
-    """Build explicit control-plane commands from surfaced recommendation drift.
-
-    This is intentionally non-mutating. It gives external automation a stable
-    contract for turning diagnosis into commands without silently applying them.
-    """
+def recommended_autosafe_commands_from_status(status: dict) -> list[dict]:
+    """Build commands safe to auto-enqueue without extra operator review."""
     control = (status or {}).get("control", {}) or {}
     commands: list[dict] = []
     for recommendation in control.get("recommended_controls_not_applied", []) or []:
         if recommendation == "tighten_risk":
             commands.append({"command": "tighten_risk"})
+        if recommendation == "pause_entries":
+            commands.append({"command": "pause_entries"})
+    return commands
+
+
+def review_required_commands_from_status(status: dict) -> list[dict]:
+    """Build commands that remain operator-review-required even if recommended."""
+    control = (status or {}).get("control", {}) or {}
+    commands: list[dict] = []
     for strategy in control.get("recommended_but_not_gated", []) or []:
         commands.append(
             {
@@ -265,6 +270,24 @@ def recommended_commands_from_status(status: dict) -> list[dict]:
                 "enabled": False,
             }
         )
+    return commands
+
+
+def recommended_commands_from_status(
+    status: dict,
+    *,
+    include_review_required: bool = False,
+) -> list[dict]:
+    """Build explicit control-plane commands from surfaced recommendation drift.
+
+    Auto-safe commands (for example `tighten_risk`) are always included.
+    Review-required commands (currently per-strategy gate flips) are only
+    included when the caller explicitly opts in, keeping automation
+    conservative by default and forcing all-callers surfaces to say so.
+    """
+    commands = recommended_autosafe_commands_from_status(status)
+    if include_review_required:
+        commands.extend(review_required_commands_from_status(status))
     return commands
 
 

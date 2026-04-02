@@ -108,9 +108,14 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["control_state"]["entries_paused"] is True
     assert result["runtime_summary"]["unverified_entries"] == 1
     assert result["risk_details"]["recommended_controls"] == ["tighten_risk"]
+    assert result["recommended_auto_commands"] == []
+    assert result["review_required_commands"] == [
+        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False}
+    ]
     assert result["recommended_commands"] == [
         {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False}
     ]
+    assert result["auto_action_available"] is False
     assert result["recent_no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert result["healthy"] is True
     assert healthcheck.exit_code_for(result) == 0
