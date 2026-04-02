@@ -127,3 +127,50 @@ def test_edge_compression_still_triggers_with_enough_samples_and_span(monkeypatc
 
     assert len(alerts) == 1
     assert alerts[0].startswith("EDGE_COMPRESSION: opening_inertia edge shrinking at -")
+
+
+def test_tracker_backfills_current_regime_started_at_from_loaded_trades():
+    tracker = strategy_tracker_module.StrategyTracker.from_dict(
+        {
+            "strategies": {
+                "opening_inertia": {
+                    "trades": [
+                        {"trade_id": "t2", "entered_at": "2026-04-02T00:00:00+00:00", "edge": 0.1},
+                        {"trade_id": "t1", "entered_at": "2026-04-01T00:00:00+00:00", "edge": 0.2},
+                    ]
+                }
+            },
+            "accounting": {
+                "accounting_scope": "current_regime",
+                "includes_legacy_history": False,
+                "current_regime_started_at": "",
+            },
+        }
+    )
+
+    assert tracker.accounting["current_regime_started_at"] == "2026-04-01T00:00:00+00:00"
+
+
+def test_tracker_record_trade_updates_current_regime_started_at():
+    tracker = strategy_tracker_module.StrategyTracker()
+
+    tracker.record_trade(
+        {
+            "trade_id": "late",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "entered_at": "2026-04-03T00:00:00+00:00",
+            "edge": 0.1,
+        }
+    )
+    tracker.record_trade(
+        {
+            "trade_id": "early",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "entered_at": "2026-04-01T00:00:00+00:00",
+            "edge": 0.2,
+        }
+    )
+
+    assert tracker.accounting["current_regime_started_at"] == "2026-04-01T00:00:00+00:00"
