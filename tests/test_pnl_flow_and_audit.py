@@ -336,6 +336,35 @@ def test_inv_run_mode_writes_failure_status(monkeypatch):
     assert captured["summary"]["failure_reason"] == "boom"
 
 
+def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00Z",
+                "process": {"pid": 1, "mode": "paper", "version": "zeus_v2"},
+                "risk": {"level": "GREEN"},
+                "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
+                "cycle": {"entries_blocked_reason": "risk_level=ORANGE", "failed": False},
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+
+    status_summary_module.write_status()
+    refreshed = json.loads(status_path.read_text())
+
+    assert refreshed["cycle"]["entries_blocked_reason"] == "risk_level=ORANGE"
+
+
 def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)

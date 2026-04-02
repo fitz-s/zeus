@@ -250,6 +250,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - RiskGuard still surfaces strategy/execution evidence more than it gates on it;
   - the next higher-order step would be to decide which strategy/execution degradations should actually alter protective behavior instead of only appearing in details.
 
+## Operator Diagnosis Slice 2 (healthcheck + non-destructive refresh truth)
+- Landed protections:
+  - `scripts/healthcheck.py` now surfaces operator-relevant stop/diagnosis truth directly from `status_summary`, including:
+    - `entries_blocked_reason`
+    - current execution summary
+    - current strategy summary
+    - cycle failure marker/reason when present
+  - `write_status()` no longer wipes the previous `cycle` diagnosis when called without a fresh cycle summary, so operator-triggered `request_status` refreshes preserve the most recent cycle explanation instead of replacing it with `{}`.
+- Validation evidence for this slice:
+  - targeted health/status tests after the slice: `30 passed`
+  - full suite after landing the slice: `437 passed, 3 skipped`
+- Residual operator/risk backlog after this slice:
+  - the main remaining gap is no longer missing diagnosis surface, but deciding which surfaced strategy/execution degradations should become actual protective gates.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
