@@ -367,15 +367,21 @@ def _normalize_legacy_settlement_record(
 def query_no_trade_cases(conn, city: str = None, hours: int = 24, *, env: str | None = None) -> list[dict]:
     """Query recent NoTradeCase entries for diagnostics."""
     query_env = settings.mode if env is None else env
+    cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
     rows = conn.execute("""
-        SELECT artifact_json FROM decision_log
-        WHERE timestamp > datetime('now', ?)
-          AND env = ?
-        ORDER BY timestamp DESC LIMIT 100
-    """, (f"-{hours} hours", query_env)).fetchall()
+        SELECT artifact_json, timestamp FROM decision_log
+        WHERE env = ?
+        ORDER BY timestamp DESC LIMIT 200
+    """, (query_env,)).fetchall()
 
     results = []
     for r in rows:
+        try:
+            recorded_at = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if recorded_at <= cutoff:
+            continue
         artifact = json.loads(r["artifact_json"])
         for ntc in artifact.get("no_trade_cases", []):
             if city is None or ntc.get("city") == city:

@@ -7,18 +7,54 @@ from datetime import datetime, timedelta, timezone
 from scripts import healthcheck
 
 
-def _write_risk_state(path, *, checked_at=None):
+def _write_risk_state(path, *, checked_at=None, details=None):
     conn = sqlite3.connect(str(path))
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, level TEXT NOT NULL, checked_at TEXT NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, level TEXT NOT NULL, details_json TEXT, checked_at TEXT NOT NULL)"
     )
     conn.execute("DELETE FROM risk_state")
+    if details is None:
+        details = {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": [],
+            "recommended_strategy_gates": [],
+        }
     conn.execute(
-        "INSERT INTO risk_state (level, checked_at) VALUES (?, ?)",
-        ("GREEN", checked_at or datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO risk_state (level, details_json, checked_at) VALUES (?, ?, ?)",
+        ("GREEN", json.dumps(details), checked_at or datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
+
+
+def _status_payload(*, timestamp=None, risk=None, portfolio=None, cycle=None, execution=None, strategy=None, learning=None, control=None, runtime=None):
+    return {
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "risk": risk or {"level": "GREEN", "details": {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": [],
+            "recommended_strategy_gates": [],
+        }},
+        "portfolio": portfolio or {"open_positions": 0, "total_exposure_usd": 0.0},
+        "cycle": cycle or {},
+        "execution": execution or {"overall": {"entry_rejected": 0}},
+        "strategy": strategy or {},
+        "learning": learning or {"no_trade_stage_counts": {}},
+        "control": control or {
+            "entries_paused": False,
+            "strategy_gates": {},
+            "recommended_but_not_gated": [],
+            "gated_but_not_recommended": [],
+            "recommended_controls_not_applied": [],
+            "recommended_auto_commands": [],
+            "review_required_commands": [],
+            "recommended_commands": [],
+        },
+        "runtime": runtime or {"unverified_entries": 0, "day0_positions": 0},
+        "truth": {"source_path": "status.json", "deprecated": False},
+    }
 
 
 def _write_no_trade_artifact(path):
@@ -63,22 +99,34 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
     zeus_db_path = tmp_path / "zeus.db"
-    status_path.write_text(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "risk": {"level": "GREEN", "details": {"recommended_controls": ["tighten_risk"]}},
-        "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
-        "cycle": {"entries_blocked_reason": "risk_level=ORANGE"},
-        "execution": {"overall": {"entry_rejected": 2}},
-        "strategy": {"center_buy": {"open_positions": 1}},
-        "learning": {"no_trade_stage_counts": {"EDGE_INSUFFICIENT": 1}},
-        "control": {
+    status_path.write_text(json.dumps(_status_payload(
+        risk={"level": "GREEN", "details": {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": ["tighten_risk"],
+            "recommended_strategy_gates": ["center_buy"],
+        }},
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={"entries_blocked_reason": "risk_level=ORANGE"},
+        execution={"overall": {"entry_rejected": 2}},
+        strategy={"center_buy": {"open_positions": 1}},
+        learning={"no_trade_stage_counts": {"EDGE_INSUFFICIENT": 1}},
+        control={
             "entries_paused": True,
             "strategy_gates": {"opening_inertia": False},
             "recommended_but_not_gated": ["center_buy"],
+            "gated_but_not_recommended": [],
             "recommended_controls_not_applied": [],
+            "recommended_auto_commands": [],
+            "review_required_commands": [
+                {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False}
+            ],
+            "recommended_commands": [
+                {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False}
+            ],
         },
-        "runtime": {"unverified_entries": 1, "day0_positions": 2},
-    }))
+        runtime={"unverified_entries": 1, "day0_positions": 2},
+    )))
     _write_risk_state(risk_path)
     _write_no_trade_artifact(zeus_db_path)
 
@@ -100,7 +148,9 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["riskguard_alive"] is True
     assert result["status_path"] == str(status_path)
     assert result["status_fresh"] is True
+    assert result["status_contract_valid"] is True
     assert result["riskguard_fresh"] is True
+    assert result["riskguard_contract_valid"] is True
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
@@ -124,11 +174,9 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
 def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
-    status_path.write_text(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "risk": {"level": "GREEN"},
-        "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
-    }))
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+    )))
     _write_risk_state(risk_path)
 
     monkeypatch.setenv("ZEUS_MODE", "paper")
@@ -152,11 +200,10 @@ def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):
 def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
     risk_path = tmp_path / "risk_state-live.db"
-    status_path.write_text(json.dumps({
-        "timestamp": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
-        "risk": {"level": "GREEN"},
-        "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
-    }))
+    status_path.write_text(json.dumps(_status_payload(
+        timestamp=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+        portfolio={"open_positions": 0, "total_exposure_usd": 0.0},
+    )))
     _write_risk_state(risk_path)
 
     monkeypatch.setenv("ZEUS_MODE", "live")
@@ -181,11 +228,9 @@ def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
 def test_healthcheck_is_not_healthy_when_riskguard_is_missing(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
-    status_path.write_text(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "risk": {"level": "GREEN"},
-        "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
-    }))
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+    )))
     _write_risk_state(risk_path, checked_at=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat())
 
     monkeypatch.setenv("ZEUS_MODE", "paper")
@@ -212,12 +257,10 @@ def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
     zeus_db_path = tmp_path / "zeus.db"
-    status_path.write_text(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "risk": {"level": "GREEN"},
-        "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
-        "cycle": {"failed": True, "failure_reason": "boom"},
-    }))
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={"failed": True, "failure_reason": "boom"},
+    )))
     _write_risk_state(risk_path)
     _write_no_trade_artifact(zeus_db_path)
 
@@ -237,3 +280,41 @@ def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path
     assert result["cycle_failed"] is True
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary-paper.json"
+    risk_path = tmp_path / "risk_state-paper.db"
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "risk": {"level": "GREEN", "details": {}},
+                "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
+                "cycle": {},
+            }
+        )
+    )
+    _write_risk_state(
+        risk_path,
+        details={"brier_level": "GREEN"},
+    )
+
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.paper-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["status_contract_valid"] is False
+    assert "control" in result["status_contract_missing_keys"]
+    assert result["riskguard_contract_valid"] is False
+    assert "execution_quality_level" in result["riskguard_contract_missing_keys"]
+    assert result["recommended_commands"] == []
+    assert result["healthy"] is False

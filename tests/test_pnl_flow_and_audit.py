@@ -374,6 +374,35 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["control"]["recommended_but_not_gated"] == ["center_buy"]
     assert status["control"]["gated_but_not_recommended"] == ["opening_inertia"]
     assert status["control"]["recommended_controls_not_applied"] == []
+    assert status["control"]["recommended_auto_commands"] == []
+    assert status["control"]["review_required_commands"] == [
+        {
+            "command": "set_strategy_gate",
+            "strategy": "center_buy",
+            "enabled": False,
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "opening_inertia",
+            "enabled": True,
+            "note": "recommended_by=gate_drift_resolved",
+        },
+    ]
+    assert status["control"]["recommended_commands"] == [
+        {
+            "command": "set_strategy_gate",
+            "strategy": "center_buy",
+            "enabled": False,
+            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "opening_inertia",
+            "enabled": True,
+            "note": "recommended_by=gate_drift_resolved",
+        },
+    ]
     assert status["runtime"]["chain_state_counts"]["exit_pending_missing"] == 1
     assert status["runtime"]["exit_state_counts"]["retry_pending"] == 1
     assert status["runtime"]["unverified_entries"] == 1
@@ -710,13 +739,44 @@ def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatc
         json.dumps(
             {
                 "control": {
-                    "recommended_controls_not_applied": ["tighten_risk"],
-                    "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
-                    "recommended_but_not_gated": ["center_buy"],
-                    "gated_but_not_recommended": ["shoulder_sell"],
-                    "recommended_strategy_gate_reasons": {
-                        "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
-                    },
+                    "recommended_auto_commands": [
+                        {
+                            "command": "tighten_risk",
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        }
+                    ],
+                    "review_required_commands": [
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "center_buy",
+                            "enabled": False,
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "shoulder_sell",
+                            "enabled": True,
+                            "note": "recommended_by=gate_drift_resolved",
+                        },
+                    ],
+                    "recommended_commands": [
+                        {
+                            "command": "tighten_risk",
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "center_buy",
+                            "enabled": False,
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "shoulder_sell",
+                            "enabled": True,
+                            "note": "recommended_by=gate_drift_resolved",
+                        },
+                    ],
                 }
             }
         )
@@ -726,7 +786,6 @@ def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatc
     monkeypatch.setattr(apply_recommended_controls_script, "state_path", lambda name: status_path if name == "status_summary.json" else control_path)
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
     monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
-    monkeypatch.setattr(apply_recommended_controls_script, "recommended_commands_from_status", control_plane_module.recommended_commands_from_status)
 
     rc = apply_recommended_controls_script.main([])
     output = json.loads(capsys.readouterr().out)
@@ -750,13 +809,44 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
         json.dumps(
             {
                 "control": {
-                    "recommended_controls_not_applied": ["tighten_risk"],
-                    "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
-                    "recommended_but_not_gated": ["center_buy"],
-                    "gated_but_not_recommended": ["shoulder_sell"],
-                    "recommended_strategy_gate_reasons": {
-                        "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
-                    },
+                    "recommended_auto_commands": [
+                        {
+                            "command": "tighten_risk",
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        }
+                    ],
+                    "review_required_commands": [
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "center_buy",
+                            "enabled": False,
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "shoulder_sell",
+                            "enabled": True,
+                            "note": "recommended_by=gate_drift_resolved",
+                        },
+                    ],
+                    "recommended_commands": [
+                        {
+                            "command": "tighten_risk",
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "center_buy",
+                            "enabled": False,
+                            "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+                        },
+                        {
+                            "command": "set_strategy_gate",
+                            "strategy": "shoulder_sell",
+                            "enabled": True,
+                            "note": "recommended_by=gate_drift_resolved",
+                        },
+                    ],
                 }
             }
         )
@@ -766,7 +856,6 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
     monkeypatch.setattr(apply_recommended_controls_script, "state_path", lambda name: status_path if name == "status_summary.json" else control_path)
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
     monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
-    monkeypatch.setattr(apply_recommended_controls_script, "recommended_commands_from_status", control_plane_module.recommended_commands_from_status)
 
     rc = apply_recommended_controls_script.main(["--include-review-required"])
     output = json.loads(capsys.readouterr().out)
@@ -793,6 +882,26 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
             "note": "recommended_by=gate_drift_resolved",
         },
     ]
+
+
+def test_inv_apply_recommended_controls_rejects_stale_status_contract(monkeypatch, tmp_path, capsys):
+    status_path = tmp_path / "status_summary.json"
+    control_path = tmp_path / "control_plane.json"
+    status_path.write_text(json.dumps({"control": {"recommended_auto_commands": []}}))
+    control_path.write_text(json.dumps({"commands": [], "acks": []}))
+
+    monkeypatch.setattr(apply_recommended_controls_script, "state_path", lambda name: status_path if name == "status_summary.json" else control_path)
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
+
+    rc = apply_recommended_controls_script.main([])
+    output = json.loads(capsys.readouterr().out)
+    payload = json.loads(control_path.read_text())
+
+    assert rc == 1
+    assert output["reason"] == "stale_status_contract"
+    assert "control.review_required_commands" in output["missing_keys"]
+    assert payload["commands"] == []
 
 
 def test_inv_kelly_uses_effective_bankroll(monkeypatch):

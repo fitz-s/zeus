@@ -778,3 +778,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'recommended_commands_from_status or apply_recommended_controls'` → `3 passed`
   - `./.venv/bin/pytest -q` → `454 passed, 3 skipped`
 - Residual P1-E truth after this slice: gate drift is now surfaced symmetrically as explicit review-required commands, but the actual decision logic for when a strategy should graduate from review-required enable/disable recommendations to stronger executable policy still remains open.
+
+## 2026-04-02 — stale-contract fail-closed + real-time filtering slice
+- Review-triggered finding: current runtime files on disk can lag the new contract badly enough to create **false authority + fail-open**. A stale `status_summary-{mode}.json` without `control/runtime/execution/learning/truth` and a stale `risk_state-{mode}.db` without new `recommended_*` fields made `healthcheck.py` / `apply_recommended_controls.py` quietly behave as if there were no policy actions to take, when in reality the daemon just had not emitted the new schema yet.
+- Main contract decision: consumer tools must now **fail closed on stale authority surfaces**. `healthcheck.py` and `apply_recommended_controls.py` are no longer allowed to silently treat missing contract fields as “no actions needed.” In parallel, `query_no_trade_cases()` must filter by real timestamps, not SQLite string-order accidents, because polluted “recent” windows would corrupt the learning/current-regime ladder.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now emits explicit `control.recommended_auto_commands`, `review_required_commands`, and combined `recommended_commands` so the status truth surface itself carries the command contract instead of forcing downstream tools to reconstruct it.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/healthcheck.py` now validates both the status contract and the RiskGuard details contract, marks them invalid when required fields are missing, and only trusts status-surface command arrays when that contract is present. This turns stale-schema runtime state into an explicit degraded condition instead of a silent no-op.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/apply_recommended_controls.py` now rejects stale status contracts with `reason='stale_status_contract'` instead of silently enqueueing nothing.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/decision_chain.py` now filters recent no-trade cases in Python by parsed UTC timestamps, closing the SQLite string-comparison seam that could include old same-day rows as if they were recent.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_healthcheck.py` now locks healthy status/risk contract validation and explicit stale-contract degradation.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks status-surface command arrays plus stale-contract rejection in `apply_recommended_controls.py`.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_db.py` now locks real timestamp filtering for `query_no_trade_cases()`.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py` → `6 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'write_status_writes_runtime_truth or status_strategy_merges_learning_surface or apply_recommended_controls'` → `4 passed`
+  - `./.venv/bin/pytest -q tests/test_db.py -k 'query_no_trade_cases_filters_recent_rows_by_real_timestamp or learning_surface_summary'` → `2 passed`
+  - `./.venv/bin/pytest -q` → `457 passed, 3 skipped`
+- Residual P1-E truth after this slice: consumer tools now detect stale authority surfaces instead of trusting them, but the actual local daemon/RiskGuard processes still need a fresh emission cycle before the on-disk runtime files will reflect the new contract. That is now an operational refresh problem, not a silent control-policy bug.
