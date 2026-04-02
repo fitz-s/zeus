@@ -371,6 +371,8 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
     log_trade_entry(conn, pos)
 
     pos.state = "entered"
+    pos.entry_order_id = "o-life"
+    pos.entry_fill_verified = True
     pos.entered_at = "2026-04-01T01:05:00Z"
     pos.order_status = "filled"
     pos.chain_state = "synced"
@@ -383,6 +385,8 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
     lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
     assert len(lifecycle_events) == 1
     assert lifecycle_events[0]["details"]["status"] == "entered"
+    assert lifecycle_events[0]["details"]["entry_order_id"] == "o-life"
+    assert lifecycle_events[0]["details"]["entry_fill_verified"] is True
     assert lifecycle_events[0]["details"]["order_status"] == "filled"
     assert lifecycle_events[0]["details"]["chain_state"] == "synced"
 

@@ -889,6 +889,8 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
     timestamp = getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
     filled_at = getattr(pos, "entered_at", "") if status == "entered" else None
     fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    entry_order_id = getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "")
+    order_id = getattr(pos, "order_id", "") or entry_order_id
     conn.execute(
         """
         UPDATE trade_decisions
@@ -908,7 +910,7 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
             timestamp,
             filled_at,
             fill_price,
-            getattr(pos, "order_id", ""),
+            order_id,
             getattr(pos, "order_status", ""),
             getattr(pos, "order_posted_at", ""),
             getattr(pos, "entered_at", ""),
@@ -925,6 +927,8 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
             "status": status,
             "filled_at": filled_at,
             "fill_price": fill_price,
+            "entry_order_id": entry_order_id,
+            "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
             "order_status": getattr(pos, "order_status", ""),
             "chain_state": getattr(pos, "chain_state", ""),
         },
@@ -1166,6 +1170,7 @@ def log_position_event(
     event_order_id = (
         order_id
         or getattr(pos, "order_id", "")
+        or getattr(pos, "entry_order_id", "")
         or getattr(pos, "last_exit_order_id", "")
         or None
     )
@@ -1400,6 +1405,7 @@ def log_reconciled_entry_event(conn: sqlite3.Connection, pos, *, timestamp: str,
         "status": "entered",
         "source": "chain_reconciliation",
         "reason": "pending_fill_rescued",
+        "entry_order_id": getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", ""),
         "entry_method": getattr(pos, "entry_method", ""),
         "selected_method": getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
         "applied_validations": list(getattr(pos, "applied_validations", []) or []),

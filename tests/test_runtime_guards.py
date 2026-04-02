@@ -191,6 +191,32 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
     assert cancelled == ["orphan-1"]
 
 
+def test_reconcile_pending_positions_delegates_to_fill_tracker(monkeypatch):
+    portfolio = PortfolioState()
+    tracker = StrategyTracker()
+    calls = {}
+
+    def fake_check_pending_entries(portfolio_arg, clob_arg, tracker_arg=None, *, deps=None, now=None):
+        calls["portfolio"] = portfolio_arg
+        calls["clob"] = clob_arg
+        calls["tracker"] = tracker_arg
+        calls["deps"] = deps
+        calls["now"] = now
+        return {"entered": 1, "voided": 0, "still_pending": 0, "dirty": True, "tracker_dirty": True}
+
+    monkeypatch.setattr("src.execution.fill_tracker.check_pending_entries", fake_check_pending_entries)
+
+    clob = object()
+    summary = cycle_runner._reconcile_pending_positions(portfolio, clob, tracker)
+
+    assert calls["portfolio"] is portfolio
+    assert calls["clob"] is clob
+    assert calls["tracker"] is tracker
+    assert calls["deps"] is cycle_runner
+    assert calls["now"] is None
+    assert summary == {"entered": 1, "voided": 0, "dirty": True, "tracker_dirty": True}
+
+
 def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(monkeypatch):
     portfolio = PortfolioState(positions=[_position(
         trade_id="pending-fill-1",

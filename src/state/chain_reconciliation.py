@@ -80,8 +80,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     returned incomplete data. Skip voiding to prevent false PHANTOM kills.
     """
     log_reconciled_entry_event = None
+    update_trade_lifecycle = None
     if conn is not None:
-        from src.state.db import log_reconciled_entry_event
+        from src.state.db import log_reconciled_entry_event, update_trade_lifecycle
 
     def _already_logged_rescue_event(position) -> bool:
         if conn is None:
@@ -114,6 +115,15 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 "historical_selected_method": getattr(position, 'selected_method', '') or getattr(position, 'entry_method', ''),
             },
         )
+
+    def _sync_reconciled_trade_lifecycle(position) -> None:
+        if update_trade_lifecycle is None:
+            return
+        try:
+            update_trade_lifecycle(conn, position)
+        except Exception as exc:
+            logger.warning("Failed to update rescued pending lifecycle for %s: %s", position.trade_id, exc)
+
     chain_by_token = {cp.token_id: cp for cp in chain_positions}
     local_tokens = set()
     stats = {
@@ -159,6 +169,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
+            pos.entry_order_id = pos.entry_order_id or pos.order_id or ""
+            pos.order_id = pos.order_id or pos.entry_order_id or ""
             pos.chain_state = "synced"
             pos.chain_shares = chain.size
             pos.chain_verified_at = now
@@ -175,6 +187,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.state = "entered"
             if not pos.entered_at:
                 pos.entered_at = now
+            _sync_reconciled_trade_lifecycle(pos)
             _emit_rescue_event(pos, rescued_at=pos.entered_at or now)
             stats["rescued_pending"] += 1
             stats["synced"] += 1

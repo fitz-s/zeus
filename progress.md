@@ -96,6 +96,25 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - Day0 still is not a full terminal-phase exit authority;
   - `day0_window` lifecycle is still not durably emitted as an event-owned phase.
 
+## P0-D Slice 3 (pending/live verification owner contraction)
+- Landed protections:
+  - production `pending_tracked` verification is now explicitly delegated to `fill_tracker.check_pending_entries()` through `cycle_runtime.reconcile_pending_positions()`, removing the second inline production owner;
+  - normal CLOB fill path now aligns its verification contract with chain rescue on the key fields that drive authority and lifecycle:
+    - `entry_order_id`
+    - `entry_fill_verified=True`
+    - `order_status="filled"`
+    - `entered_at`
+    - `chain_state="local_only"` until actual chain appearance;
+  - chain-rescue path now also updates the `trade_decisions` lifecycle surface so event spine and table-row truth no longer diverge as sharply;
+  - verified fresh entries waiting for chain appearance are no longer same-cycle voided as `PHANTOM_NOT_ON_CHAIN`.
+- Validation evidence for this slice:
+  - targeted verification after the slice: `99 passed` on `tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_db.py`
+  - full suite after landing the slice: `422 passed, 3 skipped`
+- Residual P0-D backlog after slice 3:
+  - Day0 still is not yet a true terminal-phase exit authority;
+  - `day0_window` is still not a durable event-owned lifecycle phase;
+  - normal fill accounting still does not fully reconcile authoritative `cost_basis_usd/size_usd` to actual execution telemetry / chain truth.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

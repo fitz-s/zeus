@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P0-D",
-      "goal": "Drive the next runtime-spine closure slice after landing phantom-void, stale-Day0 freshness, and entry-vs-chain authority deconfliction"
+      "goal": "Drive the next runtime-spine closure slice after landing pending/live verification owner contraction"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-D slice 2 (verified-entry local_only + no false chain void), keep P0-D active for the remaining runtime-spine gaps",
+  "last_decision": "CLOSE P0-D slice 3 (pending/live verification owner contraction), keep P0-D active for the remaining runtime-spine gaps",
   "backlog_source": "task.md"
 }

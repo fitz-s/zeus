@@ -226,95 +226,18 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     if getattr(clob, "paper_mode", False):
         return summary
 
-    now = deps._utcnow()
-    for pos in list(portfolio.positions):
-        if pos.state != "pending_tracked":
-            continue
+    from src.execution.fill_tracker import check_pending_entries
 
-        payload = clob.get_order_status(pos.order_id) if pos.order_id else None
-        status = normalize_order_status(payload)
-
-        if status in deps.PENDING_FILL_STATUSES:
-            fill_price = extract_float(payload, "avgPrice", "avg_price", "price") or pos.entry_price
-            shares = extract_float(payload, "filledSize", "filled_size", "size", "originalSize")
-            if shares is None and fill_price > 0:
-                shares = pos.size_usd / fill_price
-
-            pos.entry_price = fill_price
-            pos.entry_order_id = pos.entry_order_id or pos.order_id
-            pos.entry_fill_verified = True
-            if shares is not None:
-                pos.shares = shares
-            if pos.cost_basis_usd <= 0:
-                pos.cost_basis_usd = pos.size_usd
-            pos.state = "entered"
-            pos.order_status = "filled"
-            pos.chain_state = "local_only"
-            pos.entered_at = now.isoformat()
-            try:
-                from src.state.db import update_trade_lifecycle
-
-                lifecycle_conn = deps.get_connection()
-                update_trade_lifecycle(conn=lifecycle_conn, pos=pos)
-                lifecycle_conn.commit()
-                lifecycle_conn.close()
-            except Exception as exc:
-                deps.logger.warning("Failed to update pending->entered lifecycle for %s: %s", pos.trade_id, exc)
-            tracker.record_entry(pos)
-            summary["entered"] += 1
-            summary["dirty"] = True
-            summary["tracker_dirty"] = True
-            continue
-
-        if status in deps.PENDING_CANCEL_STATUSES:
-            closed = deps.void_position(portfolio, pos.trade_id, "UNFILLED_ORDER")
-            if closed is not None:
-                try:
-                    from src.state.db import update_trade_lifecycle
-
-                    lifecycle_conn = deps.get_connection()
-                    update_trade_lifecycle(conn=lifecycle_conn, pos=closed)
-                    lifecycle_conn.commit()
-                    lifecycle_conn.close()
-                except Exception as exc:
-                    deps.logger.warning("Failed to update pending->voided lifecycle for %s: %s", pos.trade_id, exc)
-                summary["voided"] += 1
-                summary["dirty"] = True
-            continue
-
-        if pending_order_timed_out(pos, now):
-            cancel_succeeded = True
-            if pos.order_id and hasattr(clob, "cancel_order"):
-                try:
-                    cancel_payload = clob.cancel_order(pos.order_id)
-                    if cancel_payload is None:
-                        cancel_succeeded = False
-                    else:
-                        cancel_status = normalize_order_status(cancel_payload)
-                        cancel_succeeded = cancel_status in deps.PENDING_CANCEL_STATUSES
-                except Exception as exc:
-                    deps.logger.warning("Cancel failed for timed-out order %s: %s", pos.order_id, exc)
-                    cancel_succeeded = False
-
-            closed = deps.void_position(portfolio, pos.trade_id, "UNFILLED_ORDER") if cancel_succeeded else None
-            if closed is not None:
-                try:
-                    from src.state.db import update_trade_lifecycle
-
-                    lifecycle_conn = deps.get_connection()
-                    update_trade_lifecycle(conn=lifecycle_conn, pos=closed)
-                    lifecycle_conn.commit()
-                    lifecycle_conn.close()
-                except Exception as exc:
-                    deps.logger.warning("Failed to update timed-out pending->voided lifecycle for %s: %s", pos.trade_id, exc)
-                summary["voided"] += 1
-                summary["dirty"] = True
-            continue
-
-        if status:
-            pos.order_status = status.lower()
-            summary["dirty"] = True
-
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        tracker,
+        deps=deps,
+    )
+    summary["entered"] = int(stats.get("entered", 0) or 0)
+    summary["voided"] = int(stats.get("voided", 0) or 0)
+    summary["dirty"] = bool(stats.get("dirty", False) or summary["entered"] or summary["voided"])
+    summary["tracker_dirty"] = bool(stats.get("tracker_dirty", False) or summary["entered"])
     return summary
 
 
