@@ -1205,3 +1205,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes'` → `12 passed`
   - `./.venv/bin/pytest -q` → `478 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 backbone anchor seam
+- The next P2-H seam opens the exact boundary where a future solar-backbone / online residual model will plug into day0 logic, without changing current behavior yet.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `day0_backbone_high(observed_high, current_temp, daylight_progress)`
+    - current behavior remains: backbone anchor = observed high
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - now asks the seam for `backbone_high` before residual blending instead of hardwiring the anchor inline
+- Why this matters:
+  - it freezes the exact insertion point for the future `solar backbone + online residual update` model
+  - it keeps the existing day0 trading behavior unchanged while making the next P2-H day0 upgrade much safer to land
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that `day0_backbone_high(...)` is identity-to-observed-high for now
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high'` → `13 passed`
+  - `./.venv/bin/pytest -q` → `479 passed, 3 skipped`
