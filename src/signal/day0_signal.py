@@ -9,6 +9,7 @@ import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
 from src.signal.forecast_uncertainty import (
+    day0_backbone_high,
     day0_blended_highs,
     day0_observation_weight,
     day0_post_peak_sigma,
@@ -113,6 +114,11 @@ class Day0Signal:
             # Sample residual ENS member
             remaining = rng.choice(self.ens_remaining, size=n_members, replace=True)
             noised = remaining + rng.normal(0, self._sigma, n_members)
+            backbone_high = day0_backbone_high(
+                observed_high=self.obs_high,
+                current_temp=self.current_temp,
+                daylight_progress=self._daylight_progress,
+            )
 
             # Day0 fusion: the observed high is a hard floor, while residual upside
             # above that floor should shrink continuously as the observation becomes
@@ -121,6 +127,7 @@ class Day0Signal:
                 observed_high=self.obs_high,
                 remaining_member_highs=noised,
                 observation_weight=obs_weight,
+                backbone_high=backbone_high,
             )
             final_settled = self._settle(final_highs)
 

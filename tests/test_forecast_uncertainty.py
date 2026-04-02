@@ -1,5 +1,6 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
+    day0_backbone_high,
     day0_blended_highs,
     analysis_member_maxes,
     analysis_bootstrap_sigma,
@@ -98,3 +99,11 @@ def test_day0_blended_highs_preserves_hard_floor_and_weight_endpoints():
         observation_weight=1.0,
     )
     assert list(dominated) == [45.0, 45.0, 45.0]
+
+
+def test_day0_backbone_high_is_observed_high_for_now():
+    assert day0_backbone_high(
+        observed_high=45.0,
+        current_temp=43.0,
+        daylight_progress=0.5,
+    ) == 45.0

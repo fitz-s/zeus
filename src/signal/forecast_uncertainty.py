@@ -122,13 +122,29 @@ def day0_blended_highs(
     observed_high: float,
     remaining_member_highs,
     observation_weight: float,
+    backbone_high: float | None = None,
 ):
     """Current Phase-0 residual blending policy, extracted behind a seam."""
     import numpy as np
 
+    anchor_high = float(observed_high if backbone_high is None else backbone_high)
     remaining = np.asarray(remaining_member_highs, dtype=float)
-    residual_excess = np.maximum(0.0, remaining - float(observed_high))
-    return float(observed_high) + residual_excess * (1.0 - float(observation_weight))
+    residual_excess = np.maximum(0.0, remaining - anchor_high)
+    return anchor_high + residual_excess * (1.0 - float(observation_weight))
+
+
+def day0_backbone_high(
+    *,
+    observed_high: float,
+    current_temp: float,
+    daylight_progress: float | None,
+) -> float:
+    """Phase-1 seam for future solar-backbone / online-residual day0 modeling.
+
+    Current behavior is unchanged: the observed high remains the anchor.
+    """
+    _ = current_temp, daylight_progress
+    return float(observed_high)
 
 
 def analysis_bootstrap_sigma(
