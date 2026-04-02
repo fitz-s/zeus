@@ -29,6 +29,24 @@ def _get_risk_level() -> str:
         return "UNKNOWN"
 
 
+def _get_risk_details() -> dict:
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(str(state_path("risk_state.db")))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT details_json FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row is None or not row["details_json"]:
+            return {}
+        details = json.loads(row["details_json"])
+        return details if isinstance(details, dict) else {}
+    except Exception:
+        return {}
+
+
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
@@ -87,6 +105,7 @@ def write_status(cycle_summary: dict = None) -> None:
         },
         "risk": {
             "level": _get_risk_level(),
+            "details": _get_risk_details(),
         },
         "portfolio": {
             "open_positions": len(portfolio.positions),
