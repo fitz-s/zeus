@@ -7,7 +7,7 @@ record WHY with the same rigor as when it does trade.
 import json
 import logging
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from src.config import settings
@@ -267,6 +267,7 @@ def query_legacy_settlement_records(
     city: str | None = None,
     target_date: str | None = None,
     env: str | None = None,
+    not_before: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
     query_env = settings.mode if env is None else env
@@ -282,6 +283,12 @@ def query_legacy_settlement_records(
     ).fetchall()
 
     results: list[dict] = []
+    cutoff_dt = None
+    if not_before:
+        try:
+            cutoff_dt = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
+        except ValueError:
+            cutoff_dt = None
     for row in rows:
         try:
             artifact = json.loads(row["artifact_json"])
@@ -298,6 +305,13 @@ def query_legacy_settlement_records(
             )
             if normalized is None:
                 continue
+            if cutoff_dt is not None:
+                try:
+                    settled_at = datetime.fromisoformat(str(normalized["settled_at"]).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if settled_at < cutoff_dt:
+                    continue
             if city is not None and normalized["city"] != city:
                 continue
             if target_date is not None and normalized["target_date"] != target_date:
@@ -364,10 +378,23 @@ def _normalize_legacy_settlement_record(
     return normalized
 
 
-def query_no_trade_cases(conn, city: str = None, hours: int = 24, *, env: str | None = None) -> list[dict]:
+def query_no_trade_cases(
+    conn,
+    city: str = None,
+    hours: int = 24,
+    *,
+    env: str | None = None,
+    not_before: str | None = None,
+) -> list[dict]:
     """Query recent NoTradeCase entries for diagnostics."""
     query_env = settings.mode if env is None else env
-    cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    if not_before:
+        try:
+            cutoff_dt = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
+        except ValueError:
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+    else:
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = conn.execute("""
         SELECT artifact_json, timestamp FROM decision_log
         WHERE env = ?
@@ -377,10 +404,10 @@ def query_no_trade_cases(conn, city: str = None, hours: int = 24, *, env: str | 
     results = []
     for r in rows:
         try:
-            recorded_at = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00")).timestamp()
+            recorded_at = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
         except ValueError:
             continue
-        if recorded_at <= cutoff:
+        if recorded_at <= cutoff_dt:
             continue
         artifact = json.loads(r["artifact_json"])
         for ntc in artifact.get("no_trade_cases", []):
@@ -396,11 +423,12 @@ def query_learning_surface_summary(
     hours: int = 24,
     settlement_limit: int = 50,
     execution_limit: int = 200,
+    not_before: str | None = None,
 ) -> dict:
     from src.state.db import query_authoritative_settlement_rows, query_execution_event_summary
 
-    settlements = query_authoritative_settlement_rows(conn, limit=settlement_limit, env=env)
-    no_trades = query_no_trade_cases(conn, hours=hours, env=env)
+    settlements = query_authoritative_settlement_rows(conn, limit=settlement_limit, env=env, not_before=not_before)
+    no_trades = query_no_trade_cases(conn, hours=hours, env=env, not_before=not_before)
     execution_summary = query_execution_event_summary(conn, env=env, limit=execution_limit)
 
     by_strategy: dict[str, dict] = {}

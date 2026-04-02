@@ -1068,6 +1068,120 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
     assert [case["decision_id"] for case in cases] == ["newer"]
 
 
+def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
+    from src.state.db import log_position_event, log_settlement_event
+    from src.state.decision_chain import query_learning_surface_summary
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    old_ts = "2026-04-01T00:30:00+00:00"
+    new_ts = "2026-04-03T12:30:00+00:00"
+    current_regime_started_at = "2026-04-03T00:00:00+00:00"
+
+    old_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "old-nt",
+                "city": "NYC",
+                "target_date": "2026-04-01",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "strategy": "center_buy",
+                "edge_source": "center_buy",
+                "rejection_stage": "EDGE_INSUFFICIENT",
+                "rejection_reasons": ["small"],
+            }
+        ]
+    }
+    new_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "new-nt",
+                "city": "NYC",
+                "target_date": "2026-04-03",
+                "range_label": "41-42°F",
+                "direction": "buy_yes",
+                "strategy": "center_buy",
+                "edge_source": "center_buy",
+                "rejection_stage": "RISK_REJECTED",
+                "rejection_reasons": ["risk"],
+            }
+        ]
+    }
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("opening_hunt", old_ts, old_ts, json.dumps(old_artifact), old_ts, "paper"),
+    )
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("opening_hunt", new_ts, new_ts, json.dumps(new_artifact), new_ts, "paper"),
+    )
+
+    old_pos = Position(
+        trade_id="old-settle",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        strategy="center_buy",
+        edge_source="center_buy",
+        decision_snapshot_id="snap-old",
+        exit_price=1.0,
+        pnl=2.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at=old_ts,
+        state="settled",
+        env="paper",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        edge=0.2,
+    )
+    new_pos = Position(
+        trade_id="new-settle",
+        market_id="m2",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-03",
+        bin_label="41-42°F",
+        direction="buy_yes",
+        strategy="center_buy",
+        edge_source="center_buy",
+        decision_snapshot_id="snap-new",
+        exit_price=1.0,
+        pnl=5.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at=new_ts,
+        state="settled",
+        env="paper",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        edge=0.2,
+    )
+    log_settlement_event(conn, old_pos, winning_bin="39-40°F", won=True, outcome=1)
+    log_settlement_event(conn, new_pos, winning_bin="41-42°F", won=True, outcome=1)
+    log_position_event(conn, "ORDER_REJECTED", new_pos, details={"status": "rejected"}, source="execution")
+    conn.commit()
+
+    summary = query_learning_surface_summary(
+        conn,
+        env="paper",
+        not_before=current_regime_started_at,
+    )
+    conn.close()
+
+    assert summary["settlement_sample_size"] == 1
+    assert summary["no_trade_stage_counts"] == {"RISK_REJECTED": 1}
+    assert summary["by_strategy"]["center_buy"]["settlement_pnl"] == 5.0
+    assert summary["by_strategy"]["center_buy"]["no_trade_count"] == 1
+
+
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
