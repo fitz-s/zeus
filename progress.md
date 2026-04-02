@@ -1602,3 +1602,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `21 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or evaluator_epistemic_context_includes_model_bias_reference or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors' tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
   - `./.venv/bin/pytest -q` → `490 passed, 3 skipped`
+
+## 2026-04-02 — sigma spread decomposition surface
+- The latest P2-H context slice makes the heteroscedastic sigma step more explainable. Instead of only exposing the final spread multiplier, the seam now exposes the intermediate spread ratio and reference spread.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_spread_context(...)`
+    - `analysis_spread_sigma_multiplier(...)` now delegates to it
+    - `analysis_sigma_context(...)` now includes:
+      - `reference_spread`
+      - `spread_ratio`
+- Why this matters:
+  - later heteroscedastic tuning can be audited against the normalized spread position instead of only the output multiplier
+  - it turns the spread-aware sigma step into an inspectable decomposition, not a black-box scalar
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks `analysis_spread_context(...)`
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or spread_context or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context'` → `23 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or evaluator_epistemic_context_includes_model_bias_reference or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `491 passed, 3 skipped`
