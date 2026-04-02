@@ -326,6 +326,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/control backlog after this slice:
   - the remaining work is now primarily policy and automation: which of these surfaced runtime backlogs should become automatic pauses, gates, or escalations.
 
+## Operator Diagnosis Slice 7 (healthcheck mirrors control/runtime state)
+- Landed protections:
+  - `healthcheck.check()` now mirrors the status-summary `control` and `runtime` sections into its result, so the fast path sees:
+    - current control-plane state
+    - current runtime backlog counts
+    - execution/strategy/no-trade diagnostics already added earlier
+  - this removes another multi-file/manual-join step from the operator loop.
+- Validation evidence for this slice:
+  - targeted healthcheck tests after the slice: `4 passed`
+  - full suite after landing the slice: `441 passed, 3 skipped`
+- Residual operator/control backlog after this slice:
+  - the remaining work is now predominantly automation policy: deciding which visible runtime/control/strategy/execution conditions should drive automatic actions instead of merely richer diagnosis.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
