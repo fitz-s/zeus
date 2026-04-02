@@ -773,6 +773,93 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
     assert summary["monitors"] == 1
 
 
+def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
+    from src.engine import cycle_runtime
+    from src.contracts import EdgeContext, EntryMethod
+    from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+
+    conn = get_connection(tmp_path / "day0.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="day0-db-1",
+        state="holding",
+        city="Chicago",
+        target_date="2026-04-01",
+        order_id="o-day0",
+        entry_order_id="o-day0",
+        entry_fill_verified=True,
+        entered_at="2026-04-01T04:00:00Z",
+        order_status="filled",
+    )
+    log_trade_entry(conn, pos)
+    portfolio = _make_portfolio(pos)
+
+    class PaperClob:
+        paper_mode = True
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("No exit expected in this transition test")
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda conn, clob, position: EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([position.entry_price]),
+            p_posterior=position.p_posterior,
+            forward_edge=0.0,
+            alpha=0.0,
+            confidence_band_upper=0.0,
+            confidence_band_lower=0.0,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap1",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(False, selected_method=self.selected_method or self.entry_method),
+    )
+
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_day0_transition_db"),
+            "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+        },
+    )
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: None})()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        PaperClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    events = query_position_events(conn, "day0-db-1")
+    conn.close()
+    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
+    assert any(event["position_state"] == "day0_window" for event in lifecycle_events)
+    day0_event = next(event for event in lifecycle_events if event["position_state"] == "day0_window")
+    assert day0_event["details"]["status"] == "day0_window"
+    assert day0_event["details"]["day0_entered_at"] == "2026-04-01T05:30:00+00:00"
+    assert day0_event["timestamp"] == "2026-04-01T05:30:00+00:00"
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path."""
     from src.engine import cycle_runtime, monitor_refresh

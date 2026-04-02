@@ -886,9 +886,11 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         return
 
     status = getattr(pos, "state", "") or "entered"
-    timestamp = getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
-    filled_at = getattr(pos, "entered_at", "") if status == "entered" else None
-    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    timestamp = (
+        getattr(pos, "day0_entered_at", "") if status == "day0_window" else ""
+    ) or getattr(pos, "entered_at", "") or getattr(pos, "order_posted_at", "")
+    filled_at = getattr(pos, "entered_at", "") if status in {"entered", "day0_window"} else None
+    fill_price = getattr(pos, "entry_price", None) if status in {"entered", "day0_window"} else None
     entry_order_id = getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "")
     order_id = getattr(pos, "order_id", "") or entry_order_id
     conn.execute(
@@ -933,6 +935,7 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
             "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
             "order_status": getattr(pos, "order_status", ""),
             "chain_state": getattr(pos, "chain_state", ""),
+            "day0_entered_at": getattr(pos, "day0_entered_at", ""),
         },
         timestamp=timestamp or None,
         source="trade_decisions",

@@ -143,6 +143,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - pending/live verification is structurally reduced, but chain rescue vs normal fill is still a deliberate two-path authority model rather than a single unified owner;
   - broader post-entry execution attribution (`entry_alpha_usd` / slippage / downstream accounting surfaces) can still be tightened later.
 
+## P0-D Slice 6 (durable Day0 phase surface)
+- Landed protections:
+  - `day0_window` transitions now stamp `day0_entered_at` on the position the first time the runtime promotes a holding into Day0;
+  - `update_trade_lifecycle()` now uses `day0_entered_at` as the lifecycle timestamp when persisting a `day0_window` transition, instead of reusing entry/post-order timestamps;
+  - the durable lifecycle event surface now carries `day0_entered_at`, so `POSITION_LIFECYCLE_UPDATED` can answer when a position actually entered Day0 rather than only that it was once seen there;
+  - chain reconciliation still preserves `day0_window`, so the phase no longer collapses between cycles before monitoring runs.
+- Validation evidence for this slice:
+  - targeted lifecycle/runtime/db tests after the slice: `104 passed`
+  - full suite after landing the slice: `427 passed, 3 skipped`
+- Residual P0-D backlog after slice 6:
+  - chain rescue vs normal fill is still intentionally a two-path owner model rather than a single frozen owner;
+  - broader post-entry execution attribution (`entry_alpha_usd` / slippage / downstream accounting surfaces) can still be tightened;
+  - if needed later, Day0 could still be upgraded from “durably emitted phase” to an even richer explicit event taxonomy, but the missing timestamp/truth-surface problem is now closed.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
