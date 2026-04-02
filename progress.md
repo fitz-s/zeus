@@ -376,6 +376,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual risk-loop backlog after this slice:
   - the next remaining step is policy, not plumbing: deciding which recommendations should stay advisory and which should become direct automated control-plane actions.
 
+## Health Signal Slice 2 (risk recommendations visible in fast path)
+- Landed protections:
+  - `healthcheck` now mirrors `risk.details` directly, so recommended controls / strategy-gate suggestions and other risk diagnostics are visible on the fast path without opening the status file separately.
+- Validation evidence for this slice:
+  - targeted healthcheck tests after the slice: `5 passed`
+  - full suite after landing the slice: `444 passed, 3 skipped`
+- Residual health/risk backlog after this slice:
+  - the main remaining question is no longer surfacing recommendation data, but whether any of those recommendations should automatically mutate runtime controls.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

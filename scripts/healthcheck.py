@@ -128,6 +128,9 @@ def check() -> dict:
                 status = json.load(f)
             result["last_cycle"] = status.get("timestamp", "unknown")
             result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
+            risk_details = status.get("risk", {}).get("details", {}) or {}
+            if isinstance(risk_details, dict):
+                result["risk_details"] = risk_details
             result["positions"] = status.get("portfolio", {}).get("open_positions", 0)
             result["exposure"] = status.get("portfolio", {}).get("total_exposure_usd", 0)
             cycle = status.get("cycle", {}) or {}

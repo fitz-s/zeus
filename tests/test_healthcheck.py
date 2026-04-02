@@ -65,7 +65,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     zeus_db_path = tmp_path / "zeus.db"
     status_path.write_text(json.dumps({
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "risk": {"level": "GREEN"},
+        "risk": {"level": "GREEN", "details": {"recommended_controls": ["tighten_risk"]}},
         "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
         "cycle": {"entries_blocked_reason": "risk_level=ORANGE"},
         "execution": {"overall": {"entry_rejected": 2}},
@@ -100,6 +100,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
     assert result["control_state"]["entries_paused"] is True
     assert result["runtime_summary"]["unverified_entries"] == 1
+    assert result["risk_details"]["recommended_controls"] == ["tighten_risk"]
     assert result["recent_no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert result["recent_no_trade_stage_counts"]["RISK_REJECTED"] == 1
     assert result["healthy"] is True
