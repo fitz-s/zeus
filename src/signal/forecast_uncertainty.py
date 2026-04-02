@@ -92,6 +92,20 @@ def analysis_mean_context(
     Current behavior is identity/no-op; the seam exists so later forecast-layer
     work can land mean correction without rewriting consumers again.
     """
+    base_sigma = sigma_instrument(unit).value
+    lead = 0.0 if lead_days is None else min(6.0, max(0.0, float(lead_days)))
+    lead_factor = lead / 6.0
+    bias_reference = bias_reference or {}
+    raw_offset = 0.0
+    if not bias_corrected and bias_reference:
+        try:
+            bias = float(bias_reference.get("bias", 0.0))
+            discount = float(bias_reference.get("discount_factor", 0.7))
+            raw_offset = -bias * discount * lead_factor
+        except (TypeError, ValueError):
+            raw_offset = 0.0
+    max_abs_offset = base_sigma * 2.0
+    offset = max(-max_abs_offset, min(max_abs_offset, raw_offset))
     return {
         "unit": unit,
         "city_name": city_name,
@@ -100,8 +114,11 @@ def analysis_mean_context(
         "bias_corrected": bias_corrected,
         "bias_reference": bias_reference or {},
         "lead_days": lead_days,
+        "lead_factor": lead_factor,
         "ensemble_mean": ensemble_mean,
-        "offset": 0.0,
+        "raw_offset": raw_offset,
+        "max_abs_offset": max_abs_offset,
+        "offset": offset,
     }
 
 
