@@ -967,6 +967,17 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
 - Residual note: this closes the remaining “boundary-aware but still truncated” learning-surface blocker from detailed review. Remaining P0/P1 work is now much closer to formal acceptance/closure than to further semantic rewiring.
 
+## 2026-04-02 — top-level execution summary aligned to current regime
+- One residual mismatch remained after uncapping the learning surface: `status.learning.execution` had become current-regime scoped, but top-level `status.execution` was still all-history. That meant a single status file could still mix two execution horizons.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now passes `current_regime_started_at` into `query_execution_event_summary()` and stamps `status.execution.current_regime_started_at` when that boundary exists.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that both learning and top-level execution receive the same current-regime boundary.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status_passes_current_regime_start_to_learning_surface or status_escalates_risk_when_cycle_failed_or_query_errors or enum_backed_runtime_keys or status_strategy_merges_learning_surface'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
+- Residual note: with this slice, current-regime settlement / no-trade / execution summaries are all aligned to the same boundary. Remaining P1-E work is now more about whether to add stronger policy semantics, not about mismatched scopes across current-regime truth surfaces.
+
 ## 2026-04-02 — P0/P1 acceptance checkpoint
 - Detailed review lane is now effectively clear for the current base:
   - concrete review blockers found during this round were:
