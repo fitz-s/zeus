@@ -76,6 +76,11 @@ def test_full_monitoring_pipeline(monkeypatch):
     
     # Mock refresh_position to return an EdgeContext that triggers divergent panic
     def mock_refresh(conn, clob, position):
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_prob = 0.20
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_best_bid = 0.39
         return EdgeContext(
             p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([0.40]),
             p_posterior=0.20, forward_edge=-0.20, alpha=0.0,
@@ -85,6 +90,7 @@ def test_full_monitoring_pipeline(monkeypatch):
             market_velocity_1h=-0.10, divergence_score=0.20
         )
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+    monkeypatch.setattr("src.engine.cycle_runtime.lead_hours_to_target", lambda *args, **kwargs: 12.0)
     
     # Run the cycle
     p_dirty, t_dirty = _execute_monitoring_phase(None, MockClob(), portfolio, artifact, tracker, {"monitors": 0, "exits": 0})
@@ -92,7 +98,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     assert p_dirty is True
     assert t_dirty is True
     assert len(tracker.exits) == 1
-    assert "Model-Market divergence score 0.20" in tracker.exits[0].exit_reason
+    assert "MODEL_DIVERGENCE_PANIC" in tracker.exits[0].exit_reason
     assert len(portfolio.positions) == 0 # Closed
 
 def test_refresh_position_true_metrics(monkeypatch):

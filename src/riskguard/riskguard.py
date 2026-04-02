@@ -1,7 +1,7 @@
 """RiskGuard: independent monitoring process. Spec §7.
 
 Runs as a SEPARATE process with its own 60-second tick.
-Reads from zeus.db, writes to risk_state.db.
+Reads authoritative settlement records from zeus.db, writes to risk_state.db.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 """
 
@@ -13,12 +13,12 @@ from pathlib import Path
 
 from src.config import settings, STATE_DIR
 from src.riskguard.metrics import (
-    brier_score, directional_accuracy, win_rate,
-    evaluate_brier, evaluate_win_rate,
+    brier_score,
+    directional_accuracy,
+    evaluate_brier,
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
-from src.state.db import get_connection, RISK_DB_PATH
-from src.state.decision_chain import query_settlement_records
+from src.state.db import RISK_DB_PATH, get_connection, query_authoritative_settlement_rows
 from src.state.portfolio import load_portfolio
 
 logger = logging.getLogger(__name__)
@@ -52,20 +52,44 @@ def tick() -> RiskLevel:
     thresholds = settings["riskguard"]
     portfolio = load_portfolio()
 
-    settlement_rows = query_settlement_records(zeus_conn, limit=50)
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+    settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
+    settlement_storage_source = (
+        settlement_row_storage_sources[0]
+        if len(settlement_row_storage_sources) == 1
+        else ("mixed" if settlement_row_storage_sources else "none")
+    )
+    settlement_authority_levels: dict[str, int] = {}
+    degraded_rows = 0
+    learning_snapshot_ready_count = 0
+    canonical_payload_complete_count = 0
+    metric_ready_rows = []
+    for row in settlement_rows:
+        authority_level = str(row.get("authority_level", "unknown"))
+        settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
+        if row.get("is_degraded", False):
+            degraded_rows += 1
+        if row.get("learning_snapshot_ready", False):
+            learning_snapshot_ready_count += 1
+        if row.get("canonical_payload_complete", False):
+            canonical_payload_complete_count += 1
+        if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
+            metric_ready_rows.append(row)
 
-    p_forecasts = [float(r["p_posterior"]) for r in settlement_rows if "p_posterior" in r]
-    outcomes = [int(r["outcome"]) for r in settlement_rows if "outcome" in r]
-    pnl_list = [float(r["pnl"]) for r in settlement_rows[:20] if "pnl" in r]
+    p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
+    outcomes = [int(r["outcome"]) for r in metric_ready_rows]
 
-    # Compute metrics
+    # Compute metrics from authoritative settlement rows only.
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
     d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
-    w_rate = win_rate(pnl_list) if pnl_list else 0.5
 
     # Evaluate levels
     brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
-    wr_level = evaluate_win_rate(w_rate, thresholds) if pnl_list else RiskLevel.GREEN
+    settlement_quality_level = RiskLevel.GREEN
+    if settlement_rows and not metric_ready_rows:
+        settlement_quality_level = RiskLevel.RED
+    elif degraded_rows > 0:
+        settlement_quality_level = RiskLevel.YELLOW
 
     daily_loss_level = (
         RiskLevel.RED
@@ -78,7 +102,7 @@ def tick() -> RiskLevel:
         else RiskLevel.GREEN
     )
 
-    level = overall_level(brier_level, wr_level, daily_loss_level, weekly_loss_level)
+    level = overall_level(brier_level, settlement_quality_level, daily_loss_level, weekly_loss_level)
 
     # Record
     now = datetime.now(timezone.utc).isoformat()
@@ -86,10 +110,10 @@ def tick() -> RiskLevel:
         INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
-        level.value, b_score, d_accuracy, w_rate,
+        level.value, b_score, d_accuracy, None,
         json.dumps({
             "brier_level": brier_level.value,
-            "wr_level": wr_level.value,
+            "settlement_quality_level": settlement_quality_level.value,
             "daily_loss_level": daily_loss_level.value,
             "weekly_loss_level": weekly_loss_level.value,
             "daily_loss": round(portfolio.daily_loss, 2),
@@ -98,6 +122,15 @@ def tick() -> RiskLevel:
             "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
             "total_pnl": round(portfolio.total_pnl, 2),
             "effective_bankroll": round(portfolio.effective_bankroll, 2),
+            "settlement_sample_size": len(p_forecasts),
+            "settlement_storage_source": settlement_storage_source,
+            "settlement_row_storage_sources": settlement_row_storage_sources,
+            "settlement_authority_levels": settlement_authority_levels,
+            "settlement_degraded_row_count": degraded_rows,
+            "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
+            "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
+            "settlement_metric_ready_count": len(metric_ready_rows),
+            "accuracy": round(d_accuracy, 4),
         }),
         now,
     ))
@@ -107,8 +140,8 @@ def tick() -> RiskLevel:
     risk_conn.close()
 
     if level != RiskLevel.GREEN:
-        logger.warning("RiskGuard level: %s (Brier=%.3f, WinRate=%.1f%%)",
-                       level.value, b_score, w_rate * 100)
+        logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
+                       level.value, settlement_storage_source, b_score, d_accuracy * 100)
 
     return level
 

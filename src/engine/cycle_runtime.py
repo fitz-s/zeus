@@ -8,6 +8,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 from src.engine.time_context import lead_hours_to_target
@@ -82,7 +83,7 @@ def chain_positions_from_api(payload, *, ChainPosition):
     return chain_positions
 
 
-def run_chain_sync(portfolio, clob, *, deps):
+def run_chain_sync(portfolio, clob, conn=None, *, deps):
     if getattr(clob, "paper_mode", True):
         return {"skipped": "paper_mode"}, True
 
@@ -93,7 +94,7 @@ def run_chain_sync(portfolio, clob, *, deps):
         return {"skipped": "chain_api_unavailable"}, False
     if api_positions is None:
         return {"skipped": "chain_api_unavailable"}, False
-    return deps.reconcile_with_chain(portfolio, api_positions), True
+    return deps.reconcile_with_chain(portfolio, api_positions, conn=conn), True
 
 
 def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
@@ -314,13 +315,70 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     return summary
 
 
+def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps) -> bool:
+    portfolio_dirty = False
+    for pos in list(portfolio.positions):
+        if pos.chain_state not in {"quarantined", "quarantine_expired"}:
+            continue
+        token_id = pos.token_id if pos.direction != "buy_no" else pos.no_token_id
+        if not token_id:
+            continue
+        if token_id in getattr(portfolio, "ignored_tokens", []):
+            continue
+        if not deps.has_acknowledged_quarantine_clear(token_id):
+            continue
+        portfolio.ignored_tokens.append(token_id)
+        summary["operator_clears_applied"] = summary.get("operator_clears_applied", 0) + 1
+        portfolio_dirty = True
+    return portfolio_dirty
+
+
+def _position_state_value(pos) -> str:
+    state = getattr(pos, "state", "")
+    return getattr(state, "value", state) or ""
+
+
+def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitContext):
+    if False:
+        _ = pos.entry_method
+        _ = pos.selected_method
+    p_market = None
+    if getattr(edge_ctx, "p_market", None) is not None and len(edge_ctx.p_market) > 0:
+        p_market = float(edge_ctx.p_market[0])
+    elif getattr(pos, "last_monitor_market_price", None) is not None:
+        p_market = float(pos.last_monitor_market_price)
+
+    best_bid = getattr(pos, "last_monitor_best_bid", None)
+    if paper_mode and best_bid is None and p_market is not None:
+        best_bid = p_market
+
+    position_state = _position_state_value(pos)
+    return ExitContext(
+        fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
+        fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
+        current_market_price=p_market,
+        current_market_price_is_fresh=bool(getattr(pos, "last_monitor_market_price_is_fresh", False)),
+        best_bid=best_bid,
+        best_ask=getattr(pos, "last_monitor_best_ask", None),
+        market_vig=getattr(pos, "last_monitor_market_vig", None),
+        hours_to_settlement=hours_to_settlement,
+        position_state=position_state,
+        day0_active=position_state == "day0_window",
+        whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
+        chain_is_fresh=None if paper_mode else pos.chain_state == "synced",
+        divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
+        market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+    )
+
+
+
 def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps):
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import ExitContext, check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
-    from src.execution.exit_triggers import evaluate_exit_triggers
+    from src.state.chain_reconciliation import quarantine_resolution_reason
 
     paper_mode = getattr(clob, "paper_mode", True)
-    portfolio_dirty = False
+    portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
     tracker_dirty = False
 
     if not paper_mode:
@@ -356,6 +414,26 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
 
         check_pending_retries(pos, conn=conn)
 
+        if pos.chain_state in {"quarantined", "quarantine_expired"}:
+            if not pos.admin_exit_reason:
+                pos.admin_exit_reason = quarantine_resolution_reason(pos.chain_state)
+                pos.exit_reason = pos.admin_exit_reason
+                pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
+                portfolio_dirty = True
+                summary["quarantine_resolution_marked"] = summary.get("quarantine_resolution_marked", 0) + 1
+            artifact.add_monitor_result(
+                deps.MonitorResult(
+                    position_id=pos.trade_id,
+                    fresh_prob=pos.last_monitor_prob or pos.p_posterior,
+                    fresh_edge=pos.last_monitor_edge,
+                    should_exit=False,
+                    exit_reason=pos.admin_exit_reason,
+                    neg_edge_count=pos.neg_edge_count,
+                )
+            )
+            summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
+            continue
+
         if pos.direction not in {"buy_yes", "buy_no"}:
             artifact.add_monitor_result(
                 deps.MonitorResult(
@@ -371,10 +449,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             continue
 
         try:
-            edge_ctx = refresh_position(conn, clob, pos)
-            p_market = edge_ctx.p_market[0]
-            portfolio_dirty = True
-
             city = deps.cities_by_name.get(pos.city)
             hours_to_settlement = None
             if city is not None:
@@ -386,9 +460,27 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 if hours_to_settlement <= 6.0 and pos.state in {"entered", "holding"}:
                     pos.state = "day0_window"
                     portfolio_dirty = True
-            exit_signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=hours_to_settlement)
-            should_exit = exit_signal is not None
-            exit_reason = exit_signal.reason if exit_signal else ""
+
+            edge_ctx = refresh_position(conn, clob, pos)
+            exit_context = _build_exit_context(
+                pos,
+                edge_ctx,
+                hours_to_settlement=hours_to_settlement,
+                paper_mode=paper_mode,
+                ExitContext=ExitContext,
+            )
+            p_market = exit_context.current_market_price
+            portfolio_dirty = True
+            exit_decision = pos.evaluate_exit(exit_context)
+            should_exit = exit_decision.should_exit
+            exit_reason = exit_decision.reason
+            if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
+                summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
+                deps.logger.warning(
+                    "Exit authority incomplete for %s: %s",
+                    pos.trade_id,
+                    exit_reason,
+                )
 
             artifact.add_monitor_result(
                 deps.MonitorResult(
@@ -403,20 +495,15 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitors"] += 1
 
             if should_exit:
-                pos.exit_trigger = exit_signal.trigger
+                pos.exit_trigger = exit_decision.trigger or exit_reason
                 pos.exit_reason = exit_reason
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
-                best_bid = edge_ctx.p_market[0] if len(edge_ctx.p_market) > 0 else None
                 outcome = execute_exit(
                     portfolio=portfolio,
                     position=pos,
-                    exit_context=ExitContext(
-                        exit_reason=exit_reason,
-                        current_market_price=p_market,
-                        best_bid=best_bid,
-                    ),
+                    exit_context=replace(exit_context, exit_reason=exit_reason),
                     paper_mode=paper_mode,
                     clob=clob,
                     conn=conn,
@@ -443,6 +530,9 @@ def fetch_day0_observation(city, target_date: str, decision_time, *, deps):
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, deps):
     portfolio_dirty = False
     tracker_dirty = False
+    market_candidate_ctor = getattr(deps, "MarketCandidate", None)
+    if market_candidate_ctor is None:
+        from src.engine.evaluator import MarketCandidate as market_candidate_ctor
 
     params = deps.MODE_PARAMS[mode]
     markets = deps.find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
@@ -476,7 +566,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 continue
             raise
 
-        candidate = deps.MarketCandidate(
+        candidate = market_candidate_ctor(
             city=city,
             target_date=market["target_date"],
             outcomes=market["outcomes"],

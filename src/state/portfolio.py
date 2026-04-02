@@ -6,6 +6,7 @@ Provides exposure queries for risk limit enforcement.
 
 import json
 import logging
+import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
@@ -36,6 +37,60 @@ class ExitDecision:
     urgency: str = "normal"  # "normal" or "immediate"
     selected_method: str = ""
     applied_validations: list[str] = field(default_factory=list)
+    trigger: str = ""
+
+
+@dataclass(frozen=True)
+class ExitContext:
+    """Unified runtime authority surface for exit evaluation + execution.
+
+    `evaluate_exit()` consumes this object instead of scattered optional params.
+    Some surfaces are required for authority (`fresh_prob`, `current_market_price`,
+    `hours_to_settlement`, `position_state`). Others may be explicitly
+    unavailable (`best_bid`, `best_ask`, `market_vig`, `whale_toxicity`) and
+    must be represented as such instead of silently omitted.
+    """
+
+    exit_reason: str = ""
+    fresh_prob: Optional[float] = None
+    fresh_prob_is_fresh: bool = False
+    current_market_price: Optional[float] = None
+    current_market_price_is_fresh: bool = False
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    market_vig: Optional[float] = None
+    hours_to_settlement: Optional[float] = None
+    position_state: str = ""
+    day0_active: bool = False
+    whale_toxicity: Optional[bool] = None
+    chain_is_fresh: Optional[bool] = None
+    divergence_score: float = 0.0
+    market_velocity_1h: float = 0.0
+
+    @staticmethod
+    def _is_finite(value: Optional[float]) -> bool:
+        if value is None:
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    def missing_authority_fields(self) -> list[str]:
+        missing: list[str] = []
+        if not self._is_finite(self.fresh_prob):
+            missing.append("fresh_prob")
+        elif not self.fresh_prob_is_fresh:
+            missing.append("fresh_prob_is_fresh")
+        if not self._is_finite(self.current_market_price):
+            missing.append("current_market_price")
+        elif not self.current_market_price_is_fresh:
+            missing.append("current_market_price_is_fresh")
+        if not self._is_finite(self.hours_to_settlement):
+            missing.append("hours_to_settlement")
+        if not self.position_state:
+            missing.append("position_state")
+        return missing
 
 
 # Administrative exit reasons — excluded from P&L calculations
@@ -120,8 +175,14 @@ class Position:
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
     last_monitor_prob: float = 0.0
+    last_monitor_prob_is_fresh: bool = False
     last_monitor_edge: float = 0.0
     last_monitor_market_price: Optional[float] = None
+    last_monitor_market_price_is_fresh: bool = False
+    last_monitor_best_bid: Optional[float] = None
+    last_monitor_best_ask: Optional[float] = None
+    last_monitor_market_vig: Optional[float] = None
+    last_monitor_whale_toxicity: Optional[bool] = None
     last_monitor_at: str = ""
 
     # Live exit lifecycle (sell order state machine)
@@ -183,39 +244,101 @@ class Position:
             return 0.0
         return self.effective_shares * self.last_monitor_market_price - self.effective_cost_basis_usd
 
-    def evaluate_exit(
-        self,
-        current_p_posterior: float,
-        current_p_market: float,
-        hours_to_settlement: Optional[float] = None,
-        is_whale_sweep: bool = False,
-        best_bid: Optional[float] = None,
-        market_vig: float = 1.0,
-    ) -> ExitDecision:
+    def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
-        All probabilities in native space (same as entry).
+        All probabilities remain in held/native space. Missing authority fields
+        fail closed with an explicit incomplete verdict.
         """
         applied = list(self.applied_validations)
+        missing = exit_context.missing_authority_fields()
+        if missing:
+            applied.append("exit_context_incomplete")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing)})",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
+        if exit_context.best_bid is None:
+            applied.append("best_bid_unavailable")
+        if exit_context.best_ask is None:
+            applied.append("best_ask_unavailable")
+        if exit_context.market_vig is None:
+            applied.append("market_vig_unavailable")
+        if exit_context.whale_toxicity is None:
+            applied.append("whale_toxicity_unavailable")
+        elif exit_context.whale_toxicity:
+            applied.append("whale_toxicity_available")
+        if exit_context.chain_is_fresh is None:
+            applied.append("chain_freshness_unavailable")
+        elif exit_context.chain_is_fresh is False:
+            applied.append("chain_freshness_stale")
 
         # Settlement imminent
-        if hours_to_settlement is not None and hours_to_settlement < 1.0:
+        if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
             applied.append("near_settlement_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True, "SETTLEMENT_IMMINENT", "immediate",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="SETTLEMENT_IMMINENT",
             )
 
         # Whale toxicity
-        if is_whale_sweep:
+        if exit_context.whale_toxicity:
             applied.append("whale_toxicity_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True, "WHALE_TOXICITY", "immediate",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="WHALE_TOXICITY",
+            )
+
+        if exit_context.divergence_score >= divergence_hard_threshold():
+            applied.append("divergence_hard_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"MODEL_DIVERGENCE_PANIC (score={exit_context.divergence_score:.2f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="MODEL_DIVERGENCE_PANIC",
+            )
+
+        if (
+            exit_context.divergence_score >= divergence_soft_threshold()
+            and exit_context.market_velocity_1h <= divergence_velocity_confirm()
+        ):
+            applied.append("divergence_soft_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                (
+                    "MODEL_DIVERGENCE_PANIC "
+                    f"(score={exit_context.divergence_score:.2f}, velocity={exit_context.market_velocity_1h:.2f}/hr)"
+                ),
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="MODEL_DIVERGENCE_PANIC",
+            )
+
+        if exit_context.market_velocity_1h <= -0.15:
+            applied.append("flash_crash_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"FLASH_CRASH_PANIC (velocity={exit_context.market_velocity_1h:.2f}/hr)",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="FLASH_CRASH_PANIC",
             )
 
         # Micro-position hold (Layer 8: < $1 never sold)
@@ -229,33 +352,61 @@ class Position:
             )
 
         # Vig extreme
-        if market_vig > 1.08 or market_vig < 0.92:
+        if (
+            exit_context.market_vig is not None
+            and ExitContext._is_finite(exit_context.market_vig)
+            and (exit_context.market_vig > 1.08 or exit_context.market_vig < 0.92)
+        ):
             applied.append("vig_extreme_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True, f"VIG_EXTREME (vig={market_vig:.3f})",
+                True, f"VIG_EXTREME (vig={exit_context.market_vig:.3f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="VIG_EXTREME",
             )
 
         # Direction-specific exit logic
         forward_edge = compute_forward_edge(
-            HeldSideProbability(current_p_posterior, self.direction),
-            NativeSidePrice(current_p_market, self.direction),
+            HeldSideProbability(float(exit_context.fresh_prob), self.direction),
+            NativeSidePrice(float(exit_context.current_market_price), self.direction),
         )
         applied.append("forward_edge_compute")
 
         if self.direction == "buy_no":
-            return self._buy_no_exit(forward_edge, hours_to_settlement, applied)
+            return self._buy_no_exit(
+                forward_edge,
+                current_p_posterior=float(exit_context.fresh_prob),
+                current_market_price=float(exit_context.current_market_price),
+                hours_to_settlement=exit_context.hours_to_settlement,
+                applied=applied,
+            )
         else:
-            return self._buy_yes_exit(forward_edge, best_bid, applied)
+            return self._buy_yes_exit(
+                forward_edge,
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+                applied=applied,
+            )
 
     def _buy_yes_exit(
-        self, forward_edge: float, best_bid: Optional[float] = None,
+        self,
+        forward_edge: float,
+        current_p_posterior: float,
+        best_bid: Optional[float] = None,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
         applied = list(applied or [])
+        if best_bid is None:
+            applied.append("exit_context_incomplete")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
         evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
         applied.append("ci_threshold")
@@ -282,7 +433,7 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            if shares * best_bid <= shares * self.p_posterior:
+            if shares * best_bid <= shares * current_p_posterior:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -296,10 +447,15 @@ class Position:
             True, f"EDGE_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
             selected_method=self.selected_method or self.entry_method,
             applied_validations=list(self.applied_validations),
+            trigger="EDGE_REVERSAL",
         )
 
     def _buy_no_exit(
-        self, forward_edge: float, hours_to_settlement: Optional[float] = None,
+        self,
+        forward_edge: float,
+        current_p_posterior: float,
+        current_market_price: float,
+        hours_to_settlement: Optional[float] = None,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
@@ -318,6 +474,7 @@ class Position:
                     True, f"BUY_NO_NEAR_EXIT (point={forward_edge:.4f})",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
+                    trigger="BUY_NO_NEAR_EXIT",
                 )
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -333,12 +490,23 @@ class Position:
             self.neg_edge_count = 0
 
         if self.neg_edge_count >= consecutive_confirmations():
+            if self.entry_price > 0:
+                applied.append("ev_gate")
+                shares = self.size_usd / self.entry_price
+                if shares * current_market_price <= shares * current_p_posterior:
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                    )
             self.neg_edge_count = 0
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True, f"BUY_NO_EDGE_EXIT (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="BUY_NO_EDGE_EXIT",
             )
 
         self.applied_validations = _dedupe_validations(applied)

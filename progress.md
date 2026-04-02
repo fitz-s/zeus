@@ -12,6 +12,75 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - canonical ledger / durable event spine
 - strategy/execution-aware risk
 
+## Program Reset (2026-04-02)
+- User explicitly dissolved the previous teammate set. Historical `repair/adversary` baton truth is no longer runtime truth and must not drive new dispatch.
+- Main-thread direction is now: rebuild a **new** agent team around bounded lanes, while keeping architecture authority and final integration in the main thread.
+- A second external research document (`/Users/leofitz/Downloads/外部调研.md`) was added. It does **not** override runtime-spine work; it expands the roadmap by adding a second foundational track: **clock / target semantics closure before forecast-layer learned upgrades**.
+- Reset artifacts written:
+  - `progress.md` now records the new integrated direction and team shape.
+  - `task.md` now exposes `P0-A` through `P2-I` as the new authoritative live queue.
+  - `.claude/baton_state.json` now reflects the real post-dissolution state (`solo`), not the dead historical team.
+- Context policy for this round:
+  - main model reads core authority docs and core runtime files directly;
+  - narrow truth/function-design archaeology should go to bounded `explore` subagents;
+  - durable teammates are only for implementation lane, detailed review lane, and adversarial review lane;
+  - if a subagent stops returning concrete facts, close it and respawn a narrower one rather than let context sprawl.
+
+## Integrated Direction (runtime + external research)
+- Immediate program truth is now two coupled priorities, in this order:
+  1. **runtime authority closure** — canonical settlement payload, `ExitContext` completeness, lifecycle transition ownership, pending/live fail-closed, Day0 terminal-phase truth, durable event spine, strategy/execution-aware protective loop.
+  2. **clock / target semantics closure** — unify `time_context.py`, `day0_window.py`, and the general `EnsembleSignal` hour-selection path under one local-day / local-hour model before learning richer forecast surfaces.
+- External research broadens the roadmap but does **not** justify jumping ahead to learned decision policy. Current valid sequencing is:
+  - first: runtime spine + time semantics;
+  - next: forecast-distribution layer (`day0` solar backbone + online residual update; day1..day7 lead-continuous mean/sigma; heteroscedastic sigma);
+  - later: gate layer (`conflict`, `alpha`, dependence);
+  - last: decision layer (`opening-hunt timing`, richer exit policy).
+- Main architectural synthesis:
+  - `zeus框架优化.md` is right that capital scaling is blocked by runtime truth, lifecycle, attribution, execution, and risk closure;
+  - `外部调研.md` is right that learned upgrades are unsafe until local-day / target semantics are unified across modules;
+  - therefore the program is **not** “runtime first or semantics first”; it is **runtime authority closure + time semantics closure as the shared foundation**, with learned forecast work explicitly downstream of that foundation.
+
+## Landed This Round (post-reset, accepted)
+- **P0-B contract freeze landed**
+  - `ExitContext v2` is now the runtime exit-authority surface in `src/state/portfolio.py`, wired from `src/engine/cycle_runtime.py`, fed by `src/engine/monitor_refresh.py`, and consumed by `src/execution/exit_lifecycle.py`.
+  - Exit authority now fails closed on stale/missing monitor inputs rather than silently accepting fallback values as “fresh enough”.
+  - `buy_yes` edge exits now require a sell-side realizable bid; paper mode explicitly reuses current market price as simulated bid so paper exits are not disabled by construction.
+- **Canonical settlement payload / authoritative seam landed**
+  - `POSITION_SETTLED` now has an explicit canonical payload contract in `src/state/db.py`.
+  - authoritative settlement rows now surface `authority_level`, `is_degraded`, `degraded_reason`, `canonical_payload_complete`, `learning_snapshot_ready`, `metric_ready`, and `required_missing_fields`.
+  - `src/execution/harvester.py` now distinguishes durable/legacy/working-state snapshot sources, records dropped context rows, and refuses to feed learning from `working_state_fallback`.
+  - `src/riskguard/riskguard.py` now tracks degraded settlement-row counts/readiness and fails closed (`settlement_quality_level=RED`) when only malformed authoritative rows exist.
+- **P0-C time-semantics slice landed**
+  - `src/signal/day0_window.py` preserves true “no remaining target-day hours” semantics instead of silently falling back to all target-day hours.
+  - `src/engine/evaluator.py` now uses local target-day slicing for GFS crosscheck and rejects `CROSSCHECK_UNAVAILABLE` instead of defaulting to `AGREE`.
+  - `src/data/ensemble_client.py` + `src/engine/evaluator.py` no longer fake upstream issue/valid timestamps; degraded clock metadata is now explicit.
+- **Review / adversarial gate outcome**
+  - detailed review initially found one truth-surface blocker (malformed canonical settlement rows being hidden) and adversarial review found four blockers (ExitContext freshness, GFS fail-open, RiskGuard false authority, harvester working-state fallback feeding learning).
+  - all identified blockers were fixed before acceptance.
+- **Validation evidence**
+  - project venv full suite now passes: `./.venv/bin/pytest -q` → **409 passed, 3 skipped**
+  - this round also kept targeted runtime/harvester/risk/time-semantics tests green while blocker fixes were applied.
+
+## Planned Team Shape (new round)
+- **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
+- **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
+- **time-semantics lane** — audit and unify local-day / local-hour slicing and freshness semantics across evaluator/day0/general ensemble paths.
+- **truth/learning lane** — canonical ledger/query contracts, harvester source migration, authoritative consumer migration.
+- **detailed-review lane** — file-level review for correctness/contract completeness after each landed slice.
+- **adversarial lane** — challenge each landed slice for fail-open edges, false authority claims, and missing invariants.
+- **explore subagents** — one-off truth/function-design archaeology only; never promoted to durable teammate lanes by default.
+- First dispatch in the new round is now live:
+  - `runtime lane` owns the `ExitContext v2` / lifecycle contract-wiring slice.
+  - `truth/learning lane` owns the canonical settlement payload / authoritative reader-harvester seam.
+  - `time-semantics lane` remains intentionally undispached for one turn while Main personally re-reads the core time-semantics files before freezing that lane's contract.
+- Time-semantics audit findings from the bounded explore pass:
+  - consistent now: `time_context.py` lead helpers are city-local and no longer anchored to bare `date.today()`; the main `EnsembleSignal` path now slices target-day hours from real forecast timestamps; Day0 observation paths already carry target-date/reference-time semantics into evaluator/monitor refresh.
+  - immediate P0 inconsistencies still open:
+    1. `src/signal/day0_window.py` falls back from “no remaining target-day hours” to “all target-day hours”, which silently destroys remaining-window semantics;
+    2. `src/engine/evaluator.py` still computes GFS crosscheck agreement from the first 24 forecast hours instead of the same local target-day slice used by ECMWF;
+    3. ENS snapshot metadata still uses mixed/fake clock fields (`issue_time` from first valid timestamp, `valid_time` hardcoded to noon target date) and therefore does not yet represent the true time semantics the runtime is converging toward.
+  - lower-priority follow-up: evaluator / monitor-refresh still do not share one fully explicit cycle clock, so some boundary-time behavior may remain non-replayable even after the three P0 mismatches above are fixed.
+
 ## Current Truth Map
 - Runtime spine today: `cycle_runner.run_cycle()` orchestrates pending reconciliation -> chain sync -> quarantine timeout -> monitoring -> discovery -> portfolio/tracker save -> decision artifact -> status summary.
 - Authority sources today:
@@ -52,7 +121,7 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Venus/OpenClaw remain the outer operator environment; Zeus must expose truthful status/control surfaces, not fake teeth.
 - StrategyTracker stays a coarse derived projection until authoritative event readers land; runtime may call only `record_entry`, `record_exit`, and `record_settlement` on it, and must not invent a separate `record_trade_result` contract.
 
-## Active Workstreams
+## Historical Workstreams (prior execution round)
 - lifecycle-planner: lifecycle authority, pending/live rescue, quarantine behavior, Day0 terminal phase, ExitContext wiring
 - Agent B: durable decision/execution/exit/settlement records, execution telemetry, learning-source migration
 - Agent C: invariants, adversarial regression, StrategyTracker/RiskGuard cleanup, fake-teeth deletion
@@ -91,6 +160,21 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Agent B runtime wiring delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/execution/exit_lifecycle.py` now accepts the active DB connection and emits durable sell-side telemetry during placement, quick fill checks, retry scheduling, cooldown release, and pending-exit recovery; `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py` passes the cycle DB connection through both `execute_exit()` and `check_pending_exits()`/`check_pending_retries()` so the exit state machine owns the telemetry without moving position authority out of `PortfolioState`.
 - Agent B touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_db.py` now covers canonical-settlement-reader preference/fallback plus sell-side event helper emission and backoff event typing. Tests were updated but not run in this harness.
 - Agent B current blocker after this slice: sell-side telemetry is now append-only at the exit_lifecycle seam, but rescued pending fills from chain reconciliation still do not emit corresponding stage events, and no integration/adversarial runtime test yet proves the full placed -> checked -> retried/filled path through `cycle_runtime.py`.
+- Agent B cleanup delta: the immediate follow-up is diff narrowing, not feature expansion. `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` picked up duplicated historical helper blocks and large blank/noise regions in commit `e715e7d`; this cleanup pass removes only stale duplicate definitions and formatting debris while preserving the intended settlement-reader split plus sell-side telemetry helpers.
+- Agent B cleanup status: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` is back to one live copy each of `log_trade_exit`, `update_trade_lifecycle`, `query_position_events`, `query_authoritative_settlement_rows`, and the sell-side event helpers, with the stray blank/noise tail removed. Current diff against `HEAD` is now only the deletion of that stale duplicate tail plus this doc update. Push-safety is improved to reviewable for this file shape, but tests still have not been run in this harness and no post-cleanup commit has been created yet.
+- Agent C implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/riskguard/riskguard.py` now makes the first real consumer switch to `query_authoritative_settlement_rows()` and persists settlement storage-source provenance into `risk_state.details_json` via `settlement_storage_source` plus `settlement_row_storage_sources`. This is storage-source provenance (`position_events` vs `decision_log`), not original event-writer provenance. This slice remains settlement-truth-only and does not claim broader lifecycle/execution authority migration.
+- Agent C touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks canonical `POSITION_SETTLED` preference and clean legacy-only fallback storage-source provenance in RiskGuard state, alongside the existing Brier-flow audit. The stale `risk_state.win_rate` authority expectation was also removed; RiskGuard now leaves the legacy column null and records live directional performance only in `details_json.accuracy`.
+- Agent C locked decision delta: for the first RiskGuard consumer migration, provenance surfaced to operators is settlement-source only (`position_events` vs `decision_log`); rescued `pending_tracked -> entered` stage-event coverage remains a later lifecycle/execution authority dependency and does not block settlement-reader adoption.
+- Agent C current blocker after this slice: tests were updated but not run in this harness, and commit/push should wait until the working tree can stage this slice without batching unrelated teammate changes.
+- Agent B next slice is frozen: add exactly-once durable stage-event coverage for chain-reconciliation rescue of `pending_tracked -> entered` without broadening authority claims. The event must preserve historical entry provenance, mark explicit rescue provenance/source, and avoid duplicate emission on repeated reconciliation of the same already-rescued position.
+- Agent B implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/chain_reconciliation.py` now accepts the active DB connection and emits a rescue-specific `POSITION_LIFECYCLE_UPDATED` stage event when reconciliation upgrades `pending_tracked -> entered`; `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` now supports an explicit `position_state` override on `log_position_event()` plus a dedicated `log_reconciled_entry_event()` helper so rescue events preserve historical entry provenance while marking `source='chain_reconciliation'` and `reason='pending_fill_rescued'`.
+- Agent B exactly-once delta: repeated reconciliation after the first rescue no longer appends duplicate rescue events because the reconciliation path checks for an existing `chain_reconciliation` rescue lifecycle row for the same runtime trade before emitting again. This slice remains rescue-event coverage only and does not claim broader lifecycle/execution authority migration.
+- Agent B touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now locks rescue-stage-event emission, explicit rescue provenance, historical entry provenance preservation, and exactly-once behavior across repeated reconciliation calls. Tests were updated but not run in this harness.
+- Agent B next slice is frozen: T11 harvester learning-source migration should move decision-time snapshot sourcing off open-portfolio-only discovery for the smallest safe settlement-learning path. This slice must keep `PortfolioState` as open-position runtime authority, avoid replay migration claims, and document the new durable source path explicitly.
+- Agent B T11 contract delta: harvester settlement learning should resolve `decision_snapshot_id` from durable settlement authority first, keyed by `city` + `target_date`, and only fall back to open portfolio discovery when no durable settlement rows exist yet. This slice changes learning input sourcing only; `PortfolioState` remains runtime authority for open positions.
+- Agent B implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/execution/harvester.py` now resolves settlement-learning snapshot contexts from durable `POSITION_SETTLED` rows in `position_events` before consulting still-open portfolio positions. The fallback remains narrow and only applies when no durable settlement snapshot IDs exist for the settled market.
+- Agent B touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now proves three behaviors — harvester can refit from durable settlement rows with no open position left, still falls back to open portfolio discovery when no durable settlement exists yet, and prefers the durable snapshot over a conflicting still-open portfolio snapshot. Tests were updated but not run in this harness.
+- Agent B current blocker after this slice: verification is still pending because no Sonnet-run pytest or file review has been executed in this harness yet.
 - Agent A locked decision delta: until full T6 phase authority lands, monitoring must compute real per-position `hours_to_settlement` from target date + city timezone and feed that into exit evaluation; a hardcoded 24h monitor context is fail-open and forbidden.
 - Agent A audit/fix delta: the next fail-open gap was a real Day0 bypass — monitoring always passed `hours_to_settlement=24.0`, which silently disabled settlement-imminent and near-settlement logic and prevented automatic `day0_window` transition for positions already near target date. `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py` now computes real hours-to-settlement per position and promotes `entered|holding -> day0_window` inside monitoring when the remaining window is <= 6h.
 - Agent A touched test: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now locks the Day0 transition invariant and verifies exit evaluation receives the real sub-1h settlement distance.
@@ -99,7 +183,47 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Agent A implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py` now treats `day0_window` as load-bearing by refreshing those positions through `DAY0_OBSERVATION` semantics even when the original `entry_method` was ENS-based. The historical `entry_method` is preserved, while phase-time dispatch is reflected in `selected_method` and `applied_validations`.
 - Agent A touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now locks both the `holding -> day0_window` runtime transition and the invariant that `day0_window` refresh dispatches through Day0 observation semantics without mutating historical provenance.
 - Agent A current blocker after this slice: Day0 refresh dispatch is now phase-aware, but exit behavior is still only indirectly affected through refreshed probabilities and settlement timing; a later T6 slice still needs explicit Day0-phase exit/microstructure semantics if the spec requires stronger terminal overrides.
-- Agent A slice hygiene: no subagent used; context kept narrow to `monitor_refresh.py`, `cycle_runtime.py`, `portfolio.py`, and one test file; progress/task docs updated before reporting. Commit status: not created in this harness because the user has not explicitly authorized git commit. Push status: not attempted.
+- Agent A locked decision delta: terminal-phase ownership starts in the same monitoring cycle that first observes `<6h` to settlement. Monitoring must classify/promote `entered|holding -> day0_window` before refresh dispatch so that the crossing cycle itself uses `DAY0_OBSERVATION` semantics. Historical `entry_method` remains immutable provenance.
+- Agent A implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py` now computes and applies the `<6h` Day0 promotion before calling `refresh_position()`, removing the one-cycle fail-open gap where a newly terminal position still refreshed through its old hold semantics. Existing `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py` phase-owned dispatch then takes effect in that same cycle without mutating historical `entry_method`.
+- Agent A touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now asserts both that the crossing cycle enters `day0_window` before refresh and that a same-cycle `<6h` transition refreshes through `DAY0_OBSERVATION` instead of the ENS path.
+- Agent A current blocker after this slice: same-cycle Day0 refresh semantics are now closed, but exit behavior is still only indirectly affected through refreshed probabilities and settlement timing; a later T6 slice still needs explicit Day0-phase exit/microstructure semantics if the spec requires stronger terminal overrides.
+- Agent A slice hygiene: no subagent used; context kept narrow to `monitor_refresh.py`, `cycle_runtime.py`, and one test file; progress/task docs updated before reporting. Commit status: not created in this harness because the user has not explicitly authorized git commit. Push status: not attempted.
+- Agent A locked decision delta: quarantine must own an explicit fail-closed administrative resolution path inside runtime monitoring. Unresolved `quarantined|quarantine_expired` positions must be marked for administrative review exactly once and then stay on a dedicated resolution path that skips ordinary monitoring/entry flow while continuing to block new entries.
+- Agent A implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/chain_reconciliation.py` now freezes explicit quarantine resolution reasons (`QUARANTINE_REVIEW_REQUIRED`, `QUARANTINE_EXPIRED_REVIEW_REQUIRED`), and `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py` now routes quarantined positions into that administrative-resolution path before normal monitoring. The first cycle marks `admin_exit_reason`/`exit_reason` once and records a monitor artifact; later cycles keep skipping normal monitoring without duplicating the transition.
+- Agent A touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now locks exactly-once quarantine resolution marking plus the distinct expired-quarantine reason.
+- Agent A current blocker after this slice: quarantine now has a dedicated protective runtime path, but there is still no external operator command/workflow that actually resolves the flagged position; this slice only makes the need explicit and durable inside runtime state.
+- R3 boundary decision: runtime owns detection of local↔chain divergence, quarantine entry, persistence of `chain_state`, fail-closed entry blocking, exactly-once administrative marking via `admin_exit_reason`, and continued exclusion of quarantined positions from ordinary monitoring/discovery. Operator-owned exposure resolution begins after that mark: humans must inspect chain reality, decide whether the quarantined holding should be accepted, manually closed/redeemed, or ignored, and then clear the condition through an explicit external workflow. Zeus runtime must not invent an economic exit, auto-void, or pretend quarantine itself neutralizes exposure.
+- Smallest landed R3 slice: documentation/truth-surface clarification only. No production code change was required because the current runtime already matches the intended protective boundary; the missing piece was explicit contract truth about where runtime authority stops and operator authority begins.
+- Residual R3 gap: no operator command surface or reconciliation-clear workflow exists yet, so quarantine is now truthful and fail-closed but still review-required rather than exposure-resolving.
+- Agent A locked decision delta: `day0_window` must carry explicit terminal-phase microstructure semantics, not just refreshed probabilities. During Day0 monitoring, live held-side pricing must use immediately realizable sell-side liquidity (`best_bid` for the held token) rather than ordinary hold-phase VWMP blending. Historical `entry_method` remains immutable provenance.
+- Agent A implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py` now gives `day0_window` positions a real terminal-phase microstructure rule in live mode: when refreshing the held-side market price, Day0 uses the immediate sellable `best_bid` instead of VWMP. Non-Day0 positions keep ordinary VWMP behavior, and the existing Day0 observation refresh path continues to own probability recomputation without mutating historical `entry_method`.
+- Agent A touched tests for this slice: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` now locks that live `day0_window` refresh uses `best_bid` rather than VWMP while preserving the Day0 observation dispatch invariant.
+- Agent A current blocker after this slice: Day0 now has explicit terminal-phase sell-side pricing semantics, but any stronger Day0-specific forced-exit policy remains a separate contract choice and was intentionally not broadened into this slice.
+- Agent C validation delta: the newly landed runtime seams now have load-bearing proof in existing tests rather than only helper-level coverage. `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py` already locks chain-reconciliation rescue event emission with exactly-once behavior for `pending_tracked -> entered`, and `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_riskguard.py` plus `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` lock RiskGuard settlement-source provenance persistence for canonical `position_events` preference and clean legacy-only fallback.
+- Agent C validation status: this slice tightened the acceptance story for T14 without broadening scope or changing authority claims. Tests were localized/read but not run in this harness, so commit/push should still wait for explicit execution/verification and for clean staging around shared team docs.
+
+## Current Recovery Reality (2026-04-02)
+- Team mode is currently `single-worker` in baton truth: both `repair` and `adversary` remain live teammates, but only `adversary` currently owns an active baton (`#20` review of the landed operator-clear slice). `repair` is parked in `waiting` after landing `#19`.
+- Current recovery truth is the compact `R1`-`R5` queue plus one explicit follow-up under review: operator-clear acknowledgement is now landed narrowly, while adversarial review of that slice is still active.
+- Several slices are **landed in working tree** but are **not fully trusted** yet because remediation review found real concerns and acceptance is still being tightened slice by slice.
+- The strongest remediation findings shaping the live recovery queue are:
+  - Lifecycle lane: pending rescue and Day0 transition/refresh are real; quarantine boundary is explicit; operator-clear acknowledgement is now landed narrowly, but broader exposure resolution remains manual/undefined.
+  - Event-spine lane: settlement reader split and rescued-fill exactly-once events look real; exit telemetry runtime proof is now landed, but broader authority migration remains narrower than broad historical language implied.
+  - Risk lane: tracker fake-authority cleanup is real; RiskGuard provenance switch is real but narrow; dead/misleading authority surfaces still exist in schema/tests.
+- The current active question is whether the landed operator-clear acknowledgement slice is truthful, minimal, and auditable under adversarial review. Broader exposure resolution still remains out of scope for this slice.
+- Historical task/workstream sprawl remains in this file and in `task.md`, but it is archive context only. It is not the active queue.
+
+## Active Recovery Queue
+- R1 — Re-verify canonical settlement payload contract (`src/state/db.py` + RiskGuard consumer expectations)
+- R2 — Runtime exit-path verification is landed and should be treated as review-complete evidence for the event-spine lane, not as an open proof gap
+- R3 — Quarantine runtime/operator boundary is explicit; residual gap is operator-clear workflow
+- R4 — Re-validate harvester durable sourcing scope and proof level
+- R5 — Clean remaining risk-side authority illusions (`risk_state.win_rate`, tracker fallback semantics, stale tests)
+
+## Current Stop Point
+- Work got as far as landing multiple runtime/event/risk slices plus a remediation review pass.
+- The current body of work should still be treated as: **partially landed, partially reviewed, not yet structurally accepted**.
+- Current active queue movement is narrow recovery truth alignment and compact re-verification, not new feature expansion.
 
 ## Open Risks
 - lifecycle contract mismatches across `portfolio.py`, `cycle_runtime.py`, `chain_reconciliation.py`, `exit_lifecycle.py`
@@ -107,10 +231,17 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - tests currently emphasize some cross-module semantics but not the new pending/day0/exit-context closure yet
 - operator mirrors may still overstate system completeness
 
-## Next Baton Pass
-- Agent A owns truth-map compression for lifecycle authority and proposes locked contracts for PositionState, pending rescue, quarantine, Day0, ExitContext.
-- Agent B must align event names, identity fields, and decision/execution ledger schema with Agent A before broad implementation.
-- Agent C must convert A/B contracts into adversarial invariants and identify fake teeth / bad metrics to delete.
+## Current Baton State
+- Active owner: `adversary` on `#20`, reviewing the landed operator-clear acknowledgement slice.
+- Waiting owner: `repair`, to be reactivated after the adversarial verdict or for the next implementation slice.
+- Baton truth, backlog truth, and narrative truth must stay separated: `.claude/baton_state.json` for live ownership, `task.md` for queue truth, `progress.md` / `next_round_handoff.md` for narrative truth.
+- The next live queue question is whether `#20` accepts the narrow operator-clear slice, blocks it, or sharpens one more smallest follow-up.
+- Baton semantics are coherent: two live teammates remain, but only one currently owns an active baton, so team mode is `single-worker`.
+
+## Historical Baton Context
+- Agent A owned truth-map compression for lifecycle authority and proposed locked contracts for PositionState, pending rescue, quarantine, Day0, ExitContext.
+- Agent B aligned event names, identity fields, and decision/execution ledger schema with lifecycle work.
+- Agent C converted A/B contracts into adversarial invariants and identified fake teeth / bad metrics to delete.
 
 ## Do-Not-Do
 - do not expand signal/model complexity

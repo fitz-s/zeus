@@ -1,0 +1,21 @@
+{
+  "mode": "solo",
+  "live_teammates": [],
+  "ready": [
+    {
+      "owner": "unassigned",
+      "task_id": "P0-D",
+      "goal": "Close remaining runtime spine: pending/live fail-closed, Day0 terminal phase hardening, durable transition/event emission"
+    },
+    {
+      "owner": "unassigned",
+      "task_id": "P1-E",
+      "goal": "Continue learning-loop migration from authoritative ledger and evaluated opportunity set"
+    }
+  ],
+  "active": [],
+  "blocked": [],
+  "waiting": [],
+  "last_decision": "CLOSE P0-B and P0-C after implementation, review, adversarial challenge, and full-suite validation; return to solo with P0-D next",
+  "backlog_source": "task.md"
+}
