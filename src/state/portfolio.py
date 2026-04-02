@@ -134,6 +134,7 @@ class Position:
     cost_basis_usd: float = 0.0  # = size_usd
     bankroll_at_entry: float = 150.0
     entered_at: str = ""
+    day0_entered_at: str = ""
     entry_ci_width: float = 0.0
 
     # Entry context (immutable snapshot — Blueprint v2 §2)

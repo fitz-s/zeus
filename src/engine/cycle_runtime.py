@@ -398,7 +398,20 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 )
                 if hours_to_settlement <= 6.0 and pos.state in {"entered", "holding"}:
                     pos.state = "day0_window"
+                    if not pos.day0_entered_at:
+                        pos.day0_entered_at = deps._utcnow().isoformat()
                     portfolio_dirty = True
+                    if conn is not None:
+                        try:
+                            from src.state.db import update_trade_lifecycle
+
+                            update_trade_lifecycle(conn=conn, pos=pos)
+                        except Exception as exc:
+                            deps.logger.warning(
+                                "Failed to persist day0_window lifecycle for %s: %s",
+                                pos.trade_id,
+                                exc,
+                            )
 
             edge_ctx = refresh_position(conn, clob, pos)
             exit_context = _build_exit_context(
