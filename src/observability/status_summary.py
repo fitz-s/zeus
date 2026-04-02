@@ -23,6 +23,7 @@ from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import get_connection, query_execution_event_summary
 from src.state.decision_chain import query_no_trade_cases
 from src.state.portfolio import ADMIN_EXITS, PortfolioState, load_portfolio, portfolio_heat
+from src.state.strategy_tracker import load_tracker
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -224,9 +225,16 @@ def write_status(cycle_summary: dict = None) -> None:
         include_review_required=True,
     )
     try:
+        tracker = load_tracker()
+        current_regime_started_at = str(tracker.accounting.get("current_regime_started_at") or "")
         conn = get_connection()
         status["execution"] = query_execution_event_summary(conn)
-        status["learning"] = query_learning_surface_summary(conn)
+        status["learning"] = query_learning_surface_summary(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+        if current_regime_started_at:
+            status["learning"]["current_regime_started_at"] = current_regime_started_at
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
         for case in recent_no_trades:

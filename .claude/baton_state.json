@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Continue remaining P0/P1 closure from a healthy runtime base with bootstrap risk authority fail-closed and truthful current-regime metadata"
+      "goal": "Continue remaining P0/P1 closure from a healthy runtime base with current-regime learning now tied to a real regime boundary"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the RiskGuard bootstrap fail-closed slice and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the current-regime boundary alignment slice and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

@@ -464,7 +464,7 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     monkeypatch.setattr(
         status_summary_module,
         "query_learning_surface_summary",
-        lambda conn: {
+        lambda conn, not_before=None: {
             "by_strategy": {
                 "center_buy": {
                     "settlement_count": 2,
@@ -507,6 +507,46 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     assert status["strategy"]["opening_inertia"]["open_positions"] == 0
     assert status["strategy"]["opening_inertia"]["gated"] is True
     assert status["strategy"]["opening_inertia"]["no_trade_stage_counts"]["MARKET_FILTER"] == 2
+
+
+def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    portfolio = PortfolioState(bankroll=150.0)
+    captured: dict[str, object] = {}
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    class DummyTracker:
+        accounting = {"current_regime_started_at": "2026-04-03T00:00:00+00:00"}
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: DummyTracker())
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    def _fake_learning_surface(conn, not_before=None):
+        captured["not_before"] = not_before
+        return {"by_strategy": {}}
+
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_learning_surface_summary",
+        _fake_learning_surface,
+    )
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert captured["not_before"] == "2026-04-03T00:00:00+00:00"
+    assert status["learning"]["current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):
