@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing a unified current-regime learning surface"
+      "goal": "Drive the next truth/consumer slice after landing supervisor/control contract alignment"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the unified learning-surface slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the supervisor/control contract-alignment slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

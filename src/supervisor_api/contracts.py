@@ -76,11 +76,16 @@ class SupervisorCommand:
     """Venus's only write interface to Zeus: control plane commands."""
     command: Literal[
         "pause_entries", "resume", "tighten_risk",
-        "request_status", "request_reconcile", "set_strategy_mode",
+        "request_status", "set_strategy_gate", "acknowledge_quarantine_clear",
     ]
     reason: str
     ttl_minutes: Optional[int] = None
     scope: Optional[str] = None
+    strategy: Optional[str] = None
+    enabled: Optional[bool] = None
+    token_id: Optional[str] = None
+    condition_id: Optional[str] = None
+    note: Optional[str] = None
     env: str = ""
     source: str = "venus"
 

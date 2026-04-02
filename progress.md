@@ -404,6 +404,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual learning backlog after this slice:
   - the next remaining step is no longer “how do I read these surfaces together?”, but “how do I actually use this unified surface for stronger gating or model evolution?”.
 
+## Automation Contract Slice 1 (supervisor/control contract alignment)
+- Landed protections:
+  - `SupervisorCommand` now matches the real control-plane command set and carries the load-bearing payload fields the runtime actually understands, reducing drift between external automation and actual runtime behavior.
+- Validation evidence for this slice:
+  - targeted contract/control tests after the slice: `29 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual automation backlog after this slice:
+  - the remaining question is no longer command naming drift, but which control-plane actions should be automatically produced from the richer diagnostics now available.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:

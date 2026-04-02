@@ -18,6 +18,7 @@ import src.main as main_module
 import src.execution.harvester as harvester_module
 import src.observability.status_summary as status_summary_module
 import src.riskguard.riskguard as riskguard_module
+from src.supervisor_api.contracts import SupervisorCommand
 from src.calibration.manager import season_from_date
 from src.calibration.store import add_calibration_pair
 from src.config import City
@@ -460,6 +461,18 @@ def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_pat
     assert processed == ["set_strategy_gate"]
     assert control_plane_module.is_strategy_enabled("opening_inertia") is False
     assert control_plane_module.is_strategy_enabled("center_buy") is True
+
+
+def test_inv_supervisor_command_matches_real_control_plane_contract():
+    cmd = SupervisorCommand(
+        command="set_strategy_gate",
+        reason="edge compression",
+        strategy="opening_inertia",
+        enabled=False,
+    )
+    assert cmd.command == "set_strategy_gate"
+    assert cmd.strategy == "opening_inertia"
+    assert cmd.enabled is False
 
 
 def test_inv_kelly_uses_effective_bankroll(monkeypatch):
