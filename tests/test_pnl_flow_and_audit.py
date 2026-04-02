@@ -294,6 +294,10 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     open_pos = _position()
     open_pos.strategy = "center_buy"
     open_pos.last_monitor_market_price = 0.13
+    open_pos.chain_state = "exit_pending_missing"
+    open_pos.exit_state = "retry_pending"
+    open_pos.entry_fill_verified = False
+    open_pos.state = "day0_window"
     portfolio.positions.append(open_pos)
     portfolio.recent_exits[0]["strategy"] = "opening_inertia"
 
@@ -320,6 +324,10 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["control"]["entries_paused"] is True
     assert status["control"]["edge_threshold_multiplier"] == 2.0
     assert status["control"]["strategy_gates"]["opening_inertia"] is False
+    assert status["runtime"]["chain_state_counts"]["exit_pending_missing"] == 1
+    assert status["runtime"]["exit_state_counts"]["retry_pending"] == 1
+    assert status["runtime"]["unverified_entries"] == 1
+    assert status["runtime"]["day0_positions"] == 1
     assert "overall" in status["execution"]
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)

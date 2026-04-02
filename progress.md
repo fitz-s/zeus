@@ -312,6 +312,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/control backlog after this slice:
   - the remaining work is now less about missing visibility and more about deciding which control-plane actions should become automatic responses to the strategy/execution diagnostics already present.
 
+## Operator Diagnosis Slice 6 (runtime backlog counts)
+- Landed protections:
+  - `status_summary` now exposes a `runtime` section with direct backlog counts for:
+    - `chain_state_counts`
+    - `exit_state_counts`
+    - `unverified_entries`
+    - `day0_positions`
+  - this turns previously per-position forensic state into an operator-readable aggregate surface.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `27 passed`
+  - full suite after landing the slice: `441 passed, 3 skipped`
+- Residual operator/control backlog after this slice:
+  - the remaining work is now primarily policy and automation: which of these surfaced runtime backlogs should become automatic pauses, gates, or escalations.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

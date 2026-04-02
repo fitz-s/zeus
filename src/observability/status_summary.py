@@ -97,6 +97,14 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["unrealized_pnl"] = round(bucket["unrealized_pnl"], 2)
         bucket["total_pnl"] = round(bucket["realized_pnl"] + bucket["unrealized_pnl"], 2)
 
+    chain_state_counts: dict[str, int] = {}
+    exit_state_counts: dict[str, int] = {}
+    for pos in portfolio.positions:
+        chain_key = str(pos.chain_state or "unknown")
+        chain_state_counts[chain_key] = chain_state_counts.get(chain_key, 0) + 1
+        exit_key = str(pos.exit_state or "none")
+        exit_state_counts[exit_key] = exit_state_counts.get(exit_key, 0) + 1
+
     status = {
         "timestamp": generated_at,
         "process": {
@@ -146,6 +154,15 @@ def write_status(cycle_summary: dict = None) -> None:
                 }
                 for p in portfolio.positions
             ],
+        },
+        "runtime": {
+            "chain_state_counts": chain_state_counts,
+            "exit_state_counts": exit_state_counts,
+            "unverified_entries": sum(
+                1 for pos in portfolio.positions
+                if pos.state == "pending_tracked" or not pos.entry_fill_verified
+            ),
+            "day0_positions": sum(1 for pos in portfolio.positions if pos.state == "day0_window"),
         },
         "strategy": strategy_summary,
         "execution": {},
