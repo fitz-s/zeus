@@ -191,3 +191,34 @@ def test_healthcheck_is_not_healthy_when_riskguard_is_missing(monkeypatch, tmp_p
     assert result["riskguard_alive"] is False
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary-paper.json"
+    risk_path = tmp_path / "risk_state-paper.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "risk": {"level": "GREEN"},
+        "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
+        "cycle": {"failed": True, "failure_reason": "boom"},
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.paper-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["cycle_failed"] is True
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1

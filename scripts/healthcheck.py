@@ -218,6 +218,7 @@ def check() -> dict:
         and bool(result.get("riskguard_alive"))
         and bool(result.get("riskguard_fresh"))
         and bool(result.get("assumptions_valid"))
+        and not bool(result.get("cycle_failed"))
     )
     return result
 

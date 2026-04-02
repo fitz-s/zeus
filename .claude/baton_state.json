@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing healthcheck mirroring of control/runtime state"
+      "goal": "Drive the next truth/consumer slice after landing cycle-failure health degradation"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the healthcheck control/runtime mirror slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the cycle-failure health signal slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

@@ -339,6 +339,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/control backlog after this slice:
   - the remaining work is now predominantly automation policy: deciding which visible runtime/control/strategy/execution conditions should drive automatic actions instead of merely richer diagnosis.
 
+## Health Signal Slice 1 (cycle-failure degrades health)
+- Landed protections:
+  - `healthcheck` now treats an explicitly failed latest cycle as degraded (`healthy=false`) instead of reporting healthy merely because the daemon and RiskGuard are alive.
+- Validation evidence for this slice:
+  - targeted healthcheck tests after the slice: `5 passed`
+  - full suite after landing the slice: `442 passed, 3 skipped`
+- Residual health/control backlog after this slice:
+  - the next remaining health-policy question is which additional diagnosis surfaces should affect severity versus remain informational only.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
