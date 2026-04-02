@@ -1423,3 +1423,28 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `20 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `486 passed, 3 skipped`
+
+## 2026-04-02 — P2-H observation-age-aware nowcast seam
+- The day0 nowcast seam now incorporates the last missing basic covariate for short-horizon blending: observation age. This is still bounded and simple, but it makes the seam freshness-aware instead of only source-aware.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - now carries `current_utc_timestamp`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - forwards `temporal_context.current_utc_timestamp` into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py`
+    - forwards `temporal_context.current_utc_timestamp` into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_nowcast_blend_weight(...)` now decays to zero as observation age approaches 3 hours
+    - missing `observation_source`, `observation_time`, or `current_utc_timestamp` still forces `0.0`
+- Why this matters:
+  - it is the first freshness-aware behavior in the day0 nowcast seam
+  - later short-horizon blend work can now reason about both source quality and latency without another interface change
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks:
+    - source/time required
+    - weight increases as horizon shortens
+    - stale observations decay the nowcast weight to zero
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `21 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `487 passed, 3 skipped`

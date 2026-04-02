@@ -35,6 +35,7 @@ class Day0Signal:
         unit: str = "F",
         observation_source: str = "",
         observation_time: str | None = None,
+        current_utc_timestamp: str | None = None,
         temporal_context: Day0TemporalContext | None = None,
         diurnal_peak_confidence: float = 0.0,
         solar_day: SolarDay | None = None,
@@ -59,12 +60,14 @@ class Day0Signal:
         self.unit = unit
         self._observation_source = observation_source
         self._observation_time = observation_time
+        self._current_utc_timestamp = current_utc_timestamp
         self._precision = precision
         if temporal_context is not None:
             diurnal_peak_confidence = temporal_context.post_peak_confidence
             solar_day = temporal_context.solar_day
             current_local_hour = temporal_context.current_local_hour
             daylight_progress = temporal_context.daylight_progress
+            self._current_utc_timestamp = temporal_context.current_utc_timestamp.isoformat()
         self._peak_confidence = diurnal_peak_confidence
         self._solar_day = solar_day
         self._current_local_hour = current_local_hour
@@ -126,6 +129,7 @@ class Day0Signal:
                 hours_remaining=self.hours_remaining,
                 observation_source=self._observation_source,
                 observation_time=self._observation_time,
+                current_utc_timestamp=self._current_utc_timestamp,
             )
 
             # Day0 fusion: the observed high is a hard floor, while residual upside

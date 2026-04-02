@@ -294,6 +294,7 @@ def evaluate_candidate(
             unit=city.settlement_unit,
             observation_source=str(candidate.observation.get("source", "")),
             observation_time=candidate.observation.get("observation_time"),
+            current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
             temporal_context=temporal_context,
         )
         p_raw = day0.p_vector(bins)
