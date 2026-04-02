@@ -889,14 +889,14 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual note: this closes the specific “empty risk DB rowset = false GREEN” fail-open seam. Remaining P1 work is now primarily about stronger current-regime policy semantics and formal acceptance/review closure, not missing risk authority on bootstrap.
 
 ## 2026-04-02 — learning surface aligned to current-regime boundary
-- Main review delta: after backfilling `current_regime_started_at`, one more semantic mismatch remained: `query_learning_surface_summary()` still used rolling windows / fixed limits (`hours=24`, `limit=50`) instead of the actual current-regime boundary. That meant the “current regime” label could still be technically false even though the tracker finally had a real regime-start timestamp.
-- Main contract decision: when current-regime metadata exists, learning surfaces must honor it directly. Settlement and no-trade summaries used for operator/regime diagnosis should be filtered by `current_regime_started_at`, not just by generic recent-window heuristics.
+- Main review delta: after backfilling `current_regime_started_at`, one more semantic mismatch remained: `query_learning_surface_summary()` still used rolling windows / fixed limits (`hours=24`, `limit=50`, `limit=200`) instead of the actual current-regime boundary. That meant the “current regime” label could still be technically false even though the tracker finally had a real regime-start timestamp.
+- Main contract decision: when current-regime metadata exists, learning surfaces must honor it directly. Settlement, no-trade, and execution summaries used for operator/regime diagnosis should be filtered by `current_regime_started_at`, not just by generic recent-window heuristics.
 - Implementation delta:
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/decision_chain.py` now accepts `not_before` in:
     - `query_legacy_settlement_records()`
     - `query_no_trade_cases()`
     - `query_learning_surface_summary()`
-  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` now threads `not_before` through canonical settlement-event readers.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/db.py` now threads `not_before` through canonical settlement-event readers and execution-event summaries.
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now loads tracker accounting and passes `current_regime_started_at` into `query_learning_surface_summary()`, then surfaces that timestamp in `status.learning.current_regime_started_at`.
 - Touched tests:
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_db.py` now proves `query_learning_surface_summary()` excludes pre-regime settlements and no-trades when `not_before` is provided.
