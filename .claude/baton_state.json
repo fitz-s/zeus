@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing the current-regime strategy truth surface"
+      "goal": "Drive the next truth/consumer slice after landing strategy diagnostics in RiskGuard"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the current-regime strategy truth slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, and strategy surfaces",
+  "last_decision": "CLOSE the RiskGuard strategy-diagnostics slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, and strategy surfaces",
   "backlog_source": "task.md"
 }
