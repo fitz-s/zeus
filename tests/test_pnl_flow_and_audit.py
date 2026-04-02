@@ -300,6 +300,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW"})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
 
     status_summary_module.write_status({"mode": "test"})
@@ -317,6 +318,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)
+    assert status["risk"]["details"]["execution_quality_level"] == "YELLOW"
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
 
