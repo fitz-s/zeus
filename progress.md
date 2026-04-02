@@ -1448,3 +1448,35 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `21 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `487 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 forecast context surface
+- The day0 branch now has the same kind of inspectable forecast-layer artifact surface that dayN already has. Instead of only carrying hidden seam state internally, day0 decisions can now expose a structured backbone/nowcast view for later audit.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `day0_backbone_context(...)`
+    - exposes:
+      - observation source / observation time / current UTC
+      - hours remaining
+      - nowcast blend weight
+      - residual adjustment
+      - backbone high
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - new `forecast_context()` returning:
+      - `observation_weight`
+      - `temporal_closure_weight`
+      - nested backbone context
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - day0 decisions now place that under `forecast_context["day0"]`
+    - evaluator remains migration-friendly: if `MarketAnalysis` stubs lack the unified `forecast_context()` method, it still falls back to `sigma_context()` + `mean_context()`
+- Why this matters:
+  - future P2-H day0 changes can be inspected from artifacts instead of only inferred from code
+  - day0 and dayN now both have explicit forecast-context surfaces
+  - tests/stubs do not need a flag day to follow the new contract
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks `day0_backbone_context(...)`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py` now locks that day0 evaluator artifacts expose `forecast_context.day0`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` / runtime-guard dummy analysis fixtures now carry context methods so evaluator-path regressions stay aligned
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context'` → `22 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `488 passed, 3 skipped`

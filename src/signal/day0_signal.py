@@ -9,6 +9,7 @@ import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
 from src.signal.forecast_uncertainty import (
+    day0_backbone_context,
     day0_backbone_high,
     day0_blended_highs,
     day0_observation_weight,
@@ -201,3 +202,19 @@ class Day0Signal:
         Legacy boolean interface. Prefer observation_weight() for continuous blending.
         """
         return float(np.mean(self.ens_remaining < self.obs_high)) > day0_obs_dominates_threshold()
+
+    def forecast_context(self) -> dict:
+        return {
+            "observation_weight": self.observation_weight(),
+            "temporal_closure_weight": self._temporal_closure_weight(),
+            "backbone": day0_backbone_context(
+                unit=self.unit,
+                observed_high=self.obs_high,
+                current_temp=self.current_temp,
+                daylight_progress=self._daylight_progress,
+                hours_remaining=self.hours_remaining,
+                observation_source=self._observation_source,
+                observation_time=self._observation_time,
+                current_utc_timestamp=self._current_utc_timestamp,
+            ),
+        }

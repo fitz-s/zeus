@@ -3,6 +3,7 @@ from src.signal.forecast_uncertainty import (
     analysis_mean_context,
     analysis_mean_offset,
     analysis_sigma_context,
+    day0_backbone_context,
     day0_backbone_residual_adjustment,
     day0_backbone_high,
     day0_blended_highs,
@@ -167,6 +168,23 @@ def test_day0_backbone_residual_adjustment_is_small_positive_when_temp_is_near_h
         current_utc_timestamp="2026-04-02T01:00:00+00:00",
     )
     assert 0.0 < adj < 0.25
+
+
+def test_day0_backbone_context_exposes_components():
+    ctx = day0_backbone_context(
+        unit="F",
+        observed_high=45.0,
+        current_temp=44.8,
+        daylight_progress=0.5,
+        hours_remaining=4.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:00:00+00:00",
+    )
+    assert ctx["unit"] == "F"
+    assert ctx["observation_source"] == "wu_api"
+    assert 0.0 < ctx["residual_adjustment"] < 0.25
+    assert ctx["backbone_high"] == 45.0 + ctx["residual_adjustment"]
 
 
 def test_day0_nowcast_blend_weight_requires_source_and_time():

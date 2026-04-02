@@ -1045,6 +1045,17 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             calls["bins"] = [b.label for b in bins]
             return np.array([0.60, 0.30, 0.10])
 
+        def forecast_context(self):
+            return {
+                "observation_weight": 0.5,
+                "temporal_closure_weight": 0.4,
+                "backbone": {
+                    "observation_source": "wu_api",
+                    "backbone_high": 44.0,
+                    "residual_adjustment": 0.0,
+                },
+            }
+
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
             self.member_maxes = np.full(51, 44.0)
@@ -1143,6 +1154,9 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     assert decisions[0].selected_method == "day0_observation"
     assert calls["observed_high_so_far"] == pytest.approx(44.0)
     assert calls["temporal_context"] is not None
+    forecast_context = json.loads(decisions[0].epistemic_context_json)["forecast_context"]["day0"]
+    assert forecast_context["observation_weight"] >= 0.0
+    assert forecast_context["backbone"]["observation_source"] == "wu_api"
     assert calls["temporal_context"].current_local_hour == 12.0
     assert calls["day0_now"] == datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc)
     assert "39-40°F" in calls["bins"]

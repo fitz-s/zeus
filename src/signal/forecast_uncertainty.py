@@ -218,6 +218,48 @@ def day0_backbone_high(
     )
 
 
+def day0_backbone_context(
+    *,
+    unit: str,
+    observed_high: float,
+    current_temp: float,
+    daylight_progress: float | None,
+    hours_remaining: float,
+    observation_source: str,
+    observation_time: str | None,
+    current_utc_timestamp: str | None,
+) -> dict:
+    nowcast_weight = day0_nowcast_blend_weight(
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
+        observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
+    )
+    residual_adjustment = day0_backbone_residual_adjustment(
+        unit=unit,
+        observed_high=observed_high,
+        current_temp=current_temp,
+        daylight_progress=daylight_progress,
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
+        observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
+    )
+    return {
+        "unit": unit,
+        "observed_high": observed_high,
+        "current_temp": current_temp,
+        "daylight_progress": daylight_progress,
+        "hours_remaining": hours_remaining,
+        "observation_source": observation_source,
+        "observation_time": observation_time,
+        "current_utc_timestamp": current_utc_timestamp,
+        "nowcast_blend_weight": nowcast_weight,
+        "residual_adjustment": residual_adjustment,
+        "backbone_high": float(observed_high) + residual_adjustment,
+    }
+
+
 def day0_backbone_residual_adjustment(
     *,
     unit: str,

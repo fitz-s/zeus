@@ -298,11 +298,13 @@ def evaluate_candidate(
             temporal_context=temporal_context,
         )
         p_raw = day0.p_vector(bins)
+        day0_forecast_context = day0.forecast_context()
         ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
         entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0
     else:
         p_raw = ens.p_raw_vector(bins)
+        day0_forecast_context = None
         ensemble_spread = ens.spread()
         entry_validations = ["ens_fetch", "mc_instrument_noise"]
         lead_days_for_calibration = lead_days
@@ -474,6 +476,8 @@ def evaluate_candidate(
             "uncertainty": analysis.sigma_context(),
             "location": analysis.mean_context(),
         }
+    if day0_forecast_context is not None:
+        forecast_context["day0"] = day0_forecast_context
     edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     entry_validations.append("bootstrap_ci")
 
