@@ -379,3 +379,31 @@ def query_no_trade_cases(conn, city: str = None, hours: int = 24, *, env: str | 
             if city is None or ntc.get("city") == city:
                 results.append(ntc)
     return results
+
+
+def query_learning_surface_summary(
+    conn,
+    *,
+    env: str | None = None,
+    hours: int = 24,
+    settlement_limit: int = 50,
+    execution_limit: int = 200,
+) -> dict:
+    from src.state.db import query_authoritative_settlement_rows, query_execution_event_summary
+
+    settlements = query_authoritative_settlement_rows(conn, limit=settlement_limit, env=env)
+    no_trades = query_no_trade_cases(conn, hours=hours, env=env)
+    execution_summary = query_execution_event_summary(conn, env=env, limit=execution_limit)
+
+    no_trade_stage_counts: dict[str, int] = {}
+    for case in no_trades:
+        stage = str(case.get("rejection_stage") or "UNKNOWN")
+        no_trade_stage_counts[stage] = no_trade_stage_counts.get(stage, 0) + 1
+
+    degraded_settlements = sum(1 for row in settlements if row.get("is_degraded", False))
+    return {
+        "settlement_sample_size": len(settlements),
+        "settlement_degraded_count": degraded_settlements,
+        "no_trade_stage_counts": no_trade_stage_counts,
+        "execution": execution_summary,
+    }

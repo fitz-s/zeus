@@ -507,6 +507,7 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
         edge=0.20,
         strategy="center_buy",
         edge_source="center_buy",
+        decision_snapshot_id="snap1",
         exit_price=1.0,
         pnl=15.0,
         exit_reason="SETTLEMENT",
@@ -921,6 +922,75 @@ def test_query_no_trade_cases_filters_by_env(tmp_path):
 
     assert [case["decision_id"] for case in paper_cases] == ["paper-1"]
     assert [case["decision_id"] for case in live_cases] == ["live-1"]
+
+
+def test_query_learning_surface_summary_combines_settlement_no_trade_and_execution(tmp_path):
+    from src.state.db import log_position_event, log_settlement_event
+    from src.state.decision_chain import query_learning_surface_summary
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "opening_hunt",
+            now,
+            now,
+            json.dumps(
+                {
+                    "no_trade_cases": [
+                        {
+                            "decision_id": "nt1",
+                            "city": "NYC",
+                            "target_date": "2026-04-01",
+                            "range_label": "39-40°F",
+                            "direction": "buy_yes",
+                            "rejection_stage": "EDGE_INSUFFICIENT",
+                            "rejection_reasons": ["small"],
+                        }
+                    ]
+                }
+            ),
+            now,
+            "paper",
+        ),
+    )
+    pos = Position(
+        trade_id="learn-1",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        strategy="center_buy",
+        edge_source="center_buy",
+        decision_snapshot_id="snap1",
+        exit_price=1.0,
+        pnl=5.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at=now,
+        state="settled",
+        env="paper",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        edge=0.2,
+    )
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
+    conn.commit()
+
+    summary = query_learning_surface_summary(conn, env="paper")
+    conn.close()
+
+    assert summary["settlement_sample_size"] == 1
+    assert summary["settlement_degraded_count"] == 0
+    assert summary["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
+    assert summary["execution"]["overall"]["entry_rejected"] == 1
 
 
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):

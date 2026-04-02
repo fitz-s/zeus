@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
 from src.control.control_plane import get_edge_threshold_multiplier, is_entries_paused, strategy_gates
+from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import get_connection, query_execution_event_summary
 from src.state.decision_chain import query_no_trade_cases
 from src.state.portfolio import ADMIN_EXITS, PortfolioState, load_portfolio, portfolio_heat
@@ -173,12 +174,14 @@ def write_status(cycle_summary: dict = None) -> None:
         },
         "strategy": strategy_summary,
         "execution": {},
+        "learning": {},
         "no_trade": {},
         "cycle": cycle_summary or {},
     }
     try:
         conn = get_connection()
         status["execution"] = query_execution_event_summary(conn)
+        status["learning"] = query_learning_surface_summary(conn)
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
         for case in recent_no_trades:
@@ -190,6 +193,7 @@ def write_status(cycle_summary: dict = None) -> None:
         conn.close()
     except Exception:
         status["execution"] = {"error": "execution_summary_unavailable"}
+        status["learning"] = {"error": "learning_summary_unavailable"}
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
     status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
 

@@ -394,6 +394,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/consumer backlog after this slice:
   - deeper learning migration still remains; the status and health surfaces are increasingly self-contained, but they still sit on top of separate consumer summaries rather than one unified learned-current-regime model.
 
+## Learning Consumer Slice 1 (unified current-regime learning surface)
+- Landed protections:
+  - `query_learning_surface_summary()` now combines authoritative settlement counts, degraded-settlement counts, recent no-trade stage counts, and execution summary into one consumer helper;
+  - `status_summary` now exposes that helper as a `learning` section, so outer consumers can read one current-regime learning surface instead of stitching settlement/execution/no-trade summaries manually.
+- Validation evidence for this slice:
+  - targeted DB/status tests after the slice: `56 passed`
+  - full suite after landing the slice: `445 passed, 3 skipped`
+- Residual learning backlog after this slice:
+  - the next remaining step is no longer “how do I read these surfaces together?”, but “how do I actually use this unified surface for stronger gating or model evolution?”.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:
