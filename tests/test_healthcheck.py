@@ -70,6 +70,8 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
         "cycle": {"entries_blocked_reason": "risk_level=ORANGE"},
         "execution": {"overall": {"entry_rejected": 2}},
         "strategy": {"center_buy": {"open_positions": 1}},
+        "control": {"entries_paused": True, "strategy_gates": {"opening_inertia": False}},
+        "runtime": {"unverified_entries": 1, "day0_positions": 2},
     }))
     _write_risk_state(risk_path)
     _write_no_trade_artifact(zeus_db_path)
@@ -96,6 +98,8 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
+    assert result["control_state"]["entries_paused"] is True
+    assert result["runtime_summary"]["unverified_entries"] == 1
     assert result["recent_no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert result["recent_no_trade_stage_counts"]["RISK_REJECTED"] == 1
     assert result["healthy"] is True

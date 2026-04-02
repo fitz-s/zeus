@@ -140,6 +140,12 @@ def check() -> dict:
             strategy = status.get("strategy", {}) or {}
             if isinstance(strategy, dict):
                 result["strategy_summary"] = strategy
+            control = status.get("control", {}) or {}
+            if isinstance(control, dict):
+                result["control_state"] = control
+            runtime = status.get("runtime", {}) or {}
+            if isinstance(runtime, dict):
+                result["runtime_summary"] = runtime
             age_seconds = _status_age_seconds(result["last_cycle"])
             if age_seconds is not None:
                 result["status_age_seconds"] = round(age_seconds, 1)
