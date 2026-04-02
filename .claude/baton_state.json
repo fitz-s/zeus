@@ -1,22 +1,10 @@
 {
   "mode": "solo",
   "live_teammates": [],
-  "ready": [
-    {
-      "task_id": "P1-E",
-      "owner": "Main",
-      "goal": "Continue learning-loop and consumer migration from env-filtered authoritative readers"
-    }
-  ],
-  "active": [
-    {
-      "owner": "Main",
-      "task_id": "P1-E",
-      "goal": "Continue the remaining P1-E policy/learning semantics now that P0 runtime-spine correctness is closed for the current base"
-    }
-  ],
+  "ready": [],
+  "active": [],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-D as done for the current base, keep P1-E as the only active remaining P0/P1 program lane, and continue policy/learning semantics work",
+  "last_decision": "CLOSE P1-E as done for the current base; no remaining active P0/P1 program lanes remain, only future-phase work",
   "backlog_source": "task.md"
 }
