@@ -978,6 +978,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
 - Residual note: with this slice, current-regime settlement / no-trade / execution summaries are all aligned to the same boundary. Remaining P1-E work is now more about whether to add stronger policy semantics, not about mismatched scopes across current-regime truth surfaces.
 
+## 2026-04-02 — strategy-tracker failure is no longer silent GREEN
+- One remaining P1 policy seam was that `riskguard.tick()` swallowed `load_tracker()` / strategy-diagnostics failures into empty summaries and a synthetic GREEN `strategy_signal_level`. That meant the current-regime strategy signal surface could disappear without any operator-facing degradation.
+- Main contract decision: missing strategy-tracker diagnostics is not neutral. It is absence of strategy-signal authority, so `strategy_signal_level` must fail to YELLOW and the error must be surfaced explicitly.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/riskguard/riskguard.py` now records `strategy_tracker_error` when tracker loading fails and treats that as `strategy_signal_level = YELLOW` instead of silently GREEN.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_riskguard.py` now locks `load_tracker()` failure → `YELLOW` with a surfaced `strategy_tracker_error`.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_riskguard.py -k 'strategy_edge_compression_alert or strategy_tracker_unavailable or risk_state_has_no_rows'` → `3 passed`
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py -k 'healthcheck'` → `7 passed`
+  - `./.venv/bin/pytest -q` → `469 passed, 3 skipped`
+- Residual note: this closes the “tracker missing but still GREEN” seam. The remaining P1-E space is now mostly about whether to introduce stronger policy semantics, not about silent disappearance of current-regime diagnostics.
+
 ## 2026-04-02 — P0/P1 acceptance checkpoint
 - Detailed review lane is now effectively clear for the current base:
   - concrete review blockers found during this round were:
