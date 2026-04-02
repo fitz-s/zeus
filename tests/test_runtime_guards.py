@@ -532,6 +532,74 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
     assert any(event["event_type"] == "ORDER_REJECTED" for event in events)
 
 
+def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(bankroll=150.0)
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = False
+        def get_positions_from_api(self):
+            return []
+        def get_open_orders(self):
+            return []
+        def get_balance(self):
+            return 100.0
+
+    class DummyDecision:
+        def __init__(self):
+            self.should_trade = True
+            self.edge = _edge()
+            self.tokens = {"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"}
+            self.size_usd = 5.0
+            self.decision_id = "d-gated"
+            self.rejection_stage = ""
+            self.rejection_reasons = []
+            self.selected_method = "ens_member_counting"
+            self.applied_validations = ["ens_fetch"]
+            self.decision_snapshot_id = "snap-gated"
+            self.edge_source = "opening_inertia"
+            self.edge_context = None
+            self.settlement_semantics_json = '{"measurement_unit":"F"}'
+            self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
+            self.edge_context_json = '{"forward_edge":0.12}'
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 1.0,
+        "hours_to_resolution": 24.0,
+        "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
+    }])
+    monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
+    monkeypatch.setattr(cycle_runner, "is_strategy_enabled", lambda strategy: strategy != "opening_inertia")
+    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not execute gated strategy")))
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    conn = get_connection(db_path)
+    artifact = conn.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    payload = json.loads(artifact["artifact_json"])
+
+    assert summary["strategy_gate_rejections"] == 1
+    assert payload["trade_cases"] == []
+    assert payload["no_trade_cases"][0]["rejection_stage"] == "RISK_REJECTED"
+    assert payload["no_trade_cases"][0]["rejection_reasons"] == ["strategy_gate_disabled:opening_inertia"]
+
+
 def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)

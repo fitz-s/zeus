@@ -590,6 +590,35 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 if False:
                     _ = d.calibration
                 if d.should_trade and d.edge and d.tokens:
+                    strategy_name = deps._classify_strategy(mode, d.edge, d.edge_source or deps._classify_edge_source(mode, d.edge))
+                    if not deps.is_strategy_enabled(strategy_name):
+                        summary["no_trades"] += 1
+                        summary["strategy_gate_rejections"] = summary.get("strategy_gate_rejections", 0) + 1
+                        artifact.add_no_trade(
+                            deps.NoTradeCase(
+                                decision_id=d.decision_id,
+                                city=city.name,
+                                target_date=candidate.target_date,
+                                range_label=d.edge.bin.label if d.edge else "",
+                                direction=d.edge.direction if d.edge else "",
+                                rejection_stage="RISK_REJECTED",
+                                rejection_reasons=[f"strategy_gate_disabled:{strategy_name}"],
+                                best_edge=d.edge.edge if d.edge else 0.0,
+                                model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                market_price=d.edge.entry_price if d.edge else 0.0,
+                                decision_snapshot_id=d.decision_snapshot_id,
+                                selected_method=d.selected_method,
+                                applied_validations=list(d.applied_validations),
+                                bin_labels=parseable_labels,
+                                p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                alpha=getattr(d, "alpha", 0.0),
+                                agreement=getattr(d, "agreement", ""),
+                                timestamp=decision_time.isoformat(),
+                            )
+                        )
+                        continue
                     intent = deps.create_execution_intent(
                         edge_context=d.edge_context,
                         edge=d.edge,
@@ -617,7 +646,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             "entry_price": d.edge.entry_price,
                             "p_posterior": d.edge.p_posterior,
                             "edge": d.edge.edge,
-                            "strategy": deps._classify_strategy(mode, d.edge, d.edge_source or deps._classify_edge_source(mode, d.edge)),
+                            "strategy": strategy_name,
                             "edge_source": d.edge_source or deps._classify_edge_source(mode, d.edge),
                             "market_hours_open": candidate.hours_since_open,
                             "decision_snapshot_id": d.decision_snapshot_id,

@@ -11,8 +11,8 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from src.config import settings
-from src.control.control_plane import is_entries_paused
+from src.config import cities_by_name, settings
+from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -75,8 +75,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _run_chain_sync(portfolio: PortfolioState, clob):
-    return _runtime.run_chain_sync(portfolio, clob, deps=sys.modules[__name__])
+def _run_chain_sync(portfolio: PortfolioState, clob, conn):
+    return _runtime.run_chain_sync(portfolio, clob, conn=conn, deps=sys.modules[__name__])
 
 
 def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob) -> int:
@@ -171,7 +171,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     summary["trades"] += pending_updates["entered"]
     summary["pending_voids"] = pending_updates["voided"]
 
-    chain_stats, chain_ready = _run_chain_sync(portfolio, clob)
+    chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
     if chain_stats:
         summary["chain_sync"] = chain_stats
         if chain_stats.get("synced") or chain_stats.get("voided") or chain_stats.get("quarantined") or chain_stats.get("updated"):
@@ -200,8 +200,14 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
 
     entries_blocked_reason = None
+    has_quarantine = any(
+        pos.chain_state in {"quarantined", "quarantine_expired"}
+        for pos in portfolio.positions
+    )
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
+    elif has_quarantine:
+        entries_blocked_reason = "portfolio_quarantined"
     elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
@@ -210,6 +216,9 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "entry_bankroll_non_positive"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
+
+    if has_quarantine:
+        summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
     if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:

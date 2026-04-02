@@ -284,6 +284,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/consumer backlog after this slice:
   - the next remaining step is less about missing surfaces and more about deciding which of the now-visible strategy/execution/no-trade degradations should become stronger policy or control-plane actions.
 
+## Control-Plane Slice 1 (real strategy gates)
+- Landed protections:
+  - `set_strategy_gate` is no longer a fake control-plane surface: the command now validates, persists, and is readable through `is_strategy_enabled()` / `strategy_gates()`;
+  - discovery/runtime now honors disabled strategy gates and converts blocked would-be trades into explicit `RISK_REJECTED` no-trade records with `strategy_gate_disabled:<strategy>` rather than silently ignoring the control-plane intent.
+- Validation evidence for this slice:
+  - targeted control/runtime tests after the slice: `64 passed`
+  - full suite after landing the slice: `441 passed, 3 skipped`
+- Residual control/risk backlog after this slice:
+  - surfaced strategy/execution/no-trade truth is now materially more actionable, but higher-order policy still remains: deciding which degradations should auto-tighten, which should per-strategy gate, and which should stay diagnostic only.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
