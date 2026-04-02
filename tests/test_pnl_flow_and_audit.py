@@ -542,12 +542,30 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
         }
     }
 
-    commands = control_plane_module.recommended_commands_from_status(status)
+    commands = control_plane_module.recommended_commands_from_status(
+        status,
+        include_review_required=True,
+    )
 
     assert commands == [
         {"command": "tighten_risk"},
         {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
         {"command": "set_strategy_gate", "strategy": "opening_inertia", "enabled": False},
+    ]
+
+
+def test_inv_recommended_autosafe_commands_excludes_review_required_strategy_gates():
+    status = {
+        "control": {
+            "recommended_controls_not_applied": ["tighten_risk"],
+            "recommended_but_not_gated": ["center_buy", "opening_inertia"],
+        }
+    }
+
+    commands = control_plane_module.recommended_autosafe_commands_from_status(status)
+
+    assert commands == [
+        {"command": "tighten_risk"},
     ]
 
 
@@ -568,7 +586,7 @@ def test_inv_enqueue_commands_avoids_duplicates(monkeypatch, tmp_path):
     ]
 
 
-def test_inv_apply_recommended_controls_reads_status_and_enqueues(monkeypatch, tmp_path, capsys):
+def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatch, tmp_path, capsys):
     status_path = tmp_path / "status_summary.json"
     control_path = tmp_path / "control_plane.json"
     status_path.write_text(
@@ -588,11 +606,44 @@ def test_inv_apply_recommended_controls_reads_status_and_enqueues(monkeypatch, t
     monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
     monkeypatch.setattr(apply_recommended_controls_script, "recommended_commands_from_status", control_plane_module.recommended_commands_from_status)
 
-    rc = apply_recommended_controls_script.main()
+    rc = apply_recommended_controls_script.main([])
     output = json.loads(capsys.readouterr().out)
     payload = json.loads(control_path.read_text())
 
     assert rc == 0
+    assert output["include_review_required"] is False
+    assert output["added"] == 1
+    assert payload["commands"] == [
+        {"command": "tighten_risk"},
+    ]
+
+
+def test_inv_apply_recommended_controls_can_include_review_required_commands(monkeypatch, tmp_path, capsys):
+    status_path = tmp_path / "status_summary.json"
+    control_path = tmp_path / "control_plane.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "control": {
+                    "recommended_controls_not_applied": ["tighten_risk"],
+                    "recommended_but_not_gated": ["center_buy"],
+                }
+            }
+        )
+    )
+    control_path.write_text(json.dumps({"commands": [], "acks": []}))
+
+    monkeypatch.setattr(apply_recommended_controls_script, "state_path", lambda name: status_path if name == "status_summary.json" else control_path)
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
+    monkeypatch.setattr(apply_recommended_controls_script, "recommended_commands_from_status", control_plane_module.recommended_commands_from_status)
+
+    rc = apply_recommended_controls_script.main(["--include-review-required"])
+    output = json.loads(capsys.readouterr().out)
+    payload = json.loads(control_path.read_text())
+
+    assert rc == 0
+    assert output["include_review_required"] is True
     assert output["added"] == 2
     assert payload["commands"] == [
         {"command": "tighten_risk"},

@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Freeze the next strategy/current-regime policy slice after making temporary global controls durable across restart"
+      "goal": "Drive the next learned current-regime / strategy-gating slice now that automation defaults are conservative and durable"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the durable temporary-control replay slice and continue P1-E toward stronger strategy/current-regime policy automation from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the auto-safe-vs-review-required automation contract slice and continue P1-E toward a stronger learned strategy/current-regime policy ladder from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
