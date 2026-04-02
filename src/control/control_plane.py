@@ -249,27 +249,39 @@ def enqueue_commands(new_commands: list[dict]) -> int:
 def recommended_autosafe_commands_from_status(status: dict) -> list[dict]:
     """Build commands safe to auto-enqueue without extra operator review."""
     control = (status or {}).get("control", {}) or {}
+    control_reasons = control.get("recommended_control_reasons", {}) or {}
     commands: list[dict] = []
     for recommendation in control.get("recommended_controls_not_applied", []) or []:
         if recommendation == "tighten_risk":
-            commands.append({"command": "tighten_risk"})
+            command = {"command": "tighten_risk"}
+            reasons = control_reasons.get("tighten_risk", [])
+            if reasons:
+                command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
+            commands.append(command)
         if recommendation == "pause_entries":
-            commands.append({"command": "pause_entries"})
+            command = {"command": "pause_entries"}
+            reasons = control_reasons.get("pause_entries", [])
+            if reasons:
+                command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
+            commands.append(command)
     return commands
 
 
 def review_required_commands_from_status(status: dict) -> list[dict]:
     """Build commands that remain operator-review-required even if recommended."""
     control = (status or {}).get("control", {}) or {}
+    gate_reasons = control.get("recommended_strategy_gate_reasons", {}) or {}
     commands: list[dict] = []
     for strategy in control.get("recommended_but_not_gated", []) or []:
-        commands.append(
-            {
-                "command": "set_strategy_gate",
-                "strategy": strategy,
-                "enabled": False,
-            }
-        )
+        command = {
+            "command": "set_strategy_gate",
+            "strategy": strategy,
+            "enabled": False,
+        }
+        reasons = gate_reasons.get(strategy, [])
+        if reasons:
+            command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
+        commands.append(command)
     return commands
 
 

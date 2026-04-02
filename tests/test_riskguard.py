@@ -296,6 +296,12 @@ class TestRiskGuardSettlementSource:
         assert details["execution_quality_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "tighten_risk" in details["recommended_controls"]
+        assert details["recommended_strategy_gate_reasons"]["center_buy"] == [
+            "execution_decay(fill_rate=0.0, observed=10)"
+        ]
+        assert details["recommended_control_reasons"]["tighten_risk"] == [
+            "execution_decay(fill_rate=0.0, observed=10)"
+        ]
 
     def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -329,6 +335,10 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "review_strategy_gates" in details["recommended_controls"]
+        assert details["recommended_strategy_gate_reasons"]["center_buy"] == ["edge_compression"]
+        assert details["recommended_control_reasons"]["review_strategy_gates"] == [
+            "center_buy:edge_compression"
+        ]
 
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
