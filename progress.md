@@ -875,3 +875,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Runtime truth after one-shot refresh:
   - `strategy_tracker-paper.json.accounting.current_regime_started_at` now reads `2026-03-30T09:53:02.731857+00:00`
   - a follow-up `tick(); write_status()` kept runtime health at `GREEN`
+
+## 2026-04-02 — RiskGuard bootstrap fail-closed hardening
+- Adversarial review found one remaining P0 blocker in the runtime guard boundary: `get_current_level()` returned `GREEN` when `risk_state` had no rows. That meant a fresh/cleared/missing RiskGuard state could silently permit new entries before the independent guard had produced even one valid row.
+- Main contract decision: **no RiskGuard row is not safe**. It is absence of independent risk authority, so runtime must fail closed. The bootstrap/no-row path now returns `RED` instead of `GREEN`.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/riskguard/riskguard.py` now logs and returns `RiskLevel.RED` whenever `risk_state` exists but has no rows, closing the runtime/health authority split that previously allowed discovery to proceed while health surfaces would still be degraded.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_riskguard.py` now locks `get_current_level()` → `RED` for the empty-row bootstrap case.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_riskguard.py -k 'get_current_level_fails_closed_when_risk_state_has_no_rows or edge_compression or strategy_edge_compression_alert'` → `2 passed`
+  - `./.venv/bin/pytest -q` → `463 passed, 3 skipped`
+- Residual note: this closes the specific “empty risk DB rowset = false GREEN” fail-open seam. Remaining P1 work is now primarily about stronger current-regime policy semantics and formal acceptance/review closure, not missing risk authority on bootstrap.

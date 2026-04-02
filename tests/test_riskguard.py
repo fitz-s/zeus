@@ -62,6 +62,18 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
+    def test_get_current_level_fails_closed_when_risk_state_has_no_rows(self, monkeypatch, tmp_path):
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+
+        level = riskguard_module.get_current_level()
+
+        assert level == RiskLevel.RED
+
     def test_tick_records_canonical_settlement_source(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"

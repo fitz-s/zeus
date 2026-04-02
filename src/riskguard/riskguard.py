@@ -314,8 +314,8 @@ def get_current_level() -> RiskLevel:
         conn.close()
 
         if row is None:
-            # R3: Bootstrap state — no RiskGuard data yet. Allow trading.
-            return RiskLevel.GREEN
+            logger.warning("RiskGuard has no persisted state row. Fail-closed → RED.")
+            return RiskLevel.RED
 
         # R4: Staleness check — if last check > 5 min ago, RiskGuard may have crashed
         from datetime import datetime as dt
