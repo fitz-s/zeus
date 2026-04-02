@@ -481,6 +481,23 @@ def test_inv_supervisor_command_matches_real_control_plane_contract():
     assert cmd.enabled is False
 
 
+def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
+    status = {
+        "control": {
+            "recommended_controls_not_applied": ["tighten_risk"],
+            "recommended_but_not_gated": ["center_buy", "opening_inertia"],
+        }
+    }
+
+    commands = control_plane_module.recommended_commands_from_status(status)
+
+    assert commands == [
+        {"command": "tighten_risk"},
+        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
+        {"command": "set_strategy_gate", "strategy": "opening_inertia", "enabled": False},
+    ]
+
+
 def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     captured: dict[str, float] = {}
 

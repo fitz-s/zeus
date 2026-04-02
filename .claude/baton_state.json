@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing control recommendation drift in the status surface"
+      "goal": "Drive the next truth/consumer slice after landing a stable builder for explicit recommended commands"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the control-recommendation-drift slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the recommended-command-builder slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

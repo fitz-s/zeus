@@ -206,6 +206,28 @@ def process_commands() -> list[str]:
     return processed
 
 
+def recommended_commands_from_status(status: dict) -> list[dict]:
+    """Build explicit control-plane commands from surfaced recommendation drift.
+
+    This is intentionally non-mutating. It gives external automation a stable
+    contract for turning diagnosis into commands without silently applying them.
+    """
+    control = (status or {}).get("control", {}) or {}
+    commands: list[dict] = []
+    for recommendation in control.get("recommended_controls_not_applied", []) or []:
+        if recommendation == "tighten_risk":
+            commands.append({"command": "tighten_risk"})
+    for strategy in control.get("recommended_but_not_gated", []) or []:
+        commands.append(
+            {
+                "command": "set_strategy_gate",
+                "strategy": strategy,
+                "enabled": False,
+            }
+        )
+    return commands
+
+
 
 def enqueue_command(command: dict) -> None:
     data = _load_control_payload()
