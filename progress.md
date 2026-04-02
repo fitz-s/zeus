@@ -1650,3 +1650,27 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or spread_context or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context'` → `25 passed`
   - `./.venv/bin/pytest -q` → `493 passed, 3 skipped`
+
+## 2026-04-02 — P2-H mean-offset activation on analysis path
+- The previous mean-offset slice made the mean/location seam compute a bounded offset, but one semantic seam remained: the offset was visible in context while `analysis_member_maxes(...)` still fed the bootstrap path with unadjusted member maxima. This slice closes that split-brain.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_member_maxes(...)` now accepts `bias_corrected` and `bias_reference`
+    - `analysis_member_maxes(...)` now delegates to `analysis_mean_offset(...)` instead of silently calling a neutral mean path
+    - `analysis_mean_offset(...)` now accepts the same provenance inputs, keeping the mean seam API coherent
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - `MarketAnalysis` now threads `bias_corrected` / `bias_reference` into `analysis_member_maxes(...)`, so the bounded mean-offset actually reaches the analysis/bootstrap surface instead of living only in metadata
+- Why this matters:
+  - forecast artifacts and actual analysis behavior now agree on whether a bounded mean correction exists
+  - P2-H mean work is no longer “context claims offset, bootstrap still ignores it”
+  - this is still a low-blast-radius slice because the offset remains provenance-aware, guarded by `bias_corrected`, and clipped to a small instrument-scale envelope
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - renamed the old identity expectation to the explicit no-bias-reference case
+    - now locks:
+      - bias-reference-driven member-max shift when upstream input is not already corrected
+      - `bias_corrected=True` guard on the member-max path
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `25 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or evaluator_epistemic_context_includes_model_bias_reference or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `495 passed, 3 skipped`

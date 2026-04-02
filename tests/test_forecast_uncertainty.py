@@ -61,7 +61,7 @@ def test_analysis_spread_context_explains_multiplier():
     assert ctx["spread_multiplier"] == 1.05
 
 
-def test_analysis_member_maxes_is_identity_for_now():
+def test_analysis_member_maxes_is_identity_without_bias_reference():
     raw = [40.0, 42.0, 41.5]
     adjusted = analysis_member_maxes(raw, unit="F", lead_days=5.0)
     assert list(adjusted) == raw
@@ -69,6 +69,31 @@ def test_analysis_member_maxes_is_identity_for_now():
 
 def test_analysis_mean_offset_is_zero_for_now():
     assert analysis_mean_offset(unit="F", lead_days=5.0, ensemble_mean=42.0) == 0.0
+
+
+def test_analysis_member_maxes_applies_bounded_bias_offset_when_uncorrected():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(
+        raw,
+        unit="F",
+        lead_days=5.0,
+        bias_corrected=False,
+        bias_reference={"source": "ecmwf", "bias": 1.5},
+    )
+    expected_offset = -0.875
+    assert list(adjusted) == __import__("pytest").approx([v + expected_offset for v in raw])
+
+
+def test_analysis_member_maxes_respects_bias_corrected_guard():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(
+        raw,
+        unit="F",
+        lead_days=5.0,
+        bias_corrected=True,
+        bias_reference={"source": "ecmwf", "bias": 4.0, "discount_factor": 0.7},
+    )
+    assert list(adjusted) == raw
 
 
 def test_analysis_mean_context_explains_offset():

@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Hold P2-H at a showcase-safe mini-milestone after landing the first bounded mean-offset behavior change"
+      "goal": "Continue P2-H after activating the bounded mean-offset on the real analysis path, moving next toward the next bounded forecast-layer behavior slice"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the first bounded mean-offset slice as a package-ready P2-H checkpoint before deeper forecast-layer work resumes",
+  "last_decision": "CLOSE the mean-offset activation slice and keep P2-H active for the next bounded forecast-layer upgrade",
   "backlog_source": "task.md"
 }
