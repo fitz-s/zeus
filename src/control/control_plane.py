@@ -206,6 +206,22 @@ def process_commands() -> list[str]:
     return processed
 
 
+def enqueue_commands(new_commands: list[dict]) -> int:
+    """Append commands to the durable control queue without duplicating identical payloads."""
+    if not new_commands:
+        return 0
+    data = _load_control_payload()
+    commands = list(data.get("commands", []))
+    acks = list(data.get("acks", []))
+    added = 0
+    for cmd in new_commands:
+        if cmd not in commands:
+            commands.append(cmd)
+            added += 1
+    _write_control_payload(commands, acks)
+    return added
+
+
 def recommended_commands_from_status(status: dict) -> list[dict]:
     """Build explicit control-plane commands from surfaced recommendation drift.
 

@@ -40,6 +40,10 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `外部调研.md` is right that learned upgrades are unsafe until local-day / target semantics are unified across modules;
   - therefore the program is **not** “runtime first or semantics first”; it is **runtime authority closure + time semantics closure as the shared foundation**, with learned forecast work explicitly downstream of that foundation.
 
+## Recent consumer/automation deltas
+- Added a stable `recommended_commands_from_status()` builder and a manual `scripts/apply_recommended_controls.py` helper so surfaced recommendations can be turned into explicit control-plane commands without silent auto-mutation.
+- Healthcheck now mirrors `recommended_commands`, letting the fast path expose concrete suggested actions in the same contract used by the helper.
+
 ## Landed This Round (post-reset, accepted)
 - **P0-B contract freeze landed**
   - `ExitContext v2` is now the runtime exit-authority surface in `src/state/portfolio.py`, wired from `src/engine/cycle_runtime.py`, fed by `src/engine/monitor_refresh.py`, and consumed by `src/execution/exit_lifecycle.py`.
