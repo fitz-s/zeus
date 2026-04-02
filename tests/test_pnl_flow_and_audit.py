@@ -18,6 +18,7 @@ import src.main as main_module
 import src.execution.harvester as harvester_module
 import src.observability.status_summary as status_summary_module
 import src.riskguard.riskguard as riskguard_module
+import scripts.apply_recommended_controls as apply_recommended_controls_script
 from src.supervisor_api.contracts import SupervisorCommand
 from src.calibration.manager import season_from_date
 from src.calibration.store import add_calibration_pair
@@ -495,6 +496,55 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
         {"command": "tighten_risk"},
         {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
         {"command": "set_strategy_gate", "strategy": "opening_inertia", "enabled": False},
+    ]
+
+
+def test_inv_enqueue_commands_avoids_duplicates(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    control_path.write_text(json.dumps({"commands": [{"command": "tighten_risk"}], "acks": []}))
+
+    added = control_plane_module.enqueue_commands(
+        [{"command": "tighten_risk"}, {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False}]
+    )
+
+    payload = json.loads(control_path.read_text())
+    assert added == 1
+    assert payload["commands"] == [
+        {"command": "tighten_risk"},
+        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
+    ]
+
+
+def test_inv_apply_recommended_controls_reads_status_and_enqueues(monkeypatch, tmp_path, capsys):
+    status_path = tmp_path / "status_summary.json"
+    control_path = tmp_path / "control_plane.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "control": {
+                    "recommended_controls_not_applied": ["tighten_risk"],
+                    "recommended_but_not_gated": ["center_buy"],
+                }
+            }
+        )
+    )
+    control_path.write_text(json.dumps({"commands": [], "acks": []}))
+
+    monkeypatch.setattr(apply_recommended_controls_script, "state_path", lambda name: status_path if name == "status_summary.json" else control_path)
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(apply_recommended_controls_script, "enqueue_commands", control_plane_module.enqueue_commands)
+    monkeypatch.setattr(apply_recommended_controls_script, "recommended_commands_from_status", control_plane_module.recommended_commands_from_status)
+
+    rc = apply_recommended_controls_script.main()
+    output = json.loads(capsys.readouterr().out)
+    payload = json.loads(control_path.read_text())
+
+    assert rc == 0
+    assert output["added"] == 2
+    assert payload["commands"] == [
+        {"command": "tighten_risk"},
+        {"command": "set_strategy_gate", "strategy": "center_buy", "enabled": False},
     ]
 
 

@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import settings, state_path
+from src.control.control_plane import recommended_commands_from_status
 from src.state.db import get_connection
 from src.state.decision_chain import query_no_trade_cases
 
@@ -126,6 +127,7 @@ def check() -> dict:
         try:
             with open(status_path) as f:
                 status = json.load(f)
+            result["recommended_commands"] = recommended_commands_from_status(status)
             result["last_cycle"] = status.get("timestamp", "unknown")
             result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
             risk_details = status.get("risk", {}).get("details", {}) or {}
