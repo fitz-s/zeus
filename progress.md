@@ -367,6 +367,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual control/risk backlog after this slice:
   - the remaining higher-order decision is whether future auto-controls should use this same multiplier path, stricter per-strategy gates, or both.
 
+## Risk Loop Slice 2 (actionable recommendations)
+- Landed protections:
+  - RiskGuard now emits `recommended_controls` and `recommended_strategy_gates`, turning execution decay / edge compression evidence into explicit operator-action recommendations instead of leaving them as raw diagnostics only.
+- Validation evidence for this slice:
+  - targeted RiskGuard tests after the slice: `19 passed`
+  - full suite after landing the slice: `444 passed, 3 skipped`
+- Residual risk-loop backlog after this slice:
+  - the next remaining step is policy, not plumbing: deciding which recommendations should stay advisory and which should become direct automated control-plane actions.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

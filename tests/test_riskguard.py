@@ -245,6 +245,7 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_tracker_summary"]["center_buy"]["trades"] == 2
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
         assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
+        assert details["recommended_strategy_gates"] == []
 
     def test_tick_turns_yellow_on_execution_decay(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -293,6 +294,7 @@ class TestRiskGuardSettlementSource:
         assert level == RiskLevel.YELLOW
         assert row["level"] == RiskLevel.YELLOW.value
         assert details["execution_quality_level"] == "YELLOW"
+        assert "tighten_risk" in details["recommended_controls"]
 
     def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -324,6 +326,8 @@ class TestRiskGuardSettlementSource:
         assert level == RiskLevel.YELLOW
         assert row["level"] == RiskLevel.YELLOW.value
         assert details["strategy_signal_level"] == "YELLOW"
+        assert details["recommended_strategy_gates"] == ["center_buy"]
+        assert "review_strategy_gates" in details["recommended_controls"]
 
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
