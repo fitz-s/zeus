@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import scripts.rebuild_strategy_tracker_current_regime as rebuild
+import src.state.strategy_tracker as strategy_tracker_module
 
 
 def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tmp_path, monkeypatch):
@@ -69,3 +70,60 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
     assert history["accounting"]["accounting_scope"] == "full_history_archive"
     assert rebuilt["strategies"]["opening_inertia"]["trades"][0]["trade_id"] == "open1"
     assert rebuilt["strategies"]["shoulder_sell"]["trades"][0]["trade_id"] == "exit1"
+
+
+def test_edge_compression_requires_enough_time_span(monkeypatch):
+    class FrozenDatetime(strategy_tracker_module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 4, 2, 12, 0, 0, tzinfo=strategy_tracker_module.timezone.utc)
+
+    monkeypatch.setattr(strategy_tracker_module, "datetime", FrozenDatetime)
+    tracker = strategy_tracker_module.StrategyTracker()
+    metrics = tracker.strategies["opening_inertia"]
+
+    for i in range(25):
+        metrics.record(
+            {
+                "trade_id": f"oi-{i}",
+                "strategy": "opening_inertia",
+                "edge_source": "opening_inertia",
+                "entered_at": f"2026-04-01T{(i // 6):02d}:{(i % 6) * 10:02d}:00+00:00",
+                "edge": 0.20 - (i * 0.003),
+                "pnl": 0.0,
+                "status": "exited",
+            }
+        )
+
+    assert tracker.edge_compression_check(window_days=30) == []
+
+
+def test_edge_compression_still_triggers_with_enough_samples_and_span(monkeypatch):
+    class FrozenDatetime(strategy_tracker_module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 4, 10, 12, 0, 0, tzinfo=strategy_tracker_module.timezone.utc)
+
+    monkeypatch.setattr(strategy_tracker_module, "datetime", FrozenDatetime)
+    tracker = strategy_tracker_module.StrategyTracker()
+    metrics = tracker.strategies["opening_inertia"]
+
+    for i in range(24):
+        day = 1 + (i // 4)
+        hour = 8 + (i % 4)
+        metrics.record(
+            {
+                "trade_id": f"oi-span-{i}",
+                "strategy": "opening_inertia",
+                "edge_source": "opening_inertia",
+                "entered_at": f"2026-04-{day:02d}T{hour:02d}:00:00+00:00",
+                "edge": 0.25 - (i * 0.005),
+                "pnl": 0.0,
+                "status": "exited",
+            }
+        )
+
+    alerts = tracker.edge_compression_check(window_days=30)
+
+    assert len(alerts) == 1
+    assert alerts[0].startswith("EDGE_COMPRESSION: opening_inertia edge shrinking at -")
