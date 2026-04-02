@@ -4,18 +4,19 @@
   "ready": [
     {
       "owner": "unassigned",
-      "task_id": "P0-D",
-      "goal": "Close remaining runtime spine: pending/live fail-closed, Day0 terminal phase hardening, durable transition/event emission"
-    },
-    {
-      "owner": "unassigned",
       "task_id": "P1-E",
       "goal": "Continue learning-loop migration from authoritative ledger and evaluated opportunity set"
     }
   ],
-  "active": [],
+  "active": [
+    {
+      "owner": "Main",
+      "task_id": "P0-D",
+      "goal": "Drive the next runtime-spine closure slice after landing phantom-void and stale-Day0 freshness protections"
+    }
+  ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-B and P0-C after implementation, review, adversarial challenge, and full-suite validation; return to solo with P0-D next",
+  "last_decision": "CLOSE P0-D slice 1 (phantom-void + stale-Day0 freshness), keep P0-D active for the remaining runtime-spine gaps",
   "backlog_source": "task.md"
 }
