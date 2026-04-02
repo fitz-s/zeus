@@ -431,6 +431,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual learning backlog after this slice:
   - what remains is less about assembling current-regime learning truth and more about deciding how that truth should alter controls, gating, or model adaptation.
 
+## Control/Operator Slice 3 (recommendations mirrored into control surface)
+- Landed protections:
+  - `status_summary.control` now includes `recommended_controls` and `recommended_strategy_gates`, so active controls and RiskGuard-recommended controls are visible in one place.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `29 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual control/operator backlog after this slice:
+  - the remaining question is now squarely automation policy: whether and when those recommendations should be auto-applied instead of merely surfaced.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:

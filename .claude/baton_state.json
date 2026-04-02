@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing a strategy-aware learned-current-regime summary"
+      "goal": "Drive the next truth/consumer slice after landing recommended controls and gates in the control surface"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the strategy-aware learning-summary slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the recommendations-in-control slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

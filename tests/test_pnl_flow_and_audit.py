@@ -332,7 +332,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW", "recommended_strategy_gates": ["center_buy"]})
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW", "recommended_strategy_gates": ["center_buy"], "recommended_controls": ["tighten_risk"]})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
@@ -352,6 +352,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["control"]["entries_paused"] is True
     assert status["control"]["edge_threshold_multiplier"] == 2.0
     assert status["control"]["strategy_gates"]["opening_inertia"] is False
+    assert status["control"]["recommended_controls"] == ["tighten_risk"]
+    assert status["control"]["recommended_strategy_gates"] == ["center_buy"]
     assert status["runtime"]["chain_state_counts"]["exit_pending_missing"] == 1
     assert status["runtime"]["exit_state_counts"]["retry_pending"] == 1
     assert status["runtime"]["unverified_entries"] == 1

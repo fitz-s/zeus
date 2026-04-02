@@ -124,6 +124,8 @@ def write_status(cycle_summary: dict = None) -> None:
             "entries_paused": is_entries_paused(),
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": strategy_gates(),
+            "recommended_controls": risk_details.get("recommended_controls", []),
+            "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
         },
         "risk": {
             "level": _get_risk_level(),
