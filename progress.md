@@ -1073,3 +1073,38 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or Day0Signal or observation_weight'` → `17 passed`
   - `./.venv/bin/pytest -q` → `472 passed, 3 skipped`
+
+## 2026-04-02 — P2-H second seam: day0 observation-weight policy extraction
+- The next P2-H slice continues the same low-blast-radius approach: extract the hardcoded day0 observation-dominance constants and temporal-closure formula behind the forecast-layer seam, without changing behavior yet.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py` now also owns:
+    - `day0_temporal_closure_weight(...)`
+    - `day0_observation_weight(...)`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py` now delegates both `_temporal_closure_weight()` and `observation_weight()` to the centralized seam instead of carrying the policy inline.
+- Why this slice matters:
+  - it pulls more of the day0 constant policy out of the signal class
+  - it creates one explicit surface for later `solar backbone + online residual update` work
+  - it keeps the behavior stable while shrinking the future refactor blast radius
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks closure-weight endpoints and pre-sunrise/post-sunset observation-weight behavior at the seam level.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure'` → `8 passed`
+  - `./.venv/bin/pytest -q` → `474 passed, 3 skipped`
+
+## 2026-04-02 — P2-H third seam: lead/spread-aware analysis sigma interface
+- A local research pass over `/Users/leofitz/Downloads/外部调研.md` pointed to the next smallest correct forecast-layer move: stop dropping `lead_days` and `ensemble_spread` before the analysis sigma seam. The research recommendation is explicit that day1..day7 sigma should become lead-continuous / heteroscedastic later; the right next step is to carry those covariates into the seam now, without inventing a new heuristic yet.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_bootstrap_sigma(...)` now accepts `lead_days` and `ensemble_spread`
+    - current numeric behavior is unchanged
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - now passes both `lead_days` and the current ensemble spread into that seam
+- Why this matters:
+  - it freezes the correct interface boundary for the future lead-continuous / heteroscedastic sigma policy
+  - it avoids spreading another temporary heuristic into `MarketAnalysis`
+  - it keeps this slice behavior-preserving and reviewable
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that passing `lead_days` / `ensemble_spread` preserves today’s baseline behavior.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure'` → `8 passed`
+  - `./.venv/bin/pytest -q` → `474 passed, 3 skipped`
