@@ -834,6 +834,43 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
 
 
+def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
+    from src.state.db import log_position_event, query_execution_event_summary
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="exec-summary-1",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        strategy="center_buy",
+        edge_source="center_buy",
+        env="paper",
+    )
+    log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
+    log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
+    log_position_event(conn, "EXIT_ORDER_ATTEMPTED", pos, details={"status": "placed"}, source="exit_lifecycle")
+    log_position_event(conn, "EXIT_RETRY_SCHEDULED", pos, details={"status": "retry"}, source="exit_lifecycle")
+    conn.commit()
+
+    summary = query_execution_event_summary(conn, env="paper")
+    conn.close()
+
+    assert summary["event_sample_size"] == 4
+    assert summary["overall"]["entry_attempted"] == 1
+    assert summary["overall"]["entry_filled"] == 1
+    assert summary["overall"]["exit_attempted"] == 1
+    assert summary["overall"]["exit_retry_scheduled"] == 1
+    assert summary["by_strategy"]["center_buy"]["entry_filled"] == 1
+
+
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,

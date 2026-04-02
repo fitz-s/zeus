@@ -1161,6 +1161,80 @@ def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
     return str(rows[0].get("source") or "none")
 
 
+def query_execution_event_summary(
+    conn: sqlite3.Connection,
+    *,
+    env: str | None = None,
+    limit: int = 500,
+) -> dict:
+    query_env = settings.mode if env is None else env
+    rows = conn.execute(
+        """
+        SELECT event_type, strategy
+        FROM position_events
+        WHERE env = ?
+          AND event_type IN (
+            'ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED',
+            'EXIT_ORDER_ATTEMPTED', 'EXIT_ORDER_FILLED',
+            'EXIT_RETRY_SCHEDULED', 'EXIT_BACKOFF_EXHAUSTED',
+            'EXIT_FILL_CHECK_FAILED', 'EXIT_FILL_CHECKED',
+            'EXIT_FILL_CONFIRMED', 'EXIT_RETRY_RELEASED'
+          )
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (query_env, limit),
+    ).fetchall()
+
+    def _blank() -> dict:
+        return {
+            "entry_attempted": 0,
+            "entry_filled": 0,
+            "entry_rejected": 0,
+            "exit_attempted": 0,
+            "exit_filled": 0,
+            "exit_retry_scheduled": 0,
+            "exit_backoff_exhausted": 0,
+            "exit_fill_check_failed": 0,
+            "exit_fill_checked": 0,
+            "exit_fill_confirmed": 0,
+            "exit_retry_released": 0,
+        }
+
+    overall = _blank()
+    by_strategy: dict[str, dict] = {}
+
+    mapping = {
+        "ORDER_ATTEMPTED": "entry_attempted",
+        "ORDER_FILLED": "entry_filled",
+        "ORDER_REJECTED": "entry_rejected",
+        "EXIT_ORDER_ATTEMPTED": "exit_attempted",
+        "EXIT_ORDER_FILLED": "exit_filled",
+        "EXIT_RETRY_SCHEDULED": "exit_retry_scheduled",
+        "EXIT_BACKOFF_EXHAUSTED": "exit_backoff_exhausted",
+        "EXIT_FILL_CHECK_FAILED": "exit_fill_check_failed",
+        "EXIT_FILL_CHECKED": "exit_fill_checked",
+        "EXIT_FILL_CONFIRMED": "exit_fill_confirmed",
+        "EXIT_RETRY_RELEASED": "exit_retry_released",
+    }
+
+    for row in rows:
+        event_type = str(row["event_type"])
+        counter_key = mapping.get(event_type)
+        if counter_key is None:
+            continue
+        overall[counter_key] += 1
+        strategy = str(row["strategy"] or "unclassified")
+        bucket = by_strategy.setdefault(strategy, _blank())
+        bucket[counter_key] += 1
+
+    return {
+        "event_sample_size": len(rows),
+        "overall": overall,
+        "by_strategy": by_strategy,
+    }
+
+
 def log_position_event(
     conn: sqlite3.Connection,
     event_type: str,
