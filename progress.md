@@ -1147,3 +1147,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma'` → `10 passed`
   - `./.venv/bin/pytest -q` → `476 passed, 3 skipped`
+
+## 2026-04-02 — P2-H spread-aware sigma seam (behavior-preserving)
+- After the first lead-continuous behavior change, the next bounded step from the research roadmap was to stop dropping ensemble spread at the forecast sigma seam. This slice adds the spread multiplier boundary without changing outputs yet.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_spread_sigma_multiplier(ensemble_spread, unit=...)`
+    - `analysis_bootstrap_sigma(...)` now composes:
+      - base instrument sigma
+      - lead multiplier
+      - spread multiplier
+  - current spread multiplier is intentionally neutral (`1.0`) so behavior is preserved until the next explicit P2-H behavior change chooses a real heteroscedastic policy.
+- Why this slice matters:
+  - the correct covariate boundary is now fully present for day1..day7 sigma policy
+  - the next heteroscedastic step can happen inside one seam instead of another consumer rewrite
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks that the spread multiplier is neutral for now.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma'` → `11 passed`
+  - `./.venv/bin/pytest -q` → `477 passed, 3 skipped`

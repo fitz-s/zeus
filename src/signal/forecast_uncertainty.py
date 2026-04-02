@@ -25,6 +25,21 @@ def analysis_lead_sigma_multiplier(lead_days: float | None) -> float:
     return 1.0 + 0.2 * (lead / 6.0)
 
 
+def analysis_spread_sigma_multiplier(
+    ensemble_spread: float | None,
+    *,
+    unit: str,
+) -> float:
+    """Phase-1 heteroscedastic seam for analysis sigma.
+
+    This slice is intentionally behavior-preserving: it carries the spread
+    covariate through a named policy boundary but still returns the neutral
+    multiplier until a later P2-H behavior change is chosen.
+    """
+    _ = ensemble_spread, unit
+    return 1.0
+
+
 def day0_temporal_closure_weight(
     *,
     hours_remaining: float,
@@ -106,8 +121,11 @@ def analysis_bootstrap_sigma(
     lead-continuous / heteroscedastic sigma policy will need, while preserving
     today's numeric behavior.
     """
-    _ = ensemble_spread
-    return sigma_instrument(unit).value * analysis_lead_sigma_multiplier(lead_days)
+    return (
+        sigma_instrument(unit).value
+        * analysis_lead_sigma_multiplier(lead_days)
+        * analysis_spread_sigma_multiplier(ensemble_spread, unit=unit)
+    )
 
 
 def day0_post_peak_sigma(unit: str, peak_confidence: float) -> float:

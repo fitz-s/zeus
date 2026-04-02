@@ -3,6 +3,7 @@ from src.signal.forecast_uncertainty import (
     day0_blended_highs,
     analysis_bootstrap_sigma,
     analysis_lead_sigma_multiplier,
+    analysis_spread_sigma_multiplier,
     day0_observation_weight,
     day0_post_peak_sigma,
     day0_temporal_closure_weight,
@@ -33,6 +34,12 @@ def test_analysis_lead_sigma_multiplier_is_continuous_and_bounded():
     assert analysis_lead_sigma_multiplier(3.0) == 1.1
     assert analysis_lead_sigma_multiplier(6.0) == 1.2
     assert analysis_lead_sigma_multiplier(10.0) == 1.2
+
+
+def test_analysis_spread_sigma_multiplier_is_neutral_for_now():
+    assert analysis_spread_sigma_multiplier(None, unit="F") == 1.0
+    assert analysis_spread_sigma_multiplier(2.5, unit="F") == 1.0
+    assert analysis_spread_sigma_multiplier(1.0, unit="C") == 1.0
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():
