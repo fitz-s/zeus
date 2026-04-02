@@ -17,6 +17,7 @@ from src.config import edge_n_bootstrap
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_member_maxes,
+    analysis_sigma_context,
 )
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
@@ -61,11 +62,20 @@ class MarketAnalysis:
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
+        ensemble_spread = float(np.std(self._member_maxes)) if len(self._member_maxes) else None
+        self._sigma_context = analysis_sigma_context(
+            unit=unit,
+            lead_days=lead_days,
+            ensemble_spread=ensemble_spread,
+        )
         self._sigma = analysis_bootstrap_sigma(
             unit,
             lead_days=lead_days,
-            ensemble_spread=float(np.std(self._member_maxes)) if len(self._member_maxes) else None,
+            ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
+
+    def sigma_context(self) -> dict:
+        return dict(self._sigma_context)
 
     def find_edges(
         self, n_bootstrap: int | None = None

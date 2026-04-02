@@ -1258,3 +1258,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or residual_adjustment'` → `15 passed`
   - `./.venv/bin/pytest -q` → `481 passed, 3 skipped`
+
+## 2026-04-02 — P2-H forecast sigma context surface
+- The latest P2-H slice makes the forecast uncertainty seam more inspectable. Instead of only returning a scalar sigma, the seam can now explain how that sigma was built.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_sigma_context(...)`
+    - includes: `base_sigma`, `lead_multiplier`, `spread_multiplier`, `final_sigma`
+    - `analysis_bootstrap_sigma(...)` now reuses that context instead of recomputing the pieces ad hoc
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - now stores `_sigma_context` and exposes `sigma_context()`
+- Why this matters:
+  - future P2-H changes can be evaluated against an explicit sigma decomposition instead of a hidden scalar
+  - it makes later audit / artifact surfacing much easier if we decide to expose forecast uncertainty internals
+  - current runtime behavior is unchanged by this slice
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the sigma-context decomposition values.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context'` → `15 passed`
+  - `./.venv/bin/pytest -q` → `482 passed, 3 skipped`

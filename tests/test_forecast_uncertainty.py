@@ -1,6 +1,7 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
     analysis_mean_offset,
+    analysis_sigma_context,
     day0_backbone_residual_adjustment,
     day0_backbone_high,
     day0_blended_highs,
@@ -55,6 +56,17 @@ def test_analysis_member_maxes_is_identity_for_now():
 
 def test_analysis_mean_offset_is_zero_for_now():
     assert analysis_mean_offset(unit="F", lead_days=5.0, ensemble_mean=42.0) == 0.0
+
+
+def test_analysis_sigma_context_explains_components():
+    ctx = analysis_sigma_context(unit="F", lead_days=3.0, ensemble_spread=1.0)
+    assert ctx["unit"] == "F"
+    assert ctx["lead_days"] == 3.0
+    assert ctx["ensemble_spread"] == 1.0
+    assert ctx["base_sigma"] == sigma_instrument("F").value
+    assert ctx["lead_multiplier"] == 1.1
+    assert ctx["spread_multiplier"] == 1.05
+    assert ctx["final_sigma"] == sigma_instrument("F").value * 1.1 * 1.05
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():

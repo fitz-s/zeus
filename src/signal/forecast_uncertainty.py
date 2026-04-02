@@ -33,6 +33,27 @@ def analysis_member_maxes(
     return values + offset
 
 
+def analysis_sigma_context(
+    *,
+    unit: str,
+    lead_days: float | None,
+    ensemble_spread: float | None,
+) -> dict:
+    """Explain how the current analysis sigma was constructed."""
+    base_sigma = sigma_instrument(unit).value
+    lead_multiplier = analysis_lead_sigma_multiplier(lead_days)
+    spread_multiplier = analysis_spread_sigma_multiplier(ensemble_spread, unit=unit)
+    return {
+        "unit": unit,
+        "lead_days": lead_days,
+        "ensemble_spread": ensemble_spread,
+        "base_sigma": base_sigma,
+        "lead_multiplier": lead_multiplier,
+        "spread_multiplier": spread_multiplier,
+        "final_sigma": base_sigma * lead_multiplier * spread_multiplier,
+    }
+
+
 def analysis_mean_offset(
     *,
     unit: str,
@@ -197,11 +218,11 @@ def analysis_bootstrap_sigma(
     lead-continuous / heteroscedastic sigma policy will need, while preserving
     today's numeric behavior.
     """
-    return (
-        sigma_instrument(unit).value
-        * analysis_lead_sigma_multiplier(lead_days)
-        * analysis_spread_sigma_multiplier(ensemble_spread, unit=unit)
-    )
+    return analysis_sigma_context(
+        unit=unit,
+        lead_days=lead_days,
+        ensemble_spread=ensemble_spread,
+    )["final_sigma"]
 
 
 def day0_post_peak_sigma(unit: str, peak_confidence: float) -> float:
