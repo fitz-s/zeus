@@ -138,6 +138,7 @@ def test_day0_backbone_high_is_observed_high_for_now():
         hours_remaining=4.0,
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:00:00+00:00",
     ) == 45.0
 
 
@@ -150,6 +151,7 @@ def test_day0_backbone_residual_adjustment_is_neutral_for_now():
         hours_remaining=4.0,
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:00:00+00:00",
     ) == 0.0
 
 
@@ -162,13 +164,14 @@ def test_day0_backbone_residual_adjustment_is_small_positive_when_temp_is_near_h
         hours_remaining=4.0,
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:00:00+00:00",
     )
     assert 0.0 < adj < 0.25
 
 
 def test_day0_nowcast_blend_weight_requires_source_and_time():
-    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="", observation_time=None) == 0.0
-    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="wu_api", observation_time=None) == 0.0
+    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="", observation_time=None, current_utc_timestamp=None) == 0.0
+    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="wu_api", observation_time=None, current_utc_timestamp="2026-04-02T01:00:00+00:00") == 0.0
 
 
 def test_day0_nowcast_blend_weight_increases_as_horizon_shortens():
@@ -176,11 +179,30 @@ def test_day0_nowcast_blend_weight_increases_as_horizon_shortens():
         hours_remaining=6.0,
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:00:00+00:00",
     )
     late = day0_nowcast_blend_weight(
         hours_remaining=1.0,
         observation_source="wu_api",
         observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:00:00+00:00",
     )
     assert early == 0.0
     assert 0.0 < late <= 0.25
+
+
+def test_day0_nowcast_blend_weight_decays_with_stale_observation():
+    fresh = day0_nowcast_blend_weight(
+        hours_remaining=1.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:30:00+00:00",
+    )
+    stale = day0_nowcast_blend_weight(
+        hours_remaining=1.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T04:00:00+00:00",
+    )
+    assert fresh > stale
+    assert stale == 0.0

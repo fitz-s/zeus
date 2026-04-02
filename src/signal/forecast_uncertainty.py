@@ -200,6 +200,7 @@ def day0_backbone_high(
     hours_remaining: float,
     observation_source: str,
     observation_time: str | None,
+    current_utc_timestamp: str | None,
 ) -> float:
     """Phase-1 seam for future solar-backbone / online-residual day0 modeling.
 
@@ -213,6 +214,7 @@ def day0_backbone_high(
         hours_remaining=hours_remaining,
         observation_source=observation_source,
         observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
     )
 
 
@@ -225,6 +227,7 @@ def day0_backbone_residual_adjustment(
     hours_remaining: float,
     observation_source: str,
     observation_time: str | None,
+    current_utc_timestamp: str | None,
 ) -> float:
     """Phase-1 seam for future online residual correction on the day0 backbone.
 
@@ -249,6 +252,7 @@ def day0_backbone_residual_adjustment(
         hours_remaining=hours_remaining,
         observation_source=observation_source,
         observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
     )
     max_adjustment = base_sigma * 0.5
     adjustment = max_adjustment * proximity * solar_factor * remaining_factor * nowcast_neutrality
@@ -260,19 +264,33 @@ def day0_nowcast_blend_weight(
     hours_remaining: float,
     observation_source: str,
     observation_time: str | None,
+    current_utc_timestamp: str | None,
 ) -> float:
     """Phase-1 seam for future very-short-lead nowcast/NWP blending.
 
     Current behavior is neutral; later work can turn this into a learned or
     rule-based blend without reopening the day0 call sites.
     """
-    if not observation_source or not observation_time:
+    from datetime import datetime, timezone
+
+    if not observation_source or not observation_time or not current_utc_timestamp:
         return 0.0
     source = str(observation_source).lower()
     source_factor = 1.0 if any(tag in source for tag in ("wu", "asos", "obs")) else 0.5
     hours = min(6.0, max(0.0, float(hours_remaining)))
     short_lead_progress = 1.0 - (hours / 6.0)
-    return 0.25 * short_lead_progress * source_factor
+    try:
+        observed_at = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
+        current_at = datetime.fromisoformat(str(current_utc_timestamp).replace("Z", "+00:00"))
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        if current_at.tzinfo is None:
+            current_at = current_at.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (current_at - observed_at).total_seconds() / 3600.0)
+    except ValueError:
+        return 0.0
+    freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / 3.0))
+    return 0.25 * short_lead_progress * source_factor * freshness_factor
 
 
 def analysis_bootstrap_sigma(
