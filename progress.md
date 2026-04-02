@@ -1560,3 +1560,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `488 passed, 3 skipped`
+
+## 2026-04-02 — no-trade artifact semantic parity
+- A small but useful parity slice landed on the artifact side: no-trade artifacts no longer drop `edge_context_json` while trade artifacts keep it.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/decision_chain.py`
+    - `NoTradeCase` now includes `edge_context_json`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py`
+    - no-trade artifact construction now passes `edge_context_json` through alongside `settlement_semantics_json` and `epistemic_context_json`
+- Why this matters:
+  - later gate-layer or forecast-layer audit can compare traded vs non-traded cases on the same semantic surfaces
+  - it removes another small asymmetry before learned gate work arrives
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py` now locks no-trade preservation of `edge_context_json`
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `489 passed, 3 skipped`

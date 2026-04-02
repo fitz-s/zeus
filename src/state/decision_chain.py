@@ -92,6 +92,9 @@ class NoTradeCase:
     market_price: float = 0.0
     decision_snapshot_id: str = ""
     selected_method: str = ""
+    settlement_semantics_json: str = ""
+    epistemic_context_json: str = ""
+    edge_context_json: str = ""
     applied_validations: list[str] = field(default_factory=list)
     bin_labels: list[str] = field(default_factory=list)
     p_raw_vector: list[float] = field(default_factory=list)
