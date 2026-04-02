@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing real strategy gates in the control plane"
+      "goal": "Drive the next truth/consumer slice after landing risk details mirrored into status"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the real strategy-gate slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the risk-details-in-status slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

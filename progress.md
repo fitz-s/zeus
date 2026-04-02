@@ -294,6 +294,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual control/risk backlog after this slice:
   - surfaced strategy/execution/no-trade truth is now materially more actionable, but higher-order policy still remains: deciding which degradations should auto-tighten, which should per-strategy gate, and which should stay diagnostic only.
 
+## Operator Diagnosis Slice 4 (risk details mirrored into status)
+- Landed protections:
+  - `status_summary` now mirrors the latest `risk_state.details_json` into `risk.details`, so operators and outer systems do not need a second DB read just to understand why current risk is YELLOW/ORANGE/RED.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `27 passed`
+  - full suite after landing the slice: `441 passed, 3 skipped`
+- Residual operator/risk backlog after this slice:
+  - the next remaining work is no longer “missing data in the status surface”, but deciding which of the now-visible diagnostics should become stronger automated controls.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
