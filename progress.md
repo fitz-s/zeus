@@ -1674,3 +1674,29 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `25 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or evaluator_epistemic_context_includes_model_bias_reference or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
   - `./.venv/bin/pytest -q` → `495 passed, 3 skipped`
+
+## 2026-04-02 — P2-H sample-aware mean-offset gate
+- Once the bounded mean-offset reached the real analysis path, the next sharp seam became obvious: any `bias_reference` row could move the analysis mean, even when the reference sample was thin. This slice makes the first reliability gate explicit before pushing the mean side further.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_mean_context(...)` now reads `bias_reference["n_samples"]`
+    - mean offset now gets a first `sample_factor` gate:
+      - `n_samples < 20` → `sample_factor = 0.0`
+      - otherwise current bounded offset behavior remains unchanged
+    - context now exposes:
+      - `n_samples`
+      - `sample_factor`
+  - the same gate automatically applies to `analysis_mean_offset(...)` and `analysis_member_maxes(...)`, because both already route through the same mean seam
+- Why this matters:
+  - P2-H mean-side behavior is now closer to the existing upstream bias-correction discipline, which already treats `n_samples >= 20` as the meaningful sufficiency boundary
+  - it prevents thin historical bias rows from moving the analysis/bootstrap surface just because a provenance row exists
+  - it keeps the new mean behavior conservative while still preserving the richer provenance/audit surface for later slices
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - now locks:
+      - thin-sample bias rows do **not** shift `analysis_member_maxes(...)`
+      - thin-sample bias rows force `sample_factor = 0.0` in `analysis_mean_context(...)`
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `27 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or evaluator_epistemic_context_includes_model_bias_reference or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
+  - `./.venv/bin/pytest -q` → `497 passed, 3 skipped`

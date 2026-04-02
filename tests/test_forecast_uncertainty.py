@@ -96,6 +96,18 @@ def test_analysis_member_maxes_respects_bias_corrected_guard():
     assert list(adjusted) == raw
 
 
+def test_analysis_member_maxes_suppresses_offset_for_thin_bias_reference():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(
+        raw,
+        unit="F",
+        lead_days=5.0,
+        bias_corrected=False,
+        bias_reference={"source": "ecmwf", "bias": 4.0, "discount_factor": 0.7, "n_samples": 12},
+    )
+    assert list(adjusted) == raw
+
+
 def test_analysis_mean_context_explains_offset():
     ctx = analysis_mean_context(
         unit="F",
@@ -148,6 +160,23 @@ def test_analysis_mean_context_caps_large_bias_offset():
     assert ctx["raw_offset"] == -7.0
     assert ctx["max_abs_offset"] == sigma_instrument("F").value * 2.0
     assert ctx["offset"] == -(sigma_instrument("F").value * 2.0)
+
+
+def test_analysis_mean_context_suppresses_offset_below_sample_floor():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=5.0,
+        ensemble_mean=42.0,
+        city_name="NYC",
+        season="MAM",
+        forecast_source="ecmwf_ifs025",
+        bias_corrected=False,
+        bias_reference={"source": "ecmwf", "bias": 4.0, "discount_factor": 0.7, "n_samples": 12},
+    )
+    assert ctx["n_samples"] == 12
+    assert ctx["sample_factor"] == 0.0
+    assert ctx["raw_offset"] == 0.0
+    assert ctx["offset"] == 0.0
 
 
 def test_analysis_sigma_context_explains_components():
