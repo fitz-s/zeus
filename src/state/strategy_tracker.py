@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
 TRACKER_PATH = state_path("strategy_tracker.json")
 _TRACKER_SINGLETON: "StrategyTracker | None" = None
-EDGE_COMPRESSION_MIN_TRADES = 20
-EDGE_COMPRESSION_MIN_SPAN_DAYS = 3.0
 
 
 def _default_accounting(path: Path | None = None) -> dict[str, Any]:
@@ -56,44 +54,17 @@ class StrategyMetrics:
         return sum(t.get("pnl", 0) for t in self.trades if t.get("pnl") is not None)
 
     def edge_trend(self, window_days: int = 30) -> float:
-        """Linear regression slope of edge magnitude over real elapsed days."""
-        recent = self.recent_edge_points(window_days)
+        """Linear regression slope of edge magnitude over time. Negative = shrinking."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+        recent = [t for t in self.trades if t.get("entered_at", "") >= cutoff and "edge" in t]
         if len(recent) < 5:
             return 0.0
-        start = recent[0][0]
-        x = np.array(
-            [
-                max(0.0, (ts - start).total_seconds() / 86400.0)
-                for ts, _edge in recent
-            ],
-            dtype=float,
-        )
+        edges = [abs(t["edge"]) for t in recent]
+        x = np.arange(len(edges))
         if np.std(x) == 0:
             return 0.0
-        edges = np.array([edge for _ts, edge in recent], dtype=float)
         slope = np.polyfit(x, edges, 1)[0]
         return float(slope)
-
-    def recent_edge_points(self, window_days: int = 30) -> list[tuple[datetime, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-        points: list[tuple[datetime, float]] = []
-        for trade in self.trades:
-            entered_at = trade.get("entered_at", "")
-            if not entered_at or "edge" not in trade:
-                continue
-            try:
-                ts = datetime.fromisoformat(str(entered_at).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if ts < cutoff:
-                continue
-            try:
-                edge = abs(float(trade.get("edge", 0.0) or 0.0))
-            except (TypeError, ValueError):
-                continue
-            points.append((ts, edge))
-        points.sort(key=lambda item: item[0])
-        return points
 
     def count(self) -> int:
         return len(self.trades)
@@ -151,11 +122,7 @@ class StrategyTracker:
         """Per-strategy edge trend. Returns list of alerts."""
         alerts = []
         for name, metrics in self.strategies.items():
-            recent_points = metrics.recent_edge_points(window_days)
-            if len(recent_points) < EDGE_COMPRESSION_MIN_TRADES:
-                continue
-            span_days = (recent_points[-1][0] - recent_points[0][0]).total_seconds() / 86400.0
-            if span_days < EDGE_COMPRESSION_MIN_SPAN_DAYS:
+            if metrics.count() < 10:
                 continue
             slope = metrics.edge_trend(window_days)
             if slope < -0.001:

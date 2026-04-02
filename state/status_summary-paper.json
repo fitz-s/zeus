@@ -1,0 +1,233 @@
+{
+  "timestamp": "2026-03-31T18:29:04.865175+00:00",
+  "process": {
+    "pid": 59087,
+    "mode": "paper",
+    "version": "zeus_v2"
+  },
+  "risk": {
+    "level": "GREEN"
+  },
+  "portfolio": {
+    "open_positions": 19,
+    "total_exposure_usd": 56.57,
+    "heat_pct": 36.2,
+    "initial_bankroll": 150.0,
+    "realized_pnl": 5.34,
+    "unrealized_pnl": 1.1,
+    "total_pnl": 6.44,
+    "effective_bankroll": 156.44,
+    "bankroll": 156.44,
+    "positions": [
+      {
+        "trade_id": "454db425-76d",
+        "city": "NYC",
+        "direction": "buy_yes",
+        "size": 1.2839841384863893,
+        "edge": 0.03417109787225111,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.003,
+        "unrealized_pnl": 0.64
+      },
+      {
+        "trade_id": "a9fd32ad-a8b",
+        "city": "NYC",
+        "direction": "buy_yes",
+        "size": 1.0988892428292492,
+        "edge": 0.029010676010692175,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0025,
+        "unrealized_pnl": -0.82
+      },
+      {
+        "trade_id": "0178da5e-93f",
+        "city": "NYC",
+        "direction": "buy_yes",
+        "size": 1.0172121625296633,
+        "edge": 0.02663739582944345,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0205,
+        "unrealized_pnl": 0.14
+      },
+      {
+        "trade_id": "772833bd-bf1",
+        "city": "NYC",
+        "direction": "buy_yes",
+        "size": 1.2266071390263813,
+        "edge": 0.032496911803272265,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.01,
+        "unrealized_pnl": 0.66
+      },
+      {
+        "trade_id": "bc05151e-0e0",
+        "city": "NYC",
+        "direction": "buy_yes",
+        "size": 1.2903274366518058,
+        "edge": 0.034357118546582084,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.003,
+        "unrealized_pnl": 1.29
+      },
+      {
+        "trade_id": "f4604ca3-caf",
+        "city": "NYC",
+        "direction": "buy_no",
+        "size": 11.439741595982191,
+        "edge": 0.11134681820089332,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.665,
+        "unrealized_pnl": 0.54
+      },
+      {
+        "trade_id": "f904a495-ec5",
+        "city": "Austin",
+        "direction": "buy_no",
+        "size": 13.070684160574134,
+        "edge": 0.14639166259843028,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.575,
+        "unrealized_pnl": -0.11
+      },
+      {
+        "trade_id": "6f8ce461-902",
+        "city": "Denver",
+        "direction": "buy_yes",
+        "size": 1.2522457125530209,
+        "edge": 0.03327634273490895,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.003,
+        "unrealized_pnl": -0.18
+      },
+      {
+        "trade_id": "0c108102-032",
+        "city": "Denver",
+        "direction": "buy_yes",
+        "size": 1.107565102306971,
+        "edge": 0.029092043353929772,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0055,
+        "unrealized_pnl": -0.7
+      },
+      {
+        "trade_id": "9e97c78f-2a8",
+        "city": "Denver",
+        "direction": "buy_yes",
+        "size": 1.2085672324248844,
+        "edge": 0.03200286031461094,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0065,
+        "unrealized_pnl": -0.09
+      },
+      {
+        "trade_id": "9cfc3ba7-d35",
+        "city": "Houston",
+        "direction": "buy_yes",
+        "size": 1.047414720952367,
+        "edge": 0.027833300518107566,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.003,
+        "unrealized_pnl": -0.15
+      },
+      {
+        "trade_id": "cea42e98-b7e",
+        "city": "Houston",
+        "direction": "buy_yes",
+        "size": 1.047414720952367,
+        "edge": 0.027833300518107566,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0035,
+        "unrealized_pnl": 0.0
+      },
+      {
+        "trade_id": "0a8d35bc-03a",
+        "city": "Houston",
+        "direction": "buy_yes",
+        "size": 1.0546375940103592,
+        "edge": 0.028039298166088748,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.0025,
+        "unrealized_pnl": -0.18
+      },
+      {
+        "trade_id": "050cb6f5-5cf",
+        "city": "Houston",
+        "direction": "buy_yes",
+        "size": 1.0546375940103592,
+        "edge": 0.028039298166088748,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.003,
+        "unrealized_pnl": 0.0
+      },
+      {
+        "trade_id": "59d3ec84-d2d",
+        "city": "Houston",
+        "direction": "buy_no",
+        "size": 5.346210977182252,
+        "edge": 0.0983702819801534,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.625,
+        "unrealized_pnl": -0.24
+      },
+      {
+        "trade_id": "9ad96ae9-de1",
+        "city": "Houston",
+        "direction": "buy_no",
+        "size": 3.6903386240304346,
+        "edge": 0.10965577625690437,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.635,
+        "unrealized_pnl": 0.15
+      },
+      {
+        "trade_id": "b21e81ef-125",
+        "city": "Houston",
+        "direction": "buy_no",
+        "size": 1.2541000976540801,
+        "edge": 0.07526091843857441,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.6799999999999999,
+        "unrealized_pnl": 0.0
+      },
+      {
+        "trade_id": "adad4dea-fc9",
+        "city": "Atlanta",
+        "direction": "buy_no",
+        "size": 3.870216348223784,
+        "edge": 0.1049708450123501,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.7150000000000001,
+        "unrealized_pnl": 0.0
+      },
+      {
+        "trade_id": "845fbd22-cbc",
+        "city": "Miami",
+        "direction": "buy_no",
+        "size": 4.20577556626922,
+        "edge": 0.11957745555518073,
+        "bin": "Will the highest temperature i",
+        "mark_price": 0.74,
+        "unrealized_pnl": 0.15
+      }
+    ]
+  },
+  "cycle": {
+    "mode": "day0_capture",
+    "started_at": "2026-03-31T18:23:12.875165+00:00",
+    "monitors": 19,
+    "exits": 0,
+    "candidates": 0,
+    "trades": 0,
+    "no_trades": 0,
+    "risk_level": "GREEN",
+    "pending_voids": 0,
+    "chain_sync": {
+      "skipped": "paper_mode"
+    },
+    "config_cap_usd": 150.0,
+    "effective_bankroll_usd": 155.74440151682163,
+    "dynamic_cap_usd": 150.0,
+    "portfolio_heat_pct": 37.71,
+    "completed_at": "2026-03-31T18:29:04.863548+00:00"
+  }
+}
