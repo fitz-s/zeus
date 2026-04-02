@@ -52,6 +52,51 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     return summary
 
 
+def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int = 200) -> dict:
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_type, strategy
+            FROM position_events
+            WHERE env = ?
+              AND event_type IN ('ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED')
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (env, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
+    overall = {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None}
+    by_strategy: dict[str, dict] = {}
+    for row in rows:
+        event_type = str(row["event_type"])
+        strategy = str(row["strategy"] or "unclassified")
+        bucket = by_strategy.setdefault(
+            strategy,
+            {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None},
+        )
+        if event_type == "ORDER_ATTEMPTED":
+            overall["attempted"] += 1
+            bucket["attempted"] += 1
+        elif event_type == "ORDER_FILLED":
+            overall["filled"] += 1
+            bucket["filled"] += 1
+        elif event_type == "ORDER_REJECTED":
+            overall["rejected"] += 1
+            bucket["rejected"] += 1
+
+    def _finalize(bucket: dict) -> None:
+        denom = bucket["filled"] + bucket["rejected"]
+        bucket["fill_rate"] = round(bucket["filled"] / denom, 4) if denom else None
+
+    _finalize(overall)
+    for bucket in by_strategy.values():
+        _finalize(bucket)
+    return {"overall": overall, "by_strategy": by_strategy}
+
+
 def init_risk_db(conn: sqlite3.Connection) -> None:
     """Create risk_state tables."""
     conn.executescript("""
@@ -79,6 +124,7 @@ def tick() -> RiskLevel:
 
     thresholds = settings["riskguard"]
     portfolio = load_portfolio()
+    current_env = settings.mode
 
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
     settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -107,6 +153,7 @@ def tick() -> RiskLevel:
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
     strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
+    entry_execution_summary = _entry_execution_summary(zeus_conn, env=current_env)
 
     # Compute metrics from authoritative settlement rows only.
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
@@ -161,6 +208,7 @@ def tick() -> RiskLevel:
             "settlement_metric_ready_count": len(metric_ready_rows),
             "accuracy": round(d_accuracy, 4),
             "strategy_settlement_summary": strategy_settlement_summary,
+            "entry_execution_summary": entry_execution_summary,
         }),
         now,
     ))
