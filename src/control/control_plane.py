@@ -13,10 +13,12 @@ from src.config import state_path
 logger = logging.getLogger(__name__)
 
 CONTROL_PATH = state_path("control_plane.json")
+DEFAULT_EDGE_THRESHOLD_MULTIPLIER = 1.0
+TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 
 COMMANDS = {
     "pause_entries",                # Stop entering, keep monitoring
-    "resume",                       # Resume after pause
+    "resume",                       # Clear temporary global controls and resume entries
     "tighten_risk",                 # Double edge thresholds temporarily
     "request_status",               # Force status_summary write
     "set_strategy_gate",            # Enable/disable individual strategies
@@ -59,7 +61,7 @@ def is_entries_paused() -> bool:
 
 
 def get_edge_threshold_multiplier() -> float:
-    return _control_state.get("edge_threshold_multiplier", 1.0)
+    return _control_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
 
 
 def strategy_gates() -> dict[str, bool]:
@@ -90,18 +92,39 @@ def get_acknowledged_quarantine_clear_tokens() -> set[str]:
 
 
 def refresh_control_state() -> None:
-    _control_state["acknowledged_quarantine_clear_tokens"] = get_acknowledged_quarantine_clear_tokens()
     data = _load_control_payload()
+    acknowledged_tokens: set[str] = set()
+    entries_paused = False
+    edge_threshold_multiplier = DEFAULT_EDGE_THRESHOLD_MULTIPLIER
     gates: dict[str, bool] = {}
     for ack in data.get("acks", []):
-        if ack.get("command") != "set_strategy_gate":
-            continue
         if ack.get("status") != "executed":
+            continue
+        command = ack.get("command")
+        if command == "pause_entries":
+            entries_paused = True
+            continue
+        if command == "resume":
+            entries_paused = False
+            edge_threshold_multiplier = DEFAULT_EDGE_THRESHOLD_MULTIPLIER
+            continue
+        if command == "tighten_risk":
+            edge_threshold_multiplier = TIGHTENED_EDGE_THRESHOLD_MULTIPLIER
+            continue
+        if command == "acknowledge_quarantine_clear":
+            token_id = _extract_quarantine_token_id(ack)
+            if token_id:
+                acknowledged_tokens.add(token_id)
+            continue
+        if ack.get("command") != "set_strategy_gate":
             continue
         strategy = str(ack.get("strategy") or "")
         enabled = ack.get("enabled")
         if strategy and isinstance(enabled, bool):
             gates[strategy] = enabled
+    _control_state["entries_paused"] = entries_paused
+    _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
+    _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
 
 
@@ -155,9 +178,10 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
         return True, ""
     if name == "resume":
         _set_state("entries_paused", False)
+        _set_state("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
         return True, ""
     if name == "tighten_risk":
-        _set_state("edge_threshold_multiplier", 2.0)
+        _set_state("edge_threshold_multiplier", TIGHTENED_EDGE_THRESHOLD_MULTIPLIER)
         return True, ""
     if name == "request_status":
         from src.observability.status_summary import write_status

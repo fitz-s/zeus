@@ -692,3 +692,14 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - do not use strategy tracker as capital-allocation authority yet
 - do not ship UI/control-plane cosmetics as substitutes for runtime closure
 - do not preserve dirty semantics for compatibility if they mislead operator or learning loops
+
+## 2026-04-02 — P1-E temporary-control durability slice
+- Main review delta: bounded scan/adversarial passes surfaced one real live-ready control seam after the recommendation/control work landed — `pause_entries` and `tighten_risk` were truthfully mirrored into status, but they only lived in `_control_state` memory. A daemon restart silently cleared those temporary global controls, so operator/control truth and runtime truth could drift even though the control-plane file still held executed acknowledgements.
+- Main contract decision: executed control acknowledgements, not in-process memory, now own recovery of temporary global controls. `pause_entries` and `tighten_risk` must survive control-state refresh/restart; `resume` is the single command that clears those temporary global controls back to normal operation. Explicit per-strategy gates and quarantine acknowledgements remain independent durable surfaces.
+- Implementation delta: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/control/control_plane.py` now replays executed acknowledgements into `entries_paused`, `edge_threshold_multiplier`, `strategy_gates`, and acknowledged quarantine tokens during `refresh_control_state()`. `resume` now clears both entry pause and tightened-risk posture instead of only toggling entry pause, so temporary global controls have one durable normalization path.
+- Touched tests: `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks two invariants: paused entries survive `clear_control_state()`/restart, and tightened risk survives refresh until an explicit `resume`, which resets both `entries_paused` and `edge_threshold_multiplier` back to their normal values.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'control_strategy_gate_persists or pause_entries_survives or tighten_risk_survives or apply_recommended_controls or recommended_commands_from_status'` → `5 passed`
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py tests/test_riskguard.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py` → `108 passed`
+  - `./.venv/bin/pytest -q` → `451 passed, 3 skipped`
+- Residual P1-E truth after this slice: control recommendations and temporary global controls now survive restarts, but deeper learning-loop migration plus stronger strategy/current-regime policy automation still remain open. The next valuable slice is no longer “make control surfaces visible”; it is “decide how much of the learned/recommended strategy ladder should become durable executable policy rather than manual recommendation.”

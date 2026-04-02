@@ -470,6 +470,58 @@ def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_pat
     assert control_plane_module.is_strategy_enabled("center_buy") is True
 
 
+def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    control_plane_module.clear_control_state()
+    control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["pause_entries"]
+    assert control_plane_module.is_entries_paused() is True
+
+    control_plane_module.clear_control_state()
+
+    assert control_plane_module.is_entries_paused() is True
+
+
+def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    control_plane_module.clear_control_state()
+    control_path.write_text(json.dumps({"commands": [{"command": "tighten_risk"}], "acks": []}))
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["tighten_risk"]
+    assert control_plane_module.get_edge_threshold_multiplier() == 2.0
+
+    control_plane_module.clear_control_state()
+
+    assert control_plane_module.get_edge_threshold_multiplier() == 2.0
+
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [{"command": "resume"}],
+                "acks": json.loads(control_path.read_text())["acks"],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["resume"]
+    assert control_plane_module.is_entries_paused() is False
+    assert control_plane_module.get_edge_threshold_multiplier() == 1.0
+
+    control_plane_module.clear_control_state()
+
+    assert control_plane_module.is_entries_paused() is False
+    assert control_plane_module.get_edge_threshold_multiplier() == 1.0
+
+
 def test_inv_supervisor_command_matches_real_control_plane_contract():
     cmd = SupervisorCommand(
         command="set_strategy_gate",
