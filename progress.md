@@ -239,6 +239,17 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - strategy-aware / execution-aware RiskGuard still does not gate on this truth yet;
   - edge-compression and current-regime strategy health still need a stronger consumer than the derived tracker summary alone.
 
+## Strategy Consumer Slice 2 (RiskGuard strategy diagnostics)
+- Landed protections:
+  - RiskGuard now records `strategy_tracker_summary`, `strategy_edge_compression_alerts`, and `strategy_tracker_accounting` in its details surface;
+  - this gives the protective loop a direct current-regime strategy diagnostic surface alongside settlement- and execution-based truth, without falsely upgrading the tracker itself into authority.
+- Validation evidence for this slice:
+  - targeted RiskGuard tests after the slice: `17 passed`
+  - full suite after landing the slice: `436 passed, 3 skipped`
+- Residual strategy/risk backlog after this slice:
+  - RiskGuard still surfaces strategy/execution evidence more than it gates on it;
+  - the next higher-order step would be to decide which strategy/execution degradations should actually alter protective behavior instead of only appearing in details.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

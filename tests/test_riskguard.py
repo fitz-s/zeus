@@ -5,6 +5,7 @@ import json
 import pytest
 
 import src.riskguard.riskguard as riskguard_module
+import src.state.strategy_tracker as strategy_tracker_module
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.metrics import (
     brier_score,
@@ -211,6 +212,39 @@ class TestRiskGuardSettlementSource:
         assert overall["fill_rate"] == pytest.approx(0.5)
         assert details["entry_execution_summary"]["by_strategy"]["center_buy"]["filled"] == 1
         assert details["entry_execution_summary"]["by_strategy"]["opening_inertia"]["rejected"] == 1
+
+    def test_tick_records_strategy_tracker_diagnostics(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = strategy_tracker_module.StrategyTracker()
+        tracker.record_trade({"trade_id": "t1", "strategy": "center_buy", "pnl": 3.0, "entered_at": "2026-04-01T00:00:00Z", "edge": 0.12})
+        tracker.record_trade({"trade_id": "t2", "strategy": "center_buy", "pnl": -1.0, "entered_at": "2026-04-02T00:00:00Z", "edge": 0.08})
+        tracker.set_accounting_metadata(current_regime_started_at="2026-04-01T00:00:00Z")
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["strategy_tracker_summary"]["center_buy"]["trades"] == 2
+        assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
+        assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
 
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
