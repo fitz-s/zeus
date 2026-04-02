@@ -909,3 +909,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `strategy_tracker-paper.json.accounting.current_regime_started_at` remains `2026-03-30T09:53:02.731857+00:00`
   - `tick(); write_status()` kept runtime health at `GREEN`
   - `status.learning.current_regime_started_at` is now emitted from the live status surface.
+
+## 2026-04-02 — runtime enum/value reconciliation in status
+- Detailed review found one concrete P0-D residual mismatch in the runtime truth surface: `status_summary` could emit `portfolio.positions[*].chain_state = "unknown"` while simultaneously emitting `runtime.chain_state_counts = {"ChainState.UNKNOWN": ...}` because the counter path stringified enum objects instead of normalizing their value.
+- Main contract decision: runtime/operator truth surfaces must use one normalized textual representation for enum-backed fields. Status payloads should not depend on Python enum `repr` details.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now normalizes enum-backed values through `_enum_text(...)` before writing:
+    - `portfolio.positions[*].chain_state`
+    - `portfolio.positions[*].exit_state`
+    - `runtime.chain_state_counts`
+    - `runtime.exit_state_counts`
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that an enum-backed `ChainState.UNKNOWN` position yields `chain_state == "unknown"` and `chain_state_counts == {"unknown": 1}`, not mixed `ChainState.UNKNOWN` keys.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'enum_backed_runtime_keys or status_passes_current_regime_start_to_learning_surface or status_strategy_merges_learning_surface'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `466 passed, 3 skipped`
+- Residual note: this closes the specific multi-surface enum/value mismatch that review found in `status_summary`. Remaining work is now less about representational drift and more about final acceptance/review closure plus any deeper current-regime policy semantics we still choose to land.
