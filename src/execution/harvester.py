@@ -20,8 +20,17 @@ from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
-from src.state.decision_chain import SettlementRecord, store_settlement_records
-from src.state.db import get_connection
+from src.state.decision_chain import (
+    SettlementRecord,
+    query_legacy_settlement_records,
+    store_settlement_records,
+)
+from src.state.db import (
+    get_connection,
+    log_settlement_event,
+    query_authoritative_settlement_rows,
+    query_settlement_events,
+)
 from src.state.portfolio import (
     PortfolioState, close_position, load_portfolio, save_portfolio, void_position,
 )
@@ -66,11 +75,24 @@ def run_harvester() -> dict:
 
             # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
-            snapshot_contexts = _snapshot_contexts_for_market(
+            snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
                 conn, portfolio, city.name, target_date
             )
+            _log_snapshot_context_resolution(
+                conn,
+                city=city.name,
+                target_date=target_date,
+                snapshot_contexts=snapshot_contexts,
+                dropped_rows=dropped_rows,
+            )
+            learning_contexts = [
+                context
+                for context in snapshot_contexts
+                if context.get("learning_snapshot_ready", False)
+                and context.get("authority_level") != "working_state_fallback"
+            ]
             event_pairs = 0
-            for context in snapshot_contexts:
+            for context in learning_contexts:
                 event_pairs += harvest_settlement(
                     conn,
                     city,
@@ -292,20 +314,142 @@ def _snapshot_contexts_for_market(
     portfolio: PortfolioState,
     city: str,
     target_date: str,
-) -> list[dict]:
-    """Resolve unique decision-time snapshots for positions in this settled market."""
+) -> tuple[list[dict], list[dict]]:
+    """Resolve decision-time snapshots, preferring durable settlement truth over open portfolio."""
+    stage_events = query_settlement_events(
+        conn,
+        limit=200,
+        city=city,
+        target_date=target_date,
+    )
+    authoritative_rows = query_authoritative_settlement_rows(
+        conn,
+        limit=200,
+        city=city,
+        target_date=target_date,
+    )
+    contexts, dropped_rows = _snapshot_contexts_from_rows(conn, authoritative_rows)
+    if contexts:
+        for context in contexts:
+            context["partial_context_resolution"] = bool(dropped_rows)
+        return contexts, dropped_rows
+
+    legacy_rows: list[dict] = []
+    if authoritative_rows and authoritative_rows[0].get("source") != "decision_log":
+        legacy_rows = query_legacy_settlement_records(
+            conn,
+            limit=200,
+            city=city,
+            target_date=target_date,
+        )
+        contexts, dropped_rows = _snapshot_contexts_from_rows(conn, legacy_rows)
+        if contexts:
+            for context in contexts:
+                context["partial_context_resolution"] = bool(dropped_rows)
+            return contexts, dropped_rows
+
+    fallback_reason = "no_durable_settlement_snapshot"
+    if stage_events and not authoritative_rows:
+        fallback_reason = "durable_rows_malformed"
+    elif authoritative_rows:
+        fallback_reason = "authoritative_rows_missing_snapshot_context"
+    elif legacy_rows:
+        fallback_reason = "legacy_rows_missing_snapshot_context"
+
     snapshot_ids: list[str] = []
     for pos in portfolio.positions:
         if pos.city == city and pos.target_date == target_date and pos.decision_snapshot_id:
             if pos.decision_snapshot_id not in snapshot_ids:
                 snapshot_ids.append(pos.decision_snapshot_id)
 
-    contexts: list[dict] = []
+    fallback_contexts: list[dict] = []
     for snapshot_id in snapshot_ids:
         context = get_snapshot_context(conn, snapshot_id)
-        if context is not None:
-            contexts.append(context)
-    return contexts
+        if context is None:
+            continue
+        fallback_contexts.append({
+            **context,
+            "decision_snapshot_id": snapshot_id,
+            "source": "portfolio_open_fallback",
+            "authority_level": "working_state_fallback",
+            "is_degraded": True,
+            "degraded_reason": fallback_reason,
+            "learning_snapshot_ready": False,
+        })
+    return fallback_contexts, dropped_rows
+
+
+def _snapshot_contexts_from_rows(conn, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    contexts: list[dict] = []
+    dropped_rows: list[dict] = []
+    seen_snapshot_ids: set[str] = set()
+    for row in rows:
+        snapshot_id = str(row.get("decision_snapshot_id") or "")
+        if not snapshot_id or snapshot_id in seen_snapshot_ids:
+            if not snapshot_id:
+                dropped_rows.append({
+                    "source": str(row.get("source") or "unknown"),
+                    "authority_level": str(row.get("authority_level") or "unknown"),
+                    "reason": "missing_decision_snapshot_id",
+                    "degraded_reason": str(row.get("degraded_reason") or ""),
+                })
+            continue
+        context = get_snapshot_context(conn, snapshot_id)
+        if context is None:
+            dropped_rows.append({
+                "source": str(row.get("source") or "unknown"),
+                "authority_level": str(row.get("authority_level") or "unknown"),
+                "reason": "missing_snapshot_context",
+                "decision_snapshot_id": snapshot_id,
+                "degraded_reason": str(row.get("degraded_reason") or ""),
+            })
+            continue
+        seen_snapshot_ids.add(snapshot_id)
+        contexts.append({
+            **context,
+            "decision_snapshot_id": snapshot_id,
+            "source": str(row.get("source") or "unknown"),
+            "authority_level": str(row.get("authority_level") or "unknown"),
+            "is_degraded": bool(row.get("is_degraded", False)),
+            "degraded_reason": str(row.get("degraded_reason") or ""),
+            "learning_snapshot_ready": bool(row.get("learning_snapshot_ready", bool(snapshot_id))),
+        })
+    return contexts, dropped_rows
+
+
+def _log_snapshot_context_resolution(
+    conn,
+    *,
+    city: str,
+    target_date: str,
+    snapshot_contexts: list[dict],
+    dropped_rows: list[dict] | None = None,
+) -> None:
+    """Audit which truth surface fed settlement learning for a market."""
+    log_event(
+        conn,
+        "SETTLEMENT_SNAPSHOT_SOURCE",
+        None,
+        {
+            "city": city,
+            "target_date": target_date,
+            "context_count": len(snapshot_contexts),
+            "partial_context_resolution": bool(dropped_rows),
+            "dropped_context_count": len(dropped_rows or []),
+            "contexts": [
+                {
+                    "decision_snapshot_id": context.get("decision_snapshot_id", ""),
+                    "source": context.get("source", "unknown"),
+                    "authority_level": context.get("authority_level", "unknown"),
+                    "is_degraded": bool(context.get("is_degraded", False)),
+                    "degraded_reason": context.get("degraded_reason", ""),
+                    "learning_snapshot_ready": bool(context.get("learning_snapshot_ready", False)),
+                }
+                for context in snapshot_contexts
+            ],
+            "dropped_rows": list(dropped_rows or []),
+        },
+    )
 
 
 def harvest_settlement(
@@ -436,6 +580,13 @@ def _settle_positions(
             "strategy": pos.strategy,
             "decision_snapshot_id": pos.decision_snapshot_id,
         })
+        log_settlement_event(
+            conn,
+            pos,
+            winning_bin=winning_label,
+            won=won,
+            outcome=outcome,
+        )
         settled += 1
 
         logger.info("SETTLED %s: %s %s %s — PnL=$%.2f",

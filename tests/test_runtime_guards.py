@@ -5,15 +5,18 @@ from __future__ import annotations
 import json
 import sys
 import types
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
 
 import src.data.ensemble_client as ensemble_client
 import src.engine.cycle_runner as cycle_runner
+import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
 from src.config import City
+from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
 from src.engine.discovery_mode import DiscoveryMode
@@ -21,9 +24,9 @@ from src.engine.time_context import lead_days_to_target
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, query_position_events
 from src.state.chain_reconciliation import ChainPosition, reconcile
-from src.state.portfolio import PortfolioState, Position, load_portfolio, save_portfolio
+from src.state.portfolio import ExitContext, ExitDecision, PortfolioState, Position, load_portfolio, save_portfolio
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge, Day0TemporalContext
 
@@ -397,6 +400,7 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr(cycle_runner, "cities_by_name", {"NYC": NYC}, raising=False)
 
     def _tracking_refresh(conn, clob, pos):
         from src.contracts import EdgeContext, EntryMethod
@@ -447,12 +451,94 @@ def test_chain_quarantine_keeps_direction_unknown():
     assert pos.strategy == ""
 
 
-def test_unknown_direction_positions_are_not_monitored(monkeypatch, tmp_path):
+def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined")])
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = True
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked while quarantined")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["portfolio_quarantined"] is True
+    assert summary["entries_blocked_reason"] == "portfolio_quarantined"
+    assert summary["candidates"] == 0
+
+
+def test_operator_clear_ack_applies_ignored_token_only_after_explicit_ack(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    control_path = tmp_path / "control_plane.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined", token_id="tok-clear", no_token_id="tok-clear-no")])
+
+    class DummyClob:
+        def __init__(self, paper_mode):
+            self.paper_mode = True
+
+    control_plane_module.clear_control_state()
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    assert portfolio.ignored_tokens == []
+    assert summary.get("operator_clears_applied", 0) == 0
+
+    control_plane_module.write_commands([
+        control_plane_module.build_quarantine_clear_command(
+            token_id="tok-clear",
+            condition_id="cond-clear",
+            note="operator acknowledged",
+        )
+    ])
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    assert portfolio.ignored_tokens == ["tok-clear"]
+    assert summary["operator_clears_applied"] == 1
+
+    payload = control_plane_module.read_control_payload()
+    assert payload["acks"][-1]["command"] == "acknowledge_quarantine_clear"
+    assert payload["acks"][-1]["status"] == "executed"
+    assert payload["acks"][-1]["token_id"] == "tok-clear"
+
+
+
+def test_unknown_direction_positions_are_not_monitored(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="synced")])
 
     class DummyClob:
         def __init__(self, paper_mode):
@@ -636,15 +722,15 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: None if model == "gfs025" else {
-            "members_hourly": np.ones((51, 24)) * 40.0,
+        lambda city, forecast_days=2, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
-                datetime(2026, 3, 30, 0, 0, tzinfo=timezone.utc).isoformat()
-                for _ in range(24)
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
             ],
-            "issue_time": datetime(2026, 3, 30, 0, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 3, 30, 23, 30, tzinfo=timezone.utc),
-            "model": "ecmwf_ifs025",
+            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+            "model": model or "ecmwf_ifs025",
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
@@ -851,13 +937,24 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: {
-            "members_hourly": np.ones((51, 12)) * 44.0,
-            "times": [datetime.now(timezone.utc).replace(microsecond=0).isoformat() for _ in range(12)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=2, model=None: (
+            lambda base_utc: {
+                "members_hourly": np.ones((51, 12)) * 44.0,
+                "times": [
+                    (base_utc + timedelta(hours=i)).replace(microsecond=0).isoformat()
+                    for i in range(12)
+                ],
+                "issue_time": datetime.now(timezone.utc),
+                "fetch_time": datetime.now(timezone.utc),
+                "model": "ecmwf_ifs025",
+            }
+        )(
+            datetime.combine(
+                date.fromisoformat(candidate.target_date),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            ) + timedelta(hours=4)
+        ),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-day0")
@@ -876,6 +973,299 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert "Solar/DST context unavailable for Day0" in decisions[0].rejection_reasons[0]
+
+
+def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeypatch):
+    target_date = "2026-01-15"
+    calls: dict[str, np.ndarray] = {}
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=[
+            {
+                "title": "32°F or below",
+                "range_low": None,
+                "range_high": 32,
+                "token_id": "yes-low",
+                "no_token_id": "no-low",
+                "market_id": "m-low",
+                "price": 0.30,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes-mid",
+                "no_token_id": "no-mid",
+                "market_id": "m-mid",
+                "price": 0.31,
+            },
+            {
+                "title": "51°F or higher",
+                "range_low": 51,
+                "range_high": None,
+                "token_id": "yes-high",
+                "no_token_id": "no-high",
+                "market_id": "m-high",
+                "price": 0.32,
+            },
+        ],
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 14, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(48)
+    ]
+    ecmwf_members = np.full((51, 48), 55.0)
+    gfs_members = np.concatenate(
+        [
+            np.full((31, 24), 20.0),
+            np.full((31, 24), 60.0),
+        ],
+        axis=1,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 55.0)
+
+        def p_raw_vector(self, bins):
+            return np.array([0.0, 0.0, 1.0])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.29, 0.31, 10.0, 10.0)
+
+    def _fetch_ensemble(city, forecast_days=2, model=None):
+        if model == "gfs025":
+            return {
+                "members_hourly": gfs_members,
+                "times": times,
+                "issue_time": None,
+                "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                "model": "gfs025",
+                "n_members": 31,
+            }
+        return {
+            "members_hourly": ecmwf_members,
+            "times": times,
+            "issue_time": None,
+            "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+            "model": "ecmwf_ifs025",
+            "n_members": 51,
+        }
+
+    def _model_agreement(p_raw, gfs_p):
+        calls["gfs_p"] = gfs_p
+        return "AGREE"
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "model_agreement", _model_agreement)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].agreement == "AGREE"
+    np.testing.assert_allclose(calls["gfs_p"], np.array([0.0, 0.0, 1.0]))
+
+
+def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypatch):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-01-15",
+        outcomes=[
+            {"title": "32°F or below", "range_low": None, "range_high": 32, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
+            {"title": "33-34°F", "range_low": 33, "range_high": 34, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
+            {"title": "35°F or higher", "range_low": 35, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=40.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    def _fetch(city, forecast_days=2, model=None):
+        if model == "gfs025":
+            return {
+                "members_hourly": np.ones((31, 6)) * 40.0,
+                "times": ["2026-01-14T00:00:00Z"] * 6,
+                "issue_time": None,
+                "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                "model": "gfs025",
+                "n_members": 31,
+            }
+        return {
+            "members_hourly": np.ones((51, 30)) * 40.0,
+            "times": [f"2026-01-15T{hour:02d}:00:00Z" for hour in range(24)] + [f"2026-01-16T{hour:02d}:00:00Z" for hour in range(6)],
+            "issue_time": None,
+            "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+            "model": "ecmwf_ifs025",
+            "n_members": 51,
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs-fail")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].agreement == "CROSSCHECK_UNAVAILABLE"
+
+
+def test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode():
+    edge_ctx = type(
+        "EdgeContext",
+        (),
+        {
+            "p_posterior": 0.41,
+            "p_market": np.array([0.46]),
+            "divergence_score": 0.0,
+            "market_velocity_1h": 0.0,
+        },
+    )()
+    pos = Position(
+        trade_id="paper-buy-yes",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        last_monitor_prob=0.41,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.46,
+        last_monitor_market_price_is_fresh=True,
+    )
+
+    ctx = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=4.0,
+        paper_mode=True,
+        ExitContext=ExitContext,
+    )
+
+    assert ctx.best_bid == pytest.approx(0.46)
+
+
+def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    parsed = ensemble_client._parse_response(
+        {
+            "hourly": {
+                "time": ["2026-01-14T05:00:00+00:00", "2026-01-14T06:00:00+00:00"],
+                "temperature_2m": [40.0, 41.0],
+                **{f"temperature_2m_member{i:02d}": [40.0, 41.0] for i in range(1, 3)},
+            }
+        },
+        "ecmwf_ifs025",
+        fetch_time,
+    )
+
+    assert parsed["issue_time"] is None
+    assert parsed["first_valid_time"] == datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc)
+
+
+def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    ens = type(
+        "DummyEns",
+        (),
+        {
+            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "spread_float": lambda self: 1.25,
+            "is_bimodal": lambda self: False,
+        },
+    )()
+    ens_result = {
+        "issue_time": None,
+        "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+        "fetch_time": fetch_time,
+        "model": "ecmwf_ifs025",
+    }
+
+    snapshot_id = evaluator_module._store_ens_snapshot(
+        conn,
+        NYC,
+        "2026-01-15",
+        ens,
+        ens_result,
+    )
+    row = conn.execute(
+        """
+        SELECT issue_time, valid_time, available_at, fetch_time
+        FROM ensemble_snapshots
+        WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["issue_time"] == (
+        "UNAVAILABLE_UPSTREAM_ISSUE_TIME(fetch_time=2026-01-14T06:05:00+00:00)"
+    )
+    assert row["valid_time"] == "FORECAST_WINDOW_START(2026-01-14T05:00:00+00:00)"
+    assert row["available_at"] == "2026-01-14T06:05:00+00:00"
+    assert row["fetch_time"] == "2026-01-14T06:05:00+00:00"
 
 
 def test_open_ens_collection_stores_snapshots(monkeypatch, tmp_path):
@@ -1126,6 +1516,222 @@ def test_run_cycle_clears_market_scanner_cache_each_cycle(monkeypatch, tmp_path)
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert cleared["n"] == 1
+
+
+def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monkeypatch):
+    class Tracker:
+        def __init__(self):
+            self.exits = []
+
+        def record_exit(self, position):
+            self.exits.append(position.trade_id)
+
+    pos = _position(trade_id="filled-1", state="holding", exit_reason="DEFERRED_SELL_FILL")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    tracker = Tracker()
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda portfolio, clob, conn=None: {
+            "filled": 1,
+            "retried": 0,
+            "unchanged": 0,
+            "filled_positions": [type("ClosedPos", (), {
+                "trade_id": "filled-1",
+                "exit_reason": "DEFERRED_SELL_FILL",
+                "exit_price": 0.44,
+            })()],
+        },
+    )
+    monkeypatch.setattr("src.execution.exit_lifecycle.is_exit_cooldown_active", lambda pos: False)
+    monkeypatch.setattr("src.execution.exit_lifecycle.check_pending_retries", lambda pos, conn=None: False)
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        type("LiveClob", (), {"paper_mode": False})(),
+        portfolio,
+        artifact,
+        tracker,
+        summary,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is True
+    assert tracker.exits == ["filled-1"]
+    assert summary["pending_exits_filled"] == 1
+    assert artifact.exit_cases[0].trade_id == "filled-1"
+
+
+def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = _position(
+        trade_id="live-exit-1",
+        state="holding",
+        decision_snapshot_id="snap-live-exit",
+        last_monitor_market_price=0.46,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def __init__(self):
+            self.exits = []
+
+        def record_exit(self, position):
+            self.exits.append(position.trade_id)
+
+    class LiveClob:
+        paper_mode = False
+
+        def get_order_status(self, order_id):
+            assert order_id == "sell-order-1"
+            return {"status": "FILLED"}
+
+    tracker = Tracker()
+    captured = {}
+
+    monkeypatch.setattr(cycle_runner, "cities_by_name", {"NYC": NYC}, raising=False)
+    monkeypatch.setattr("src.execution.exit_lifecycle.check_sell_collateral", lambda *args, **kwargs: (True, None))
+    def _refresh_position(conn, clob, pos):
+        pos.last_monitor_market_price = 0.46
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = 0.46
+        pos.last_monitor_best_ask = 0.49
+        pos.last_monitor_prob = 0.41
+        pos.last_monitor_prob_is_fresh = True
+        return type(
+            "EdgeContext",
+            (),
+            {
+                "p_market": np.array([0.46]),
+                "p_posterior": 0.41,
+                "divergence_score": 0.0,
+                "market_velocity_1h": 0.0,
+                "forward_edge": -0.08,
+            },
+        )()
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+
+    def _evaluate_exit(self, exit_context):
+        captured["context"] = exit_context
+        return ExitDecision(
+            True,
+            "forward edge failed",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+            trigger="EDGE_REVERSAL",
+        )
+
+    monkeypatch.setattr(Position, "evaluate_exit", _evaluate_exit)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.place_sell_order",
+        lambda **kwargs: {"orderID": "sell-order-1", "avgPrice": 0.46},
+    )
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        conn,
+        LiveClob(),
+        portfolio,
+        artifact,
+        tracker,
+        summary,
+    )
+
+    events = query_position_events(conn, "live-exit-1")
+
+    assert p_dirty is True
+    assert t_dirty is True
+    assert tracker.exits == ["live-exit-1"]
+    assert summary["pending_exits_filled"] == 0
+    assert summary["pending_exits_retried"] == 0
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 1
+    assert artifact.exit_cases == []
+    assert portfolio.positions == []
+    assert captured["context"].fresh_prob == pytest.approx(0.41)
+    assert captured["context"].fresh_prob_is_fresh is True
+    assert captured["context"].current_market_price == pytest.approx(0.46)
+    assert captured["context"].current_market_price_is_fresh is True
+    assert captured["context"].best_bid == pytest.approx(0.46)
+    assert captured["context"].best_ask == pytest.approx(0.49)
+    assert captured["context"].hours_to_settlement is not None
+    assert captured["context"].day0_active is True
+    assert captured["context"].position_state == "day0_window"
+    assert captured["context"].whale_toxicity is None
+    assert captured["context"].market_vig is None
+
+    assert [event["event_type"] for event in events] == [
+        "EXIT_ORDER_ATTEMPTED",
+        "EXIT_ORDER_FILLED",
+    ]
+
+    attempt_event, fill_event = events
+    assert attempt_event["source"] == "exit_lifecycle"
+    assert attempt_event["runtime_trade_id"] == "live-exit-1"
+    assert attempt_event["position_state"] == "day0_window"
+    assert attempt_event["order_id"] == "sell-order-1"
+    assert attempt_event["city"] == "NYC"
+    assert attempt_event["target_date"] == "2026-04-01"
+    assert attempt_event["market_id"] == "m1"
+    assert attempt_event["direction"] == "buy_yes"
+    assert attempt_event["strategy"] == "opening_inertia"
+    assert attempt_event["edge_source"] == "opening_inertia"
+    assert attempt_event["decision_snapshot_id"] == "snap-live-exit"
+    assert attempt_event["env"] == "paper"
+    assert attempt_event["details"]["status"] == "placed"
+    assert attempt_event["details"]["exit_reason"] == "forward edge failed"
+    assert attempt_event["details"]["last_exit_order_id"] == "sell-order-1"
+    assert attempt_event["details"]["retry_count"] == 0
+    assert attempt_event["details"]["next_retry_at"] in (None, "")
+    assert attempt_event["details"]["error"] == ""
+    assert attempt_event["details"]["best_bid"] == pytest.approx(0.46)
+    assert attempt_event["details"]["current_market_price"] == pytest.approx(0.46)
+    assert attempt_event["details"]["shares"] == pytest.approx(25.0)
+
+    assert fill_event["source"] == "exit_lifecycle"
+    assert fill_event["runtime_trade_id"] == "live-exit-1"
+    assert fill_event["position_state"] == "settled"
+    assert fill_event["order_id"] == "sell-order-1"
+    assert fill_event["city"] == "NYC"
+    assert fill_event["target_date"] == "2026-04-01"
+    assert fill_event["market_id"] == "m1"
+    assert fill_event["direction"] == "buy_yes"
+    assert fill_event["strategy"] == "opening_inertia"
+    assert fill_event["edge_source"] == "opening_inertia"
+    assert fill_event["decision_snapshot_id"] == "snap-live-exit"
+    assert fill_event["env"] == "paper"
+    assert fill_event["details"]["status"] == "FILLED"
+    assert fill_event["details"]["exit_reason"] == "forward edge failed"
+    assert fill_event["details"]["last_exit_order_id"] == "sell-order-1"
+    assert fill_event["details"]["retry_count"] == 0
+    assert fill_event["details"]["next_retry_at"] in (None, "")
+    assert fill_event["details"]["error"] == ""
+    assert fill_event["details"]["fill_price"] == pytest.approx(0.46)
+    assert fill_event["details"]["best_bid"] == pytest.approx(0.46)
+    assert fill_event["details"]["current_market_price"] == pytest.approx(0.46)
+    assert fill_event["details"]["shares"] == pytest.approx(25.0)
+
+    assert pos.state == "settled"
+    assert pos.exit_state == "sell_filled"
+    assert pos.exit_trigger == "EDGE_REVERSAL"
+    assert pos.exit_reason == "forward edge failed"
+    assert pos.last_exit_order_id == "sell-order-1"
+    assert pos.last_monitor_prob == pytest.approx(0.41)
+    assert pos.last_monitor_market_price == pytest.approx(0.46)
+    assert pos.exit_price == pytest.approx(0.46)
+    assert pos.last_exit_at == fill_event["timestamp"]
+    assert fill_event["details"]["fill_price"] == pytest.approx(pos.exit_price)
+    assert attempt_event["timestamp"] == pos.entered_at
+    assert fill_event["timestamp"] != attempt_event["timestamp"]
+
+    conn.close()
 
 
 def test_materialize_position_carries_semantic_snapshot_jsons():

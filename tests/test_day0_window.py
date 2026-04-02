@@ -46,3 +46,23 @@ def test_day0_window_respects_dst_transition_for_new_york():
 
     assert hours == 2.0
     assert remaining[0] == 33.0
+
+
+def test_day0_window_returns_empty_when_target_day_has_no_remaining_hours():
+    members = np.array([[30.0, 31.0, 32.0]])
+    times = [
+        "2025-03-09T06:00:00+00:00",  # 01:00 EST
+        "2025-03-09T07:00:00+00:00",  # 03:00 EDT
+        "2025-03-09T08:00:00+00:00",  # 04:00 EDT
+    ]
+
+    remaining, hours = remaining_member_maxes_for_day0(
+        members,
+        times,
+        "America/New_York",
+        date(2025, 3, 9),
+        now=datetime(2025, 3, 9, 13, 0, tzinfo=timezone.utc),  # 09:00 EDT
+    )
+
+    assert hours == 0.0
+    assert remaining.size == 0

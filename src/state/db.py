@@ -6,6 +6,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,29 @@ from src.config import STATE_DIR, state_path, settings
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
 RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
+CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
+CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
+    "contract_version",
+    "winning_bin",
+    "position_bin",
+    "won",
+    "outcome",
+    "p_posterior",
+    "exit_price",
+    "pnl",
+    "exit_reason",
+)
+AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
+    "trade_id",
+    "city",
+    "target_date",
+    "range_label",
+    "direction",
+    "p_posterior",
+    "outcome",
+    "pnl",
+    "settled_at",
+)
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -629,15 +653,24 @@ def _bin_type_for_label(label: str) -> str:
         return "shoulder_high"
     return "center"
 
+
+def _coerce_snapshot_fk(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    env = getattr(pos, "env", None) or settings.mode
+    status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
+    timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
+    filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
+    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
     try:
-        env = getattr(pos, "env", None) or settings.mode
-        status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
-        timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
-        filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
-        fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
         values = (
             pos.market_id,
             pos.bin_label,
@@ -645,7 +678,7 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             pos.size_usd,
             pos.entry_price,
             timestamp,
-            getattr(pos, "decision_snapshot_id", None) or None,
+            _coerce_snapshot_fk(getattr(pos, "decision_snapshot_id", None)),
             getattr(pos, "calibration_version", "") or None,
             pos.p_posterior,
             pos.p_posterior,
@@ -689,25 +722,25 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             )
             VALUES ({placeholders})
         """, values)
-        log_position_event(
-            conn,
-            "POSITION_ENTRY_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "fill_price": fill_price,
-                "submitted_price": getattr(pos, "entry_price", None),
-                "shares": getattr(pos, "shares", 0.0),
-                "chain_state": getattr(pos, "chain_state", ""),
-                "entry_method": getattr(pos, "entry_method", ""),
-                "selected_method": getattr(pos, "selected_method", ""),
-            },
-            timestamp=timestamp or None,
-            source="trade_decisions",
-        )
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
+    log_position_event(
+        conn,
+        "POSITION_ENTRY_RECORDED",
+        pos,
+        details={
+            "status": status,
+            "fill_price": fill_price,
+            "submitted_price": getattr(pos, "entry_price", None),
+            "shares": getattr(pos, "shares", 0.0),
+            "chain_state": getattr(pos, "chain_state", ""),
+            "entry_method": getattr(pos, "entry_method", ""),
+            "selected_method": getattr(pos, "selected_method", ""),
+        },
+        timestamp=timestamp or None,
+        source="trade_decisions",
+    )
 
 
 def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
@@ -716,12 +749,14 @@ def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
         return
     submitted_price = getattr(result, "submitted_price", None)
     fill_price = getattr(result, "fill_price", None)
-    fill_quality = getattr(pos, "fill_quality", None)
-    if fill_quality is None and fill_price not in (None, 0) and submitted_price not in (None, 0):
+    fill_quality = None
+    if fill_price not in (None, 0) and submitted_price not in (None, 0):
         try:
             fill_quality = (float(fill_price) - float(submitted_price)) / float(submitted_price)
         except (TypeError, ValueError, ZeroDivisionError):
             fill_quality = None
+    if fill_quality is None:
+        fill_quality = getattr(pos, "fill_quality", None)
 
     details = {
         "status": getattr(result, "status", ""),
@@ -750,15 +785,12 @@ def log_settlement_event(conn: sqlite3.Connection, pos, *, winning_bin: str, won
         conn,
         "POSITION_SETTLED",
         pos,
-        details={
-            "winning_bin": winning_bin,
-            "position_bin": getattr(pos, "bin_label", ""),
-            "won": won,
-            "outcome": outcome,
-            "exit_price": getattr(pos, "exit_price", None),
-            "pnl": getattr(pos, "pnl", None),
-            "exit_reason": getattr(pos, "exit_reason", ""),
-        },
+        details=_canonical_position_settled_payload(
+            pos,
+            winning_bin=winning_bin,
+            won=won,
+            outcome=outcome,
+        ),
         timestamp=getattr(pos, "last_exit_at", None),
         source="settlement",
     )
@@ -913,6 +945,110 @@ def _decode_position_event_rows(rows) -> list[dict]:
     return results
 
 
+def _is_missing_settlement_value(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _coerce_settlement_float(value) -> Optional[float]:
+    if _is_missing_settlement_value(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_settlement_int(value) -> Optional[int]:
+    if _is_missing_settlement_value(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _canonical_position_settled_payload(pos, *, winning_bin: str, won: bool, outcome: int) -> dict:
+    return {
+        "contract_version": CANONICAL_POSITION_SETTLED_CONTRACT_VERSION,
+        "winning_bin": winning_bin,
+        "position_bin": getattr(pos, "bin_label", ""),
+        "won": bool(won),
+        "outcome": int(outcome),
+        "p_posterior": getattr(pos, "p_posterior", None),
+        "exit_price": getattr(pos, "exit_price", None),
+        "pnl": getattr(pos, "pnl", None),
+        "exit_reason": getattr(pos, "exit_reason", ""),
+    }
+
+
+def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
+    details = dict(event.get("details") or {})
+    contract_missing_fields = [
+        field
+        for field in CANONICAL_POSITION_SETTLED_DETAIL_FIELDS
+        if _is_missing_settlement_value(details.get(field))
+    ]
+    normalized = {
+        "trade_id": str(event.get("runtime_trade_id") or ""),
+        "city": str(event.get("city") or ""),
+        "target_date": str(event.get("target_date") or ""),
+        "range_label": str(event.get("bin_label") or ""),
+        "direction": str(event.get("direction") or ""),
+        "p_posterior": _coerce_settlement_float(details.get("p_posterior")),
+        "outcome": _coerce_settlement_int(details.get("outcome")),
+        "pnl": _coerce_settlement_float(details.get("pnl")),
+        "decision_snapshot_id": str(event.get("decision_snapshot_id") or ""),
+        "edge_source": str(event.get("edge_source") or ""),
+        "strategy": str(event.get("strategy") or ""),
+        "settled_at": str(event.get("timestamp") or ""),
+        "winning_bin": details.get("winning_bin"),
+        "position_bin": details.get("position_bin") or event.get("bin_label"),
+        "won": details.get("won"),
+        "exit_price": _coerce_settlement_float(details.get("exit_price")),
+        "exit_reason": str(details.get("exit_reason") or ""),
+        "source": "position_events",
+        "authority_level": "durable_event",
+        "contract_version": str(
+            details.get("contract_version") or CANONICAL_POSITION_SETTLED_CONTRACT_VERSION
+        ),
+    }
+    missing_required = [
+        field
+        for field in AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS
+        if _is_missing_settlement_value(normalized.get(field))
+    ]
+    if missing_required:
+        normalized.update({
+            "is_degraded": True,
+            "degraded_reason": f"missing_required_fields:{','.join(missing_required)}",
+            "contract_missing_fields": contract_missing_fields,
+            "canonical_payload_complete": not contract_missing_fields,
+            "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]),
+            "metric_ready": False,
+            "authority_level": "durable_event_malformed",
+            "required_missing_fields": missing_required,
+        })
+        return normalized
+
+    degraded_reasons: list[str] = []
+    if contract_missing_fields:
+        degraded_reasons.append(
+            f"missing_payload_fields:{','.join(contract_missing_fields)}"
+        )
+    if not normalized["decision_snapshot_id"]:
+        degraded_reasons.append("missing_decision_snapshot_id")
+    normalized.update({
+        "is_degraded": bool(degraded_reasons),
+        "degraded_reason": "; ".join(degraded_reasons),
+        "contract_missing_fields": contract_missing_fields,
+        "canonical_payload_complete": not contract_missing_fields,
+        "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]),
+        "metric_ready": True,
+        "required_missing_fields": [],
+    })
+    return normalized
+
+
 def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
     """Load recent durable position events for one runtime trade."""
     rows = conn.execute(
@@ -930,1705 +1066,76 @@ def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit
     return _decode_position_event_rows(rows)
 
 
-def query_settlement_events(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+def query_settlement_events(
+    conn: sqlite3.Connection,
+    limit: int = 50,
+    *,
+    city: str | None = None,
+    target_date: str | None = None,
+) -> list[dict]:
     """Load recent canonical settlement stage events from the durable event spine."""
+    filters = ["event_type = 'POSITION_SETTLED'"]
+    params: list[object] = []
+    if city is not None:
+        filters.append("city = ?")
+        params.append(city)
+    if target_date is not None:
+        filters.append("target_date = ?")
+        params.append(target_date)
+    params.append(limit)
     rows = conn.execute(
-        """
+        f"""
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
                city, target_date, market_id, bin_label, direction, strategy, edge_source,
                source, details_json, timestamp, env
         FROM position_events
-        WHERE event_type = 'POSITION_SETTLED'
+        WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         LIMIT ?
         """,
-        (limit,),
+        params,
     ).fetchall()
     return _decode_position_event_rows(rows)
 
 
-def query_authoritative_settlement_rows(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+def query_authoritative_settlement_rows(
+    conn: sqlite3.Connection,
+    limit: int = 50,
+    *,
+    city: str | None = None,
+    target_date: str | None = None,
+) -> list[dict]:
     """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
-    stage_events = query_settlement_events(conn, limit=limit)
-    if stage_events:
-        normalized: list[dict] = []
-        for event in stage_events:
-            details = event.get("details", {})
-            normalized.append({
-                "trade_id": event.get("runtime_trade_id", ""),
-                "city": event.get("city", ""),
-                "target_date": event.get("target_date", ""),
-                "range_label": event.get("bin_label", ""),
-                "direction": event.get("direction", ""),
-                "p_posterior": details.get("p_posterior"),
-                "outcome": details.get("outcome"),
-                "pnl": details.get("pnl"),
-                "decision_snapshot_id": event.get("decision_snapshot_id", ""),
-                "edge_source": event.get("edge_source", ""),
-                "strategy": event.get("strategy", ""),
-                "settled_at": event.get("timestamp", ""),
-                "source": "position_events",
-            })
-        return normalized[:limit]
+    stage_events = query_settlement_events(
+        conn,
+        limit=limit,
+        city=city,
+        target_date=target_date,
+    )
+    normalized_stage = [
+        normalized
+        for event in stage_events
+        if (normalized := _normalize_position_settlement_event(event)) is not None
+    ]
+    if normalized_stage:
+        return normalized_stage[:limit]
 
     from src.state.decision_chain import query_legacy_settlement_records
-    legacy_rows = query_legacy_settlement_records(conn, limit=limit)
-    for row in legacy_rows:
-        row.setdefault("source", "decision_log")
+    legacy_rows = query_legacy_settlement_records(
+        conn,
+        limit=limit,
+        city=city,
+        target_date=target_date,
+    )
     return legacy_rows[:limit]
 
 
 def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
     """Report which settlement source is currently authoritative for readers."""
-    row = conn.execute(
-        "SELECT 1 FROM position_events WHERE event_type = 'POSITION_SETTLED' LIMIT 1"
-    ).fetchone()
-    return "position_events" if row is not None else "decision_log"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
-    """Evidence spine: Update or insert exit fill evidence."""
-    if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    try:
-        from datetime import datetime
-        env = getattr(pos, "env", None) or settings.mode
-        status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
-        values = (
-            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
-            getattr(pos, "decision_snapshot_id", None) or None,
-            getattr(pos, "calibration_version", "") or None,
-            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
-            status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
-            getattr(pos, "trade_id", ""),
-            getattr(pos, "order_id", ""),
-            getattr(pos, "order_status", ""),
-            getattr(pos, "order_posted_at", ""),
-            getattr(pos, "entered_at", ""),
-            getattr(pos, "chain_state", ""),
-            getattr(pos, "discovery_mode", ""),
-            getattr(pos, "market_hours_open", 0.0),
-            getattr(pos, "fill_quality", 0.0),
-            getattr(pos, "entry_method", ""),
-            getattr(pos, "selected_method", ""),
-            json.dumps(getattr(pos, "applied_validations", []) or []),
-            getattr(pos, "exit_trigger", ""),
-            getattr(pos, "exit_reason", ""),
-            getattr(pos, "admin_exit_reason", ""),
-            getattr(pos, "exit_divergence_score", 0.0),
-            getattr(pos, "exit_market_velocity_1h", 0.0),
-            getattr(pos, "exit_forward_edge", 0.0),
-            getattr(pos, "settlement_semantics_json", None),
-            getattr(pos, "epistemic_context_json", None),
-            getattr(pos, "edge_context_json", None),
-        )
-        placeholders = ", ".join(["?"] * len(values))
-        conn.execute(f"""
-            INSERT INTO trade_decisions (
-                market_id, bin_label, direction, size_usd, price, timestamp,
-                forecast_snapshot_id, calibration_model_version,
-                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                status, strategy, edge_source, bin_type, env, filled_at, fill_price, settlement_edge_usd,
-                runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
-                discovery_mode, market_hours_open, fill_quality,
-                entry_method, selected_method, applied_validations_json,
-                exit_trigger, exit_reason, admin_exit_reason,
-                exit_divergence_score, exit_market_velocity_1h, exit_forward_edge,
-                settlement_semantics_json, epistemic_context_json, edge_context_json
-            )
-            VALUES ({placeholders})
-        """, values)
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
+    rows = query_authoritative_settlement_rows(conn, limit=1)
+    if not rows:
+        return "none"
+    return str(rows[0].get("source") or "none")
 
 
 def log_position_event(
@@ -2640,6 +1147,7 @@ def log_position_event(
     timestamp: str | None = None,
     source: str = "runtime",
     order_id: str | None = None,
+    position_state: str | None = None,
 ) -> None:
     """Append a stage-level position event without changing open-position authority."""
     runtime_trade_id = getattr(pos, "trade_id", "")
@@ -2652,7 +1160,7 @@ def log_position_event(
         or getattr(pos, "last_exit_at", "")
         or getattr(pos, "entered_at", "")
         or getattr(pos, "order_posted_at", "")
-        or datetime.utcnow().isoformat()
+        or datetime.now(timezone.utc).isoformat()
     )
     payload = details or {}
     event_order_id = (
@@ -2686,7 +1194,7 @@ def log_position_event(
         (
             event_type,
             runtime_trade_id,
-            getattr(pos, "state", "") or None,
+            position_state if position_state is not None else (getattr(pos, "state", "") or None),
             event_order_id,
             getattr(pos, "decision_snapshot_id", "") or None,
             getattr(pos, "city", "") or None,
@@ -2886,9 +1394,31 @@ def log_pending_exit_recovery_event(
     )
 
 
-
-
-
-
-
-
+def log_reconciled_entry_event(conn: sqlite3.Connection, pos, *, timestamp: str, details: dict | None = None) -> None:
+    """Append exactly-once stage event for chain-reconciled pending fills."""
+    payload = {
+        "status": "entered",
+        "source": "chain_reconciliation",
+        "reason": "pending_fill_rescued",
+        "entry_method": getattr(pos, "entry_method", ""),
+        "selected_method": getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+        "applied_validations": list(getattr(pos, "applied_validations", []) or []),
+        "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
+        "shares": getattr(pos, "shares", None),
+        "cost_basis_usd": getattr(pos, "cost_basis_usd", None),
+        "size_usd": getattr(pos, "size_usd", None),
+        "condition_id": getattr(pos, "condition_id", ""),
+        "order_status": getattr(pos, "order_status", ""),
+        "chain_state": getattr(pos, "chain_state", ""),
+    }
+    if details:
+        payload.update(details)
+    log_position_event(
+        conn,
+        "POSITION_LIFECYCLE_UPDATED",
+        pos,
+        details=payload,
+        timestamp=timestamp,
+        source="chain_reconciliation",
+        position_state="entered",
+    )
