@@ -24,7 +24,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, log_settlement_event
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.portfolio import (
     PortfolioState,
@@ -90,7 +90,15 @@ def _recent_exit(pnl: float) -> dict:
     }
 
 
-def _insert_snapshot(conn, city: str, target_date: str, p_raw: list[float]) -> str:
+def _insert_snapshot(
+    conn,
+    city: str,
+    target_date: str,
+    p_raw: list[float],
+    *,
+    issue_time: str = "2026-03-30T00:00:00Z",
+    data_version: str = "live_v1",
+) -> str:
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
@@ -101,7 +109,7 @@ def _insert_snapshot(conn, city: str, target_date: str, p_raw: list[float]) -> s
         (
             city,
             target_date,
-            "2026-03-30T00:00:00Z",
+            issue_time,
             f"{target_date}T12:00:00Z",
             "2026-03-30T01:00:00Z",
             "2026-03-30T01:00:00Z",
@@ -111,7 +119,7 @@ def _insert_snapshot(conn, city: str, target_date: str, p_raw: list[float]) -> s
             2.0,
             0,
             "ecmwf_ifs025",
-            "live_v1",
+            data_version,
         ),
     )
     row = conn.execute("SELECT last_insert_rowid() AS snapshot_id").fetchone()
@@ -421,15 +429,15 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: None if model == "gfs025" else {
-            "members_hourly": np.ones((51, 48)) * 40.0,
+        lambda city, forecast_days=8, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
             "times": [
-                datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc).isoformat()
-                for _ in range(48)
+                datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(48)
             ],
             "issue_time": datetime.now(timezone.utc),
             "fetch_time": datetime.now(timezone.utc),
-            "model": "ecmwf_ifs025",
+            "model": model or "ecmwf_ifs025",
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
@@ -541,10 +549,12 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(
-        "SELECT win_rate FROM risk_state ORDER BY id DESC LIMIT 1"
+        "SELECT win_rate, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
     ).fetchone()
+    details = json.loads(row["details_json"])
 
-    assert row["win_rate"] == pytest.approx(1.0)
+    assert row["win_rate"] is None
+    assert details["accuracy"] == pytest.approx(0.5)
 
 
 def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
@@ -576,10 +586,109 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(
-        "SELECT brier FROM risk_state ORDER BY id DESC LIMIT 1"
+        "SELECT brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
     ).fetchone()
+    details = json.loads(row["details_json"])
 
     assert row["brier"] == pytest.approx(0.64)
+    assert details["settlement_storage_source"] == "decision_log"
+    assert details["settlement_row_storage_sources"] == ["decision_log"]
+
+
+
+def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-settle-auth",
+        market_id="m6",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        edge=0.21,
+        decision_snapshot_id="snap-auth",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+    conn.close()
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+
+    riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+
+    assert details["settlement_storage_source"] == "position_events"
+    assert details["settlement_row_storage_sources"] == ["position_events"]
+    assert details["settlement_sample_size"] == 1
+    assert details["accuracy"] == pytest.approx(1.0)
+
+
+
+def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="legacy-settle",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.58,
+            outcome=1,
+            pnl=12.5,
+            decision_snapshot_id="legacy-snap",
+            edge_source="center_buy",
+            strategy="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        )
+    ])
+    conn.close()
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+
+    riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+
+    assert details["settlement_storage_source"] == "decision_log"
+    assert details["settlement_row_storage_sources"] == ["decision_log"]
+    assert details["settlement_sample_size"] == 1
 
 
 def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
@@ -680,6 +789,71 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
             settlement_value=None,
         )
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    settled_pos = _position(
+        trade_id="trade-1",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        decision_snapshot_id=snapshot_id,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_settlement_event(conn, settled_pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            },
+            {
+                "question": "41-42°F",
+                "winningOutcome": "No",
+                "clobTokenIds": json.dumps(["yes2", "no2"]),
+                "outcomePrices": json.dumps([0.0, 1.0]),
+                "conditionId": "m2",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(bankroll=150.0, positions=[]),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+
+    result = harvester_module.run_harvester()
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT n_samples FROM platt_models ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+
+    assert result["pairs_created"] == 2
+    assert row is not None
+    assert row["n_samples"] >= 15
+
+
+def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_settlement_exists(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     conn.commit()
     conn.close()
 
@@ -711,7 +885,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         lambda: PortfolioState(
             bankroll=150.0,
             positions=[_position(
-                trade_id="trade-1",
+                trade_id="trade-open-fallback",
                 target_date="2026-04-01",
                 bin_label="39-40°F",
                 decision_snapshot_id=snapshot_id,
@@ -724,10 +898,303 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
 
     result = harvester_module.run_harvester()
+
+    assert result["pairs_created"] == 0
+
     conn = get_connection(db_path)
-    row = conn.execute("SELECT n_samples FROM platt_models ORDER BY id DESC LIMIT 1").fetchone()
+    pair_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM calibration_pairs WHERE city = ? AND target_date = ?",
+        ("NYC", "2026-04-01"),
+    ).fetchone()["n"]
+    snapshot_event = conn.execute(
+        """
+        SELECT details_json FROM chronicle
+        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    assert pair_count == 0
+    snapshot_details = json.loads(snapshot_event["details_json"])
+    assert snapshot_details["context_count"] == 1
+    assert snapshot_details["contexts"][0]["source"] == "portfolio_open_fallback"
+    assert snapshot_details["contexts"][0]["authority_level"] == "working_state_fallback"
+    assert snapshot_details["contexts"][0]["is_degraded"] is True
+    assert snapshot_details["contexts"][0]["degraded_reason"] == "no_durable_settlement_snapshot"
+    assert snapshot_details["contexts"][0]["learning_snapshot_ready"] is False
+
+
+def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    legacy_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    portfolio_snapshot_id = _insert_snapshot(
+        conn,
+        "NYC",
+        "2026-04-01",
+        [0.10, 0.90],
+        issue_time="2026-03-30T06:00:00Z",
+    )
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="legacy-settle",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.58,
+            outcome=1,
+            pnl=12.5,
+            decision_snapshot_id=legacy_snapshot_id,
+            edge_source="center_buy",
+            strategy="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        )
+    ])
     conn.close()
 
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            },
+            {
+                "question": "41-42°F",
+                "winningOutcome": "No",
+                "clobTokenIds": json.dumps(["yes2", "no2"]),
+                "outcomePrices": json.dumps([0.0, 1.0]),
+                "conditionId": "m2",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(
+            bankroll=150.0,
+            positions=[_position(
+                trade_id="trade-open-ignored",
+                target_date="2026-04-01",
+                bin_label="39-40°F",
+                decision_snapshot_id=portfolio_snapshot_id,
+            )],
+        ),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+
+    result = harvester_module.run_harvester()
+
     assert result["pairs_created"] == 2
-    assert row is not None
-    assert row["n_samples"] >= 15
+
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        """
+        SELECT range_label, p_raw
+        FROM calibration_pairs
+        WHERE city = ? AND target_date = ?
+        ORDER BY range_label ASC
+        """,
+        ("NYC", "2026-04-01"),
+    ).fetchall()
+    snapshot_event = conn.execute(
+        """
+        SELECT details_json FROM chronicle
+        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert [row["range_label"] for row in rows] == ["39-40°F", "41-42°F"]
+    assert [row["p_raw"] for row in rows] == pytest.approx([0.65, 0.35])
+    snapshot_details = json.loads(snapshot_event["details_json"])
+    assert snapshot_details["contexts"][0]["source"] == "decision_log"
+    assert snapshot_details["contexts"][0]["authority_level"] == "legacy_decision_log_fallback"
+    assert snapshot_details["contexts"][0]["is_degraded"] is True
+
+
+def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    durable_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    portfolio_snapshot_id = _insert_snapshot(
+        conn,
+        "NYC",
+        "2026-04-01",
+        [0.10, 0.90],
+        issue_time="2026-03-30T06:00:00Z",
+    )
+    settled_pos = _position(
+        trade_id="trade-durable-preferred",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        decision_snapshot_id=durable_snapshot_id,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_settlement_event(conn, settled_pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            },
+            {
+                "question": "41-42°F",
+                "winningOutcome": "No",
+                "clobTokenIds": json.dumps(["yes2", "no2"]),
+                "outcomePrices": json.dumps([0.0, 1.0]),
+                "conditionId": "m2",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(
+            bankroll=150.0,
+            positions=[_position(
+                trade_id="trade-open-ignored",
+                target_date="2026-04-01",
+                bin_label="39-40°F",
+                decision_snapshot_id=portfolio_snapshot_id,
+            )],
+        ),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+
+    result = harvester_module.run_harvester()
+
+    assert result["pairs_created"] == 2
+
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        """
+        SELECT range_label, p_raw
+        FROM calibration_pairs
+        WHERE city = ? AND target_date = ?
+        ORDER BY range_label ASC
+        """,
+        ("NYC", "2026-04-01"),
+    ).fetchall()
+    snapshot_event = conn.execute(
+        """
+        SELECT details_json FROM chronicle
+        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert [row["range_label"] for row in rows] == ["39-40°F", "41-42°F"]
+    assert [row["p_raw"] for row in rows] == pytest.approx([0.65, 0.35])
+
+    assert durable_snapshot_id != portfolio_snapshot_id
+    snapshot_details = json.loads(snapshot_event["details_json"])
+    assert snapshot_details["contexts"][0]["source"] == "position_events"
+    assert snapshot_details["contexts"][0]["authority_level"] == "durable_event"
+    assert snapshot_details["contexts"][0]["is_degraded"] is False
+
+
+def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    good_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    good_pos = _position(
+        trade_id="trade-good-context",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        decision_snapshot_id=good_snapshot_id,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    bad_pos = _position(
+        trade_id="trade-missing-context",
+        target_date="2026-04-01",
+        bin_label="41-42°F",
+        decision_snapshot_id="",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-3.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_settlement_event(conn, good_pos, winning_bin="39-40°F", won=True, outcome=1)
+    log_settlement_event(conn, bad_pos, winning_bin="39-40°F", won=False, outcome=0)
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {"question": "39-40°F", "winningOutcome": "Yes", "clobTokenIds": json.dumps(["yes1", "no1"]), "outcomePrices": json.dumps([1.0, 0.0]), "conditionId": "m1"},
+            {"question": "41-42°F", "winningOutcome": "No", "clobTokenIds": json.dumps(["yes2", "no2"]), "outcomePrices": json.dumps([0.0, 1.0]), "conditionId": "m2"},
+        ],
+    }
+
+    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0, positions=[]))
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+
+    result = harvester_module.run_harvester()
+    assert result["pairs_created"] == 2
+
+    conn = get_connection(db_path)
+    snapshot_event = conn.execute(
+        """
+        SELECT details_json FROM chronicle
+        WHERE event_type = 'SETTLEMENT_SNAPSHOT_SOURCE'
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    details = json.loads(snapshot_event["details_json"])
+    assert details["partial_context_resolution"] is True
+    assert details["dropped_context_count"] == 1
+    assert details["dropped_rows"][0]["reason"] == "missing_decision_snapshot_id"

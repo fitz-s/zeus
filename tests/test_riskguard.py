@@ -1,12 +1,18 @@
 """Tests for RiskGuard metrics and risk levels."""
 
+import json
+
 import pytest
 
+import src.riskguard.riskguard as riskguard_module
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.metrics import (
-    brier_score, directional_accuracy, win_rate,
-    evaluate_brier, evaluate_win_rate,
+    brier_score,
+    directional_accuracy,
+    evaluate_brier,
 )
+from src.state.db import get_connection
+from src.state.portfolio import PortfolioState
 
 
 class TestRiskLevel:
@@ -37,11 +43,6 @@ class TestMetrics:
     def test_directional_accuracy_perfect(self):
         assert directional_accuracy([0.8, 0.2, 0.9], [1, 0, 1]) == pytest.approx(1.0)
 
-    def test_win_rate(self):
-        assert win_rate([1.0, -0.5, 2.0, -1.0]) == pytest.approx(0.5)
-
-    def test_win_rate_all_wins(self):
-        assert win_rate([1.0, 2.0, 0.5]) == pytest.approx(1.0)
 
 
 class TestRiskEvaluation:
@@ -57,10 +58,150 @@ class TestRiskEvaluation:
         thresholds = {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35}
         assert evaluate_brier(0.40, thresholds) == RiskLevel.RED
 
-    def test_win_rate_green(self):
-        thresholds = {"win_rate_yellow": 0.40, "win_rate_orange": 0.35}
-        assert evaluate_win_rate(0.55, thresholds) == RiskLevel.GREEN
 
-    def test_win_rate_orange(self):
-        thresholds = {"win_rate_yellow": 0.40, "win_rate_orange": 0.35}
-        assert evaluate_win_rate(0.30, thresholds) == RiskLevel.ORANGE
+class TestRiskGuardSettlementSource:
+    def test_tick_records_canonical_settlement_source(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events"}],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["settlement_storage_source"] == "position_events"
+        assert details["settlement_row_storage_sources"] == ["position_events"]
+        assert details["settlement_sample_size"] == 1
+
+    def test_tick_records_legacy_settlement_fallback_source(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.4, "outcome": 0, "source": "decision_log"}],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["settlement_storage_source"] == "decision_log"
+        assert details["settlement_row_storage_sources"] == ["decision_log"]
+        assert details["settlement_sample_size"] == 1
+
+    def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [
+                {
+                    "p_posterior": 0.7,
+                    "outcome": 1,
+                    "source": "position_events",
+                    "authority_level": "durable_event",
+                    "is_degraded": False,
+                    "learning_snapshot_ready": True,
+                    "canonical_payload_complete": True,
+                    "metric_ready": True,
+                },
+                {
+                    "p_posterior": None,
+                    "outcome": None,
+                    "source": "position_events",
+                    "authority_level": "durable_event_malformed",
+                    "is_degraded": True,
+                    "learning_snapshot_ready": False,
+                    "canonical_payload_complete": False,
+                    "metric_ready": False,
+                },
+            ],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["settlement_sample_size"] == 1
+        assert details["settlement_degraded_row_count"] == 1
+        assert details["settlement_learning_snapshot_ready_count"] == 1
+        assert details["settlement_canonical_payload_complete_count"] == 1
+        assert details["settlement_metric_ready_count"] == 1
+        assert details["settlement_quality_level"] == "YELLOW"
+        assert details["settlement_authority_levels"]["durable_event"] == 1
+        assert details["settlement_authority_levels"]["durable_event_malformed"] == 1
+
+    def test_tick_fails_closed_when_only_malformed_settlement_rows_exist(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [
+                {
+                    "p_posterior": None,
+                    "outcome": None,
+                    "source": "position_events",
+                    "authority_level": "durable_event_malformed",
+                    "is_degraded": True,
+                    "learning_snapshot_ready": False,
+                    "canonical_payload_complete": False,
+                    "metric_ready": False,
+                }
+            ],
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
+        assert details["settlement_quality_level"] == "RED"
+        assert details["settlement_metric_ready_count"] == 0

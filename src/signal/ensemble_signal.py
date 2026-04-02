@@ -44,6 +44,47 @@ BOUNDARY_WINDOW = ensemble_boundary_window()
 UNIMODAL_RANGE_EPSILON = ensemble_unimodal_range_epsilon()
 
 
+def _coerce_timezone(timezone_name: str | ZoneInfo) -> ZoneInfo:
+    if isinstance(timezone_name, ZoneInfo):
+        return timezone_name
+    return ZoneInfo(str(timezone_name))
+
+
+def select_hours_for_target_date(
+    target_date: date,
+    timezone_name: str | ZoneInfo,
+    *,
+    times: list[str],
+) -> np.ndarray:
+    """Return hourly indices that belong to the local target date."""
+    tz = _coerce_timezone(timezone_name)
+    idxs = [
+        idx
+        for idx, ts in enumerate(times)
+        if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
+    ]
+    if idxs:
+        return np.array(idxs, dtype=int)
+    raise ValueError(
+        f"No forecast hours map to local target date {target_date} in {tz.key}."
+    )
+
+
+def member_maxes_for_target_date(
+    members_hourly: np.ndarray,
+    times: list[str],
+    timezone_name: str | ZoneInfo,
+    target_date: date,
+) -> np.ndarray:
+    """Compute per-member daily maxes using the local target-date slice."""
+    tz_hours = select_hours_for_target_date(
+        target_date,
+        timezone_name,
+        times=times,
+    )
+    return members_hourly[:, tz_hours].max(axis=1)
+
+
 class EnsembleSignal:
     """51 ensemble members → probability vector over all bins.
 
@@ -80,21 +121,13 @@ class EnsembleSignal:
                 f"{members_hourly.shape[1]}."
             )
 
-        tz = ZoneInfo(city.timezone)
-        tz_hours = self._select_hours_for_date(
-            target_date,
-            tz,
-            times=times,
-        )
-
-        if len(tz_hours) == 0:
-            raise ValueError(
-                f"No hours found for {target_date} in {city.timezone}. "
-                f"Check forecast_days parameter."
-            )
-
         # Daily max per member, respecting city timezone for day boundary
-        self.member_maxes: np.ndarray = members_hourly[:, tz_hours].max(axis=1)
+        self.member_maxes = member_maxes_for_target_date(
+            members_hourly,
+            times,
+            city.timezone,
+            target_date,
+        )
         
         # Bias correction: subtract per-city×season systematic ECMWF bias
         # GATED by config flag. Activation requires simultaneous Platt recompute
@@ -194,16 +227,7 @@ class EnsembleSignal:
         Approximate lead-day slicing is forbidden here because it can drift from
         the decision-reference semantics used elsewhere in the pipeline.
         """
-        idxs = [
-            idx
-            for idx, ts in enumerate(times)
-            if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
-        ]
-        if idxs:
-            return np.array(idxs, dtype=int)
-        raise ValueError(
-            f"No forecast hours map to local target date {target_date} in {tz.key}."
-        )
+        return select_hours_for_target_date(target_date, tz, times=times)
 
     def p_raw_vector(
         self, bins: list[Bin], n_mc: int | None = None

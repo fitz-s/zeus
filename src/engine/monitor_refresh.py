@@ -342,6 +342,13 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
         raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
 
+    pos.last_monitor_best_bid = None
+    pos.last_monitor_best_ask = None
+    pos.last_monitor_market_vig = None
+    pos.last_monitor_whale_toxicity = None
+    pos.last_monitor_market_price_is_fresh = False
+    pos.last_monitor_prob_is_fresh = False
+
     # 1. Refresh market price
     market_refreshed = False
     if getattr(clob, "paper_mode", True):
@@ -357,7 +364,12 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         if tid:
             try:
                 bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
-                current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
+                pos.last_monitor_best_bid = float(bid)
+                pos.last_monitor_best_ask = float(ask)
+                if pos.state == "day0_window":
+                    current_p_market = bid
+                else:
+                    current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
                 market_refreshed = True
 
                 # Injection Point 7: Data completeness - record microstructure snapshot
@@ -381,6 +393,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     if market_refreshed:
         pos.last_monitor_market_price = current_p_market
+        pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
 
     # 2. Recompute P_posterior from fresh ENS
@@ -394,17 +407,23 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
             EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
         }
+        refresh_pos = pos
+        if pos.state == "day0_window" and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
+            refresh_pos = Position(**{**pos.__dict__, "entry_method": EntryMethod.DAY0_OBSERVATION.value})
         current_p_posterior = recompute_native_probability(
-            pos,
+            refresh_pos,
             current_p_market=current_p_market,
             registry=registry,
             conn=conn,
             city=city,
             target_d=target_d,
         )
+        pos.selected_method = refresh_pos.selected_method
+        pos.applied_validations = list(refresh_pos.applied_validations)
 
         # Persist monitor state on Position
         pos.last_monitor_prob = current_p_posterior
+        pos.last_monitor_prob_is_fresh = True
         pos.last_monitor_edge = current_p_posterior - current_p_market
         if not market_refreshed:
             pos.last_monitor_market_price = current_p_market

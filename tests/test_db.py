@@ -477,7 +477,11 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     assert events[0]["details"]["winning_bin"] == "39-40°F"
     assert events[0]["details"]["won"] is True
     assert events[0]["details"]["outcome"] == 1
+    assert events[0]["details"]["contract_version"] == "position_settled.v1"
+    assert events[0]["details"]["p_posterior"] == pytest.approx(0.60)
+    assert events[0]["details"]["exit_price"] == pytest.approx(1.0)
     assert events[0]["details"]["pnl"] == pytest.approx(15.0)
+    assert events[0]["details"]["exit_reason"] == "SETTLEMENT"
 
 
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
@@ -520,8 +524,16 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     assert len(rows) == 1
     assert rows[0]["trade_id"] == "rt-settle-auth"
     assert rows[0]["source"] == "position_events"
+    assert rows[0]["authority_level"] == "durable_event"
+    assert rows[0]["contract_version"] == "position_settled.v1"
+    assert rows[0]["canonical_payload_complete"] is True
+    assert rows[0]["contract_missing_fields"] == []
+    assert rows[0]["learning_snapshot_ready"] is True
+    assert rows[0]["p_posterior"] == pytest.approx(0.61)
     assert rows[0]["outcome"] == 1
     assert rows[0]["pnl"] == pytest.approx(15.0)
+    assert rows[0]["winning_bin"] == "39-40°F"
+    assert rows[0]["exit_reason"] == "SETTLEMENT"
 
 
 def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path):
@@ -558,8 +570,104 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     assert len(rows) == 1
     assert rows[0]["trade_id"] == "legacy-settle"
     assert rows[0]["source"] == "decision_log"
+    assert rows[0]["authority_level"] == "legacy_decision_log_fallback"
+    assert rows[0]["is_degraded"] is True
+    assert rows[0]["canonical_payload_complete"] is False
+    assert {
+        "winning_bin",
+        "position_bin",
+        "won",
+        "exit_price",
+        "exit_reason",
+    }.issubset(set(rows[0]["contract_missing_fields"]))
     assert rows[0]["outcome"] == 1
     assert rows[0]["pnl"] == pytest.approx(12.5)
+
+
+def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_path):
+    from src.state.db import (
+        log_position_event,
+        query_authoritative_settlement_rows,
+        query_authoritative_settlement_source,
+    )
+    from src.state.decision_chain import SettlementRecord, store_settlement_records
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    malformed_pos = Position(
+        trade_id="rt-malformed",
+        market_id="m7",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.61,
+        edge=0.21,
+        decision_snapshot_id="snap-missing-posterior",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_position_event(
+        conn,
+        "POSITION_SETTLED",
+        malformed_pos,
+        details={
+            "contract_version": "position_settled.v1",
+            "winning_bin": "39-40°F",
+            "position_bin": "39-40°F",
+            "won": True,
+            "outcome": 1,
+            # p_posterior intentionally omitted: malformed canonical payload
+            "exit_price": 1.0,
+            "pnl": 15.0,
+            "exit_reason": "SETTLEMENT",
+        },
+        timestamp="2026-04-01T23:00:00Z",
+        source="settlement",
+    )
+
+    store_settlement_records(
+        conn,
+        [
+            SettlementRecord(
+                trade_id="legacy-fallback",
+                city="NYC",
+                target_date="2026-04-01",
+                range_label="39-40°F",
+                direction="buy_yes",
+                p_posterior=0.58,
+                outcome=1,
+                pnl=12.5,
+                decision_snapshot_id="legacy-snap",
+                edge_source="center_buy",
+                strategy="center_buy",
+                settled_at="2026-04-01T23:00:00Z",
+            )
+        ],
+    )
+
+    rows = query_authoritative_settlement_rows(conn, limit=10)
+    assert query_authoritative_settlement_source(conn) == "position_events"
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "rt-malformed"
+    assert rows[0]["source"] == "position_events"
+    assert rows[0]["authority_level"] == "durable_event_malformed"
+    assert rows[0]["metric_ready"] is False
+    assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):

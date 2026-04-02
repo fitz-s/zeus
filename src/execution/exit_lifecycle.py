@@ -15,13 +15,13 @@ CycleRunner does not contain exit business logic.
 
 import logging
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
 from src.execution.executor import place_sell_order
 from src.state.portfolio import (
+    ExitContext,
     Position,
     PortfolioState,
     close_position,
@@ -34,13 +34,6 @@ DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
 
 # CLOB statuses that indicate a fill
 FILL_STATUSES = frozenset({"MATCHED", "FILLED"})
-
-
-@dataclass(frozen=True)
-class ExitContext:
-    exit_reason: str
-    current_market_price: float
-    best_bid: Optional[float]
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -80,11 +73,18 @@ def execute_exit(
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
+    if exit_context.current_market_price is None:
+        if not paper_mode:
+            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
+            _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
+            return "exit_blocked: incomplete_context"
+        return "paper_exit_failed: incomplete_context"
+
     if paper_mode:
         closed = close_position(
             portfolio,
             position.trade_id,
-            exit_context.current_market_price,
+            float(exit_context.current_market_price),
             exit_context.exit_reason,
         )
         if closed is not None:
@@ -129,7 +129,7 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason or "")
         return f"collateral_blocked: {collateral_reason}"
 
-    current_market_price = exit_context.current_market_price
+    current_market_price = float(exit_context.current_market_price)
     best_bid = exit_context.best_bid
 
     # Cancel stale sell order before retry
@@ -330,7 +330,7 @@ def check_pending_exits(
                         order_id=pos.last_exit_order_id,
                         fill_price=actual_price,
                         current_market_price=actual_price,
-                        best_bid=getattr(pos, "last_monitor_market_price", None),
+                        best_bid=getattr(pos, "last_monitor_best_bid", None),
                         timestamp=getattr(closed, "last_exit_at", None),
                     )
             stats["filled"] += 1

@@ -16,18 +16,18 @@
 | T2 | P0 | Canonical position ledger / position_events schema | Agent B | REVIEW | T1 | `src/state/db.py`, runtime writers | first `position_events` schema + append helpers landed; ownership contract still open | DB assertions + tests |
 | T3 | P0 | PositionState / transition authority consolidation | lifecycle-planner | IN_PROGRESS | T1 | `src/state/portfolio.py`, `src/engine/cycle_runtime.py`, `src/engine/cycle_runner.py` | concentrated lifecycle authority / transition map | invariants + targeted tests |
 | T4 | P0 | pending/live fail-closed + chain rescue | Agent A | IN_PROGRESS | T3 | `src/engine/cycle_runtime.py`, `src/state/chain_reconciliation.py`, `src/state/fill_tracker.py` | pending rescue design + implementation | targeted regression tests |
-| T5 | P0 | quarantine protective behavior | Agent A | IN_PROGRESS | T3 | `src/state/chain_reconciliation.py`, `src/engine/cycle_runner.py`, `src/observability/*` | quarantine protection semantics | adversarial tests |
-| T6 | P0 | Day0 terminal phase for all positions | Agent A | IN_PROGRESS | T3 | `src/engine/monitor_refresh.py`, `src/state/portfolio.py`, `src/engine/cycle_runtime.py` | phase transition landed through runtime transition + Day0 refresh dispatch; exit-specific phase semantics still open | lifecycle/day0 tests |
+| T5 | P0 | quarantine protective behavior | Agent A | IN_PROGRESS | T3 | `src/state/chain_reconciliation.py`, `src/engine/cycle_runtime.py`, targeted lifecycle tests | quarantine entry blocking plus explicit administrative resolution path | adversarial tests |
+| T6 | P0 | Day0 terminal phase for all positions | Agent A | IN_PROGRESS | T3 | `src/engine/monitor_refresh.py`, `src/state/portfolio.py`, `src/engine/cycle_runtime.py` | phase transition + Day0 refresh dispatch now cover same-cycle `<6h` crossings immediately; live Day0 refresh now uses sell-side `best_bid`; stronger exit-policy overrides still open | lifecycle/day0 tests |
 | T7 | P0 | ExitContext required schema + fail-closed behavior | Agent A | IN_PROGRESS | T3 | `src/state/portfolio.py`, `src/engine/monitor_refresh.py`, `src/engine/cycle_runtime.py`, `src/execution/exit_lifecycle.py` | ExitContext contract + callers wired | adversarial tests |
 | T8 | P0 | cycle_runner main-path state transition + event emission | Agent A / B | TODO | T2,T3,T7 | `src/engine/cycle_runner.py`, `src/engine/cycle_runtime.py` | integrated runtime path | integration tests |
 | T9 | P1 | decision / execution / exit / settlement durable records | Agent B | REVIEW | T2 | `src/state/db.py`, `src/engine/cycle_runtime.py`, `src/execution/harvester.py`, `tests/test_db.py` | entry/exit/settlement durable position events appended alongside legacy writers | DB assertions + tests |
 | T10 | P1 | ExecutionReport / fill telemetry / order attempt events | Agent B | REVIEW | T2 | `src/execution/executor.py`, `src/execution/exit_lifecycle.py`, runtime writers | entry-path telemetry plus exit-lifecycle placement/retry/fill-check durable events landed; still needs full runtime-path validation | unit tests |
-| T11 | P1 | harvester learning source migration | Agent B | TODO | T2,T9 | `src/execution/harvester.py` | learning inputs sourced from authority, not only open portfolio | harvester tests |
-| T17 | P1 | position_events reader/owner contract | Agent B / Agent C | IN_PROGRESS | T2,T9 | `src/state/db.py`, downstream readers | RiskGuard settlement reader now prefers `position_events` and falls back to legacy-only settlement blobs; broader consumer contract still open | contract review |
-| T18 | P1 | exit_lifecycle event emission | Agent B | REVIEW | T10 | `src/execution/exit_lifecycle.py`, runtime writers | emit sell placement/retry/fill-check/recovery events into `position_events` from the exit state machine seam | unit tests |
-| T19 | P1 | harvester snapshot sourcing from durable ledger | Agent B | TODO | T11,T17 | `src/execution/harvester.py`, ledger readers | replace open-portfolio snapshot discovery with durable source | harvester tests |
+| T11 | P1 | harvester learning source migration | Agent B | REVIEW | T2,T9 | `src/execution/harvester.py` | learning inputs sourced from durable settlement authority first, not only open portfolio | harvester tests |
+| T17 | P1 | position_events reader/owner contract | Agent B / Agent C | IN_PROGRESS | T2,T9 | `src/state/db.py`, downstream readers | RiskGuard settlement reader now prefers `position_events` and falls back to legacy-only settlement blobs; `db.py` cleanup has removed duplicate helper tails, but broader consumer contract still open | contract review |
+| T18 | P1 | exit_lifecycle event emission | Agent B | REVIEW | T10 | `src/execution/exit_lifecycle.py`, runtime writers | emit sell placement/retry/fill-check/recovery events into `position_events` from the exit state machine seam; current follow-up is runtime-path validation, not more helper expansion | unit tests |
+| T19 | P1 | harvester snapshot sourcing from durable ledger | Agent B | REVIEW | T11,T17 | `src/execution/harvester.py`, ledger readers | replace open-portfolio snapshot discovery with durable settlement rows first and narrow portfolio fallback | harvester tests |
 | T20 | P1 | settlement/decision event dedupe contract | Agent B / Agent C | TODO | T9,T17 | `src/state/decision_chain.py`, `src/state/db.py`, consumers | define authoritative read path across `decision_log`, `chronicle`, and `position_events` | contract review |
-| T21 | P1 | lifecycle event telemetry for pending reconciliation | Agent B | TODO | T10,T3 | `src/engine/cycle_runtime.py`, `src/state/db.py` | explicit pending->entered|voided reconciliation event coverage | DB assertions + tests |
+| T21 | P1 | lifecycle event telemetry for pending reconciliation | Agent B | REVIEW | T10,T3 | `src/engine/cycle_runtime.py`, `src/state/db.py`, `src/state/chain_reconciliation.py` | explicit pending->entered|voided reconciliation event coverage now includes exactly-once rescued-fill stage events from chain reconciliation; broader void/reconciliation coverage still separate | DB assertions + tests |
 | T22 | P1 | chronicle alignment with stage-level events | Agent B | TODO | T9,T20 | `src/state/chronicler.py`, runtime writers | align chronicle event names/payloads or formally narrow its scope | grep/tests |
 | T23 | P1 | durable event spine contract docs in team files | Agent B | TODO | T17,T20 | `progress.md`, `task.md` | freeze event names, identity fields, and source semantics after review | file review |
 | T24 | P1 | event spine smoke validation | Agent B | TODO | T9,T10,T18,T21 | `tests/` | entry->lifecycle->exit->settlement append smoke path | pytest targets |
@@ -134,10 +134,53 @@
 | T125 | P2 | queue sanity maintained | Main | TODO | T124 | `task.md` | final guardrail | review |
 | T126 | P2 | stop here | Main | TODO | T125 | `task.md` | stop expanding | review |
 | T12 | P1 | strategy analytics rebuild from authoritative events | Agent B / C | TODO | T9,T10 | `src/state/strategy_tracker.py`, ledger readers | rebuilt derived analytics or narrowed scope | regression tests |
-| T13 | P1 | RiskGuard input contract upgrade | Agent C | BLOCKED | T9,T12 | `src/riskguard/riskguard.py`, `src/riskguard/metrics.py`, `src/state/decision_chain.py`, `src/state/db.py` | strategy/execution-aware authoritative inputs; mixed reader must split canonical vs legacy fallback cleanly first | riskguard tests |
-| T14 | P2 | adversarial invariant test pack | Agent C | IN_PROGRESS | T4,T5,T6,T7,T9,T10,T13 | `tests/` | invariant and regression coverage | pytest targets |
+| T13 | P1 | RiskGuard input contract upgrade | Agent C | REVIEW | T9,T12 | `src/riskguard/riskguard.py`, `src/riskguard/metrics.py`, `src/state/decision_chain.py`, `src/state/db.py` | first consumer switch landed for settlement-source provenance; broader strategy/execution authority still separate | riskguard tests |
+| T14 | P2 | adversarial invariant test pack | Agent C | REVIEW | T4,T5,T6,T7,T9,T10,T13 | `tests/` | invariant and regression coverage now includes rescued-fill exactly-once runtime proof plus RiskGuard settlement-source provenance coverage; broader execution-path validation still open | pytest targets |
 | T15 | P2 | delete / shrink fake runtime teeth | Agent C | REVIEW | T1 | `src/observability/*`, `src/state/strategy_tracker.py`, `src/engine/cycle_runtime.py`, runtime mirrors | removal list + actual deletions; fake deferred-fill tracker contract removed | grep/tests |
 | T16 | P2 | remove bad metrics / legacy illusion / non-authoritative views | Agent C | REVIEW | T12,T13,T15 | `src/state/strategy_tracker.py`, `src/riskguard/riskguard.py`, `src/riskguard/metrics.py`, `src/engine/cycle_runtime.py`, docs/tests | semantics cleanup slice landed; tracker win-rate authority removed; authoritative reader migration still separate | tests + grep |
+
+## Current Program Queue (authoritative live set)
+
+Use this compact set as the current queue truth. The older historical backlog above and the earlier `R1`-`R5` recovery queue are preserved for audit context, but they are no longer the controlling live queue after the user dissolved the previous team and added the external research expansion.
+
+| Program ID | Priority | Title | Owner | Status | Why now |
+|---|---|---|---|---|---|
+| P0-A | P0 | Reset runtime ownership truth after team dissolution | Main | REVIEW | Old `repair/adversary` baton truth was stale and has now been rewritten out of the live control surfaces. |
+| P0-B | P0 | Freeze core contracts: canonical settlement payload, `ExitContext v2`, lifecycle transition ownership | Main + runtime/truth lanes | DONE | Canonical settlement contract, degraded-authority seam, and `ExitContext v2` are landed, reviewed, and validated. |
+| P0-C | P0 | Unify clock / target semantics across evaluator, Day0, and general ensemble slicing | Main + time-semantics lane | DONE | Day0 remaining semantics, GFS target-day slicing, and degraded snapshot clock metadata are landed and validated. |
+| P0-D | P0 | Close runtime spine: pending/live fail-closed, Day0 terminal phase, durable transition/event emission | runtime lane | READY | This is still the highest-leverage capital-protection work. |
+| P1-E | P1 | Migrate learning loop to authoritative ledger + evaluated opportunity set | truth/learning lane | READY | Harvester and attribution must stop depending on still-open portfolio paths. |
+| P1-F | P1 | Detailed review lane for landed slices | detailed-review lane | READY | Every landed slice needs file-level correctness review before acceptance. |
+| P1-G | P1 | Adversarial review lane for landed slices | adversarial lane | READY | Every landed slice needs fail-open / false-authority challenge before closure. |
+| P2-H | P1 | Forecast-layer Phase-1 de-hardcode: Day0 backbone, lead-continuous mean/sigma, heteroscedastic sigma | forecast lane | BLOCKED | Valid only after `P0-C` proves unified time semantics and `P0-D` stops runtime truth loss. |
+| P2-I | P2 | Gate / decision learned policy work (`alpha`, `conflict`, timing, richer exit policy`) | Main | BLOCKED | Must wait for thicker verified samples and clean runtime/forecast truth. |
+
+### Live Baton / Queue Rules
+- Current baton mode is **`solo`** after closing the post-reset implementation and review lanes for `P0-B`/`P0-C`.
+- There is currently no active durable baton; next claimable work starts at `P0-D`.
+- Durable teammates should only be created for:
+  - runtime implementation lane
+  - time-semantics implementation/audit lane
+  - detailed review lane
+  - adversarial review lane
+- One-off archaeology, truth checks, schema/function design lookups, and external-fact retrieval go to bounded `explore` subagents instead of durable teammate lanes.
+- Acceptance order for each landed slice:
+  1. implementation evidence
+  2. detailed review
+  3. adversarial review
+  4. main-thread integration/closure
+
+### Mapping Note
+- Earlier recovery items map into the new queue as follows:
+  - `R1` folds into `P0-B`
+  - `R2` and parts of `R3` fold into `P0-D`
+  - `R4` folds into `P1-E`
+  - `R5` folds into `P1-F`/`P1-G` and later `P2-H`
+
+### Historical Backlog Note
+- The large task inventory above records how the prior round evolved, including task-sprawl mistakes. It remains audit context only.
+- Queue truth for current work now lives in `P0-A` through `P2-I` plus `.claude/baton_state.json`.
+- Future compaction may archive or delete the stale historical rows once no longer needed for recovery archaeology.
 
 ## Claim Rules
 1. Before starting, change task status to `IN_PROGRESS` and write the owner.

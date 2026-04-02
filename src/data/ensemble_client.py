@@ -45,6 +45,13 @@ def _clone_result(result: dict) -> dict:
     return cloned
 
 
+def _parse_timestamp_as_utc(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def fetch_ensemble(
     city: City,
     forecast_days: int = 8,
@@ -54,7 +61,8 @@ def fetch_ensemble(
 
     Returns dict with:
         members_hourly: np.ndarray shape (n_members, hours) in city's settlement unit
-        issue_time: datetime (UTC)
+        issue_time: datetime | None (UTC, if upstream exposes true cycle issue time)
+        first_valid_time: datetime (UTC forecast-window start from payload)
         fetch_time: datetime (UTC)
         model: str
         n_members: int
@@ -144,13 +152,13 @@ def _parse_response(data: dict, model: str, fetch_time: datetime) -> dict:
     members_hourly = np.array(members, dtype=np.float64)  # (n_members, hours)
     n_members = members_hourly.shape[0]
 
-    # Parse issue time from first timestamp
-    issue_time = datetime.fromisoformat(times[0]).replace(tzinfo=timezone.utc)
+    first_valid_time = _parse_timestamp_as_utc(times[0])
 
     return {
         "members_hourly": members_hourly,
         "times": times,
-        "issue_time": issue_time,
+        "issue_time": None,
+        "first_valid_time": first_valid_time,
         "fetch_time": fetch_time,
         "model": model,
         "n_members": n_members,
