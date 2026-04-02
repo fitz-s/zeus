@@ -236,7 +236,12 @@ def write_status(cycle_summary: dict = None) -> None:
         tracker = load_tracker()
         current_regime_started_at = str(tracker.accounting.get("current_regime_started_at") or "")
         conn = get_connection()
-        status["execution"] = query_execution_event_summary(conn)
+        status["execution"] = query_execution_event_summary(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+        if current_regime_started_at:
+            status["execution"]["current_regime_started_at"] = current_regime_started_at
         status["learning"] = query_learning_surface_summary(
             conn,
             not_before=current_regime_started_at or None,

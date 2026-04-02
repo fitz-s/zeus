@@ -461,7 +461,7 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
     def _boom(_conn):
         raise RuntimeError("db unavailable")
 
-    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", _boom)
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: _boom(conn))
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
@@ -499,7 +499,7 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
-    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(
         status_summary_module,
         "query_learning_surface_summary",
@@ -565,7 +565,7 @@ def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
     monkeypatch.setattr(status_summary_module, "load_tracker", lambda: type("T", (), {"accounting": {}})())
-    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
@@ -598,7 +598,11 @@ def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch,
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
     monkeypatch.setattr(status_summary_module, "load_tracker", lambda: DummyTracker())
-    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    def _fake_execution_summary(conn, not_before=None):
+        captured["execution_not_before"] = not_before
+        return {}
+
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", _fake_execution_summary)
     def _fake_learning_surface(conn, not_before=None):
         captured["not_before"] = not_before
         return {"by_strategy": {}}
@@ -617,6 +621,8 @@ def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch,
     status = json.loads(status_path.read_text())
 
     assert captured["not_before"] == "2026-04-03T00:00:00+00:00"
+    assert captured["execution_not_before"] == "2026-04-03T00:00:00+00:00"
+    assert status["execution"]["current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
     assert status["learning"]["current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
 
 
