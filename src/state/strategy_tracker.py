@@ -117,6 +117,24 @@ class StrategyTracker:
         }
         self.accounting: dict[str, Any] = _default_accounting()
 
+    def _refresh_current_regime_started_at(self) -> None:
+        if self.accounting.get("includes_legacy_history", False):
+            return
+        earliest: str | None = None
+        for metrics in self.strategies.values():
+            for trade in metrics.trades:
+                entered_at = str(trade.get("entered_at", "") or "")
+                if not entered_at:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(entered_at.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if earliest is None or ts < datetime.fromisoformat(earliest.replace("Z", "+00:00")):
+                    earliest = ts.isoformat()
+        if earliest:
+            self.accounting["current_regime_started_at"] = earliest
+
     def record_trade(self, trade: dict) -> None:
         strategy = trade.get("strategy") or trade.get("edge_source", "")
         if not strategy:
@@ -124,6 +142,7 @@ class StrategyTracker:
         if strategy not in self.strategies:
             strategy = "opening_inertia"  # Default bucket
         self.strategies[strategy].record(trade)
+        self._refresh_current_regime_started_at()
 
     def record_entry(self, position: Any) -> None:
         self.record_trade(_position_like_payload(position, status="entered"))
@@ -203,6 +222,8 @@ class StrategyTracker:
         accounting = data.get("accounting", {})
         if isinstance(accounting, dict):
             tracker.accounting.update(accounting)
+        if not tracker.accounting.get("current_regime_started_at"):
+            tracker._refresh_current_regime_started_at()
         return tracker
 
 

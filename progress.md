@@ -856,3 +856,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
     - `riskguard_contract_valid: true`
     - `recommended_commands: []`
 - Follow-up note: this was an operational state-recovery slice, not a semantic code contract slice. The mainline P0/P1 code remains valid; the recovery was necessary to restore runtime truth after restart.
+
+## 2026-04-02 — tracker current-regime start backfill
+- Main review delta: after runtime recovered, one remaining semantic weakness in the current-regime surfaces was that `strategy_tracker.accounting.current_regime_started_at` could stay empty unless the rebuild script had been run explicitly. That made the current-regime label partially true in narrative but not fully encoded in the live tracker artifact.
+- Main contract decision: the tracker must backfill `current_regime_started_at` from its own trade set whenever it is operating as the live current-regime attribution surface. This is still attribution-only; it does not turn the tracker into runtime authority, but it makes the current-regime metadata truthful and durable.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/strategy_tracker.py` now recomputes `current_regime_started_at` from tracked `entered_at` timestamps:
+    - when loading a tracker file with an empty regime start
+    - when new trades are recorded into the tracker
+  - The backfill is skipped for explicit history archives (`includes_legacy_history=true`).
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_strategy_tracker_regime.py` now locks:
+    - load-time backfill from existing trades
+    - incremental update when earlier trades are recorded later
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_strategy_tracker_regime.py` → `5 passed`
+  - `./.venv/bin/pytest -q` → `462 passed, 3 skipped`
+- Runtime truth after one-shot refresh:
+  - `strategy_tracker-paper.json.accounting.current_regime_started_at` now reads `2026-03-30T09:53:02.731857+00:00`
+  - a follow-up `tick(); write_status()` kept runtime health at `GREEN`
