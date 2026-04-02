@@ -738,3 +738,17 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary or authoritative_settlement or execution_event_summary'` → `6 passed`
   - `./.venv/bin/pytest -q` → `453 passed, 3 skipped`
 - Residual P1-E truth after this slice: recommendation payloads are now explainable and auditable, but the system still stops at rationale-bearing recommendation rather than a fully learned policy ladder. The next step is not more note fields; it is deciding how the learned current-regime surface should elevate or suppress strategy gates with stronger structural authority.
+
+## 2026-04-02 — P1-E strategy-tagged no-trade learning slice
+- Main review delta: after recommendation payloads became explainable, the next missing learning edge was the no-trade side of the current regime. `query_learning_surface_summary()` could count no-trades globally, but it could not attribute them by strategy, because `NoTradeCase` did not carry `strategy` / `edge_source` and the learning surface therefore lost one whole side of current-regime opportunity truth.
+- Main contract decision: `NoTradeCase` now carries strategy provenance whenever it is knowable at decision time. Learning/current-regime surfaces should be able to answer not only “what settled?” and “what filled?”, but also “which strategy opportunities are getting rejected or gated right now?” This remains learning truth only; it does not yet auto-gate anything.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/state/decision_chain.py` now extends `NoTradeCase` with `strategy` and `edge_source`, and `query_learning_surface_summary()` now folds strategy-tagged no-trades into `learning.by_strategy[*].no_trade_count` and `no_trade_stage_counts`.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/cycle_runtime.py` now writes strategy/edge-source provenance into both ordinary no-trades and strategy-gate rejections whenever the strategy is knowable from the evaluated edge.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_db.py` now proves that the learning surface carries per-strategy no-trade counts/stages alongside settlement and execution truth.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py` now locks that strategy-gate rejections persist `strategy` + `edge_source` into the `NoTradeCase` artifact.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary'` → `1 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'strategy_gate_blocks_trade_execution'` → `1 passed`
+- Residual P1-E truth after this slice: the learned current-regime surface now sees strategy-tagged no-trades, but it still uses them as descriptive evidence rather than a closed policy ladder. The next step is to decide how this richer by-strategy rejection truth should influence review-required vs executable gating policy.

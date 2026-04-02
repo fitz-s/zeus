@@ -592,6 +592,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 if d.should_trade and d.edge and d.tokens:
                     strategy_name = deps._classify_strategy(mode, d.edge, d.edge_source or deps._classify_edge_source(mode, d.edge))
                     if not deps.is_strategy_enabled(strategy_name):
+                        edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
                         summary["no_trades"] += 1
                         summary["strategy_gate_rejections"] = summary.get("strategy_gate_rejections", 0) + 1
                         artifact.add_no_trade(
@@ -602,6 +603,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 range_label=d.edge.bin.label if d.edge else "",
                                 direction=d.edge.direction if d.edge else "",
                                 rejection_stage="RISK_REJECTED",
+                                strategy=strategy_name,
+                                edge_source=edge_source,
                                 rejection_reasons=[f"strategy_gate_disabled:{strategy_name}"],
                                 best_edge=d.edge.edge if d.edge else 0.0,
                                 model_prob=d.edge.p_posterior if d.edge else 0.0,
@@ -694,6 +697,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             result,
                         )
                 else:
+                    edge_source = ""
+                    strategy_name = ""
+                    if d.edge:
+                        edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
+                        strategy_name = deps._classify_strategy(mode, d.edge, edge_source)
                     summary["no_trades"] += 1
                     artifact.add_no_trade(
                         deps.NoTradeCase(
@@ -703,6 +711,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             range_label=d.edge.bin.label if d.edge else "",
                             direction=d.edge.direction if d.edge else "",
                             rejection_stage=d.rejection_stage,
+                            strategy=strategy_name,
+                            edge_source=edge_source,
                             rejection_reasons=list(d.rejection_reasons),
                             best_edge=d.edge.edge if d.edge else 0.0,
                             model_prob=d.edge.p_posterior if d.edge else 0.0,
