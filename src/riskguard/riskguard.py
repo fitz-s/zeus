@@ -20,6 +20,7 @@ from src.riskguard.metrics import (
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.state.db import RISK_DB_PATH, get_connection, query_authoritative_settlement_rows
 from src.state.portfolio import load_portfolio
+from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,15 @@ def tick() -> RiskLevel:
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
     strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
     entry_execution_summary = _entry_execution_summary(zeus_conn, env=current_env)
+    try:
+        tracker = load_tracker()
+        tracker_summary = tracker.summary()
+        edge_compression_alerts = tracker.edge_compression_check()
+        tracker_accounting = dict(getattr(tracker, "accounting", {}))
+    except Exception:
+        tracker_summary = {}
+        edge_compression_alerts = []
+        tracker_accounting = {}
 
     # Compute metrics from authoritative settlement rows only.
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
@@ -209,6 +219,9 @@ def tick() -> RiskLevel:
             "accuracy": round(d_accuracy, 4),
             "strategy_settlement_summary": strategy_settlement_summary,
             "entry_execution_summary": entry_execution_summary,
+            "strategy_tracker_summary": tracker_summary,
+            "strategy_edge_compression_alerts": edge_compression_alerts,
+            "strategy_tracker_accounting": tracker_accounting,
         }),
         now,
     ))
