@@ -1,10 +1,22 @@
 {
   "mode": "solo",
   "live_teammates": [],
-  "ready": [],
-  "active": [],
+  "ready": [
+    {
+      "task_id": "P2-H",
+      "owner": "Main",
+      "goal": "Start forecast-layer Phase-1 de-hardcode from the now-closed P0/P1 base"
+    }
+  ],
+  "active": [
+    {
+      "task_id": "P2-H",
+      "owner": "Main",
+      "goal": "Identify and land the first low-blast-radius seam for forecast-layer Phase-1 de-hardcode"
+    }
+  ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P1-E as done for the current base; no remaining active P0/P1 program lanes remain, only future-phase work",
+  "last_decision": "CLOSE the current P0/P1 base and open P2-H as the next active lane",
   "backlog_source": "task.md"
 }
