@@ -82,6 +82,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - pending/live entry verification still has split-brain ownership (`cycle_runtime` vs `fill_tracker`)
   - `day0_window` lifecycle still is not yet a durable event-owned phase
 
+## P0-D Slice 2 (entry verification / chain authority reduction)
+- Landed protections:
+  - normal CLOB-filled pending entries now stamp `entry_order_id`, `entry_fill_verified=True`, and canonicalize `order_status=\"filled\"`;
+  - the normal FILLED path now keeps `chain_state=\"local_only\"` instead of overclaiming `synced` before chain truth has actually confirmed the position;
+  - chain reconciliation now preserves `entry_fill_verified` local positions that are still waiting for chain appearance instead of immediately voiding them as `PHANTOM_NOT_ON_CHAIN`;
+  - incomplete chain snapshots (`0` chain positions with active locals) no longer escalate retrying exits or verified fresh entries into false missing-chain recovery.
+- Validation evidence for this slice:
+  - targeted runtime tests after the slice: `74 passed`
+  - full suite after landing the slice: `419 passed, 3 skipped`
+- Residual P0-D backlog after slice 2:
+  - pending/live verification still has two code paths (`cycle_runtime.reconcile_pending_positions` vs `fill_tracker.check_pending_entries`) and therefore still lacks a single frozen owner;
+  - Day0 still is not a full terminal-phase exit authority;
+  - `day0_window` lifecycle is still not durably emitted as an event-owned phase.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

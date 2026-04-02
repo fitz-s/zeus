@@ -212,6 +212,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         edge_context_json=decision.edge_context_json,
         state=state,
         order_id=result.order_id or "",
+        entry_order_id=result.order_id or "",
         order_status=result.status,
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
@@ -240,13 +241,15 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
                 shares = pos.size_usd / fill_price
 
             pos.entry_price = fill_price
+            pos.entry_order_id = pos.entry_order_id or pos.order_id
+            pos.entry_fill_verified = True
             if shares is not None:
                 pos.shares = shares
             if pos.cost_basis_usd <= 0:
                 pos.cost_basis_usd = pos.size_usd
             pos.state = "entered"
-            pos.order_status = status.lower()
-            pos.chain_state = "synced"
+            pos.order_status = "filled"
+            pos.chain_state = "local_only"
             pos.entered_at = now.isoformat()
             try:
                 from src.state.db import update_trade_lifecycle

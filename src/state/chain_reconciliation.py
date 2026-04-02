@@ -183,6 +183,15 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if chain is None:
             if skip_voiding:
                 continue  # Don't void — API response is suspect
+            if (
+                getattr(pos, "entry_fill_verified", False)
+                and pos.chain_state in {"local_only", "unknown"}
+                and pos.state in {"entered", "holding", "day0_window"}
+            ):
+                pos.chain_state = "local_only"
+                pos.chain_verified_at = now
+                stats["awaiting_chain_entry"] = stats.get("awaiting_chain_entry", 0) + 1
+                continue
             if _pending_exit_owned_by_exit_lifecycle(pos):
                 logger.info(
                     "EXIT IN FLIGHT: %s missing on chain while exit_state=%s; "

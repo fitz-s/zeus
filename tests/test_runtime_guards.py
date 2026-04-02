@@ -191,6 +191,43 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
     assert cancelled == ["orphan-1"]
 
 
+def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(monkeypatch):
+    portfolio = PortfolioState(positions=[_position(
+        trade_id="pending-fill-1",
+        state="pending_tracked",
+        order_id="ord-1",
+        entry_order_id="",
+        entry_fill_verified=False,
+        token_id="tok_yes_pending",
+        no_token_id="tok_no_pending",
+        size_usd=10.0,
+        entry_price=0.40,
+    )])
+
+    class Tracker:
+        def __init__(self):
+            self.entries = []
+        def record_entry(self, position):
+            self.entries.append(position.trade_id)
+
+    class DummyClob:
+        paper_mode = False
+        def get_order_status(self, order_id):
+            assert order_id == "ord-1"
+            return {"status": "FILLED", "avgPrice": 0.41, "filledSize": 24.39}
+
+    monkeypatch.setattr(cycle_runner, "_utcnow", lambda: datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc))
+    summary = cycle_runner._reconcile_pending_positions(portfolio, DummyClob(), Tracker())
+    pos = portfolio.positions[0]
+
+    assert summary["entered"] == 1
+    assert pos.state == "entered"
+    assert pos.entry_fill_verified is True
+    assert pos.entry_order_id == "ord-1"
+    assert pos.order_status == "filled"
+    assert pos.chain_state == "local_only"
+
+
 def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)

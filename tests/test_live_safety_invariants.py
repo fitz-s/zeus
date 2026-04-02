@@ -286,6 +286,39 @@ def test_chain_reconciliation_does_not_void_exit_in_flight_positions(exit_state)
     assert healthy.condition_id == "cond-live-1"
 
 
+def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    entered = _make_position(
+        trade_id="entered-waiting-chain",
+        token_id="tok_entry_001",
+        no_token_id="tok_entry_no_001",
+        state="entered",
+        chain_state="local_only",
+        entry_fill_verified=True,
+        order_status="filled",
+    )
+    healthy = _make_position(
+        trade_id="healthy-sync-2",
+        token_id="tok_live_002",
+        no_token_id="tok_live_no_002",
+        state="holding",
+        chain_state="unknown",
+        condition_id="cond-live-2",
+    )
+    portfolio = _make_portfolio(entered, healthy)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_live_002", size=25.0, avg_price=0.40, cost=10.0, condition_id="cond-live-2")],
+    )
+
+    assert stats["voided"] == 0
+    assert stats["awaiting_chain_entry"] == 1
+    assert entered in portfolio.positions
+    assert entered.chain_state == "local_only"
+
+
 # ---- Test 4: Retry respects cooldown ----
 
 
