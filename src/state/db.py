@@ -768,7 +768,13 @@ def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
         "fill_quality": fill_quality,
         "order_status": getattr(pos, "order_status", ""),
     }
-    event_type = "ORDER_FILLED" if getattr(result, "status", "") == "filled" else "ORDER_ATTEMPTED"
+    status = getattr(result, "status", "")
+    if status == "filled":
+        event_type = "ORDER_FILLED"
+    elif status in {"rejected", "cancelled", "canceled"}:
+        event_type = "ORDER_REJECTED"
+    else:
+        event_type = "ORDER_ATTEMPTED"
     log_position_event(
         conn,
         event_type,

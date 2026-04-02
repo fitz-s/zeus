@@ -440,6 +440,49 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     assert events[0]["details"]["fill_quality"] == pytest.approx(0.05)
 
 
+def test_log_execution_report_emits_rejected_entry_event(tmp_path):
+    from src.execution.executor import OrderResult
+    from src.state.db import log_execution_report, query_position_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="rt-exec-rejected",
+        market_id="m4",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        order_status="rejected",
+    )
+    result = OrderResult(
+        trade_id="rt-exec-rejected",
+        status="rejected",
+        submitted_price=0.40,
+        reason="insufficient_liquidity",
+    )
+
+    log_execution_report(conn, pos, result)
+    conn.commit()
+
+    events = query_position_events(conn, "rt-exec-rejected")
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "ORDER_REJECTED"
+    assert events[0]["details"]["status"] == "rejected"
+    assert events[0]["details"]["reason"] == "insufficient_liquidity"
+
+
 def test_log_settlement_event_emits_durable_record(tmp_path):
     from src.state.db import log_settlement_event, query_position_events
     from src.state.portfolio import Position

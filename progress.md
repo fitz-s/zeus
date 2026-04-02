@@ -186,6 +186,18 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - strategy-aware / execution-aware RiskGuard behavior is still not yet a full protective loop;
   - some operator surfaces still summarize rather than diagnose (for example strategy/execution breakdowns are still thinner than runtime internals).
 
+## Execution Attribution Slice 1 (rejected-entry durability)
+- Landed protections:
+  - live rejected/cancelled entries are no longer visible only inside `decision_log`/cycle artifact; they now emit durable execution events through the same event spine as accepted entry attempts;
+  - `log_execution_report()` now distinguishes `ORDER_REJECTED` from generic `ORDER_ATTEMPTED`, so entry-side execution failure is queryable as first-class telemetry rather than a missing-position side effect;
+  - `execute_discovery_phase()` now emits durable execution telemetry even when an intended trade never materializes into a `Position`.
+- Validation evidence for this slice:
+  - targeted DB/runtime tests after the slice: `86 passed`
+  - full suite after landing the slice: `433 passed, 3 skipped`
+- Residual execution/consumer backlog after this slice:
+  - strategy-aware / execution-aware RiskGuard behavior is still not yet a full protective loop;
+  - broader post-entry execution attribution (`entry_alpha_usd`, slippage decomposition, downstream strategy/risk consumers) can still be tightened further.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

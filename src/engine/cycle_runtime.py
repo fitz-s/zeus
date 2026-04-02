@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from src.engine.time_context import lead_hours_to_target
 
@@ -294,6 +295,27 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitC
         chain_is_fresh=None if paper_mode else pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+    )
+
+
+def _execution_stub(candidate, decision, result, city, mode, *, deps):
+    edge_source = decision.edge_source or deps._classify_edge_source(mode, decision.edge)
+    return SimpleNamespace(
+        trade_id=result.trade_id,
+        market_id=decision.tokens["market_id"],
+        city=city.name,
+        target_date=candidate.target_date,
+        bin_label=decision.edge.bin.label,
+        direction=decision.edge.direction,
+        strategy=deps._classify_strategy(mode, decision.edge, edge_source),
+        edge_source=edge_source,
+        decision_snapshot_id=decision.decision_snapshot_id,
+        order_id=result.order_id or "",
+        order_status=result.status,
+        order_posted_at="",
+        entered_at="",
+        chain_state="",
+        fill_quality=None,
     )
 
 
@@ -634,6 +656,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             tracker.record_entry(pos)
                             tracker_dirty = True
                             summary["trades"] += 1
+                    else:
+                        from src.state.db import log_execution_report
+
+                        log_execution_report(
+                            conn,
+                            _execution_stub(candidate, d, result, city, mode, deps=deps),
+                            result,
+                        )
                 else:
                     summary["no_trades"] += 1
                     artifact.add_no_trade(
