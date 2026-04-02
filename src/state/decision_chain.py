@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.config import settings
 from src.contracts.semantic_types import Direction, RejectionStage, DirectionAlias
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,7 @@ def query_settlement_records(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
 ) -> list[dict]:
     """Load settlement records, preferring canonical stage events over legacy blobs."""
     from src.state.db import query_authoritative_settlement_rows
@@ -251,6 +253,7 @@ def query_settlement_records(
         limit=limit,
         city=city,
         target_date=target_date,
+        env=env,
     )
 
 
@@ -261,16 +264,19 @@ def query_legacy_settlement_records(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
+    query_env = settings.mode if env is None else env
     rows = conn.execute(
         """
-        SELECT artifact_json, timestamp FROM decision_log
+        SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'
+          AND env = ?
         ORDER BY timestamp DESC
         LIMIT ?
         """,
-        (max(limit * 10, 50),),
+        (query_env, max(limit * 10, 50)),
     ).fetchall()
 
     results: list[dict] = []

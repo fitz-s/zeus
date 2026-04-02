@@ -86,6 +86,7 @@ class TestRiskGuardSettlementSource:
         assert details["settlement_storage_source"] == "position_events"
         assert details["settlement_row_storage_sources"] == ["position_events"]
         assert details["settlement_sample_size"] == 1
+        assert details["strategy_settlement_summary"]["unclassified"]["count"] == 1
 
     def test_tick_records_legacy_settlement_fallback_source(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -113,6 +114,38 @@ class TestRiskGuardSettlementSource:
         assert details["settlement_storage_source"] == "decision_log"
         assert details["settlement_row_storage_sources"] == ["decision_log"]
         assert details["settlement_sample_size"] == 1
+
+    def test_tick_records_authoritative_strategy_breakdown(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [
+                {"p_posterior": 0.7, "outcome": 1, "pnl": 5.0, "strategy": "center_buy", "source": "position_events", "metric_ready": True},
+                {"p_posterior": 0.4, "outcome": 0, "pnl": -2.0, "strategy": "center_buy", "source": "position_events", "metric_ready": True},
+                {"p_posterior": 0.8, "outcome": 1, "pnl": 4.0, "strategy": "opening_inertia", "source": "position_events", "metric_ready": True},
+            ],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["strategy_settlement_summary"]["center_buy"]["count"] == 2
+        assert details["strategy_settlement_summary"]["center_buy"]["pnl"] == pytest.approx(3.0)
+        assert details["strategy_settlement_summary"]["center_buy"]["accuracy"] == pytest.approx(0.5)
+        assert details["strategy_settlement_summary"]["opening_inertia"]["count"] == 1
 
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

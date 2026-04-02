@@ -674,6 +674,123 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
     assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
+def test_query_authoritative_settlement_rows_filters_by_env(tmp_path):
+    from src.state.db import log_settlement_event, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    paper_pos = Position(
+        trade_id="paper-settle",
+        market_id="m-paper",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.6,
+        edge=0.2,
+        exit_price=1.0,
+        pnl=6.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+        env="paper",
+    )
+    live_pos = Position(
+        trade_id="live-settle",
+        market_id="m-live",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="41-42°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        edge=0.3,
+        exit_price=1.0,
+        pnl=7.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+        env="live",
+    )
+    log_settlement_event(conn, paper_pos, winning_bin="39-40°F", won=True, outcome=1)
+    log_settlement_event(conn, live_pos, winning_bin="41-42°F", won=True, outcome=1)
+    conn.commit()
+
+    paper_rows = query_authoritative_settlement_rows(conn, limit=10, env="paper")
+    live_rows = query_authoritative_settlement_rows(conn, limit=10, env="live")
+    conn.close()
+
+    assert [row["trade_id"] for row in paper_rows] == ["paper-settle"]
+    assert [row["trade_id"] for row in live_rows] == ["live-settle"]
+
+
+def test_query_legacy_settlement_records_filters_by_env(tmp_path):
+    from src.state.decision_chain import query_legacy_settlement_records
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    paper_artifact = {
+        "mode": "settlement",
+        "settlements": [
+            {
+                "trade_id": "paper-legacy",
+                "city": "NYC",
+                "target_date": "2026-04-01",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "p_posterior": 0.6,
+                "outcome": 1,
+                "pnl": 6.0,
+                "settled_at": "2026-04-01T23:00:00Z",
+            }
+        ],
+    }
+    live_artifact = {
+        "mode": "settlement",
+        "settlements": [
+            {
+                "trade_id": "live-legacy",
+                "city": "NYC",
+                "target_date": "2026-04-01",
+                "range_label": "41-42°F",
+                "direction": "buy_yes",
+                "p_posterior": 0.7,
+                "outcome": 1,
+                "pnl": 7.0,
+                "settled_at": "2026-04-01T23:00:00Z",
+            }
+        ],
+    }
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(paper_artifact), "2026-04-01T23:00:00Z", "paper"),
+    )
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("settlement", "2026-04-01T23:00:00Z", "2026-04-01T23:00:00Z", json.dumps(live_artifact), "2026-04-01T23:00:00Z", "live"),
+    )
+    conn.commit()
+
+    paper_rows = query_legacy_settlement_records(conn, limit=10, env="paper")
+    live_rows = query_legacy_settlement_records(conn, limit=10, env="live")
+    conn.close()
+
+    assert [row["trade_id"] for row in paper_rows] == ["paper-legacy"]
+    assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
+
+
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
