@@ -348,6 +348,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual health/control backlog after this slice:
   - the next remaining health-policy question is which additional diagnosis surfaces should affect severity versus remain informational only.
 
+## Consumer Truth Slice 3 (env-filtered no-trade diagnostics)
+- Landed protections:
+  - `query_no_trade_cases()` now filters by `env`, aligning no-trade diagnostics with the same paper/live truth boundary already enforced for settlement readers;
+  - this means operator and health surfaces no longer risk mixing paper and live rejection reasons when they summarize recent no-trade behavior.
+- Validation evidence for this slice:
+  - targeted DB/healthcheck tests after the slice: `32 passed`
+  - full suite after landing the slice: `443 passed, 3 skipped`
+- Residual consumer backlog after this slice:
+  - deeper learning migration still remains: evaluated opportunity set, no-trade diagnostics, and strategy/execution truth are now cleaner, but they are not yet unified into a single learned-current-regime consumer model.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

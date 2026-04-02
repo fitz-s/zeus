@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing cycle-failure health degradation"
+      "goal": "Drive the next truth/consumer slice after landing env-filtered no-trade diagnostics"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the cycle-failure health signal slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the env-filtered no-trade diagnostics slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
