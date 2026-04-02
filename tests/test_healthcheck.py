@@ -21,9 +21,48 @@ def _write_risk_state(path, *, checked_at=None):
     conn.close()
 
 
+def _write_no_trade_artifact(path):
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, artifact_json TEXT NOT NULL, timestamp TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'paper')"
+    )
+    artifact = {
+        "mode": "opening_hunt",
+        "started_at": "2026-04-02T00:00:00Z",
+        "completed_at": "2026-04-02T00:01:00Z",
+        "no_trade_cases": [
+            {
+                "decision_id": "d1",
+                "city": "NYC",
+                "target_date": "2026-04-02",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "rejection_stage": "EDGE_INSUFFICIENT",
+                "rejection_reasons": ["small"],
+            },
+            {
+                "decision_id": "d2",
+                "city": "NYC",
+                "target_date": "2026-04-02",
+                "range_label": "41-42°F",
+                "direction": "buy_yes",
+                "rejection_stage": "RISK_REJECTED",
+                "rejection_reasons": ["risk"],
+            },
+        ],
+    }
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("opening_hunt", "2026-04-02T00:00:00Z", "2026-04-02T00:01:00Z", json.dumps(artifact), datetime.now(timezone.utc).isoformat(), "paper"),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
+    zeus_db_path = tmp_path / "zeus.db"
     status_path.write_text(json.dumps({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "risk": {"level": "GREEN"},
@@ -33,10 +72,12 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
         "strategy": {"center_buy": {"open_positions": 1}},
     }))
     _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
 
     monkeypatch.setenv("ZEUS_MODE", "paper")
     monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
     monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
 
     class _Result:
         returncode = 0
@@ -55,6 +96,8 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["entries_blocked_reason"] == "risk_level=ORANGE"
     assert result["execution_summary"]["entry_rejected"] == 2
     assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
+    assert result["recent_no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
+    assert result["recent_no_trade_stage_counts"]["RISK_REJECTED"] == 1
     assert result["healthy"] is True
     assert healthcheck.exit_code_for(result) == 0
 
