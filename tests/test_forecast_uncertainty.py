@@ -85,12 +85,44 @@ def test_analysis_mean_context_explains_offset():
     assert ctx["unit"] == "F"
     assert ctx["lead_days"] == 5.0
     assert ctx["ensemble_mean"] == 42.0
-    assert ctx["offset"] == 0.0
+    assert ctx["lead_factor"] == 5.0 / 6.0
+    assert ctx["offset"] == __import__("pytest").approx(-0.875)
     assert ctx["city_name"] == "NYC"
     assert ctx["season"] == "MAM"
     assert ctx["forecast_source"] == "ecmwf_ifs025"
     assert ctx["bias_corrected"] is False
     assert ctx["bias_reference"]["bias"] == 1.5
+
+
+def test_analysis_mean_context_respects_bias_corrected_guard():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=5.0,
+        ensemble_mean=42.0,
+        city_name="NYC",
+        season="MAM",
+        forecast_source="ecmwf_ifs025",
+        bias_corrected=True,
+        bias_reference={"source": "ecmwf", "bias": 4.0, "discount_factor": 0.7},
+    )
+    assert ctx["raw_offset"] == 0.0
+    assert ctx["offset"] == 0.0
+
+
+def test_analysis_mean_context_caps_large_bias_offset():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=6.0,
+        ensemble_mean=42.0,
+        city_name="NYC",
+        season="MAM",
+        forecast_source="ecmwf_ifs025",
+        bias_corrected=False,
+        bias_reference={"source": "ecmwf", "bias": 10.0, "discount_factor": 0.7},
+    )
+    assert ctx["raw_offset"] == -7.0
+    assert ctx["max_abs_offset"] == sigma_instrument("F").value * 2.0
+    assert ctx["offset"] == -(sigma_instrument("F").value * 2.0)
 
 
 def test_analysis_sigma_context_explains_components():
