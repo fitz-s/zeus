@@ -33,6 +33,7 @@ class Day0Signal:
         hours_remaining: float,
         member_maxes_remaining: np.ndarray,
         unit: str = "F",
+        observation_source: str = "",
         temporal_context: Day0TemporalContext | None = None,
         diurnal_peak_confidence: float = 0.0,
         solar_day: SolarDay | None = None,
@@ -55,6 +56,7 @@ class Day0Signal:
         self.hours_remaining = hours_remaining
         self.ens_remaining = member_maxes_remaining
         self.unit = unit
+        self._observation_source = observation_source
         self._precision = precision
         if temporal_context is not None:
             diurnal_peak_confidence = temporal_context.post_peak_confidence
@@ -118,6 +120,8 @@ class Day0Signal:
                 observed_high=self.obs_high,
                 current_temp=self.current_temp,
                 daylight_progress=self._daylight_progress,
+                hours_remaining=self.hours_remaining,
+                observation_source=self._observation_source,
             )
 
             # Day0 fusion: the observed high is a hard floor, while residual upside

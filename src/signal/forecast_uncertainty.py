@@ -196,6 +196,8 @@ def day0_backbone_high(
     observed_high: float,
     current_temp: float,
     daylight_progress: float | None,
+    hours_remaining: float,
+    observation_source: str,
 ) -> float:
     """Phase-1 seam for future solar-backbone / online-residual day0 modeling.
 
@@ -205,6 +207,8 @@ def day0_backbone_high(
         observed_high=observed_high,
         current_temp=current_temp,
         daylight_progress=daylight_progress,
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
     )
 
 
@@ -213,6 +217,8 @@ def day0_backbone_residual_adjustment(
     observed_high: float,
     current_temp: float,
     daylight_progress: float | None,
+    hours_remaining: float,
+    observation_source: str,
 ) -> float:
     """Phase-1 seam for future online residual correction on the day0 backbone.
 
@@ -220,6 +226,23 @@ def day0_backbone_residual_adjustment(
     residual update without changing `Day0Signal` again.
     """
     _ = observed_high, current_temp, daylight_progress
+    return day0_nowcast_blend_weight(
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
+    ) * 0.0
+
+
+def day0_nowcast_blend_weight(
+    *,
+    hours_remaining: float,
+    observation_source: str,
+) -> float:
+    """Phase-1 seam for future very-short-lead nowcast/NWP blending.
+
+    Current behavior is neutral; later work can turn this into a learned or
+    rule-based blend without reopening the day0 call sites.
+    """
+    _ = hours_remaining, observation_source
     return 0.0
 
 

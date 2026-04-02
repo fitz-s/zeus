@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H after making forecast context artifact-visible, moving next toward richer forecast-layer behavior changes"
+      "goal": "Continue P2-H after threading observation-source through the day0 backbone seam, moving next toward richer forecast-layer behavior changes"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the forecast-context artifact surface slice and continue deeper into forecast-layer de-hardcode",
+  "last_decision": "CLOSE the day0 observation-source seam slice and continue deeper into forecast-layer de-hardcode",
   "backlog_source": "task.md"
 }

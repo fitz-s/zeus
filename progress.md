@@ -1324,3 +1324,26 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'evaluator_projects_exposure_across_multiple_edges or day0_observation_path_reaches_day0_signal or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `3 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 observation-source seam
+- This slice threads `observation_source` through the day0 backbone path so the later nowcast/blend policy has the exact source signal it needs without reopening the day0 call sites again.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - now accepts `observation_source`
+    - passes it through to the backbone seam
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - now forwards `candidate.observation["source"]` into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py`
+    - now forwards live monitor observation `source` into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_backbone_high(...)` and `day0_backbone_residual_adjustment(...)` now take `hours_remaining` + `observation_source`
+    - `day0_nowcast_blend_weight(...)` is the explicit seam for future short-horizon observation/NWP blending
+- Why this matters:
+  - the future day0 backbone no longer needs to reach outside the seam to learn where the observation came from
+  - the later very-short-lead blend work can key on source/latency provenance without another interface break
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the expanded backbone/residual seam signatures.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment'` → `17 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`

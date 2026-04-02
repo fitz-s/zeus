@@ -209,6 +209,7 @@ def _refresh_day0_observation(
         hours_remaining=hours_remaining,
         member_maxes_remaining=remaining_member_maxes,
         unit=city.settlement_unit,
+        observation_source=str(obs.get("source", "")),
         temporal_context=temporal_context,
     )
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
