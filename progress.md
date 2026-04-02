@@ -1277,3 +1277,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context'` → `15 passed`
   - `./.venv/bin/pytest -q` → `482 passed, 3 skipped`
+
+## 2026-04-02 — P2-H forecast mean context surface
+- The latest P2-H slice gives the same treatment to the mean/location seam that sigma already received: the seam can now explain its own current neutral behavior instead of only returning a scalar/no-op.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_mean_context(...)`
+    - `analysis_mean_offset(...)` now delegates to that context
+    - `analysis_member_maxes(...)` now consumes the mean-context output rather than reaching straight to the scalar helper
+- Why this matters:
+  - future lead-continuous mean correction can now be developed with an explicit decomposition surface
+  - it keeps the current behavior unchanged while making the next P2-H location step auditable
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the mean-context decomposition.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context'` → `16 passed`
+  - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`

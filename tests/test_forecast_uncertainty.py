@@ -1,5 +1,6 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
+    analysis_mean_context,
     analysis_mean_offset,
     analysis_sigma_context,
     day0_backbone_residual_adjustment,
@@ -56,6 +57,14 @@ def test_analysis_member_maxes_is_identity_for_now():
 
 def test_analysis_mean_offset_is_zero_for_now():
     assert analysis_mean_offset(unit="F", lead_days=5.0, ensemble_mean=42.0) == 0.0
+
+
+def test_analysis_mean_context_explains_offset():
+    ctx = analysis_mean_context(unit="F", lead_days=5.0, ensemble_mean=42.0)
+    assert ctx["unit"] == "F"
+    assert ctx["lead_days"] == 5.0
+    assert ctx["ensemble_mean"] == 42.0
+    assert ctx["offset"] == 0.0
 
 
 def test_analysis_sigma_context_explains_components():

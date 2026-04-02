@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H after adding sigma decomposition context, moving next toward richer forecast-layer behavior changes and audit surfaces"
+      "goal": "Continue P2-H after adding mean decomposition context, moving next toward richer forecast-layer behavior changes and audit surfaces"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the sigma-context surface slice and continue deeper into forecast-layer de-hardcode",
+  "last_decision": "CLOSE the mean-context surface slice and continue deeper into forecast-layer de-hardcode",
   "backlog_source": "task.md"
 }
