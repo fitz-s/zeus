@@ -931,6 +931,12 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
                 e.forward_edge = e.p_posterior - e.p_market
             return result
 
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
     heats: list[float] = []
 
     def _check_position_allowed(**kwargs):
@@ -1063,6 +1069,12 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             for e in result:
                 e.forward_edge = e.p_posterior - e.p_market
             return result
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.0, "spread_multiplier": 1.0, "final_sigma": 0.5}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 0.0}
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
@@ -1278,6 +1290,12 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
 
         def find_edges(self, n_bootstrap=500):
             return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):

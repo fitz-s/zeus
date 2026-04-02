@@ -464,6 +464,10 @@ def evaluate_candidate(
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
     )
+    forecast_context = {
+        "uncertainty": analysis.sigma_context(),
+        "location": analysis.mean_context(),
+    }
     edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     entry_validations.append("bootstrap_ci")
 
@@ -662,7 +666,10 @@ def evaluate_candidate(
             n_edges_after_fdr=len(filtered),
             edge_context=edge_ctx,
             settlement_semantics_json=_serialize_json(settlement_semantics),
-            epistemic_context_json=_serialize_json(epistemic),
+            epistemic_context_json=_serialize_json({
+                **_to_jsonable(epistemic),
+                "forecast_context": forecast_context,
+            }),
             edge_context_json=_serialize_json(edge_ctx),
         ))
         projected_total_exposure_usd += size

@@ -16,6 +16,7 @@ from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_
 from src.config import edge_n_bootstrap
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
+    analysis_mean_context,
     analysis_member_maxes,
     analysis_sigma_context,
 )
@@ -57,6 +58,11 @@ class MarketAnalysis:
             unit=unit,
             lead_days=lead_days,
         )
+        self._mean_context = analysis_mean_context(
+            unit=unit,
+            lead_days=lead_days,
+            ensemble_mean=float(self._member_maxes.mean()) if len(self._member_maxes) else None,
+        )
         self._calibrator = calibrator
         self._alpha = alpha
         self._lead_days = lead_days
@@ -76,6 +82,9 @@ class MarketAnalysis:
 
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
+
+    def mean_context(self) -> dict:
+        return dict(self._mean_context)
 
     def find_edges(
         self, n_bootstrap: int | None = None
