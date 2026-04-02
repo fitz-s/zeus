@@ -1311,3 +1311,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'evaluator_projects_exposure_across_multiple_edges or day0_observation_path_reaches_day0_signal or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `3 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
+
+## 2026-04-02 — P2-H forecast context contract cleanup
+- After surfacing forecast context into evaluator artifacts, a small cleanup slice removed a new contract split between production `MarketAnalysis` and test doubles. Evaluator now accepts either:
+  - `analysis.forecast_context()`, or
+  - the legacy pair `analysis.sigma_context()` + `analysis.mean_context()`
+- Why this matters:
+  - production code keeps the cleaner unified `forecast_context()` surface
+  - tests and other light stubs do not need an immediate wide rewrite just to stay compatible
+  - the P2-H artifact contract is therefore stricter in production but softer at the boundary for incremental migration
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'evaluator_projects_exposure_across_multiple_edges or day0_observation_path_reaches_day0_signal or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `3 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`

@@ -464,10 +464,13 @@ def evaluate_candidate(
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
     )
-    forecast_context = {
-        "uncertainty": analysis.sigma_context(),
-        "location": analysis.mean_context(),
-    }
+    if hasattr(analysis, "forecast_context"):
+        forecast_context = analysis.forecast_context()
+    else:
+        forecast_context = {
+            "uncertainty": analysis.sigma_context(),
+            "location": analysis.mean_context(),
+        }
     edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     entry_validations.append("bootstrap_ci")
 
