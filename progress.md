@@ -1293,3 +1293,21 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context'` → `16 passed`
   - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
+
+## 2026-04-02 — P2-H forecast context now reaches evaluator outputs
+- The forecast-layer seams are now not just internal helpers; the evaluator’s trade-decision payloads can carry the forecast context forward for later audit/debug of P2-H changes.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - now exposes both `sigma_context()` and `mean_context()`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - now attaches `forecast_context = {uncertainty, location}` into `epistemic_context_json` for evaluator-generated trade decisions
+- Why this matters:
+  - later forecast-layer changes can be inspected in decision artifacts instead of only inferred from code
+  - it makes P2-H changes auditable without widening the external contract surface too aggressively
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that evaluator-generated `epistemic_context_json` carries the forecast context
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py` DummyAnalysis fixtures were updated so evaluator-path regression tests stay aligned with the new contract
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'evaluator_projects_exposure_across_multiple_edges or day0_observation_path_reaches_day0_signal or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `3 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
