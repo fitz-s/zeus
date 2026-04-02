@@ -266,8 +266,13 @@ def day0_nowcast_blend_weight(
     Current behavior is neutral; later work can turn this into a learned or
     rule-based blend without reopening the day0 call sites.
     """
-    _ = hours_remaining, observation_source, observation_time
-    return 0.0
+    if not observation_source or not observation_time:
+        return 0.0
+    source = str(observation_source).lower()
+    source_factor = 1.0 if any(tag in source for tag in ("wu", "asos", "obs")) else 0.5
+    hours = min(6.0, max(0.0, float(hours_remaining)))
+    short_lead_progress = 1.0 - (hours / 6.0)
+    return 0.25 * short_lead_progress * source_factor
 
 
 def analysis_bootstrap_sigma(

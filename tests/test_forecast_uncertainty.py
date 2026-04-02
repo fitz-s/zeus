@@ -6,6 +6,7 @@ from src.signal.forecast_uncertainty import (
     day0_backbone_residual_adjustment,
     day0_backbone_high,
     day0_blended_highs,
+    day0_nowcast_blend_weight,
     analysis_member_maxes,
     analysis_bootstrap_sigma,
     analysis_lead_sigma_multiplier,
@@ -163,3 +164,23 @@ def test_day0_backbone_residual_adjustment_is_small_positive_when_temp_is_near_h
         observation_time="2026-04-02T00:00:00+00:00",
     )
     assert 0.0 < adj < 0.25
+
+
+def test_day0_nowcast_blend_weight_requires_source_and_time():
+    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="", observation_time=None) == 0.0
+    assert day0_nowcast_blend_weight(hours_remaining=2.0, observation_source="wu_api", observation_time=None) == 0.0
+
+
+def test_day0_nowcast_blend_weight_increases_as_horizon_shortens():
+    early = day0_nowcast_blend_weight(
+        hours_remaining=6.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+    )
+    late = day0_nowcast_blend_weight(
+        hours_remaining=1.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+    )
+    assert early == 0.0
+    assert 0.0 < late <= 0.25
