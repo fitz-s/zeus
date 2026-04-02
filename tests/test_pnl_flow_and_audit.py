@@ -286,6 +286,33 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "opening_hunt",
+            now,
+            now,
+            json.dumps(
+                {
+                    "no_trade_cases": [
+                        {
+                            "decision_id": "nt1",
+                            "city": "NYC",
+                            "target_date": "2026-04-01",
+                            "range_label": "39-40°F",
+                            "direction": "buy_yes",
+                            "rejection_stage": "EDGE_INSUFFICIENT",
+                            "rejection_reasons": ["small"],
+                        }
+                    ]
+                }
+            ),
+            now,
+            "paper",
+        ),
+    )
+    conn.commit()
     conn.close()
     portfolio = PortfolioState(
         bankroll=150.0,
@@ -329,6 +356,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["runtime"]["unverified_entries"] == 1
     assert status["runtime"]["day0_positions"] == 1
     assert "overall" in status["execution"]
+    assert status["no_trade"]["recent_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)

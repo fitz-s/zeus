@@ -385,6 +385,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual health/risk backlog after this slice:
   - the main remaining question is no longer surfacing recommendation data, but whether any of those recommendations should automatically mutate runtime controls.
 
+## Operator Diagnosis Slice 8 (no-trade counts in status)
+- Landed protections:
+  - `status_summary` now includes recent no-trade stage counts, so the status file itself can answer whether the recent system bottleneck is `EDGE_INSUFFICIENT`, `RISK_REJECTED`, or another rejection family without forcing healthcheck/database-only access.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `28 passed`
+  - full suite after landing the slice: `444 passed, 3 skipped`
+- Residual operator/consumer backlog after this slice:
+  - deeper learning migration still remains; the status and health surfaces are increasingly self-contained, but they still sit on top of separate consumer summaries rather than one unified learned-current-regime model.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

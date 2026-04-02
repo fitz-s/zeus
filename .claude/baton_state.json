@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing risk recommendations mirrored into healthcheck"
+      "goal": "Drive the next truth/consumer slice after landing recent no-trade counts surfaced into status"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the healthcheck risk-detail mirror slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the no-trade-in-status slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
