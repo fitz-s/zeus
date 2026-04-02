@@ -411,6 +411,75 @@ def test_inv_run_mode_writes_failure_status(monkeypatch):
     assert captured["summary"]["failure_reason"] == "boom"
 
 
+def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    portfolio = PortfolioState(bankroll=150.0, positions=[_position(strategy="center_buy")])
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_risk_details",
+        lambda: {
+            "recommended_strategy_gates": ["center_buy"],
+            "recommended_strategy_gate_reasons": {"center_buy": ["edge_compression"]},
+        },
+    )
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_learning_surface_summary",
+        lambda conn: {
+            "by_strategy": {
+                "center_buy": {
+                    "settlement_count": 2,
+                    "settlement_pnl": 1.25,
+                    "settlement_accuracy": 0.5,
+                    "no_trade_count": 3,
+                    "no_trade_stage_counts": {"EDGE_INSUFFICIENT": 2, "RISK_REJECTED": 1},
+                    "entry_attempted": 4,
+                    "entry_filled": 1,
+                    "entry_rejected": 3,
+                },
+                "opening_inertia": {
+                    "settlement_count": 0,
+                    "settlement_pnl": 0.0,
+                    "settlement_accuracy": None,
+                    "no_trade_count": 2,
+                    "no_trade_stage_counts": {"MARKET_FILTER": 2},
+                    "entry_attempted": 0,
+                    "entry_filled": 0,
+                    "entry_rejected": 0,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": False})
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert status["strategy"]["center_buy"]["settlement_count"] == 2
+    assert status["strategy"]["center_buy"]["settlement_pnl"] == 1.25
+    assert status["strategy"]["center_buy"]["no_trade_count"] == 3
+    assert status["strategy"]["center_buy"]["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 2
+    assert status["strategy"]["center_buy"]["entry_rejected"] == 3
+    assert status["strategy"]["center_buy"]["recommended_gate"] is True
+    assert status["strategy"]["center_buy"]["recommended_gate_reasons"] == ["edge_compression"]
+    assert status["strategy"]["opening_inertia"]["open_positions"] == 0
+    assert status["strategy"]["opening_inertia"]["gated"] is True
+    assert status["strategy"]["opening_inertia"]["no_trade_stage_counts"]["MARKET_FILTER"] == 2
+
+
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     db_path = tmp_path / "zeus.db"
