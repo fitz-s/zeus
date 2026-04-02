@@ -302,6 +302,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW"})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": False})
 
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
@@ -314,6 +317,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["positions"][0]["exit_state"] == open_pos.exit_state
     assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
     assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
+    assert status["control"]["entries_paused"] is True
+    assert status["control"]["edge_threshold_multiplier"] == 2.0
+    assert status["control"]["strategy_gates"]["opening_inertia"] is False
     assert "overall" in status["execution"]
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)

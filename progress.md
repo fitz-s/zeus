@@ -303,6 +303,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/risk backlog after this slice:
   - the next remaining work is no longer “missing data in the status surface”, but deciding which of the now-visible diagnostics should become stronger automated controls.
 
+## Operator Diagnosis Slice 5 (control-plane truth in status)
+- Landed protections:
+  - `status_summary` now mirrors the effective control-plane state (`entries_paused`, `edge_threshold_multiplier`, `strategy_gates`) so operator surfaces can see what manual/automatic controls are currently active without separately reading control files.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `27 passed`
+  - full suite after landing the slice: `441 passed, 3 skipped`
+- Residual operator/control backlog after this slice:
+  - the remaining work is now less about missing visibility and more about deciding which control-plane actions should become automatic responses to the strategy/execution diagnostics already present.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
