@@ -275,6 +275,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - the system still does not yet have a richer multi-threshold strategy/execution protective ladder beyond these first YELLOW gates;
   - broader learning-loop migration and stronger strategy/current-regime gating remain open.
 
+## Operator Diagnosis Slice 3 (no-trade drilldown in healthcheck)
+- Landed protections:
+  - `healthcheck.check()` now includes `recent_no_trade_stage_counts`, so the fast-path operator surface can expose whether the system is currently blocked by `EDGE_INSUFFICIENT`, `RISK_REJECTED`, or other rejection stages without manual `decision_log` archaeology.
+- Validation evidence for this slice:
+  - targeted healthcheck tests after the slice: `4 passed`
+  - full suite after landing the slice: `439 passed, 3 skipped`
+- Residual operator/consumer backlog after this slice:
+  - the next remaining step is less about missing surfaces and more about deciding which of the now-visible strategy/execution/no-trade degradations should become stronger policy or control-plane actions.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
