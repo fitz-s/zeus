@@ -129,6 +129,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - normal fill accounting still does not fully reconcile `cost_basis_usd/size_usd` to executed truth before chain confirmation;
   - entry execution telemetry for normal fill still remains thinner than the exit-side telemetry spine.
 
+## P0-D Slice 5 (normal fill accounting convergence)
+- Landed protections:
+  - normal fill verification now updates `size_usd` / `cost_basis_usd` from executed fill economics instead of leaving planned notional in place until a later chain correction;
+  - `fill_quality` is now set on the normal fill-confirmation path from executed vs submitted price;
+  - normal fill confirmation now emits `ORDER_FILLED` entry telemetry through the same execution spine instead of only relying on lifecycle promotion;
+  - chain reconciliation now repairs `entry_price` / `cost_basis_usd` / `size_usd` from chain truth even when share count already matches, eliminating the old “synced but still wrong notional” case.
+- Validation evidence for this slice:
+  - targeted accounting/runtime tests after the slice: `103 passed`
+  - full suite after landing the slice: `426 passed, 3 skipped`
+- Residual P0-D backlog after slice 5:
+  - `day0_window` still is not yet a first-class event-owned lifecycle phase with an explicit Day0-entered timestamp/surface;
+  - pending/live verification is structurally reduced, but chain rescue vs normal fill is still a deliberate two-path authority model rather than a single unified owner;
+  - broader post-entry execution attribution (`entry_alpha_usd` / slippage / downstream accounting surfaces) can still be tightened later.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

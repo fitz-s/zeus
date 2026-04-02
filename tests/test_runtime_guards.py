@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import types
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -218,6 +220,11 @@ def test_reconcile_pending_positions_delegates_to_fill_tracker(monkeypatch):
 
 
 def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(monkeypatch):
+    db_path = Path(tempfile.mkdtemp()) / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
     portfolio = PortfolioState(positions=[_position(
         trade_id="pending-fill-1",
         state="pending_tracked",
@@ -243,8 +250,12 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
             return {"status": "FILLED", "avgPrice": 0.41, "filledSize": 24.39}
 
     monkeypatch.setattr(cycle_runner, "_utcnow", lambda: datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     summary = cycle_runner._reconcile_pending_positions(portfolio, DummyClob(), Tracker())
     pos = portfolio.positions[0]
+    conn = get_connection(db_path)
+    events = query_position_events(conn, "pending-fill-1")
+    conn.close()
 
     assert summary["entered"] == 1
     assert pos.state == "entered"
@@ -252,6 +263,10 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     assert pos.entry_order_id == "ord-1"
     assert pos.order_status == "filled"
     assert pos.chain_state == "local_only"
+    assert pos.size_usd == pytest.approx(24.39 * 0.41)
+    assert pos.cost_basis_usd == pytest.approx(24.39 * 0.41)
+    assert pos.fill_quality == pytest.approx((0.41 - 0.40) / 0.40)
+    assert any(event["event_type"] == "ORDER_FILLED" for event in events)
 
 
 def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, tmp_path):

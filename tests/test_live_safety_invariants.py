@@ -204,6 +204,9 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert pos.order_status == "filled"
     assert pos.chain_state == "local_only"
     assert pos.entered_at != ""
+    assert pos.size_usd == pytest.approx(11.0)
+    assert pos.cost_basis_usd == pytest.approx(11.0)
+    assert pos.fill_quality == pytest.approx(0.10)
     assert tracker.entries == ["test_001"]
 
 
@@ -426,6 +429,34 @@ def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     assert stats["awaiting_chain_entry"] == 1
     assert entered in portfolio.positions
     assert entered.chain_state == "local_only"
+
+
+def test_chain_reconciliation_updates_cost_basis_even_when_share_count_matches():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    pos = _make_position(
+        trade_id="cost-sync-1",
+        token_id="tok_cost_001",
+        no_token_id="tok_cost_no_001",
+        state="holding",
+        chain_state="unknown",
+        shares=25.0,
+        size_usd=10.0,
+        cost_basis_usd=10.0,
+        entry_price=0.40,
+    )
+    portfolio = _make_portfolio(pos)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_cost_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-cost-1")],
+    )
+
+    assert stats["synced"] == 1
+    assert pos.chain_state == "synced"
+    assert pos.cost_basis_usd == pytest.approx(11.0)
+    assert pos.size_usd == pytest.approx(11.0)
+    assert pos.entry_price == pytest.approx(0.44)
 
 
 # ---- Test 4: Retry respects cooldown ----

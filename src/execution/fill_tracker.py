@@ -10,6 +10,7 @@ before CLOB fill verification resolves. Do not create a third semantic owner.
 
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 from src.state.portfolio import PortfolioState, Position, void_position
@@ -130,6 +131,44 @@ def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> None:
                 pass
 
 
+def _maybe_log_execution_fill(
+    pos: Position,
+    *,
+    submitted_price: float | None,
+    shares: float | None,
+    deps=None,
+) -> None:
+    if deps is None or not hasattr(deps, "get_connection"):
+        return
+
+    telemetry_conn = None
+    try:
+        from src.state.db import log_execution_report
+
+        telemetry_conn = deps.get_connection()
+        log_execution_report(
+            telemetry_conn,
+            pos,
+            SimpleNamespace(
+                status="filled",
+                fill_price=getattr(pos, "entry_price", None),
+                filled_at=getattr(pos, "entered_at", None),
+                submitted_price=submitted_price,
+                shares=shares,
+                timeout_seconds=None,
+            ),
+        )
+        telemetry_conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to log entry fill telemetry for %s: %s", pos.trade_id, exc)
+    finally:
+        if telemetry_conn is not None:
+            try:
+                telemetry_conn.close()
+            except Exception:
+                pass
+
+
 def _mark_entry_filled(
     pos: Position,
     payload,
@@ -138,6 +177,7 @@ def _mark_entry_filled(
     *,
     deps=None,
 ) -> tuple[str, bool, bool]:
+    submitted_price = pos.entry_price
     fill_price = _extract_float(payload, "avgPrice", "avg_price", "price") or pos.entry_price
     shares = _extract_float(payload, "filledSize", "filled_size", "size", "originalSize")
     if shares is None and fill_price > 0:
@@ -149,14 +189,29 @@ def _mark_entry_filled(
     pos.entry_fill_verified = True
     if shares is not None:
         pos.shares = shares
-    if pos.cost_basis_usd <= 0:
+        actual_cost_basis = shares * fill_price
+        if actual_cost_basis > 0:
+            pos.size_usd = actual_cost_basis
+            pos.cost_basis_usd = actual_cost_basis
+    elif pos.cost_basis_usd <= 0:
         pos.cost_basis_usd = pos.size_usd
+    if submitted_price not in (None, 0) and fill_price not in (None, 0):
+        try:
+            pos.fill_quality = (float(fill_price) - float(submitted_price)) / float(submitted_price)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
     pos.state = "entered"
     pos.order_status = "filled"
     pos.chain_state = "local_only"
     pos.entered_at = now.isoformat()
 
     _maybe_update_trade_lifecycle(pos, deps=deps)
+    _maybe_log_execution_fill(
+        pos,
+        submitted_price=submitted_price,
+        shares=shares,
+        deps=deps,
+    )
     if tracker is not None:
         tracker.record_entry(pos)
         return "entered", True, True

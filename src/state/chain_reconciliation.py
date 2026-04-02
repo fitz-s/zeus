@@ -226,16 +226,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.chain_shares = chain.size
             pos.chain_verified_at = now
             pos.condition_id = pos.condition_id or chain.condition_id
+            if chain.avg_price > 0:
+                pos.entry_price = chain.avg_price
+            if chain.cost > 0:
+                pos.cost_basis_usd = chain.cost
+                pos.size_usd = chain.cost
             if abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
                 pos.shares = chain.size
-                if chain.avg_price > 0:
-                    pos.entry_price = chain.avg_price
-                if chain.cost > 0:
-                    pos.cost_basis_usd = chain.cost
-                    pos.size_usd = chain.cost
                 stats["updated"] += 1
-            if pos.state in {"entered", "holding", "day0_window", "unknown"}:
+            if pos.state in {"entered", "unknown"}:
                 pos.state = "holding"
             stats["synced"] += 1
 
