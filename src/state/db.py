@@ -1088,6 +1088,7 @@ def query_settlement_events(
     city: str | None = None,
     target_date: str | None = None,
     env: str | None = None,
+    not_before: str | None = None,
 ) -> list[dict]:
     """Load recent canonical settlement stage events from the durable event spine."""
     filters = ["event_type = 'POSITION_SETTLED'"]
@@ -1102,6 +1103,9 @@ def query_settlement_events(
     if target_date is not None:
         filters.append("target_date = ?")
         params.append(target_date)
+    if not_before is not None:
+        filters.append("timestamp >= ?")
+        params.append(not_before)
     params.append(limit)
     rows = conn.execute(
         f"""
@@ -1125,6 +1129,7 @@ def query_authoritative_settlement_rows(
     city: str | None = None,
     target_date: str | None = None,
     env: str | None = None,
+    not_before: str | None = None,
 ) -> list[dict]:
     """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
     stage_events = query_settlement_events(
@@ -1133,6 +1138,7 @@ def query_authoritative_settlement_rows(
         city=city,
         target_date=target_date,
         env=env,
+        not_before=not_before,
     )
     normalized_stage = [
         normalized
@@ -1149,6 +1155,7 @@ def query_authoritative_settlement_rows(
         city=city,
         target_date=target_date,
         env=env,
+        not_before=not_before,
     )
     return legacy_rows[:limit]
 
