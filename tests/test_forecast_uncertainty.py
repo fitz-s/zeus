@@ -2,6 +2,7 @@ from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
     day0_blended_highs,
     analysis_bootstrap_sigma,
+    analysis_lead_sigma_multiplier,
     day0_observation_weight,
     day0_post_peak_sigma,
     day0_temporal_closure_weight,
@@ -11,10 +12,7 @@ from src.signal.forecast_uncertainty import (
 def test_analysis_bootstrap_sigma_matches_current_instrument_sigma():
     assert analysis_bootstrap_sigma("F") == sigma_instrument("F").value
     assert analysis_bootstrap_sigma("C") == sigma_instrument("C").value
-    assert (
-        analysis_bootstrap_sigma("F", lead_days=5.0, ensemble_spread=7.5)
-        == sigma_instrument("F").value
-    )
+    assert analysis_bootstrap_sigma("F", lead_days=6.0, ensemble_spread=7.5) == sigma_instrument("F").value * 1.2
 
 
 def test_day0_post_peak_sigma_matches_existing_formula_endpoints():
@@ -27,6 +25,14 @@ def test_day0_post_peak_sigma_clamps_peak_confidence():
     base_c = sigma_instrument("C").value
     assert day0_post_peak_sigma("C", -1.0) == base_c
     assert day0_post_peak_sigma("C", 2.0) == base_c * 0.5
+
+
+def test_analysis_lead_sigma_multiplier_is_continuous_and_bounded():
+    assert analysis_lead_sigma_multiplier(None) == 1.0
+    assert analysis_lead_sigma_multiplier(0.0) == 1.0
+    assert analysis_lead_sigma_multiplier(3.0) == 1.1
+    assert analysis_lead_sigma_multiplier(6.0) == 1.2
+    assert analysis_lead_sigma_multiplier(10.0) == 1.2
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():

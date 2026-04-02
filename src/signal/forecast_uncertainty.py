@@ -11,6 +11,20 @@ from __future__ import annotations
 from src.signal.ensemble_signal import sigma_instrument
 
 
+def analysis_lead_sigma_multiplier(lead_days: float | None) -> float:
+    """Conservative lead-continuous sigma inflation for day1..day7 analysis.
+
+    Phase-1 behavior change: stop treating all non-day0 leads as the same
+    uncertainty regime. Inflation ramps continuously from 1.0 at day0 to 1.2
+    by day6+, matching the documented ~15-20% underdispersion correction
+    without introducing per-lead discontinuities.
+    """
+    if lead_days is None:
+        return 1.0
+    lead = min(6.0, max(0.0, float(lead_days)))
+    return 1.0 + 0.2 * (lead / 6.0)
+
+
 def day0_temporal_closure_weight(
     *,
     hours_remaining: float,
@@ -92,8 +106,8 @@ def analysis_bootstrap_sigma(
     lead-continuous / heteroscedastic sigma policy will need, while preserving
     today's numeric behavior.
     """
-    _ = lead_days, ensemble_spread
-    return sigma_instrument(unit).value
+    _ = ensemble_spread
+    return sigma_instrument(unit).value * analysis_lead_sigma_multiplier(lead_days)
 
 
 def day0_post_peak_sigma(unit: str, peak_confidence: float) -> float:

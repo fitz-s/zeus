@@ -1125,3 +1125,25 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs'` → `9 passed`
   - `./.venv/bin/pytest -q` → `475 passed, 3 skipped`
+
+## 2026-04-02 — P2-H first behavior-changing step: lead-continuous sigma inflation
+- This is the first deliberate behavior change in the forecast-layer lane. Research guidance emphasized that day1..day7 uncertainty should not stay flat across all leads, and that a modest underdispersion correction is warranted. The seam now starts to express that continuously instead of treating all non-day0 leads as identical.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_lead_sigma_multiplier(lead_days)`
+    - `analysis_bootstrap_sigma(...)` now applies a conservative lead-continuous inflation:
+      - day0: `1.0x`
+      - day3: `1.1x`
+      - day6+: `1.2x`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py`
+    - inherits that lead-continuous sigma behavior automatically through the seam
+- Why this is the right first behavior change:
+  - small blast radius
+  - continuous, not per-lead stepwise
+  - grounded in the existing research note that raw ensemble uncertainty is underdispersive by roughly 15–20%
+  - moves the system off the fully hardcoded “same sigma for every non-day0 lead” regime without introducing station-specific or model-specific complexity yet
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the multiplier endpoints and continuity
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma'` → `10 passed`
+  - `./.venv/bin/pytest -q` → `476 passed, 3 skipped`
