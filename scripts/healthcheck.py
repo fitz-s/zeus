@@ -76,7 +76,7 @@ def _parse_launchctl_pid(output: str) -> int:
         return 0
 
     # Older tabular format from `launchctl list`
-    if "\t" in text and not text.startswith("{"):
+    if "\t" in text and "\n" not in text and not text.startswith("{"):
         parts = text.split("\t")
         if parts and parts[0] != "-":
             try:
@@ -88,7 +88,28 @@ def _parse_launchctl_pid(output: str) -> int:
     match = re.search(r'"PID"\s*=\s*(\d+);', text)
     if match:
         return int(match.group(1))
+    match = re.search(r'\bpid\s*=\s*(\d+)', text)
+    if match:
+        return int(match.group(1))
 
+    return 0
+
+
+def _launchctl_pid_for(label: str) -> int:
+    commands = [
+        ["launchctl", "list", label],
+        ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+    ]
+    for cmd in commands:
+        try:
+            ps = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        if ps.returncode != 0:
+            continue
+        pid = _parse_launchctl_pid(ps.stdout or ps.stderr)
+        if pid > 0:
+            return pid
     return 0
 
 
@@ -113,31 +134,17 @@ def check() -> dict:
 
     # Check daemon PID
     try:
-        ps = subprocess.run(
-            ["launchctl", "list", result["launchd_label"]],
-            capture_output=True, text=True, timeout=5,
-        )
-        if ps.returncode == 0:
-            pid = _parse_launchctl_pid(ps.stdout)
-            result["pid"] = pid
-            result["daemon_alive"] = pid > 0
-        else:
-            result["daemon_alive"] = False
+        pid = _launchctl_pid_for(result["launchd_label"])
+        result["pid"] = pid
+        result["daemon_alive"] = pid > 0
     except Exception:
         result["daemon_alive"] = False
 
     # Check RiskGuard PID
     try:
-        ps = subprocess.run(
-            ["launchctl", "list", result["riskguard_label"]],
-            capture_output=True, text=True, timeout=5,
-        )
-        if ps.returncode == 0:
-            pid = _parse_launchctl_pid(ps.stdout)
-            result["riskguard_pid"] = pid
-            result["riskguard_alive"] = pid > 0
-        else:
-            result["riskguard_alive"] = False
+        pid = _launchctl_pid_for(result["riskguard_label"])
+        result["riskguard_pid"] = pid
+        result["riskguard_alive"] = pid > 0
     except Exception:
         result["riskguard_alive"] = False
 
