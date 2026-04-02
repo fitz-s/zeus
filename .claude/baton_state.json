@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing healthcheck and request-status diagnosis improvements"
+      "goal": "Drive the next truth/consumer slice after landing first execution/strategy-aware RiskGuard YELLOW gates"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the healthcheck/request-status diagnosis slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, and operator surfaces",
+  "last_decision": "CLOSE the first execution/strategy-aware RiskGuard gating slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, and operator surfaces",
   "backlog_source": "task.md"
 }

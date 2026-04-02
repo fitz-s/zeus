@@ -176,6 +176,12 @@ def tick() -> RiskLevel:
         settlement_quality_level = RiskLevel.RED
     elif degraded_rows > 0:
         settlement_quality_level = RiskLevel.YELLOW
+    execution_quality_level = RiskLevel.GREEN
+    execution_overall = entry_execution_summary["overall"]
+    execution_observed = execution_overall["filled"] + execution_overall["rejected"]
+    if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
+        execution_quality_level = RiskLevel.YELLOW
+    strategy_signal_level = RiskLevel.YELLOW if edge_compression_alerts else RiskLevel.GREEN
 
     daily_loss_level = (
         RiskLevel.RED
@@ -188,7 +194,14 @@ def tick() -> RiskLevel:
         else RiskLevel.GREEN
     )
 
-    level = overall_level(brier_level, settlement_quality_level, daily_loss_level, weekly_loss_level)
+    level = overall_level(
+        brier_level,
+        settlement_quality_level,
+        execution_quality_level,
+        strategy_signal_level,
+        daily_loss_level,
+        weekly_loss_level,
+    )
 
     # Record
     now = datetime.now(timezone.utc).isoformat()
@@ -200,6 +213,8 @@ def tick() -> RiskLevel:
         json.dumps({
             "brier_level": brier_level.value,
             "settlement_quality_level": settlement_quality_level.value,
+            "execution_quality_level": execution_quality_level.value,
+            "strategy_signal_level": strategy_signal_level.value,
             "daily_loss_level": daily_loss_level.value,
             "weekly_loss_level": weekly_loss_level.value,
             "daily_loss": round(portfolio.daily_loss, 2),

@@ -264,6 +264,17 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/risk backlog after this slice:
   - the main remaining gap is no longer missing diagnosis surface, but deciding which surfaced strategy/execution degradations should become actual protective gates.
 
+## Risk Loop Slice 1 (light strategy/execution-aware gating)
+- Landed protections:
+  - RiskGuard now escalates to `YELLOW` when recent durable entry execution evidence shows true execution decay (`fill_rate < 30%` with enough observed outcomes), instead of only surfacing the counts;
+  - RiskGuard now also escalates to `YELLOW` when current strategy diagnostics report `EDGE_COMPRESSION`, making strategy deterioration visible in the actual protective level rather than only in details.
+- Validation evidence for this slice:
+  - targeted RiskGuard tests after the slice: `19 passed`
+  - full suite after landing the slice: `439 passed, 3 skipped`
+- Residual risk-loop backlog after this slice:
+  - the system still does not yet have a richer multi-threshold strategy/execution protective ladder beyond these first YELLOW gates;
+  - broader learning-loop migration and stronger strategy/current-regime gating remain open.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

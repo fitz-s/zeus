@@ -246,6 +246,85 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
         assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
 
+    def test_tick_turns_yellow_on_execution_decay(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+        )
+
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema, log_position_event
+        init_schema(conn)
+        for i in range(10):
+            pos = Position(
+                trade_id=f"reject-{i}",
+                market_id="m1",
+                city="NYC",
+                cluster="US-Northeast",
+                target_date="2026-04-01",
+                bin_label="39-40°F",
+                direction="buy_yes",
+                strategy="center_buy",
+                edge_source="center_buy",
+                env="paper",
+            )
+            log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
+        conn.commit()
+        conn.close()
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["execution_quality_level"] == "YELLOW"
+
+    def test_tick_turns_yellow_on_strategy_edge_compression_alert(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = strategy_tracker_module.StrategyTracker()
+        tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["strategy_signal_level"] == "YELLOW"
+
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
