@@ -25,11 +25,11 @@ def analysis_member_maxes(
     surface through a named forecast-layer boundary without changing values yet.
     """
     values = np.asarray(member_maxes, dtype=float)
-    offset = analysis_mean_offset(
+    offset = analysis_mean_context(
         unit=unit,
         lead_days=lead_days,
         ensemble_mean=float(values.mean()) if values.size else None,
-    )
+    )["offset"]
     return values + offset
 
 
@@ -60,13 +60,30 @@ def analysis_mean_offset(
     lead_days: float | None = None,
     ensemble_mean: float | None = None,
 ) -> float:
+    return analysis_mean_context(
+        unit=unit,
+        lead_days=lead_days,
+        ensemble_mean=ensemble_mean,
+    )["offset"]
+
+
+def analysis_mean_context(
+    *,
+    unit: str,
+    lead_days: float | None = None,
+    ensemble_mean: float | None = None,
+) -> dict:
     """Phase-1 seam for future lead-continuous mean/location correction.
 
     Current behavior is identity/no-op; the seam exists so later forecast-layer
     work can land mean correction without rewriting consumers again.
     """
-    _ = unit, lead_days, ensemble_mean
-    return 0.0
+    return {
+        "unit": unit,
+        "lead_days": lead_days,
+        "ensemble_mean": ensemble_mean,
+        "offset": 0.0,
+    }
 
 
 def analysis_lead_sigma_multiplier(lead_days: float | None) -> float:
