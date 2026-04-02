@@ -28,6 +28,9 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "risk": {"level": "GREEN"},
         "portfolio": {"open_positions": 1, "total_exposure_usd": 6.99},
+        "cycle": {"entries_blocked_reason": "risk_level=ORANGE"},
+        "execution": {"overall": {"entry_rejected": 2}},
+        "strategy": {"center_buy": {"open_positions": 1}},
     }))
     _write_risk_state(risk_path)
 
@@ -49,6 +52,9 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert result["status_path"] == str(status_path)
     assert result["status_fresh"] is True
     assert result["riskguard_fresh"] is True
+    assert result["entries_blocked_reason"] == "risk_level=ORANGE"
+    assert result["execution_summary"]["entry_rejected"] == 2
+    assert result["strategy_summary"]["center_buy"]["open_positions"] == 1
     assert result["healthy"] is True
     assert healthcheck.exit_code_for(result) == 0
 

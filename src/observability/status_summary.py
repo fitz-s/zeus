@@ -33,6 +33,13 @@ def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
     generated_at = datetime.now(timezone.utc).isoformat()
+    if cycle_summary is None and STATUS_PATH.exists():
+        try:
+            with open(STATUS_PATH) as f:
+                prior = json.load(f)
+            cycle_summary = prior.get("cycle", {})
+        except Exception:
+            cycle_summary = {}
 
     strategy_summary: dict[str, dict] = {}
     for pos in portfolio.positions:

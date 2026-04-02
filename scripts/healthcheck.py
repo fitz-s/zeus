@@ -124,6 +124,16 @@ def check() -> dict:
             result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
             result["positions"] = status.get("portfolio", {}).get("open_positions", 0)
             result["exposure"] = status.get("portfolio", {}).get("total_exposure_usd", 0)
+            cycle = status.get("cycle", {}) or {}
+            result["entries_blocked_reason"] = cycle.get("entries_blocked_reason")
+            result["cycle_failed"] = bool(cycle.get("failed", False))
+            result["failure_reason"] = cycle.get("failure_reason")
+            execution = status.get("execution", {}) or {}
+            if isinstance(execution, dict):
+                result["execution_summary"] = execution.get("overall", execution)
+            strategy = status.get("strategy", {}) or {}
+            if isinstance(strategy, dict):
+                result["strategy_summary"] = strategy
             age_seconds = _status_age_seconds(result["last_cycle"])
             if age_seconds is not None:
                 result["status_age_seconds"] = round(age_seconds, 1)
