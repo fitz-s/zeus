@@ -394,6 +394,18 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual operator/consumer backlog after this slice:
   - deeper learning migration still remains; the status and health surfaces are increasingly self-contained, but they still sit on top of separate consumer summaries rather than one unified learned-current-regime model.
 
+## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
+- Landed protections:
+  - each strategy bucket in `status_summary.strategy` now shows both:
+    - whether it is currently gated by control-plane truth
+    - whether RiskGuard currently recommends gating it
+  - this closes another operator loop: current strategy state, recommended action, and active manual control now live in one surface instead of three.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `28 passed`
+  - full suite after landing the slice: `444 passed, 3 skipped`
+- Residual strategy/operator backlog after this slice:
+  - the remaining work is less about seeing strategy state and more about deciding which recommendations should automatically become control mutations or higher-severity gates.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

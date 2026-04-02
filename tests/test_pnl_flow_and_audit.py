@@ -331,7 +331,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW"})
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"execution_quality_level": "YELLOW", "recommended_strategy_gates": ["center_buy"]})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
@@ -359,7 +359,10 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["no_trade"]["recent_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
+    assert status["strategy"]["center_buy"]["gated"] is False
+    assert status["strategy"]["center_buy"]["recommended_gate"] is True
     assert status["strategy"]["opening_inertia"]["realized_pnl"] == pytest.approx(-2.3)
+    assert status["strategy"]["opening_inertia"]["gated"] is True
     assert status["risk"]["details"]["execution_quality_level"] == "YELLOW"
     assert status["truth"]["source_path"] == str(status_path)
     assert status["truth"]["deprecated"] is False
