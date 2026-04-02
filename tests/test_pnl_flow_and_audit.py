@@ -568,6 +568,110 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     assert captured["bankroll"] == pytest.approx(portfolio.effective_bankroll)
 
 
+def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
+    captured: dict[str, float] = {}
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-03",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
+            {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
+            {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
+        ],
+        hours_since_open=10.0,
+        hours_to_resolution=30.0,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=5000):
+            return np.array([0.60, 0.25, 0.15])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            self.bins = kwargs["bins"]
+
+        def find_edges(self, n_bootstrap=500):
+            edge = BinEdge(
+                bin=self.bins[0],
+                direction="buy_yes",
+                edge=0.12,
+                ci_lower=0.05,
+                ci_upper=0.15,
+                p_model=0.60,
+                p_market=0.35,
+                p_posterior=0.47,
+                entry_price=0.35,
+                p_value=0.02,
+                vwmp=0.35,
+            )
+            edge.forward_edge = edge.p_posterior - edge.p_market
+            return [edge]
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=8, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
+            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
+            "issue_time": datetime.now(timezone.utc),
+            "fetch_time": datetime.now(timezone.utc),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-tighten")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
+    monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "get_edge_threshold_multiplier", lambda: 2.0)
+
+    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult):
+        captured["kelly_mult"] = kelly_mult
+        return 5.0
+
+    monkeypatch.setattr(evaluator_module, "kelly_size", _capture_kelly)
+    monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(
+            max_single_position_pct=0.10,
+            max_portfolio_heat_pct=0.50,
+            max_correlated_pct=0.25,
+            max_city_pct=0.20,
+            max_region_pct=0.35,
+            min_order_usd=1.0,
+        ),
+    )
+
+    assert decisions[0].should_trade is True
+    assert captured["kelly_mult"] == pytest.approx(0.125)
+
+
 def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"

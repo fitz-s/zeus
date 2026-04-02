@@ -32,6 +32,7 @@ from src.engine.time_context import lead_days_to_target, lead_hours_to_target
 from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, select_hours_for_target_date
+from src.control.control_plane import get_edge_threshold_multiplier
 from src.signal.model_agreement import model_agreement
 from src.state.portfolio import (
     PortfolioState,
@@ -572,6 +573,10 @@ def evaluate_candidate(
             lead_days=lead_days_for_calibration,
             portfolio_heat=current_heat,
         )
+        control_risk_multiplier = max(1.0, float(get_edge_threshold_multiplier()))
+        if control_risk_multiplier > 1.0:
+            km = km / control_risk_multiplier
+            decision_validations.append(f"control_plane_risk_tightened_{control_risk_multiplier:g}x")
         
         # Apply RiskGraph Throttling Phase 3
         size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)

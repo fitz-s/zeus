@@ -358,6 +358,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual consumer backlog after this slice:
   - deeper learning migration still remains: evaluated opportunity set, no-trade diagnostics, and strategy/execution truth are now cleaner, but they are not yet unified into a single learned-current-regime consumer model.
 
+## Control-Plane Slice 2 (real tighten-risk effect)
+- Landed protections:
+  - the control-plane `tighten_risk` surface is no longer inert: `get_edge_threshold_multiplier()` now directly reduces the effective Kelly multiplier inside evaluator sizing, so a tightened-r​isk command actually shrinks new entry risk instead of only appearing in state.
+- Validation evidence for this slice:
+  - targeted sizing/status tests after the slice: `28 passed`
+  - full suite after landing the slice: `444 passed, 3 skipped`
+- Residual control/risk backlog after this slice:
+  - the remaining higher-order decision is whether future auto-controls should use this same multiplier path, stricter per-strategy gates, or both.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.
