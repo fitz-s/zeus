@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Continue remaining P0/P1 closure from a healthy runtime base with current-regime learning tied to a real regime boundary, normalized runtime truth, and fail-closed status headlines"
+      "goal": "Continue the remaining P1-E policy/learning work from a now review-cleared P0/P1 runtime base"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the status risk fail-closed consistency slice and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the final current-regime/truth blockers, mark detailed+adversarial review lanes done for the current P0/P1 base, and continue only the remaining P1-E policy/learning work",
   "backlog_source": "task.md"
 }
