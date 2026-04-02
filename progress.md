@@ -797,3 +797,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_db.py -k 'query_no_trade_cases_filters_recent_rows_by_real_timestamp or learning_surface_summary'` → `2 passed`
   - `./.venv/bin/pytest -q` → `457 passed, 3 skipped`
 - Residual P1-E truth after this slice: consumer tools now detect stale authority surfaces instead of trusting them, but the actual local daemon/RiskGuard processes still need a fresh emission cycle before the on-disk runtime files will reflect the new contract. That is now an operational refresh problem, not a silent control-policy bug.
+
+## 2026-04-02 — operational refresh + launchctl fallback hardening
+- Operational action: restarted the paper daemon and RiskGuard via launchd, then forced a one-shot `write_status()` / `tick()` / `write_status()` refresh so the on-disk authority surfaces re-emitted under the new contract instead of waiting for the next normal cycle.
+- Main follow-up finding: after the refresh, status/risk contracts were valid, but `healthcheck.py` still reported `daemon_alive=false` / `riskguard_alive=false` because `launchctl list <label>` fails from Python subprocesses in this environment even while the agents are actually running. `launchctl print gui/<uid>/<label>` works and exposes the real PID/state.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/healthcheck.py` now falls back from `launchctl list <label>` to `launchctl print gui/<uid>/<label>` and correctly parses multiline `pid = ...` output instead of treating that runtime shape as dead.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_healthcheck.py` → `7 passed`
+  - live one-shot check after restart/refresh: `./.venv/bin/python scripts/healthcheck.py` → `healthy: true`, `daemon_alive: true`, `riskguard_alive: true`, `status_contract_valid: true`, `riskguard_contract_valid: true`
+- Runtime truth after refresh:
+  - paper daemon alive: `PID 74917`
+  - RiskGuard alive: `PID 74919`
+  - current healthcheck is now GREEN on process truth, with `risk_level: YELLOW` and one review-required strategy gate command visible: disable `opening_inertia` because of `edge_compression`

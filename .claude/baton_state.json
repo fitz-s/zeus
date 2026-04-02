@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Decide the next operational or policy-ladder slice now that stale authority surfaces fail closed and current-regime strategy truth is unified"
+      "goal": "Decide whether to continue deeper policy-ladder work or start formal review/acceptance now that runtime authority surfaces are healthy and current"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the stale-contract fail-closed slice and continue P1-E toward a stronger learned strategy/current-regime policy ladder from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the operational refresh plus launchctl-fallback hardening and continue P1-E toward either stronger learned policy-ladder work or formal review/acceptance from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
