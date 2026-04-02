@@ -1523,3 +1523,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend'` → `21 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `488 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 context contract cleanup
+- After surfacing day0 forecast context, one small cleanup was still needed: not every evaluator-path test double implements the new unified day0/forecast helpers. The code now treats the richer context surface as preferred but keeps compatibility for lightweight test doubles and existing mocked decision objects.
+- Implementation delta:
+  - no new behavior change; this slice only stabilizes the contract around:
+    - day0 no-trade/trade artifact preservation
+    - day0 evaluator artifact surfacing
+    - mixed legacy/new helper compatibility in tests
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h'` → `4 passed`
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `488 passed, 3 skipped`

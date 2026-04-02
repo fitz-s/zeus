@@ -373,6 +373,8 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert trade_case["p_market_vector"] == []
     assert no_trade_case["decision_snapshot_id"] == "snap-1"
     assert no_trade_case["selected_method"] == "ens_member_counting"
+    assert no_trade_case["settlement_semantics_json"] == '{"measurement_unit":"F"}'
+    assert no_trade_case["epistemic_context_json"] == '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
     assert no_trade_case["applied_validations"] == ["ens_fetch"]
     assert no_trade_case["bin_labels"] == ["39-40°F"]
     assert shadow is not None
