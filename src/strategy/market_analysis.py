@@ -54,7 +54,11 @@ class MarketAnalysis:
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
-        self._sigma = analysis_bootstrap_sigma(unit)  # centralized forecast-uncertainty seam
+        self._sigma = analysis_bootstrap_sigma(
+            unit,
+            lead_days=lead_days,
+            ensemble_spread=float(np.std(member_maxes)) if len(member_maxes) else None,
+        )  # centralized forecast-uncertainty seam
 
     def find_edges(
         self, n_bootstrap: int | None = None
