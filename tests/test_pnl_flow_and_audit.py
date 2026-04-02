@@ -628,6 +628,7 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
             "recommended_controls_not_applied": ["tighten_risk"],
             "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
             "recommended_but_not_gated": ["center_buy", "opening_inertia"],
+            "gated_but_not_recommended": ["shoulder_sell"],
             "recommended_strategy_gate_reasons": {
                 "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"],
                 "opening_inertia": ["edge_compression"],
@@ -656,6 +657,12 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
             "strategy": "opening_inertia",
             "enabled": False,
             "note": "recommended_by=edge_compression",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "shoulder_sell",
+            "enabled": True,
+            "note": "recommended_by=gate_drift_resolved",
         },
     ]
 
@@ -706,6 +713,7 @@ def test_inv_apply_recommended_controls_defaults_to_autosafe_commands(monkeypatc
                     "recommended_controls_not_applied": ["tighten_risk"],
                     "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
                     "recommended_but_not_gated": ["center_buy"],
+                    "gated_but_not_recommended": ["shoulder_sell"],
                     "recommended_strategy_gate_reasons": {
                         "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
                     },
@@ -745,6 +753,7 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
                     "recommended_controls_not_applied": ["tighten_risk"],
                     "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
                     "recommended_but_not_gated": ["center_buy"],
+                    "gated_but_not_recommended": ["shoulder_sell"],
                     "recommended_strategy_gate_reasons": {
                         "center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]
                     },
@@ -765,7 +774,7 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
 
     assert rc == 0
     assert output["include_review_required"] is True
-    assert output["added"] == 2
+    assert output["added"] == 3
     assert payload["commands"] == [
         {
             "command": "tighten_risk",
@@ -776,6 +785,12 @@ def test_inv_apply_recommended_controls_can_include_review_required_commands(mon
             "strategy": "center_buy",
             "enabled": False,
             "note": "recommended_by=execution_decay(fill_rate=0.2, observed=12)",
+        },
+        {
+            "command": "set_strategy_gate",
+            "strategy": "shoulder_sell",
+            "enabled": True,
+            "note": "recommended_by=gate_drift_resolved",
         },
     ]
 
