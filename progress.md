@@ -1222,3 +1222,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high'` → `13 passed`
   - `./.venv/bin/pytest -q` → `479 passed, 3 skipped`
+
+## 2026-04-02 — P2-H mean-offset seam
+- The next forecast-layer seam mirrors what has already been done for sigma: create an explicit place where future lead-continuous mean/location correction can land, without changing today’s forecasts yet.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `analysis_mean_offset(unit, lead_days, ensemble_mean)`
+    - current behavior is neutral (`0.0`)
+    - `analysis_member_maxes(...)` now routes member maxima through that offset seam
+- Why this matters:
+  - future mean/location correction now has a single forecast-layer insertion point
+  - it keeps `MarketAnalysis` out of the business of inventing forecast-mean policy inline
+  - it preserves current outputs while improving the architecture for later P2-H work
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the mean-offset seam as identity/no-op for now.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset'` → `14 passed`
+  - `./.venv/bin/pytest -q` → `480 passed, 3 skipped`

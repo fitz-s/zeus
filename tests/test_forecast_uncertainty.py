@@ -1,5 +1,6 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
+    analysis_mean_offset,
     day0_backbone_high,
     day0_blended_highs,
     analysis_member_maxes,
@@ -49,6 +50,10 @@ def test_analysis_member_maxes_is_identity_for_now():
     raw = [40.0, 42.0, 41.5]
     adjusted = analysis_member_maxes(raw, unit="F", lead_days=5.0)
     assert list(adjusted) == raw
+
+
+def test_analysis_mean_offset_is_zero_for_now():
+    assert analysis_mean_offset(unit="F", lead_days=5.0, ensemble_mean=42.0) == 0.0
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():
