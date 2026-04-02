@@ -12,6 +12,7 @@ from src.riskguard.metrics import (
     evaluate_brier,
 )
 from src.state.db import get_connection
+from src.state.portfolio import Position
 from src.state.portfolio import PortfolioState
 
 
@@ -146,6 +147,70 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_settlement_summary"]["center_buy"]["pnl"] == pytest.approx(3.0)
         assert details["strategy_settlement_summary"]["center_buy"]["accuracy"] == pytest.approx(0.5)
         assert details["strategy_settlement_summary"]["opening_inertia"]["count"] == 1
+
+    def test_tick_records_entry_execution_summary(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema, log_position_event
+        init_schema(conn)
+        pos = Position(
+            trade_id="exec-1",
+            market_id="m1",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-01",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            strategy="center_buy",
+            edge_source="center_buy",
+            env="paper",
+        )
+        log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
+        log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
+        reject_pos = Position(
+            trade_id="exec-2",
+            market_id="m2",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-01",
+            bin_label="41-42°F",
+            direction="buy_yes",
+            strategy="opening_inertia",
+            edge_source="opening_inertia",
+            env="paper",
+        )
+        log_position_event(conn, "ORDER_REJECTED", reject_pos, details={"status": "rejected"}, source="execution")
+        conn.commit()
+        conn.close()
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        overall = details["entry_execution_summary"]["overall"]
+        assert overall["attempted"] == 1
+        assert overall["filled"] == 1
+        assert overall["rejected"] == 1
+        assert overall["fill_rate"] == pytest.approx(0.5)
+        assert details["entry_execution_summary"]["by_strategy"]["center_buy"]["filled"] == 1
+        assert details["entry_execution_summary"]["by_strategy"]["opening_inertia"]["rejected"] == 1
 
     def test_tick_records_degraded_settlement_counts(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
