@@ -1026,3 +1026,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Queue consequence:
   - `P0-D` can now close as DONE for the current base
   - remaining active work is P1-E policy/learning semantics, not runtime-spine correctness
+
+## 2026-04-02 — P1-E current-base closure
+- After the remaining P1-E blockers from this round were closed — regime-boundary alignment, uncapped regime summaries, top-level execution/current-regime alignment, and fail-closed behavior when strategy diagnostics disappear — there are no more concrete P1 blockers on the current live-ready base.
+- What is now complete for the current base:
+  - authoritative settlement payloads are usable and non-degraded in current runtime
+  - current-regime tracker metadata is truthful and backfilled
+  - settlement / no-trade / execution summaries all honor the same regime boundary
+  - strategy/current-regime recommendations are durable, explainable, and split into autosafe vs review-required
+  - missing or stale control/risk/status surfaces fail closed instead of silently reading as safe
+  - strategy diagnostics no longer disappear into synthetic GREEN when the tracker fails
+- What is explicitly **not** being treated as remaining P1 blocker work:
+  - stronger policy automation semantics
+  - richer learned gating policy
+  - forecast-layer de-hardcode
+  - learned decision/timing policy
+- These remain future work, not blockers for the current P0/P1 base.
+- Queue consequence:
+  - `P1-E` can close as DONE for the current base
+  - the active backlog now shifts entirely to future-phase work rather than unresolved P0/P1 closure
