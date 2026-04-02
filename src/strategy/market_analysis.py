@@ -86,6 +86,12 @@ class MarketAnalysis:
     def mean_context(self) -> dict:
         return dict(self._mean_context)
 
+    def forecast_context(self) -> dict:
+        return {
+            "uncertainty": self.sigma_context(),
+            "location": self.mean_context(),
+        }
+
     def find_edges(
         self, n_bootstrap: int | None = None
     ) -> list[BinEdge]:
