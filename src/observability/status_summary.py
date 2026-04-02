@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 STATUS_PATH = state_path("status_summary.json")
 
 
+def _enum_text(value, default: str) -> str:
+    if value in (None, ""):
+        return default
+    return str(getattr(value, "value", value))
+
+
 def _get_risk_level() -> str:
     """Read actual RiskGuard level instead of hardcoding GREEN."""
     try:
@@ -141,9 +147,9 @@ def write_status(cycle_summary: dict = None) -> None:
     chain_state_counts: dict[str, int] = {}
     exit_state_counts: dict[str, int] = {}
     for pos in portfolio.positions:
-        chain_key = str(pos.chain_state or "unknown")
+        chain_key = _enum_text(pos.chain_state, "unknown")
         chain_state_counts[chain_key] = chain_state_counts.get(chain_key, 0) + 1
-        exit_key = str(pos.exit_state or "none")
+        exit_key = _enum_text(pos.exit_state, "none")
         exit_state_counts[exit_key] = exit_state_counts.get(exit_key, 0) + 1
 
     status = {
@@ -186,8 +192,8 @@ def write_status(cycle_summary: dict = None) -> None:
                     "direction": p.direction,
                     "strategy": p.strategy,
                     "state": p.state,
-                    "chain_state": p.chain_state,
-                    "exit_state": p.exit_state,
+                    "chain_state": _enum_text(p.chain_state, "unknown"),
+                    "exit_state": _enum_text(p.exit_state, ""),
                     "entry_fill_verified": p.entry_fill_verified,
                     "admin_exit_reason": p.admin_exit_reason,
                     "size_usd": p.size_usd,

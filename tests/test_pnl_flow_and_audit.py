@@ -509,6 +509,38 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     assert status["strategy"]["opening_inertia"]["no_trade_stage_counts"]["MARKET_FILTER"] == 2
 
 
+def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        positions=[_position(chain_state="unknown", exit_state="")],
+    )
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: type("T", (), {"accounting": {}})())
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert status["portfolio"]["positions"][0]["chain_state"] == "unknown"
+    assert status["runtime"]["chain_state_counts"] == {"unknown": 1}
+    assert status["runtime"]["exit_state_counts"] == {"none": 1}
+
+
 def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     portfolio = PortfolioState(bankroll=150.0)
