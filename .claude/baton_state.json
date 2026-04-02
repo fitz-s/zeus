@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Continue remaining P0/P1 closure now that runtime authority is healthy and the opening_inertia edge-compression alert has been defused as insufficient evidence"
+      "goal": "Continue remaining P0/P1 closure from a healthy runtime base after defusing the weak opening_inertia compression alert and recovering restart-time DB corruption"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the edge-compression robustness hardening and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the restart-time DB recovery slice and continue P1-E/P0 closure from the now-healthy runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

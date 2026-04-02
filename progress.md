@@ -834,3 +834,25 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
     - `recommended_strategy_gates: []`
     - `recommended_commands: []`
   - `opening_inertia` is no longer recommended for gating, matching the recorded operator decision.
+
+## 2026-04-02 — operational DB recovery after restart
+- Restarting the launchd services exposed a real runtime issue unrelated to the policy work: the paper daemon began crash-looping with `sqlite3.DatabaseError: malformed database schema (solar_daily) - invalid rootpage`, and RiskGuard also hit disk/database errors. Root cause was not logical schema drift in code; it was an operational storage inconsistency after restart.
+- Main recovery finding:
+  - `state/zeus.db` main database was intact when opened without journals
+  - the corruption came from mismatched `state/zeus.db-wal` / `state/zeus.db-shm`
+  - `state/risk_state-paper.db` itself was corrupted and had to be treated as disposable derived state
+- Recovery action:
+  - stopped paper daemon + RiskGuard
+  - archived the broken `zeus.db` WAL/SHM files and the broken `risk_state-paper.db` family into `state/legacy_state_archive/`
+  - restarted services
+  - forced a one-shot `write_status()` refresh so status truth immediately reflected the recovered runtime
+- Runtime truth after recovery:
+  - paper daemon alive: `PID 99017`
+  - RiskGuard alive: `PID 99018`
+  - `./.venv/bin/python scripts/healthcheck.py` now returns:
+    - `healthy: true`
+    - `risk_level: GREEN`
+    - `status_contract_valid: true`
+    - `riskguard_contract_valid: true`
+    - `recommended_commands: []`
+- Follow-up note: this was an operational state-recovery slice, not a semantic code contract slice. The mainline P0/P1 code remains valid; the recovery was necessary to restore runtime truth after restart.
