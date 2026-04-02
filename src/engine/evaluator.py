@@ -293,6 +293,7 @@ def evaluate_candidate(
             member_maxes_remaining=remaining_member_maxes,
             unit=city.settlement_unit,
             observation_source=str(candidate.observation.get("source", "")),
+            observation_time=candidate.observation.get("observation_time"),
             temporal_context=temporal_context,
         )
         p_raw = day0.p_vector(bins)

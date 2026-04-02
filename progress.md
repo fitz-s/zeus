@@ -1347,3 +1347,27 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment'` → `17 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
   - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
+
+## 2026-04-02 — P2-H day0 observation-time seam
+- The day0 backbone now carries not just where the observation came from, but when it was observed. This closes the last obvious interface gap before latency-aware day0 blending can become a real behavior change later.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - now accepts `observation_time`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/evaluator.py`
+    - now forwards candidate observation timestamps into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/engine/monitor_refresh.py`
+    - now forwards live observation timestamps into `Day0Signal`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_backbone_high(...)`
+    - `day0_backbone_residual_adjustment(...)`
+    - `day0_nowcast_blend_weight(...)`
+    now all accept `observation_time`
+- Why this matters:
+  - the future day0 nowcast/NWP blend no longer needs another interface break to reason about latency/freshness
+  - source and time are now both carried to the exact seam where short-horizon blending will live
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the expanded signatures remain behavior-neutral.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment'` → `17 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or evaluator_projects_exposure_across_multiple_edges or gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h' tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `3 passed`
+  - `./.venv/bin/pytest -q` → `483 passed, 3 skipped`
