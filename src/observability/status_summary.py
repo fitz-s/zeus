@@ -227,6 +227,30 @@ def write_status(cycle_summary: dict = None) -> None:
         status["execution"] = {"error": "execution_summary_unavailable"}
         status["learning"] = {"error": "learning_summary_unavailable"}
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
+
+    learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
+    for name, learning_bucket in learning_by_strategy.items():
+        bucket = strategy_summary.setdefault(
+            name,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "gated": not current_strategy_gates.get(name, True),
+                "recommended_gate": name in recommended_strategy_gates,
+                "recommended_gate_reasons": list(recommended_strategy_gate_reasons.get(name, [])),
+            },
+        )
+        bucket["settlement_count"] = learning_bucket.get("settlement_count", 0)
+        bucket["settlement_pnl"] = learning_bucket.get("settlement_pnl", 0.0)
+        bucket["settlement_accuracy"] = learning_bucket.get("settlement_accuracy")
+        bucket["no_trade_count"] = learning_bucket.get("no_trade_count", 0)
+        bucket["no_trade_stage_counts"] = dict(learning_bucket.get("no_trade_stage_counts", {}) or {})
+        bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
+        bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
+        bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
     status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
 
     # Atomic write

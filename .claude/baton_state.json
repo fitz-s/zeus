@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Bridge richer by-strategy rejection truth into the next learned current-regime policy-ladder slice"
+      "goal": "Decide the next learned strategy-gating policy-ladder slice now that current-regime strategy truth is unified on one operator surface"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the strategy-tagged no-trade learning slice and continue P1-E toward a stronger learned strategy/current-regime policy ladder from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the current-regime strategy summary merge and continue P1-E toward a stronger learned strategy/current-regime policy ladder from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }

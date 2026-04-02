@@ -752,3 +752,16 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary'` → `1 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'strategy_gate_blocks_trade_execution'` → `1 passed`
 - Residual P1-E truth after this slice: the learned current-regime surface now sees strategy-tagged no-trades, but it still uses them as descriptive evidence rather than a closed policy ladder. The next step is to decide how this richer by-strategy rejection truth should influence review-required vs executable gating policy.
+
+## 2026-04-02 — P1-E current-regime strategy summary merge
+- Main review delta: after strategy-tagged no-trades landed, the next truth gap moved one layer up: operator strategy surfaces still split open-position PnL/exposure from learning/regime evidence. `status.strategy` knew holdings and recent exits; `status.learning.by_strategy` knew settlements / execution / no-trades. A human or downstream automation still had to manually join those two surfaces to understand a strategy’s current regime.
+- Main contract decision: `status.strategy` is now the human-facing current-regime strategy surface. It keeps operator-truth fields (open positions, exposure, realized/unrealized PnL, gate state) and now also absorbs the learning-side counts (settlements, entry execution, no-trades) so one strategy bucket shows both current book truth and current-regime learning truth.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/observability/status_summary.py` now merges `learning.by_strategy` into `status.strategy`, carrying `settlement_count`, `settlement_pnl`, `settlement_accuracy`, `entry_attempted`, `entry_filled`, `entry_rejected`, `no_trade_count`, and `no_trade_stage_counts` alongside the existing operator/gating fields.
+  - Strategies that only exist in the learning surface (for example, recently rejected or inactive strategies with no open positions) now still appear in `status.strategy`, so the operator surface is no longer biased toward currently-held exposure only.
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py` now locks that `status.strategy` preserves gate truth and also absorbs the learning/regime fields, including learning-only strategies with zero open positions.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status_strategy_merges_learning_surface'` → `1 passed`
+  - `./.venv/bin/pytest -q` → `454 passed, 3 skipped`
+- Residual P1-E truth after this slice: the operator surface can now see a unified by-strategy regime picture, but policy remains advisory. The next real step is to decide whether any of that richer current-regime evidence should promote or suppress strategy gates automatically, and under what contract.
