@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
+from src.control.control_plane import get_edge_threshold_multiplier, is_entries_paused, strategy_gates
 from src.state.db import get_connection, query_execution_event_summary
 from src.state.portfolio import ADMIN_EXITS, PortfolioState, load_portfolio, portfolio_heat
 from src.state.truth_files import annotate_truth_payload
@@ -102,6 +103,11 @@ def write_status(cycle_summary: dict = None) -> None:
             "pid": os.getpid(),
             "mode": settings.mode,
             "version": "zeus_v2",
+        },
+        "control": {
+            "entries_paused": is_entries_paused(),
+            "edge_threshold_multiplier": get_edge_threshold_multiplier(),
+            "strategy_gates": strategy_gates(),
         },
         "risk": {
             "level": _get_risk_level(),
