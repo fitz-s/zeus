@@ -62,16 +62,22 @@ def test_analysis_mean_offset_is_zero_for_now():
 
 
 def test_analysis_mean_context_explains_offset():
-    ctx = analysis_mean_context(unit="F", lead_days=5.0, ensemble_mean=42.0)
+    ctx = analysis_mean_context(unit="F", lead_days=5.0, ensemble_mean=42.0, city_name="NYC", season="MAM", forecast_source="ecmwf_ifs025")
     assert ctx["unit"] == "F"
     assert ctx["lead_days"] == 5.0
     assert ctx["ensemble_mean"] == 42.0
     assert ctx["offset"] == 0.0
+    assert ctx["city_name"] == "NYC"
+    assert ctx["season"] == "MAM"
+    assert ctx["forecast_source"] == "ecmwf_ifs025"
 
 
 def test_analysis_sigma_context_explains_components():
-    ctx = analysis_sigma_context(unit="F", lead_days=3.0, ensemble_spread=1.0)
+    ctx = analysis_sigma_context(unit="F", lead_days=3.0, ensemble_spread=1.0, city_name="NYC", season="MAM", forecast_source="ecmwf_ifs025")
     assert ctx["unit"] == "F"
+    assert ctx["city_name"] == "NYC"
+    assert ctx["season"] == "MAM"
+    assert ctx["forecast_source"] == "ecmwf_ifs025"
     assert ctx["lead_days"] == 3.0
     assert ctx["ensemble_spread"] == 1.0
     assert ctx["base_sigma"] == sigma_instrument("F").value

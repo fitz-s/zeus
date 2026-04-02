@@ -16,6 +16,7 @@ from typing import Optional
 import numpy as np
 
 from src.calibration.manager import get_calibrator
+from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.config import City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
 from src.contracts import (
@@ -468,6 +469,9 @@ def evaluate_candidate(
         calibrator=cal,
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
+        city_name=city.name,
+        season=season_from_date(target_date),
+        forecast_source=str(ens_result.get("model") or "ecmwf_ifs025"),
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()
