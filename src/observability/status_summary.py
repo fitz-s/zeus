@@ -53,6 +53,7 @@ def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
     generated_at = datetime.now(timezone.utc).isoformat()
+    risk_details = _get_risk_details()
     if cycle_summary is None and STATUS_PATH.exists():
         try:
             with open(STATUS_PATH) as f:
@@ -97,6 +98,11 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["realized_pnl"] = round(bucket["realized_pnl"], 2)
         bucket["unrealized_pnl"] = round(bucket["unrealized_pnl"], 2)
         bucket["total_pnl"] = round(bucket["realized_pnl"] + bucket["unrealized_pnl"], 2)
+    recommended_strategy_gates = set(risk_details.get("recommended_strategy_gates", []) or [])
+    current_strategy_gates = strategy_gates()
+    for name, bucket in strategy_summary.items():
+        bucket["gated"] = not current_strategy_gates.get(name, True)
+        bucket["recommended_gate"] = name in recommended_strategy_gates
 
     chain_state_counts: dict[str, int] = {}
     exit_state_counts: dict[str, int] = {}
@@ -120,7 +126,7 @@ def write_status(cycle_summary: dict = None) -> None:
         },
         "risk": {
             "level": _get_risk_level(),
-            "details": _get_risk_details(),
+            "details": risk_details,
         },
         "portfolio": {
             "open_positions": len(portfolio.positions),
