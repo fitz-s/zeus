@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P1-E",
-      "goal": "Drive the next truth/consumer slice after landing a real tighten-risk effect on sizing"
+      "goal": "Drive the next truth/consumer slice after landing actionable recommendations from RiskGuard"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the real tighten-risk slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
+  "last_decision": "CLOSE the actionable-recommendations slice and continue P1-E consumer/learning migration from the cleaner runtime, settlement, execution, strategy, operator, and control surfaces",
   "backlog_source": "task.md"
 }
