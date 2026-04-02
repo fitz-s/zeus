@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Identify and land the first low-blast-radius seam for forecast-layer Phase-1 de-hardcode"
+      "goal": "Continue P2-H after landing the first low-blast-radius uncertainty-policy seam, moving next toward behavior-changing forecast de-hardcode"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the current P0/P1 base and open P2-H as the next active lane",
+  "last_decision": "CLOSE the first P2-H seam-extraction slice and continue into behavior-changing forecast-layer de-hardcode",
   "backlog_source": "task.md"
 }

@@ -14,7 +14,7 @@ import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
 from src.config import edge_n_bootstrap
-from src.signal.ensemble_signal import sigma_instrument
+from src.signal.forecast_uncertainty import analysis_bootstrap_sigma
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
 
@@ -37,7 +37,7 @@ class MarketAnalysis:
         member_maxes: np.ndarray,
         calibrator: Optional[ExtendedPlattCalibrator] = None,
         lead_days: float = 3.0,
-        unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
+        unit: str = "F",  # P0-9 baseline bootstrap sigma still depends on settlement unit
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
     ):
         # Semantic Provenance Guard
@@ -54,7 +54,7 @@ class MarketAnalysis:
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
-        self._sigma = sigma_instrument(unit).value  # P0-9: use city-appropriate noise
+        self._sigma = analysis_bootstrap_sigma(unit)  # centralized forecast-uncertainty seam
 
     def find_edges(
         self, n_bootstrap: int | None = None

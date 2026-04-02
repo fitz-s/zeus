@@ -8,7 +8,7 @@ This constraint dramatically narrows probability distribution near settlement.
 import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
-from src.signal.ensemble_signal import sigma_instrument
+from src.signal.forecast_uncertainty import day0_post_peak_sigma
 from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
 
 
@@ -66,8 +66,7 @@ class Day0Signal:
         # Sigma shrinkage remains tied specifically to post-peak confidence.
         # Broader temporal closure now flows through observation_weight() and
         # remaining-window selection, not through a second implicit sigma policy.
-        base_sigma = sigma_instrument(unit).value
-        self._sigma = base_sigma * (1.0 - self._peak_confidence * 0.5)
+        self._sigma = day0_post_peak_sigma(unit, self._peak_confidence)
 
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.

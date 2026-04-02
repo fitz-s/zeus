@@ -1054,3 +1054,22 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - First principle for the next lane:
   - do not jump straight to learned decision policy
   - first create a clean forecast-layer seam where `day0` and `dayN` uncertainty policy can evolve without being hardcoded into unrelated modules
+
+## 2026-04-02 — P2-H first seam: forecast uncertainty policy extraction
+- The first P2-H slice is intentionally behavior-preserving. Instead of changing forecast math immediately, it extracts the current hardcoded sigma choices behind a dedicated forecast-layer seam so later de-hardcode work can proceed without touching unrelated modules.
+- Implementation delta:
+  - new module: `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_bootstrap_sigma(unit)`
+    - `day0_post_peak_sigma(unit, peak_confidence)`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/strategy/market_analysis.py` now gets its bootstrap sigma through the new forecast-layer seam instead of calling `sigma_instrument()` directly.
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py` now gets its post-peak sigma through the new seam instead of embedding the formula inline.
+- Why this slice first:
+  - it keeps output behavior unchanged
+  - it creates one explicit place for future heteroscedastic sigma / lead-continuous sigma upgrades
+  - it reduces future blast radius when P2-H stops using today’s hardcoded policy
+- Touched tests:
+  - new `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` locks current behavior at the seam boundary
+  - existing day0/instrument tests still pass unchanged
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or Day0Signal or observation_weight'` → `17 passed`
+  - `./.venv/bin/pytest -q` → `472 passed, 3 skipped`
