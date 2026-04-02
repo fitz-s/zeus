@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from src.execution.exit_triggers import (
@@ -13,6 +14,29 @@ from src.execution.harvester import harvest_settlement
 from src.state.portfolio import Position
 from src.state.db import get_connection, init_schema
 from src.config import City
+from src.contracts import EdgeContext, EntryMethod
+
+
+def _make_edge_context(p_posterior: float, entry_price: float) -> EdgeContext:
+    """Build a minimal EdgeContext for tests. forward_edge = p_posterior - entry_price."""
+    forward_edge = p_posterior - entry_price
+    dummy_vec = np.array([1.0])
+    return EdgeContext(
+        p_raw=dummy_vec,
+        p_cal=dummy_vec,
+        p_market=dummy_vec,
+        p_posterior=p_posterior,
+        forward_edge=forward_edge,
+        alpha=0.55,
+        confidence_band_upper=forward_edge + 0.05,
+        confidence_band_lower=forward_edge - 0.05,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="test-snap",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
 
 
 NYC = City(
@@ -38,27 +62,70 @@ class TestExitTriggers:
 
     def test_settlement_imminent(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, 0.60, 0.40, hours_to_settlement=0.5)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), hours_to_settlement=0.5)
         assert signal is not None
         assert signal.trigger == "SETTLEMENT_IMMINENT"
         assert signal.urgency == "immediate"
 
     def test_whale_toxicity(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, 0.60, 0.40, is_whale_sweep=True)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), is_whale_sweep=True)
         assert signal is not None
         assert signal.trigger == "WHALE_TOXICITY"
+
+    def test_soft_divergence_requires_adverse_velocity_confirmation(self):
+        pos = _make_position()
+        edge_ctx = EdgeContext(
+            p_raw=np.array([1.0]),
+            p_cal=np.array([1.0]),
+            p_market=np.array([0.40]),
+            p_posterior=0.20,
+            forward_edge=-0.20,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=0.0,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.20,
+        )
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+        assert signal is None
+
+    def test_hard_divergence_panics_without_velocity_confirmation(self):
+        pos = _make_position()
+        edge_ctx = EdgeContext(
+            p_raw=np.array([1.0]),
+            p_cal=np.array([1.0]),
+            p_market=np.array([0.40]),
+            p_posterior=0.20,
+            forward_edge=-0.20,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=0.0,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.31,
+        )
+        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
+        assert signal is not None
+        assert signal.trigger == "MODEL_DIVERGENCE_PANIC"
 
     def test_edge_reversal_needs_two_confirmations(self):
         """CLAUDE.md §4.2: EDGE_REVERSAL needs 2 confirmations, 1st doesn't trigger."""
         pos = _make_position()
 
         # First check: edge reversed but only 1 confirmation
-        signal = evaluate_exit_triggers(pos, 0.30, 0.40)  # edge < 0
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))  # edge < 0
         assert signal is None  # Should NOT trigger on first reversal
 
         # Second check: confirmed reversal
-        signal = evaluate_exit_triggers(pos, 0.30, 0.40)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
         assert signal is not None
         assert signal.trigger == "EDGE_REVERSAL"
 
@@ -67,21 +134,21 @@ class TestExitTriggers:
         pos = _make_position()
 
         # First reversal
-        evaluate_exit_triggers(pos, 0.30, 0.40)
+        evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
         # Edge recovers
-        evaluate_exit_triggers(pos, 0.60, 0.40)
+        evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40))
         # Another reversal — should need 2 new confirmations
-        signal = evaluate_exit_triggers(pos, 0.30, 0.40)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
         assert signal is None  # Only 1st confirmation after reset
 
     def test_no_exit_when_edge_healthy(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, 0.60, 0.40)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40))
         assert signal is None
 
     def test_vig_extreme(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, 0.60, 0.40, market_vig=1.10)
+        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), market_vig=1.10)
         assert signal is not None
         assert signal.trigger == "VIG_EXTREME"
 

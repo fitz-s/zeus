@@ -27,6 +27,7 @@
       "airport_name": "LaGuardia Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
       "timezone": "America/New_York",
+      "cluster": "US-Northeast",
       "unit": "F",
       "historical_peak_hour": 15.8,
       "diurnal_amplitude_f": 11.0
@@ -53,6 +54,7 @@
       "airport_name": "O'Hare International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
       "timezone": "America/Chicago",
+      "cluster": "US-GreatLakes",
       "unit": "F",
       "historical_peak_hour": 16.4,
       "diurnal_amplitude_f": 15.0
@@ -79,6 +81,7 @@
       "airport_name": "Seattle-Tacoma International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/wa/seatac/KSEA",
       "timezone": "America/Los_Angeles",
+      "cluster": "US-Pacific-Northwest",
       "unit": "F",
       "historical_peak_hour": 13.8,
       "diurnal_amplitude_f": 12.2
@@ -101,6 +104,7 @@
       "airport_name": "Incheon Intl Airport Station",
       "settlement_source": "https://www.wunderground.com/history/daily/kr/incheon/RKSI",
       "timezone": "Asia/Seoul",
+      "cluster": "Asia-Northeast",
       "unit": "C",
       "historical_peak_hour": 14.8,
       "diurnal_amplitude_c": 8.2
@@ -123,6 +127,7 @@
       "airport_name": "Shanghai Pudong International Airport Station",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
       "timezone": "Asia/Shanghai",
+      "cluster": "Asia-East-China",
       "unit": "C",
       "historical_peak_hour": 14.6,
       "diurnal_amplitude_c": 7.8
@@ -145,6 +150,7 @@
       "airport_name": "Tokyo Haneda Airport Station",
       "settlement_source": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
       "timezone": "Asia/Tokyo",
+      "cluster": "Asia-Northeast",
       "unit": "C",
       "historical_peak_hour": 14.7,
       "diurnal_amplitude_c": 7.6
@@ -171,6 +177,7 @@
       "airport_name": "Hartsfield-Jackson Atlanta International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
       "timezone": "America/New_York",
+      "cluster": "US-Southeast-Inland",
       "unit": "F",
       "historical_peak_hour": 17.6,
       "diurnal_amplitude_f": 17.3
@@ -197,6 +204,7 @@
       "airport_name": "Austin-Bergstrom International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
       "timezone": "America/Chicago",
+      "cluster": "US-Texas-Triangle",
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.0
@@ -223,6 +231,7 @@
       "airport_name": "Dallas Love Field",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
       "timezone": "America/Chicago",
+      "cluster": "US-Texas-Triangle",
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.6
@@ -249,6 +258,7 @@
       "airport_name": "Buckley Space Force Base Station",
       "settlement_source": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
       "timezone": "America/Denver",
+      "cluster": "US-Rockies",
       "unit": "F",
       "historical_peak_hour": 16.1,
       "diurnal_amplitude_f": 18.4
@@ -275,6 +285,7 @@
       "airport_name": "William P. Hobby Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
       "timezone": "America/Chicago",
+      "cluster": "US-Texas-Triangle",
       "unit": "F",
       "historical_peak_hour": 17.4,
       "diurnal_amplitude_f": 15.2
@@ -301,6 +312,7 @@
       "airport_name": "Miami International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
       "timezone": "America/New_York",
+      "cluster": "US-Florida",
       "unit": "F",
       "historical_peak_hour": 17.3,
       "diurnal_amplitude_f": 12.1
@@ -329,6 +341,7 @@
       "airport_name": "Los Angeles International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
       "timezone": "America/Los_Angeles",
+      "cluster": "US-California-Coast",
       "unit": "F",
       "historical_peak_hour": 18.1,
       "diurnal_amplitude_f": 11.1
@@ -357,6 +370,7 @@
       "airport_name": "San Francisco International Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
       "timezone": "America/Los_Angeles",
+      "cluster": "US-California-Coast",
       "unit": "F",
       "historical_peak_hour": 16.7,
       "diurnal_amplitude_f": 11.9
@@ -379,6 +393,7 @@
       "airport_name": "Paris-Charles de Gaulle Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
       "timezone": "Europe/Paris",
+      "cluster": "Europe-Continental",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.0
@@ -401,6 +416,7 @@
       "airport_name": "London Heathrow Airport",
       "settlement_source": "https://www.wunderground.com/history/daily/gb/london/EGLL",
       "timezone": "Europe/London",
+      "cluster": "Europe-Maritime",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 7.4

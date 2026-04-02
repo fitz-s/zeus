@@ -22,7 +22,9 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import cities_by_name, load_cities
+from src.contracts import SettlementSemantics
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
+from src.engine.time_context import lead_hours_to_target
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.db import get_connection, init_schema
 from src.types import Bin
@@ -65,7 +67,7 @@ def get_bin_structure(conn, city: str, target_date: str) -> list[Bin]:
         low, high = _parse_temp_range(r["range_label"])
         if low is None and high is None:
             continue
-        bins.append(Bin(low=low, high=high, label=r["range_label"]))
+        bins.append(Bin(low=low, high=high, label=r["range_label"], unit=cities_by_name[city].settlement_unit))
 
     return bins
 
@@ -91,25 +93,15 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
         print(f"  FAIL {city_name} {target_date_str} — ENS fetch failed or < 51 members")
         return False
 
-    # Extract hours for target date
-    members_hourly = result["members_hourly"]  # (51, hours)
-    n_hours = members_hourly.shape[1]
-
-    # Select hours for the target date
-    # The API returns hours from the start of the forecast period
-    # For a past_days request, target_date is near the end of the range
-    # We approximate by taking a 24-hour slice for the target date
-    target_hour_start = max(0, (days_ago - 1) * 24)
-    target_hour_end = min(n_hours, target_hour_start + 24)
-
-    if target_hour_end <= target_hour_start:
-        print(f"  SKIP {city_name} {target_date_str} — no hours for target date in response")
-        return False
-
-    target_slice = members_hourly[:, target_hour_start:target_hour_end]
-
     try:
-        ens = EnsembleSignal(target_slice, city, target_date)
+        ens = EnsembleSignal(
+            result["members_hourly"],
+            result["times"],
+            city,
+            target_date,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            decision_time=result.get("fetch_time"),
+        )
     except ValueError as e:
         print(f"  FAIL {city_name} {target_date_str} — {e}")
         return False
@@ -137,7 +129,7 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
         target_date_str + "T12:00:00Z",          # valid_time (midday target)
         result["issue_time"].isoformat(),         # available_at = issue_time for backfill
         result["fetch_time"].isoformat(),         # fetch_time
-        float(days_ago * 24),                     # lead_hours
+        float(max(0.0, lead_hours_to_target(target_date, city.timezone, result["issue_time"]))),
         json.dumps(ens.member_maxes.tolist()),     # members_json
         p_raw_json,
         ens.spread(),

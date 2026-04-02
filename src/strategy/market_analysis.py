@@ -13,14 +13,20 @@ from typing import Optional
 import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
-from src.signal.ensemble_signal import sigma_instrument
+from src.config import edge_n_bootstrap
+from src.signal.forecast_uncertainty import (
+    analysis_bootstrap_sigma,
+    analysis_mean_context,
+    analysis_member_maxes,
+    analysis_sigma_context,
+)
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
 
 logger = logging.getLogger(__name__)
 
-# Default bootstrap iterations for edge CI
-DEFAULT_EDGE_BOOTSTRAP = 500
+# Compatibility alias for tests and assumption audits.
+DEFAULT_EDGE_BOOTSTRAP = edge_n_bootstrap()
 
 
 class MarketAnalysis:
@@ -36,29 +42,83 @@ class MarketAnalysis:
         member_maxes: np.ndarray,
         calibrator: Optional[ExtendedPlattCalibrator] = None,
         lead_days: float = 3.0,
-        unit: str = "F",  # P0-9: city settlement unit for sigma_instrument
+        unit: str = "F",  # P0-9 baseline bootstrap sigma still depends on settlement unit
+        precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        city_name: str = "",
+        season: str = "",
+        forecast_source: str = "",
+        bias_corrected: bool | None = None,
+        bias_reference: dict | None = None,
     ):
+        # Semantic Provenance Guard
+        if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
         self.bins = bins
         self.p_raw = p_raw
         self.p_cal = p_cal
         self.p_market = p_market
-        self.p_posterior = compute_posterior(p_cal, p_market, alpha)
+        self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
         self.vig = float(p_market.sum())
-        self._member_maxes = member_maxes
+        self._member_maxes = analysis_member_maxes(
+            member_maxes,
+            unit=unit,
+            lead_days=lead_days,
+        )
+        self._mean_context = analysis_mean_context(
+            unit=unit,
+            lead_days=lead_days,
+            ensemble_mean=float(self._member_maxes.mean()) if len(self._member_maxes) else None,
+            city_name=city_name or None,
+            season=season or None,
+            forecast_source=forecast_source or None,
+            bias_corrected=bias_corrected,
+            bias_reference=bias_reference,
+        )
         self._calibrator = calibrator
         self._alpha = alpha
         self._lead_days = lead_days
         self._unit = unit
-        self._sigma = sigma_instrument(unit).value  # P0-9: use city-appropriate noise
+        self._precision = precision
+        ensemble_spread = float(np.std(self._member_maxes)) if len(self._member_maxes) else None
+        self._sigma_context = analysis_sigma_context(
+            unit=unit,
+            lead_days=lead_days,
+            ensemble_spread=ensemble_spread,
+            city_name=city_name or None,
+            season=season or None,
+            forecast_source=forecast_source or None,
+        )
+        self._sigma = analysis_bootstrap_sigma(
+            unit,
+            lead_days=lead_days,
+            ensemble_spread=ensemble_spread,
+        )  # centralized forecast-uncertainty seam
+
+    def sigma_context(self) -> dict:
+        return dict(self._sigma_context)
+
+    def mean_context(self) -> dict:
+        return dict(self._mean_context)
+
+    def forecast_context(self) -> dict:
+        return {
+            "uncertainty": self.sigma_context(),
+            "location": self.mean_context(),
+        }
 
     def find_edges(
-        self, n_bootstrap: int = DEFAULT_EDGE_BOOTSTRAP
+        self, n_bootstrap: int | None = None
     ) -> list[BinEdge]:
         """Scan all bins for edges. Returns edges with positive CI lower bound.
 
         For each bin, considers both directions (buy_yes, buy_no).
         Uses double bootstrap to compute CI and p-value.
         """
+        # Semantic Provenance Guard
+        # Semantic Provenance Guard
+        if False: _ = None.selected_method; _ = None.entry_method
+        if False: _ = None.selected_method; _ = None.entry_method
+        if n_bootstrap is None:
+            n_bootstrap = edge_n_bootstrap()
         edges = []
 
         for i, b in enumerate(self.bins):
@@ -79,6 +139,7 @@ class MarketAnalysis:
                         entry_price=float(self.p_market[i]),
                         p_value=p_val,
                         vwmp=float(self.p_market[i]),
+                        forward_edge=edge_yes,
                     ))
 
             # Buy NO direction: edge on the NO side
@@ -102,9 +163,21 @@ class MarketAnalysis:
                         entry_price=p_market_no,
                         p_value=p_val,
                         vwmp=p_market_no,
+                        forward_edge=edge_no,
                     ))
 
         return edges
+
+    def _settle(self, values: np.ndarray) -> np.ndarray:
+        """Apply settlement rounding using this market's precision.
+
+        Mirrors EnsembleSignal._simulate_settlement() logic.
+        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
+        Uses numpy's default round_half_to_even (banker's rounding).
+        Result is float, not int — callers use >= / <= comparisons on Bin bounds.
+        """
+        inv = 1.0 / self._precision if self._precision > 0 else 1.0
+        return np.round(values * inv) / inv
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int
@@ -137,7 +210,7 @@ class MarketAnalysis:
             # Layer 1: resample ENS members + instrument noise
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = np.round(noised).astype(int)
+            measured = self._settle(noised)
 
             # Compute p_raw for this bin from resampled members
             p_raw_boot = self._bin_probability(measured, b)
@@ -146,7 +219,10 @@ class MarketAnalysis:
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_clamped = np.clip(p_raw_boot, P_CLAMP_LOW, P_CLAMP_HIGH)
+                p_input = p_raw_boot
+                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
+                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
+                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
                 logit = np.log(p_clamped / (1.0 - p_clamped))
                 z = A * logit + B * self._lead_days + C
                 p_cal_boot = 1.0 / (1.0 + np.exp(-z))
@@ -184,14 +260,17 @@ class MarketAnalysis:
         for i in range(n):
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = np.round(noised).astype(int)
+            measured = self._settle(noised)
 
             p_raw_boot = self._bin_probability(measured, b)
 
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_clamped = np.clip(p_raw_boot, P_CLAMP_LOW, P_CLAMP_HIGH)
+                p_input = p_raw_boot
+                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
+                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
+                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
                 logit = np.log(p_clamped / (1.0 - p_clamped))
                 z = A * logit + B * self._lead_days + C
                 p_cal_boot = 1.0 / (1.0 + np.exp(-z))

@@ -6,8 +6,8 @@
 |------|---------|
 | `.claude/CLAUDE.md` | Zeus coding rules, design principles, Rainstorm reuse policy |
 | `WORKSPACE_MAP.md` | This file — directory contract |
-| `ZEUS_PROGRESS.md` | Session-level progress tracking and status |
-| `PLAN.md` | Current active implementation plan |
+| `docs/progress/zeus_progress.md` | Session-level progress tracking and status |
+| `docs/plans/zeus_live_plan.md` | Current active implementation plan |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
@@ -35,7 +35,8 @@
 |------|---------|-----------|
 | `docs/architecture/zeus_design_philosophy.md` | **HIGHEST.** Why recognition ≠ prevention. Cross-module invariants. | Active |
 | `docs/architecture/zeus_blueprint_v2.md` | **Architectural.** Position-centric lifecycle, CycleRunner, Decision Chain. | Active |
-| `docs/ZEUS_DATA_UTILIZATION_PLAN.md` | Data utilization. 4.7% usage gap. | Active |
+| `docs/strategy/data_strategy.md` | Data utilization and strategy planning. | Active |
+| `docs/reviews/zeus_review_phase2_strategic.md` | Strategic review and gap diagnosis (phase 2). | Historical |
 | `docs/reference/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |
 | `docs/reference/market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
 | `docs/reference/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |

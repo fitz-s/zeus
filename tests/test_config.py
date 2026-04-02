@@ -1,12 +1,32 @@
 """Tests for config loader and city metadata."""
 
 import json
+import inspect
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from src.config import Settings, City, load_cities
+from src.config import (
+    ALL_CLUSTERS,
+    Settings,
+    calibration_clusters,
+    calibration_maturity_thresholds,
+    day0_n_mc,
+    day0_obs_dominates_threshold,
+    edge_n_bootstrap,
+    ensemble_bimodal_gap_ratio,
+    ensemble_bimodal_kde_order,
+    ensemble_boundary_window,
+    ensemble_instrument_noise,
+    ensemble_member_count,
+    ensemble_n_mc,
+    ensemble_unimodal_range_epsilon,
+    load_cities,
+    correlation_matrix,
+    sizing_defaults,
+)
+from src.contracts.settlement_semantics import SettlementSemantics
 
 
 def test_settings_loads_all_required_keys():
@@ -58,11 +78,123 @@ def test_city_clusters():
     cities = load_cities()
     by_name = {c.name: c for c in cities}
     assert by_name["NYC"].cluster == "US-Northeast"
-    assert by_name["Chicago"].cluster == "US-Midwest"
-    assert by_name["Atlanta"].cluster == "US-Southeast"
-    assert by_name["London"].cluster == "Europe"
-    assert by_name["Seoul"].cluster == "Asia"
-    assert by_name["Denver"].cluster == "US-Mountain"
+    assert by_name["Chicago"].cluster == "US-GreatLakes"
+    assert by_name["Atlanta"].cluster == "US-Southeast-Inland"
+    assert by_name["London"].cluster == "Europe-Maritime"
+    assert by_name["Paris"].cluster == "Europe-Continental"
+    assert by_name["Seoul"].cluster == "Asia-Northeast"
+    assert by_name["Shanghai"].cluster == "Asia-East-China"
+    assert by_name["Denver"].cluster == "US-Rockies"
+    assert set(calibration_clusters()) == set(ALL_CLUSTERS)
+
+
+def test_city_without_explicit_cluster_is_rejected(tmp_path):
+    path = tmp_path / "cities.json"
+    path.write_text(json.dumps({
+        "cities": [
+            {
+                "name": "Unknown City",
+                "lat": 1,
+                "lon": 2,
+                "timezone": "UTC",
+                "unit": "F",
+                "wu_station": "KUNK",
+            }
+        ]
+    }))
+    with pytest.raises(KeyError, match="missing from city metadata cluster field"):
+        load_cities(path=path)
+
+
+def test_calibration_manager_cluster_taxonomy_matches_config():
+    manager_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src/calibration/manager.py").read_text()
+    etl_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/etl_tigge_calibration.py").read_text()
+
+    assert tuple(calibration_clusters()) == tuple(ALL_CLUSTERS)
+    assert "calibration_clusters()" in manager_source
+    assert "calibration_clusters()" in etl_source
+
+
+def test_calibration_thresholds_are_single_sourced_from_settings():
+    s = Settings()
+    expected = (
+        int(s["calibration"]["maturity"]["level1"]),
+        int(s["calibration"]["maturity"]["level2"]),
+        int(s["calibration"]["maturity"]["level3"]),
+    )
+    assert calibration_maturity_thresholds() == expected
+    from src.calibration.manager import maturity_level
+    assert maturity_level(expected[0]) == 1
+    assert maturity_level(expected[1]) == 2
+    assert maturity_level(expected[2]) == 3
+    assert maturity_level(expected[2] - 1) == 4
+
+
+def test_platt_bootstrap_iterations_are_single_sourced_from_settings():
+    from src.calibration.platt import DEFAULT_N_BOOTSTRAP
+    from src.strategy.market_analysis import DEFAULT_EDGE_BOOTSTRAP
+    s = Settings()
+    assert DEFAULT_N_BOOTSTRAP == int(s["calibration"]["n_bootstrap"])
+    assert DEFAULT_EDGE_BOOTSTRAP == edge_n_bootstrap()
+
+
+def test_risk_limit_defaults_are_single_sourced_from_settings():
+    from src.strategy.risk_limits import RiskLimits
+
+    defaults = sizing_defaults()
+    limits = RiskLimits()
+    assert limits.max_single_position_pct == defaults["max_single_position_pct"]
+    assert limits.max_portfolio_heat_pct == defaults["max_portfolio_heat_pct"]
+    assert limits.max_correlated_pct == defaults["max_correlated_pct"]
+    assert limits.max_city_pct == defaults["max_city_pct"]
+    assert limits.max_region_pct == defaults["max_region_pct"]
+    assert limits.min_order_usd == defaults["min_order_usd"]
+
+
+def test_correlation_matrix_covers_all_configured_clusters():
+    matrix = correlation_matrix()
+    assert set(matrix) == set(ALL_CLUSTERS)
+    for cluster, mapping in matrix.items():
+        assert cluster in ALL_CLUSTERS
+        assert set(mapping).issubset(set(ALL_CLUSTERS))
+        assert cluster not in mapping
+
+
+def test_signal_constants_are_single_sourced_from_settings():
+    from src.signal.ensemble_signal import (
+        BIMODAL_GAP_RATIO,
+        BIMODAL_KDE_ORDER,
+        BOUNDARY_WINDOW,
+        DEFAULT_N_MC,
+        SIGMA_INSTRUMENT,
+        UNIMODAL_RANGE_EPSILON,
+    )
+
+    assert ensemble_member_count() == 51
+    assert DEFAULT_N_MC == ensemble_n_mc()
+    assert SIGMA_INSTRUMENT == ensemble_instrument_noise("F")
+    assert BIMODAL_KDE_ORDER == ensemble_bimodal_kde_order()
+    assert BIMODAL_GAP_RATIO == ensemble_bimodal_gap_ratio()
+    assert BOUNDARY_WINDOW == ensemble_boundary_window()
+    assert UNIMODAL_RANGE_EPSILON == ensemble_unimodal_range_epsilon()
+
+
+def test_day0_constants_are_single_sourced_from_settings():
+    from src.signal.day0_signal import Day0Signal
+    import numpy as np
+
+    sig = Day0Signal(
+        observed_high_so_far=40.0,
+        current_temp=39.0,
+        hours_remaining=6.0,
+        member_maxes_remaining=np.array([39.0, 40.0, 41.0]),
+    )
+    assert day0_n_mc() == 5000
+    assert sig.obs_dominates() is False
+    assert day0_obs_dominates_threshold() == 0.8
+
+    p_vector_signature = inspect.signature(Day0Signal.p_vector)
+    assert p_vector_signature.parameters["n_mc"].default is None
 
 
 def test_city_has_timezone():
@@ -108,3 +240,18 @@ def test_city_aliases():
     assert "New York City" in by_name["NYC"].aliases
     assert "LA" in by_name["Los Angeles"].aliases
     assert "SF" in by_name["San Francisco"].aliases
+
+
+def test_settlement_semantics_matches_city_metadata():
+    for city in load_cities():
+        sem = SettlementSemantics.for_city(city)
+        assert sem.measurement_unit == city.settlement_unit
+        assert sem.finalization_time == "12:00:00Z"
+
+        if "wunderground.com" in city.settlement_source:
+            assert sem.resolution_source == f"WU_{city.wu_station}"
+        else:
+            pytest.fail(
+                f"{city.name} uses non-WU settlement_source={city.settlement_source!r}. "
+                "SettlementSemantics.for_city() must be upgraded before this city is valid."
+            )

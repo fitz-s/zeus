@@ -7,37 +7,21 @@ over-concentration without requiring historical correlation estimation.
 
 import logging
 
+from src.config import correlation_default_cross_cluster, correlation_matrix
+
 logger = logging.getLogger(__name__)
-
-# Spec §5.5: Heuristic correlation coefficients between clusters.
-# Same cluster = 1.0, nearby = 0.5-0.7, distant = 0.1-0.3
-CLUSTER_CORRELATION = {
-    # Keys must be in sorted() order to match the lookup in get_correlation().
-    ("US-Midwest", "US-Northeast"): 0.6,
-    ("US-Northeast", "US-Southeast"): 0.4,
-    ("US-Northeast", "US-SouthCentral"): 0.3,
-    ("US-Northeast", "US-Pacific"): 0.1,
-    ("Europe", "US-Northeast"): 0.1,
-    ("US-Midwest", "US-Southeast"): 0.3,
-    ("US-Midwest", "US-SouthCentral"): 0.5,
-    ("US-Midwest", "US-Pacific"): 0.2,
-    ("Europe", "US-Midwest"): 0.1,
-    ("US-SouthCentral", "US-Southeast"): 0.5,
-    ("US-Pacific", "US-Southeast"): 0.1,
-    ("Europe", "US-Southeast"): 0.1,
-    ("US-Pacific", "US-SouthCentral"): 0.2,
-    ("Europe", "US-SouthCentral"): 0.1,
-    ("Europe", "US-Pacific"): 0.1,
-}
-
 
 def get_correlation(cluster_a: str, cluster_b: str) -> float:
     """Get heuristic correlation between two clusters."""
     if cluster_a == cluster_b:
         return 1.0
 
-    key = tuple(sorted([cluster_a, cluster_b]))
-    return CLUSTER_CORRELATION.get(key, 0.1)
+    matrix = correlation_matrix()
+    if cluster_b in matrix.get(cluster_a, {}):
+        return matrix[cluster_a][cluster_b]
+    if cluster_a in matrix.get(cluster_b, {}):
+        return matrix[cluster_b][cluster_a]
+    return correlation_default_cross_cluster()
 
 
 def correlated_exposure(

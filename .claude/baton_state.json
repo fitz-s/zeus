@@ -1,0 +1,22 @@
+{
+  "mode": "solo",
+  "live_teammates": [],
+  "ready": [
+    {
+      "task_id": "P2-H",
+      "owner": "Main",
+      "goal": "Start forecast-layer Phase-1 de-hardcode from the now-closed P0/P1 base"
+    }
+  ],
+  "active": [
+    {
+      "task_id": "P2-H",
+      "owner": "Main",
+      "goal": "Hold P2-H at a showcase-safe mini-milestone after landing the first bounded mean-offset behavior change"
+    }
+  ],
+  "blocked": [],
+  "waiting": [],
+  "last_decision": "CLOSE the first bounded mean-offset slice as a package-ready P2-H checkpoint before deeper forecast-layer work resumes",
+  "backlog_source": "task.md"
+}

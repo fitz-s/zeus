@@ -13,6 +13,8 @@ import logging
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
+from src.config import calibration_n_bootstrap
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,8 +22,28 @@ logger = logging.getLogger(__name__)
 P_CLAMP_LOW = 0.01
 P_CLAMP_HIGH = 0.99
 
-# Default bootstrap iterations for parameter uncertainty
-DEFAULT_N_BOOTSTRAP = 200
+# Compatibility alias for tests and assumption audits.
+DEFAULT_N_BOOTSTRAP = calibration_n_bootstrap()
+RAW_PROBABILITY_SPACE = "raw_probability"
+WIDTH_NORMALIZED_SPACE = "width_normalized_density"
+
+
+def normalize_bin_probability_for_calibration(
+    p_raw: float,
+    *,
+    bin_width: float | None = None,
+) -> float:
+    """Map a bin probability into the Platt input space.
+
+    Finite bins are normalized by their settlement width so Platt sees an
+    approximate per-degree density rather than raw probability mass.
+
+    Shoulder bins remain in raw probability space because they are open-ended
+    tail events and do not have a finite width.
+    """
+    if bin_width is None or bin_width <= 0:
+        return float(p_raw)
+    return float(p_raw) / float(bin_width)
 
 
 class ExtendedPlattCalibrator:
@@ -37,13 +59,15 @@ class ExtendedPlattCalibrator:
         self.n_samples: int = 0
         self.fitted: bool = False
         self.bootstrap_params: list[tuple[float, float, float]] = []
+        self.input_space: str = RAW_PROBABILITY_SPACE
 
     def fit(
         self,
         p_raw: np.ndarray,
         lead_days: np.ndarray,
         outcomes: np.ndarray,
-        n_bootstrap: int = DEFAULT_N_BOOTSTRAP,
+        bin_widths: np.ndarray | None = None,
+        n_bootstrap: int | None = None,
         regularization_C: float = 1.0,
     ) -> None:
         """Fit Platt model on (p_raw, lead_days, outcome) triples.
@@ -57,16 +81,22 @@ class ExtendedPlattCalibrator:
             p_raw: raw probabilities, shape (n,)
             lead_days: forecast lead in days, shape (n,)
             outcomes: binary outcomes (0/1), shape (n,)
+            bin_widths: optional finite bin widths for width-aware normalization
             n_bootstrap: number of bootstrap parameter sets
             regularization_C: sklearn LogisticRegression C parameter
         """
+        if n_bootstrap is None:
+            n_bootstrap = calibration_n_bootstrap()
         if len(p_raw) < 15:
             raise ValueError(
                 f"Cannot fit Platt with n={len(p_raw)} < 15. "
                 f"Per spec §3.3: use P_raw directly for n < 15."
             )
 
-        X = self._build_features(p_raw, lead_days)
+        X = self._build_features(p_raw, lead_days, bin_widths=bin_widths)
+        self.input_space = (
+            WIDTH_NORMALIZED_SPACE if bin_widths is not None else RAW_PROBABILITY_SPACE
+        )
 
         # Primary fit
         lr = self._fit_lr(X, outcomes, regularization_C)
@@ -112,9 +142,31 @@ class ExtendedPlattCalibrator:
 
         return float(np.clip(p_cal, 0.001, 0.999))
 
+    def predict_for_bin(
+        self,
+        p_raw: float,
+        lead_days: float,
+        *,
+        bin_width: float | None = None,
+    ) -> float:
+        """Calibrate a bin probability in the same input space used at fit time."""
+        if self.input_space == WIDTH_NORMALIZED_SPACE:
+            p_raw = normalize_bin_probability_for_calibration(p_raw, bin_width=bin_width)
+        return self.predict(p_raw, lead_days)
+
     @staticmethod
-    def _build_features(p_raw: np.ndarray, lead_days: np.ndarray) -> np.ndarray:
+    def _build_features(
+        p_raw: np.ndarray,
+        lead_days: np.ndarray,
+        *,
+        bin_widths: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Build feature matrix: [logit(P_raw), lead_days]."""
+        if bin_widths is not None:
+            p_raw = np.array([
+                normalize_bin_probability_for_calibration(float(p), bin_width=float(w) if w is not None else None)
+                for p, w in zip(p_raw, bin_widths)
+            ], dtype=np.float64)
         p_clamped = np.clip(p_raw, P_CLAMP_LOW, P_CLAMP_HIGH)
         logits = np.log(p_clamped / (1 - p_clamped))
         return np.column_stack([logits, lead_days])
@@ -132,6 +184,7 @@ def calibrate_and_normalize(
     p_raw_vector: np.ndarray,
     calibrator: ExtendedPlattCalibrator,
     lead_days: float,
+    bin_widths: np.ndarray | list[float | None] | None = None,
 ) -> np.ndarray:
     """Calibrate all bins and re-normalize to sum=1.0.
 
@@ -140,8 +193,10 @@ def calibrate_and_normalize(
 
     Returns: np.ndarray shape (n_bins,), sums to 1.0
     """
+    widths = list(bin_widths) if bin_widths is not None else [None] * len(p_raw_vector)
     p_cal = np.array([
-        calibrator.predict(float(p), lead_days) for p in p_raw_vector
+        calibrator.predict_for_bin(float(p), lead_days, bin_width=widths[i])
+        for i, p in enumerate(p_raw_vector)
     ])
 
     total = p_cal.sum()

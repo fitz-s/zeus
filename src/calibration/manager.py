@@ -1,7 +1,7 @@
 """Calibration manager: bucket routing, maturity gate, hierarchical fallback.
 
 Spec §3.2-3.4:
-- 24 buckets: 6 clusters × 4 seasons
+- cluster taxonomy comes from src.config, not a local hardcoded list
 - Lead_days is Platt INPUT FEATURE, not bucket dimension
 - Maturity gate controls regularization strength
 - Fallback: cluster+season → season → global → uncalibrated
@@ -21,21 +21,7 @@ from src.calibration.store import (
     load_platt_model,
     save_platt_model,
 )
-from src.config import City, cities_by_name
-
-
-# Spec §3.2: 6 clusters × 4 seasons = 24 buckets
-CLUSTERS = [
-    "US-Northeast", "US-Midwest", "US-Southeast",
-    "US-SouthCentral", "US-Pacific", "Europe"
-]
-SEASONS = ["DJF", "MAM", "JJA", "SON"]
-
-# Spec §3.3: Maturity levels
-MATURITY_LEVEL1 = 150  # Standard Platt (C=1.0)
-MATURITY_LEVEL2 = 50   # Standard Platt (C=1.0)
-MATURITY_LEVEL3 = 15   # Strong regularization (C=0.1)
-# Below 15: no Platt, use P_raw directly
+from src.config import City, calibration_clusters, calibration_maturity_thresholds
 
 
 def bucket_key(cluster: str, season: str) -> str:
@@ -71,11 +57,12 @@ def maturity_level(n_pairs: int) -> int:
     Level 3: 15 <= n < 50 → strong regularization (C=0.1), edge threshold 2×
     Level 4: n < 15 → no Platt (use P_raw), edge threshold 3×
     """
-    if n_pairs >= MATURITY_LEVEL1:
+    level1, level2, level3 = calibration_maturity_thresholds()
+    if n_pairs >= level1:
         return 1
-    elif n_pairs >= MATURITY_LEVEL2:
+    elif n_pairs >= level2:
         return 2
-    elif n_pairs >= MATURITY_LEVEL3:
+    elif n_pairs >= level3:
         return 3
     else:
         return 4
@@ -118,25 +105,31 @@ def get_calibrator(
     bk = bucket_key(cluster, season)
     model_data = load_platt_model(conn, bk)
     if model_data is not None:
+        if model_data.get("input_space") != "width_normalized_density":
+            refit = _fit_from_pairs(conn, cluster, season)
+            if refit is not None:
+                level = maturity_level(refit.n_samples)
+                return refit, level
         cal = _model_data_to_calibrator(model_data)
         level = maturity_level(model_data["n_samples"])
         return cal, level
 
     # Check if we have enough pairs to fit on the fly
     n = get_pairs_count(conn, cluster, season)
-    if n >= MATURITY_LEVEL3:
+    _, _, level3 = calibration_maturity_thresholds()
+    if n >= level3:
         cal = _fit_from_pairs(conn, cluster, season)
         if cal is not None:
             level = maturity_level(n)
             return cal, level
 
     # Fallback: season-only (pool all clusters)
-    for fallback_cluster in CLUSTERS:
+    for fallback_cluster in calibration_clusters():
         if fallback_cluster == cluster:
             continue
         bk_fb = bucket_key(fallback_cluster, season)
         model_data = load_platt_model(conn, bk_fb)
-        if model_data is not None and model_data["n_samples"] >= MATURITY_LEVEL3:
+        if model_data is not None and model_data["n_samples"] >= level3:
             cal = _model_data_to_calibrator(model_data)
             level = maturity_level(model_data["n_samples"])
             return cal, max(level, 3)  # Fallback is at most level 3
@@ -156,6 +149,7 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
     cal.bootstrap_params = [
         tuple(p) for p in model_data["bootstrap_params"]
     ]
+    cal.input_space = model_data.get("input_space", "raw_probability")
     return cal
 
 
@@ -164,19 +158,27 @@ def _fit_from_pairs(
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs."""
     pairs = get_pairs_for_bucket(conn, cluster, season)
-    if len(pairs) < MATURITY_LEVEL3:
+    _, _, level3 = calibration_maturity_thresholds()
+    if len(pairs) < level3:
         return None
 
     p_raw = np.array([p["p_raw"] for p in pairs])
     lead_days = np.array([p["lead_days"] for p in pairs])
     outcomes = np.array([p["outcome"] for p in pairs])
+    bin_widths = np.array([p.get("bin_width") for p in pairs], dtype=object)
 
     level = maturity_level(len(pairs))
     reg_C = regularization_for_level(level)
 
     cal = ExtendedPlattCalibrator()
     try:
-        cal.fit(p_raw, lead_days, outcomes, regularization_C=reg_C)
+        cal.fit(
+            p_raw,
+            lead_days,
+            outcomes,
+            bin_widths=bin_widths,
+            regularization_C=reg_C,
+        )
     except Exception as e:
         logger.warning("Platt fit failed for %s_%s: %s", cluster, season, e)
         return None
@@ -188,6 +190,7 @@ def _fit_from_pairs(
         cal.A, cal.B, cal.C,
         cal.bootstrap_params,
         cal.n_samples,
+        input_space=cal.input_space,
     )
     conn.commit()
 

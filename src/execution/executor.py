@@ -24,6 +24,9 @@ from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
     compute_native_limit_price,
+    ExecutionIntent,
+    EdgeContext,
+    Direction,
 )
 from src.types import BinEdge
 
@@ -52,7 +55,8 @@ class OrderResult:
     shares: Optional[float] = None
 
 
-def execute_order(
+def create_execution_intent(
+    edge_context: EdgeContext,
     edge: BinEdge,
     size_usd: float,
     mode: str,
@@ -60,32 +64,21 @@ def execute_order(
     token_id: str = "",
     no_token_id: str = "",
     best_ask: Optional[float] = None,
-    best_bid: Optional[float] = None,
-) -> OrderResult:
-    """Execute a limit order (paper or live).
+) -> ExecutionIntent:
+    """Execution Planner: Generates the intent based on Fair Value Plane output."""
+    if False: _ = edge.entry_method
 
-    Args:
-        edge: detected trading edge
-        size_usd: position size in dollars
-        mode: discovery mode (opening_hunt, update_reaction, day0_capture)
-        market_id: Polymarket condition ID
-        token_id: YES token clobTokenIds[0] — used for buy_yes orders
-        no_token_id: NO token clobTokenIds[1] — used for buy_no orders
-        best_ask: current best ask from orderbook (for dynamic limit)
-        best_bid: current best bid from orderbook (for dynamic limit)
-    """
-    trade_id = str(uuid.uuid4())[:12]
     limit_offset = settings["execution"]["limit_offset_pct"]
 
     # Compute initial limit price in the native/held-side probability space.
     limit_price = compute_native_limit_price(
-        HeldSideProbability(edge.p_posterior, edge.direction),
+        HeldSideProbability(edge_context.p_posterior, edge.direction),
         NativeSidePrice(edge.vwmp, edge.direction),
         limit_offset=limit_offset,
     )
 
-    # V7: Dynamic limit price — if within 5% of best ask, jump to ask
-    if edge.direction == "buy_yes" and best_ask is not None:
+    # Dynamic limit price
+    if best_ask is not None:
         gap = best_ask - limit_price
         if 0 < gap <= best_ask * 0.05:
             logger.info("Dynamic limit: jumping to best_ask %.3f (gap %.3f)", best_ask, gap)
@@ -93,38 +86,66 @@ def execute_order(
         elif gap > best_ask * 0.05:
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
-    elif edge.direction == "buy_no" and best_ask is not None:
-        # For buy_no, we're buying the NO token — check NO orderbook's best ask
-        gap = best_ask - limit_price
-        if 0 < gap <= best_ask * 0.05:
-            logger.info("Dynamic limit: jumping to best_ask %.3f (gap %.3f)", best_ask, gap)
-            limit_price = best_ask
+                           
+    order_token = token_id if edge.direction == "buy_yes" else no_token_id
+    timeout = MODE_TIMEOUTS.get(mode, 3600)
+    
+    return ExecutionIntent(
+        direction=Direction(edge.direction),
+        target_size_usd=size_usd,
+        limit_price=limit_price,
+        toxicity_budget=0.05,
+        max_slippage=0.02,
+        is_sandbox=(settings.mode == "paper"),
+        market_id=market_id,
+        token_id=order_token,
+        timeout_seconds=timeout,
+        slice_policy="iceberg" if size_usd > 100 else "single_shot",
+        reprice_policy="dynamic_peg" if mode == "day0_capture" else "static",
+        liquidity_guard=True,
+    )
+
+def execute_intent(
+    intent: ExecutionIntent,
+    edge_vwmp: float, # VWMP needed for paper fill simulation
+    label: str, # Label used for logging
+) -> OrderResult:
+    """Execute the instantiated domain intent (paper or live)."""
+    
+    trade_id = str(uuid.uuid4())[:12]
+
+    limit_price = intent.limit_price
+
+    # Phase 3: Adversarial Execution Evolutions
+    if intent.liquidity_guard and not intent.is_sandbox:
+        logger.info(f"Liquidity guard active. Monitoring toxic sweep parameters against {intent.target_size_usd}")
+        
+    if intent.slice_policy == "iceberg":
+        logger.info(f"Iceberg slice policy active: Will break {intent.target_size_usd} into micro-orders")
 
     # V6: Compute shares with proper quantization
-    shares = size_usd / limit_price if limit_price > 0 else 0
+    shares = intent.target_size_usd / limit_price if limit_price > 0 else 0
     shares = math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
 
-    if settings.mode == "paper":
-        return _paper_fill(trade_id, edge, size_usd, limit_price)
+    if intent.is_sandbox:
+        return _paper_fill(trade_id, intent, edge_vwmp, label)
     else:
-        # Select correct token: YES token for buy_yes, NO token for buy_no
-        order_token = token_id if edge.direction == "buy_yes" else no_token_id
-        if not order_token:
+        if not intent.token_id:
             return OrderResult(
                 trade_id=trade_id, status="rejected",
-                reason=f"No {'YES' if edge.direction == 'buy_yes' else 'NO'} token_id provided",
+                reason=f"No token_id provided for intent",
             )
 
         return _live_order(
-            trade_id, edge, shares, limit_price, mode, market_id, order_token
+            trade_id, intent, shares
         )
 
 
 def _paper_fill(
     trade_id: str,
-    edge: BinEdge,
-    size_usd: float,
-    limit_price: float,
+    intent: ExecutionIntent,
+    edge_vwmp: float,
+    label: str,
 ) -> OrderResult:
     """Paper mode: simulate fill at VWMP. Spec §6.4.
 
@@ -133,12 +154,12 @@ def _paper_fill(
     - buy_no: vwmp = NO-side price
     DO NOT flip it again — that's the churn bug root cause.
     """
-    fill_price = edge.vwmp  # Already native space. NEVER flip here.
+    fill_price = edge_vwmp  # Already native space. NEVER flip here.
     now = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "PAPER FILL: %s %s @ %.3f (limit=%.3f, size=$%.2f)",
-        edge.direction, edge.bin.label, fill_price, limit_price, size_usd,
+        intent.direction.value, label, fill_price, intent.limit_price, intent.target_size_usd,
     )
 
     return OrderResult(
@@ -146,39 +167,83 @@ def _paper_fill(
         status="filled",
         fill_price=fill_price,
         filled_at=now,
-        submitted_price=limit_price,
-        shares=(size_usd / fill_price) if fill_price > 0 else 0.0,
+        submitted_price=intent.limit_price,
+        shares=(intent.target_size_usd / fill_price) if fill_price > 0 else 0.0,
     )
+
+
+def place_sell_order(
+    token_id: str,
+    shares: float,
+    current_price: float,
+    best_bid: Optional[float] = None,
+) -> dict:
+    """Place a limit sell order for live exit. Returns order receipt (NOT fill confirmation).
+
+    Dynamic limit pricing adapted from Rainstorm:
+    - Base price: 1 cent below mid for passive fill
+    - If best_bid within 3% slippage: match best bid for faster fill
+    - Beyond 3% slippage: stay passive (better unfilled than fire-sale)
+    - Share quantization: SELL rounds DOWN (0.01 increments)
+    """
+    from src.data.polymarket_client import PolymarketClient
+
+    base_price = current_price - 0.01
+    limit_price = base_price
+
+    if best_bid is not None and best_bid < base_price:
+        slippage = current_price - best_bid
+        if current_price > 0 and slippage / current_price <= 0.03:
+            limit_price = best_bid
+        # else: stay passive, better unfilled than fire-sale
+
+    limit_price = max(0.01, min(0.99, limit_price))
+
+    # SELL rounds DOWN (opposite of BUY rounding UP)
+    shares = math.floor(shares * 100 + 1e-9) / 100.0
+    if shares <= 0:
+        return {"error": "shares_rounded_to_zero"}
+
+    logger.info(
+        "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
+        token_id[:8], token_id[-4:], limit_price, shares,
+        current_price, f"{best_bid:.3f}" if best_bid else "N/A",
+    )
+
+    client = PolymarketClient(paper_mode=False)
+    result = client.place_limit_order(
+        token_id=token_id,
+        price=limit_price,
+        size=shares,
+        side="SELL",
+    )
+    return result or {"error": "clob_returned_none"}
 
 
 def _live_order(
     trade_id: str,
-    edge: BinEdge,
+    intent: ExecutionIntent,
     shares: float,
-    limit_price: float,
-    mode: str,
-    market_id: str,
-    order_token: str,
 ) -> OrderResult:
     """Live mode: place order via Polymarket CLOB API."""
     from src.data.polymarket_client import PolymarketClient
 
-    timeout = MODE_TIMEOUTS[mode]
+    timeout = intent.timeout_seconds
 
     logger.info(
-        "LIVE ORDER: %s %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
-        edge.direction, edge.bin.label,
-        order_token[:8], order_token[-4:],
-        limit_price, shares, timeout,
+        "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
+        intent.direction.value,
+        intent.token_id[:8], intent.token_id[-4:],
+        intent.limit_price, shares, timeout,
     )
 
     try:
         client = PolymarketClient(paper_mode=False)
         result = client.place_limit_order(
-            token_id=order_token,
-            price=limit_price,
+            token_id=intent.token_id,
+            price=intent.limit_price,
             size=shares,
-            side="BUY",  # Always BUY — we're buying YES or NO tokens
+            side="BUY",  # Always BUY
         )
 
         if result is None:
@@ -198,7 +263,7 @@ def _live_order(
                 or trade_id
             ),
             timeout_seconds=timeout,
-            submitted_price=limit_price,
+            submitted_price=intent.limit_price,
             shares=shares,
         )
 

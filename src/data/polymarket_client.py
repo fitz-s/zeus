@@ -37,7 +37,7 @@ def _resolve_credentials() -> dict:
         if result.returncode != 0:
             raise RuntimeError(f"Keychain resolution failed: {result.stderr}")
         creds = json.loads(result.stdout)
-        if not creds.get("private_key") or not creds.get("funder_address"):
+        if "private_key" not in creds or "funder_address" not in creds:
             raise RuntimeError("Missing private_key or funder_address from Keychain")
         return creds
     except Exception as e:
@@ -83,9 +83,10 @@ class PolymarketClient:
 
         # Normalize: API returns string numerics
         for side in ("bids", "asks"):
-            for entry in data.get(side, []):
-                entry["price"] = float(entry["price"])
-                entry["size"] = float(entry["size"])
+            if side in data:
+                for entry in data[side]:
+                    entry["price"] = float(entry["price"])
+                    entry["size"] = float(entry["size"])
 
         return data
 
@@ -94,14 +95,20 @@ class PolymarketClient:
 
         Returns: (best_bid, best_ask, bid_size, ask_size)
         """
+        from src.contracts.exceptions import EmptyOrderbookError
         book = self.get_orderbook(token_id)
-        bids = book.get("bids", [])
-        asks = book.get("asks", [])
+        if "bids" not in book or not book["bids"]:
+            raise EmptyOrderbookError(f"No bids available for {token_id}")
+        if "asks" not in book or not book["asks"]:
+            raise EmptyOrderbookError(f"No asks available for {token_id}")
 
-        best_bid = bids[0]["price"] if bids else 0.0
-        best_ask = asks[0]["price"] if asks else 1.0
-        bid_size = bids[0]["size"] if bids else 0.0
-        ask_size = asks[0]["size"] if asks else 0.0
+        best_bid = book["bids"][0]["price"]
+        best_ask = book["asks"][0]["price"]
+        bid_size = book["bids"][0]["size"]
+        ask_size = book["asks"][0]["size"]
+        
+        if bid_size <= 0.0 or ask_size <= 0.0:
+            raise EmptyOrderbookError(f"Liquidity sizes are 0.0 for token {token_id}")
 
         return best_bid, best_ask, bid_size, ask_size
 
@@ -123,8 +130,7 @@ class PolymarketClient:
         Returns: order result dict or None on failure
         """
         if self.paper_mode:
-            logger.warning("place_limit_order called in paper mode — no-op")
-            return None
+            raise RuntimeError("Live API 'place_limit_order' cannot be called in paper mode")
 
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
@@ -144,7 +150,7 @@ class PolymarketClient:
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
         if self.paper_mode:
-            return None
+            raise RuntimeError("Live API 'cancel_order' cannot be called in paper mode")
         result = self._clob_client.cancel(order_id)
         logger.info("Order cancelled: %s → %s", order_id, result.get("status"))
         return result
@@ -152,7 +158,7 @@ class PolymarketClient:
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
         if self.paper_mode:
-            return None
+            raise RuntimeError("Live API 'get_order_status' cannot be called in paper mode")
 
         try:
             if hasattr(self._clob_client, "get_order"):
@@ -172,7 +178,7 @@ class PolymarketClient:
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
         if self.paper_mode:
-            return []
+            raise RuntimeError("Live API 'get_open_orders' cannot be called in paper mode")
 
         try:
             try:
@@ -192,7 +198,7 @@ class PolymarketClient:
     def get_positions_from_api(self) -> Optional[list[dict]]:
         """Fetch authoritative live positions from Polymarket's data API."""
         if self.paper_mode:
-            return []
+            raise RuntimeError("Live API 'get_positions_from_api' cannot be called in paper mode")
 
         try:
             creds = _resolve_credentials()
@@ -246,9 +252,25 @@ class PolymarketClient:
     def get_balance(self) -> float:
         """Get USDC balance."""
         if self.paper_mode:
-            return 0.0
+            raise RuntimeError("Live API 'get_balance' cannot be called in paper mode")
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
         resp = self._clob_client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
         return int(resp["balance"]) / 1e6
+
+    def redeem(self, condition_id: str) -> Optional[dict]:
+        """Redeem winning shares for USDC after settlement.
+
+        Not urgent (USDC stays claimable indefinitely) but without it,
+        winning capital sits on-chain instead of being available for new trades.
+        """
+        if self.paper_mode:
+            raise RuntimeError("Live API 'redeem' cannot be called in paper mode")
+        try:
+            result = self._clob_client.redeem(condition_id)
+            logger.info("Redeemed condition %s → %s", condition_id, result)
+            return result
+        except Exception as exc:
+            logger.warning("Redeem failed for condition %s: %s", condition_id, exc)
+            return None

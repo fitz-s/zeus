@@ -6,6 +6,7 @@ Provides exposure queries for risk limit enforcement.
 
 import json
 import logging
+import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
@@ -13,12 +14,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.config import STATE_DIR, settings
-from src.contracts import HeldSideProbability, NativeSidePrice, compute_forward_edge
+from src.config import STATE_DIR, settings, state_path
+from src.contracts import (
+    HeldSideProbability, 
+    NativeSidePrice, 
+    compute_forward_edge,
+    ExpiringAssumption,
+)
+from src.contracts.semantic_types import Direction, LifecycleState, ChainState, DirectionAlias
+from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
-POSITIONS_PATH = STATE_DIR / "positions.json"
+POSITIONS_PATH = state_path("positions.json")
 
 
 @dataclass
@@ -29,13 +37,67 @@ class ExitDecision:
     urgency: str = "normal"  # "normal" or "immediate"
     selected_method: str = ""
     applied_validations: list[str] = field(default_factory=list)
+    trigger: str = ""
+
+
+@dataclass(frozen=True)
+class ExitContext:
+    """Unified runtime authority surface for exit evaluation + execution.
+
+    `evaluate_exit()` consumes this object instead of scattered optional params.
+    Some surfaces are required for authority (`fresh_prob`, `current_market_price`,
+    `hours_to_settlement`, `position_state`). Others may be explicitly
+    unavailable (`best_bid`, `best_ask`, `market_vig`, `whale_toxicity`) and
+    must be represented as such instead of silently omitted.
+    """
+
+    exit_reason: str = ""
+    fresh_prob: Optional[float] = None
+    fresh_prob_is_fresh: bool = False
+    current_market_price: Optional[float] = None
+    current_market_price_is_fresh: bool = False
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    market_vig: Optional[float] = None
+    hours_to_settlement: Optional[float] = None
+    position_state: str = ""
+    day0_active: bool = False
+    whale_toxicity: Optional[bool] = None
+    chain_is_fresh: Optional[bool] = None
+    divergence_score: float = 0.0
+    market_velocity_1h: float = 0.0
+
+    @staticmethod
+    def _is_finite(value: Optional[float]) -> bool:
+        if value is None:
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    def missing_authority_fields(self) -> list[str]:
+        missing: list[str] = []
+        if not self._is_finite(self.fresh_prob):
+            missing.append("fresh_prob")
+        elif not self.fresh_prob_is_fresh:
+            missing.append("fresh_prob_is_fresh")
+        if not self._is_finite(self.current_market_price):
+            missing.append("current_market_price")
+        elif not self.current_market_price_is_fresh:
+            missing.append("current_market_price_is_fresh")
+        if not self._is_finite(self.hours_to_settlement):
+            missing.append("hours_to_settlement")
+        if not self.position_state:
+            missing.append("position_state")
+        return missing
 
 
 # Administrative exit reasons — excluded from P&L calculations
 ADMIN_EXITS = frozenset({
     "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
     "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
-    "SETTLED_UNKNOWN_DIRECTION",
+    "SETTLED_UNKNOWN_DIRECTION", "EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
 })
 
 
@@ -56,8 +118,12 @@ class Position:
     cluster: str
     target_date: str
     bin_label: str
-    direction: str  # "buy_yes" | "buy_no" | "unknown" (quarantine only)
+    direction: DirectionAlias  # Forces use of Direction(Enum)
+
     unit: str = "F"  # Blueprint v2: carried, never inferred
+
+    # Provenance: which environment created this position (set once, never changed)
+    env: str = "paper"  # "paper" | "live" | "backtest"
 
     # Probability (always in held-side space — flipped exactly once at creation)
     size_usd: float = 0.0
@@ -68,6 +134,7 @@ class Position:
     cost_basis_usd: float = 0.0  # = size_usd
     bankroll_at_entry: float = 150.0
     entered_at: str = ""
+    day0_entered_at: str = ""
     entry_ci_width: float = 0.0
 
     # Entry context (immutable snapshot — Blueprint v2 §2)
@@ -86,7 +153,7 @@ class Position:
     fill_quality: float = 0.0  # (exec_price - vwmp) / vwmp
 
     # Lifecycle state (Blueprint v2 §2)
-    state: str = "holding"  # pending_tracked | entered | holding | day0_window | settled | voided | admin_closed
+    state: str = LifecycleState.HOLDING.value
     exit_strategy: str = ""  # "buy_yes_standard" | "buy_no_conservative" (set from direction)
     order_id: str = ""
     order_status: str = ""
@@ -94,7 +161,7 @@ class Position:
     order_timeout_at: str = ""
 
     # Chain reconciliation (Blueprint v2 §5)
-    chain_state: str = "unknown"  # unknown | synced | local_only | chain_only | quarantined
+    chain_state: str = ChainState.UNKNOWN.value
     chain_shares: float = 0.0
     chain_verified_at: str = ""
 
@@ -103,22 +170,61 @@ class Position:
     no_token_id: str = ""
     condition_id: str = ""
 
+    # Quarantine tracking
+    quarantined_at: str = ""  # ISO timestamp when quarantined
+
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
     last_monitor_prob: float = 0.0
+    last_monitor_prob_is_fresh: bool = False
     last_monitor_edge: float = 0.0
     last_monitor_market_price: Optional[float] = None
+    last_monitor_market_price_is_fresh: bool = False
+    last_monitor_best_bid: Optional[float] = None
+    last_monitor_best_ask: Optional[float] = None
+    last_monitor_market_vig: Optional[float] = None
+    last_monitor_whale_toxicity: Optional[bool] = None
     last_monitor_at: str = ""
-    city_peak_hour: float = 15.0  # For Day0 phase detection
+
+    # Live exit lifecycle (sell order state machine)
+    exit_state: str = ""  # "" | "exit_intent" | "sell_placed" | "sell_pending" |
+                          #   "sell_filled" | "retry_pending" | "backoff_exhausted"
+    exit_retry_count: int = 0
+    next_exit_retry_at: Optional[str] = None  # ISO timestamp for retry cooldown
+    last_exit_order_id: Optional[str] = None  # for stale cancel on retry
+    last_exit_error: str = ""
+
+    # Entry fill verification (live mode)
+    entry_order_id: Optional[str] = None  # CLOB order ID from entry
+    entry_fill_verified: bool = False  # True only after CLOB confirms MATCHED/FILLED
 
     # Anti-churn
     last_exit_at: str = ""
+    exit_trigger: str = ""
     exit_reason: str = ""
     admin_exit_reason: str = ""  # Separate from economic exit_reason
+    exit_divergence_score: float = 0.0
+    exit_market_velocity_1h: float = 0.0
+    exit_forward_edge: float = 0.0
+
+    # JSON Object Snapshots (Phase 2 Object Persistence DTO)
+    settlement_semantics_json: Optional[str] = None
+    epistemic_context_json: Optional[str] = None
+    edge_context_json: Optional[str] = None
 
     # P&L (set on close)
     exit_price: float = 0.0
     pnl: float = 0.0
+
+    def __post_init__(self):
+        """CRITICAL: Enforce Enum strictness via coercion."""
+        if not isinstance(self.direction, Direction):
+            self.direction = Direction(self.direction)
+        if not isinstance(self.state, LifecycleState):
+            self.state = LifecycleState(self.state)
+        if not isinstance(self.chain_state, ChainState):
+            self.chain_state = ChainState(self.chain_state)
+
 
     @property
     def effective_shares(self) -> float:
@@ -139,39 +245,135 @@ class Position:
             return 0.0
         return self.effective_shares * self.last_monitor_market_price - self.effective_cost_basis_usd
 
-    def evaluate_exit(
-        self,
-        current_p_posterior: float,
-        current_p_market: float,
-        hours_to_settlement: Optional[float] = None,
-        is_whale_sweep: bool = False,
-        best_bid: Optional[float] = None,
-        market_vig: float = 1.0,
-    ) -> ExitDecision:
+    def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
-        All probabilities in native space (same as entry).
+        All probabilities remain in held/native space. Missing authority fields
+        fail closed with an explicit incomplete verdict.
         """
         applied = list(self.applied_validations)
+        missing = exit_context.missing_authority_fields()
+        if missing:
+            applied.append("exit_context_incomplete")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing)})",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
+        if exit_context.best_bid is None:
+            applied.append("best_bid_unavailable")
+        if exit_context.best_ask is None:
+            applied.append("best_ask_unavailable")
+        if exit_context.market_vig is None:
+            applied.append("market_vig_unavailable")
+        if exit_context.whale_toxicity is None:
+            applied.append("whale_toxicity_unavailable")
+        elif exit_context.whale_toxicity:
+            applied.append("whale_toxicity_available")
+        if exit_context.chain_is_fresh is None:
+            applied.append("chain_freshness_unavailable")
+        elif exit_context.chain_is_fresh is False:
+            applied.append("chain_freshness_stale")
+
+        forward_edge = compute_forward_edge(
+            HeldSideProbability(float(exit_context.fresh_prob), self.direction),
+            NativeSidePrice(float(exit_context.current_market_price), self.direction),
+        )
+        applied.append("forward_edge_compute")
+
+        if exit_context.day0_active:
+            applied.append("day0_observation_authority")
+            if self.direction == "buy_no":
+                day0_decision = self._buy_no_exit(
+                    forward_edge,
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    current_market_price=float(exit_context.current_market_price),
+                    hours_to_settlement=exit_context.hours_to_settlement,
+                    day0_active=True,
+                    applied=applied,
+                )
+            else:
+                day0_decision = self._buy_yes_exit(
+                    forward_edge,
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    best_bid=exit_context.best_bid,
+                    day0_active=True,
+                    applied=applied,
+                )
+            if day0_decision.should_exit:
+                return day0_decision
+            self.applied_validations = _dedupe_validations(day0_decision.applied_validations)
+            return ExitDecision(
+                False,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
 
         # Settlement imminent
-        if hours_to_settlement is not None and hours_to_settlement < 1.0:
+        if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
             applied.append("near_settlement_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True, "SETTLEMENT_IMMINENT", "immediate",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="SETTLEMENT_IMMINENT",
             )
 
         # Whale toxicity
-        if is_whale_sweep:
+        if exit_context.whale_toxicity:
             applied.append("whale_toxicity_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True, "WHALE_TOXICITY", "immediate",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="WHALE_TOXICITY",
+            )
+
+        if exit_context.divergence_score >= divergence_hard_threshold():
+            applied.append("divergence_hard_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"MODEL_DIVERGENCE_PANIC (score={exit_context.divergence_score:.2f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="MODEL_DIVERGENCE_PANIC",
+            )
+
+        if (
+            exit_context.divergence_score >= divergence_soft_threshold()
+            and exit_context.market_velocity_1h <= divergence_velocity_confirm()
+        ):
+            applied.append("divergence_soft_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                (
+                    "MODEL_DIVERGENCE_PANIC "
+                    f"(score={exit_context.divergence_score:.2f}, velocity={exit_context.market_velocity_1h:.2f}/hr)"
+                ),
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="MODEL_DIVERGENCE_PANIC",
+            )
+
+        if exit_context.market_velocity_1h <= -0.15:
+            applied.append("flash_crash_trigger")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"FLASH_CRASH_PANIC (velocity={exit_context.market_velocity_1h:.2f}/hr)",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="FLASH_CRASH_PANIC",
             )
 
         # Micro-position hold (Layer 8: < $1 never sold)
@@ -185,37 +387,84 @@ class Position:
             )
 
         # Vig extreme
-        if market_vig > 1.08 or market_vig < 0.92:
+        if (
+            exit_context.market_vig is not None
+            and ExitContext._is_finite(exit_context.market_vig)
+            and (exit_context.market_vig > 1.08 or exit_context.market_vig < 0.92)
+        ):
             applied.append("vig_extreme_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True, f"VIG_EXTREME (vig={market_vig:.3f})",
+                True, f"VIG_EXTREME (vig={exit_context.market_vig:.3f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="VIG_EXTREME",
             )
 
         # Direction-specific exit logic
-        forward_edge = compute_forward_edge(
-            HeldSideProbability(current_p_posterior, self.direction),
-            NativeSidePrice(current_p_market, self.direction),
-        )
-        applied.append("forward_edge_compute")
-
         if self.direction == "buy_no":
-            return self._buy_no_exit(forward_edge, hours_to_settlement, applied)
+            return self._buy_no_exit(
+                forward_edge,
+                current_p_posterior=float(exit_context.fresh_prob),
+                current_market_price=float(exit_context.current_market_price),
+                hours_to_settlement=exit_context.hours_to_settlement,
+                day0_active=bool(exit_context.day0_active),
+                applied=applied,
+            )
         else:
-            return self._buy_yes_exit(forward_edge, best_bid, applied)
+            return self._buy_yes_exit(
+                forward_edge,
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+                day0_active=bool(exit_context.day0_active),
+                applied=applied,
+            )
 
     def _buy_yes_exit(
-        self, forward_edge: float, best_bid: Optional[float] = None,
+        self,
+        forward_edge: float,
+        current_p_posterior: float,
+        best_bid: Optional[float] = None,
+        day0_active: bool = False,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
         applied = list(applied or [])
+        if best_bid is None:
+            applied.append("exit_context_incomplete")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
         applied.append("ci_threshold")
+        if day0_active and evidence_edge < edge_threshold:
+            applied.append("day0_observation_gate")
+            applied.append("ev_gate")
+            shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
+            if shares * best_bid <= shares * current_p_posterior:
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="DAY0_OBSERVATION_REVERSAL",
+            )
         applied.append("consecutive_cycle_check")
-        if forward_edge >= edge_threshold:
+        if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -237,7 +486,7 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            if shares * best_bid <= shares * self.p_posterior:
+            if shares * best_bid <= shares * current_p_posterior:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -248,20 +497,50 @@ class Position:
         self.neg_edge_count = 0
         self.applied_validations = _dedupe_validations(applied)
         return ExitDecision(
-            True, f"EDGE_REVERSAL (edge={forward_edge:.4f})",
+            True, f"EDGE_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
             selected_method=self.selected_method or self.entry_method,
             applied_validations=list(self.applied_validations),
+            trigger="EDGE_REVERSAL",
         )
 
     def _buy_no_exit(
-        self, forward_edge: float, hours_to_settlement: Optional[float] = None,
+        self,
+        forward_edge: float,
+        current_p_posterior: float,
+        current_market_price: float,
+        hours_to_settlement: Optional[float] = None,
+        day0_active: bool = False,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
         applied = list(applied or [])
+        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
         near_threshold = buy_no_ceiling()
         applied.append("ci_threshold")
+
+        if day0_active and evidence_edge < edge_threshold:
+            applied.append("day0_observation_gate")
+            if self.entry_price > 0:
+                applied.append("ev_gate")
+                shares = self.size_usd / self.entry_price
+                if shares * current_market_price <= shares * current_p_posterior:
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                    )
+            self.neg_edge_count = 0
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
+                "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="DAY0_OBSERVATION_REVERSAL",
+            )
 
         # Near-settlement hold (unless deeply negative)
         if hours_to_settlement is not None and hours_to_settlement < near_settlement_hours():
@@ -269,9 +548,10 @@ class Position:
             if forward_edge < near_threshold:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
-                    True, f"BUY_NO_NEAR_EXIT (edge={forward_edge:.4f})",
+                    True, f"BUY_NO_NEAR_EXIT (point={forward_edge:.4f})",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
+                    trigger="BUY_NO_NEAR_EXIT",
                 )
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -281,18 +561,29 @@ class Position:
             )
 
         applied.append("consecutive_cycle_check")
-        if forward_edge < edge_threshold:
+        if evidence_edge < edge_threshold:
             self.neg_edge_count += 1
         else:
             self.neg_edge_count = 0
 
         if self.neg_edge_count >= consecutive_confirmations():
+            if self.entry_price > 0:
+                applied.append("ev_gate")
+                shares = self.size_usd / self.entry_price
+                if shares * current_market_price <= shares * current_p_posterior:
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                    )
             self.neg_edge_count = 0
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True, f"BUY_NO_EDGE_EXIT (edge={forward_edge:.4f})",
+                True, f"BUY_NO_EDGE_EXIT (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
+                trigger="BUY_NO_EDGE_EXIT",
             )
 
         self.applied_validations = _dedupe_validations(applied)
@@ -313,10 +604,13 @@ class PortfolioState:
     positions: list[Position] = field(default_factory=list)
     bankroll: float = 150.0
     updated_at: str = ""
+    audit_logging_enabled: bool = False
     daily_baseline_total: float = 150.0
     weekly_baseline_total: float = 150.0
     # Layer 5+6: recently closed positions for reentry/cooldown checks
     recent_exits: list[dict] = field(default_factory=list)
+    # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
+    ignored_tokens: list[str] = field(default_factory=list)
 
     @property
     def initial_bankroll(self) -> float:
@@ -351,29 +645,63 @@ class PortfolioState:
         return max(0.0, self.weekly_baseline_total - self.current_total_value)
 
 
+class PortfolioModeError(RuntimeError):
+    """Paper data in live state, or vice versa. Daemon refuses to boot."""
+    pass
+
+
+class DeprecatedStateFileError(RuntimeError):
+    """Raised when a deprecated unsuffixed truth file is accessed."""
+    pass
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
-    """Load portfolio from JSON file. Returns empty state if file missing."""
+    """Load portfolio from JSON file. Returns empty state if file missing.
+
+    Includes contamination guard: refuses to load positions from wrong env.
+    """
     path = path or POSITIONS_PATH
     if not path.exists():
-        return PortfolioState()
+        return PortfolioState(audit_logging_enabled=True)
 
     with open(path) as f:
         data = json.load(f)
+    if data.get("truth", {}).get("deprecated") is True:
+        raise DeprecatedStateFileError(
+            f"{path} is a deprecated legacy truth file. "
+            "Use the mode-suffixed positions file instead."
+        )
+
+    import os
+    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
 
     position_fields = {f.name for f in fields(Position)}
     positions = []
     for p in data.get("positions", []):
         filtered = {k: v for k, v in p.items() if k in position_fields}
+        if "env" not in p:
+            filtered["env"] = current_mode
         positions.append(Position(**filtered))
+
+    # Contamination guard: every position's env must match current mode
+    for pos in positions:
+        if pos.env and pos.env != current_mode:
+            raise PortfolioModeError(
+                f"{current_mode} portfolio contains {pos.env} position "
+                f"{pos.trade_id} — refusing to load. Resolve manually: "
+                f"settle or void all {pos.env} positions before switching modes."
+            )
 
     bankroll = data.get("bankroll", 150.0)
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
         updated_at=data.get("updated_at", ""),
+        audit_logging_enabled=True,
         daily_baseline_total=data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
         recent_exits=data.get("recent_exits", []),
+        ignored_tokens=data.get("ignored_tokens", []),
     )
 
 
@@ -390,7 +718,9 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "daily_baseline_total": state.daily_baseline_total,
         "weekly_baseline_total": state.weekly_baseline_total,
         "recent_exits": state.recent_exits,
+        "ignored_tokens": state.ignored_tokens,
     }
+    data = annotate_truth_payload(data, path, mode=settings.mode, generated_at=state.updated_at)
 
     # Atomic write pattern per OpenClaw conventions
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -501,17 +831,68 @@ def remove_position(
 
 
 def _track_exit(state: PortfolioState, pos: Position) -> None:
-    """Track exit for reentry/cooldown checks (Layers 5+6)."""
+    """Track exit for reentry/cooldown checks AND replay auditability.
+
+    CRITICAL: All fields required by profit_validation_replay.py must be
+    persisted here. If a field is on Position but not in this dict, the
+    replay engine will classify the exit as 'fully_skipped'.
+
+    This list is intentionally unbounded. Truncating exit history makes
+    realized PnL, weekly/daily loss checks, and future full-fidelity replay
+    depend on arbitrary retention rather than actual trading history.
+    """
     state.recent_exits.append({
-        "city": pos.city, "bin_label": pos.bin_label,
-        "target_date": pos.target_date, "direction": pos.direction,
-        "token_id": pos.token_id, "no_token_id": pos.no_token_id,
+        # Identity
+        "trade_id": pos.trade_id,
+        "market_id": pos.market_id,
+        "city": pos.city,
+        "cluster": pos.cluster,
+        "bin_label": pos.bin_label,
+        "target_date": pos.target_date,
+        "direction": pos.direction,
+        "token_id": pos.token_id,
+        "no_token_id": pos.no_token_id,
+        # Entry context (replay-critical)
+        "entry_price": pos.entry_price,
+        "size_usd": pos.size_usd,
+        "p_posterior": pos.p_posterior,
+        "edge": pos.edge,
+        "entry_ci_width": pos.entry_ci_width,
+        "entry_method": pos.entry_method,
+        "selected_method": pos.selected_method,
+        "applied_validations": list(pos.applied_validations),
+        "decision_snapshot_id": pos.decision_snapshot_id,
+        "entered_at": pos.entered_at,
+        # Strategy attribution
+        "strategy": pos.strategy,
+        "edge_source": pos.edge_source,
+        "discovery_mode": pos.discovery_mode,
+        "market_hours_open": pos.market_hours_open,
+        "fill_quality": pos.fill_quality,
+        "settlement_semantics_json": pos.settlement_semantics_json,
+        "epistemic_context_json": pos.epistemic_context_json,
+        "edge_context_json": pos.edge_context_json,
+        # Exit context
+        "exit_trigger": pos.exit_trigger,
         "exit_reason": pos.exit_reason,
+        "admin_exit_reason": pos.admin_exit_reason,
+        "exit_divergence_score": pos.exit_divergence_score,
+        "exit_market_velocity_1h": pos.exit_market_velocity_1h,
+        "exit_forward_edge": pos.exit_forward_edge,
+        "exit_price": pos.exit_price,
         "exited_at": pos.last_exit_at,
         "pnl": pos.pnl,
     })
-    if len(state.recent_exits) > 50:
-        state.recent_exits = state.recent_exits[-50:]
+
+    if state.audit_logging_enabled:
+        try:
+            from src.state.db import get_connection, log_trade_exit
+            conn = get_connection()
+            log_trade_exit(conn, pos)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Error logging trade exit to db: %s", e)
 
 
 def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
@@ -527,6 +908,38 @@ def _realized_pnl_value(state: PortfolioState, exclude_admin: bool = True) -> fl
             continue
         total += pnl
     return total
+
+
+def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
+    """T2-E: Chain-journal merge for live position queries.
+
+    Paper mode or no chain_view: return local positions only.
+    Live mode with chain_view: merge chain truth (shares/price) with
+    local metadata (city, range, direction, decision context).
+    """
+    if chain_view is None or getattr(chain_view, "is_stale", True):
+        return [p for p in state.positions if p.state not in ("voided", "settled")]
+
+    merged = []
+    for pos in state.positions:
+        if pos.state in ("voided", "settled"):
+            continue
+
+        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+        chain_pos = chain_view.get_position(tid) if tid else None
+
+        if chain_pos:
+            # Chain overrides size/price, local keeps metadata
+            pos.shares = chain_pos.size
+            if chain_pos.avg_price > 0:
+                pos.entry_price = chain_pos.avg_price
+            pos.chain_state = "synced"
+            merged.append(pos)
+        elif pos.state == "pending_tracked":
+            merged.append(pos)  # Just placed, chain hasn't indexed yet
+        # else: gone from chain — reconciler will handle
+
+    return merged
 
 
 def total_exposure_usd(state: PortfolioState) -> float:
@@ -618,65 +1031,186 @@ def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -
     return any(p.city == city and p.bin_label == bin_label for p in state.positions)
 
 
-# HARDCODED(setting_key="exit.buy_no_scaling_factor", note_key="exit._buy_no_scaling_factor_note",
-#           tier=1, replace_after="200+ buy_no settlements",
-#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
+_V2_INTRODUCTION_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+_BUY_NO_SCALING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_scaling_factor"]),
+    fallback=1.5,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_SCALING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_scaling_factor"]),
+    fallback=1.0,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_NO_FLOOR = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_floor"]),
+    fallback=-0.03,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_NO_CEILING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_no_ceiling"]),
+    fallback=-0.15,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_FLOOR = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_floor"]),
+    fallback=-0.02,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_BUY_YES_CEILING = ExpiringAssumption[float](
+    value=float(settings["exit"]["buy_yes_ceiling"]),
+    fallback=-0.10,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_CONSECUTIVE_CONFIRMS = ExpiringAssumption[int](
+    value=int(settings["exit"]["consecutive_confirmations"]),
+    fallback=2,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=365,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_NEAR_SETTLEMENT_HOURS = ExpiringAssumption[float](
+    value=float(settings["exit"]["near_settlement_hours"]),
+    fallback=48.0,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="pr_b_validation_replay",
+    max_lifespan_days=365,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team"
+)
+
+_DIVERGENCE_SOFT_THRESHOLD = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_soft_threshold"]),
+    fallback=0.20,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
+_DIVERGENCE_HARD_THRESHOLD = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_hard_threshold"]),
+    fallback=0.30,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
+_DIVERGENCE_VELOCITY_CONFIRM = ExpiringAssumption[float](
+    value=float(settings["exit"]["divergence_velocity_confirm"]),
+    fallback=-0.05,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="divergence_threshold_audit",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_version="v2",
+    owner="risk_team",
+)
+
+
 def buy_no_scaling_factor() -> float:
-    return float(settings["exit"]["buy_no_scaling_factor"])
+    return _BUY_NO_SCALING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_scaling_factor", note_key="exit._buy_yes_scaling_factor_note",
-#           tier=1, replace_after="200+ buy_yes settlements",
-#           data_needed="optimal scaling minimizing false exit rate from historical forward-edge noise")
 def buy_yes_scaling_factor() -> float:
-    return float(settings["exit"]["buy_yes_scaling_factor"])
+    return _BUY_YES_SCALING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_no_floor", note_key="exit._buy_no_floor_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge noise floor for buy_no exits")
 def buy_no_floor() -> float:
-    return float(settings["exit"]["buy_no_floor"])
+    return _BUY_NO_FLOOR.active_value
 
-
-# HARDCODED(setting_key="exit.buy_no_ceiling", note_key="exit._buy_no_ceiling_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge deep-reversal ceiling for buy_no exits")
 def buy_no_ceiling() -> float:
-    return float(settings["exit"]["buy_no_ceiling"])
+    return _BUY_NO_CEILING.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_floor", note_key="exit._buy_yes_floor_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge noise floor for buy_yes exits")
 def buy_yes_floor() -> float:
-    return float(settings["exit"]["buy_yes_floor"])
+    return _BUY_YES_FLOOR.active_value
 
-
-# HARDCODED(setting_key="exit.buy_yes_ceiling", note_key="exit._buy_yes_ceiling_note",
-#           tier=1, replace_after="200+ settlements",
-#           data_needed="historical forward_edge deep-reversal ceiling for buy_yes exits")
 def buy_yes_ceiling() -> float:
-    return float(settings["exit"]["buy_yes_ceiling"])
+    return _BUY_YES_CEILING.active_value
 
-
-# HARDCODED(setting_key="exit.consecutive_confirmations", note_key="exit._consecutive_confirmations_note",
-#           tier=2, replace_after="500+ exit events",
-#           data_needed="1-cycle vs 2-cycle vs 3-cycle false positive rate")
 def consecutive_confirmations() -> int:
-    return int(settings["exit"]["consecutive_confirmations"])
+    return _CONSECUTIVE_CONFIRMS.active_value
 
-
-# HARDCODED(setting_key="exit.near_settlement_hours", note_key="exit._near_settlement_hours_note",
-#           tier=2, replace_after="100+ near-settlement trades per city",
-#           data_needed="per-city optimal near-settlement hold window")
 def near_settlement_hours() -> float:
-    return float(settings["exit"]["near_settlement_hours"])
+    return _NEAR_SETTLEMENT_HOURS.active_value
+
+
+def divergence_soft_threshold() -> float:
+    return _DIVERGENCE_SOFT_THRESHOLD.active_value
+
+
+def divergence_hard_threshold() -> float:
+    return _DIVERGENCE_HARD_THRESHOLD.active_value
+
+
+def divergence_velocity_confirm() -> float:
+    return _DIVERGENCE_VELOCITY_CONFIRM.active_value
 
 
 def _clamp_negative_threshold(raw: float, floor: float, ceiling: float) -> float:
     """Clamp a negative threshold between a shallow floor and deep ceiling."""
     return max(ceiling, min(floor, raw))
+
+
+def conservative_forward_edge(forward_edge: float, ci_width: float) -> float:
+    """Conservative exit evidence: use the lower confidence bound of edge."""
+    return forward_edge - max(0.0, float(ci_width)) / 2.0
 
 
 def buy_no_edge_threshold(entry_ci_width: float) -> float:

@@ -1,7 +1,7 @@
 """P0 ETL: TIGGE ENS vectors → calibration_pairs + ensemble_snapshots.
 
-Unlocks DJF/JJA/SON Platt buckets (currently 0 models for those seasons).
-After this runs, Zeus goes from 6 Platt models to up to 24.
+Unlocks non-MAM Platt buckets by refitting every configured cluster × season
+bucket from the canonical config taxonomy.
 
 Source: ~/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens/{city}/{date}/
 Target: zeus.db:calibration_pairs + ensemble_snapshots
@@ -17,9 +17,10 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.calibration.manager import season_from_date, bucket_key, CLUSTERS, SEASONS
+from src.calibration.manager import bucket_key, season_from_date
 from src.calibration.store import add_calibration_pair, get_pairs_count
-from src.config import cities_by_name
+from src.config import calibration_clusters, calibration_seasons, cities_by_name
+from src.contracts import SettlementSemantics
 from src.data.market_scanner import _parse_temp_range
 from src.state.db import get_connection, init_schema
 
@@ -120,7 +121,7 @@ def run_etl() -> dict:
                 continue
 
             values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
-            values_int = np.round(values).astype(int)
+            values_measured = SettlementSemantics.for_city(city).round_values(values)
 
             # Store ensemble snapshot
             conn.execute("""
@@ -168,11 +169,11 @@ def run_etl() -> dict:
             for i, (label, low, high) in enumerate(bins):
                 # Compute P_raw for this bin
                 if low is None and high is not None:
-                    p_raw = float(np.sum(values_int <= high)) / 51
+                    p_raw = float(np.sum(values_measured <= high)) / 51
                 elif high is None and low is not None:
-                    p_raw = float(np.sum(values_int >= low)) / 51
+                    p_raw = float(np.sum(values_measured >= low)) / 51
                 elif low is not None and high is not None:
-                    p_raw = float(np.sum((values_int >= low) & (values_int <= high))) / 51
+                    p_raw = float(np.sum((values_measured >= low) & (values_measured <= high))) / 51
                 else:
                     continue
 
@@ -205,8 +206,8 @@ def run_etl() -> dict:
     print("\nRefitting Platt models...")
     from src.calibration.manager import _fit_from_pairs
     fitted = 0
-    for cluster in CLUSTERS:
-        for season in SEASONS:
+    for cluster in calibration_clusters():
+        for season in calibration_seasons():
             bk = bucket_key(cluster, season)
             n = get_pairs_count(conn, cluster, season)
             if n >= 15:

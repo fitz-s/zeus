@@ -1,62 +1,15 @@
 {
-  "timestamp": "2026-03-31T03:12:43.523612+00:00",
-  "process": {
-    "pid": 5785,
-    "mode": "paper",
-    "version": "zeus_v2"
-  },
-  "risk": {
-    "level": "GREEN"
-  },
-  "portfolio": {
-    "open_positions": 2,
-    "total_exposure_usd": 20.38,
-    "heat_pct": 5.0,
-    "initial_bankroll": 150.0,
-    "realized_pnl": 244.0,
-    "unrealized_pnl": 12.42,
-    "total_pnl": 256.42,
-    "effective_bankroll": 406.42,
-    "bankroll": 406.42,
-    "positions": [
-      {
-        "trade_id": "83651497-7e0",
-        "city": "Denver",
-        "direction": "buy_no",
-        "size": 6.988829628388125,
-        "edge": 0.1437875576505696,
-        "bin": "Will the highest temperature i",
-        "mark_price": 0.745,
-        "unrealized_pnl": 7.82
-      },
-      {
-        "trade_id": "16a62cac-696",
-        "city": "Denver",
-        "direction": "buy_no",
-        "size": 13.39243937391137,
-        "edge": 0.1740065003313147,
-        "bin": "Will the highest temperature i",
-        "mark_price": 0.885,
-        "unrealized_pnl": 4.59
-      }
-    ]
-  },
-  "cycle": {
-    "mode": "opening_hunt",
-    "started_at": "2026-03-31T03:11:49.129056+00:00",
-    "monitors": 2,
-    "exits": 0,
-    "candidates": 0,
-    "trades": 0,
-    "no_trades": 0,
-    "pending_voids": 0,
-    "chain_sync": {
-      "skipped": "paper_mode"
-    },
-    "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 406.51801125096256,
-    "dynamic_cap_usd": 150.0,
-    "portfolio_heat_pct": 13.59,
-    "completed_at": "2026-03-31T03:12:43.523331+00:00"
+  "error": "status_summary.json is deprecated and must not be used as current truth. Use the mode-suffixed state files instead.",
+  "truth": {
+    "mode": "deprecated",
+    "generated_at": "2026-04-01T10:56:05.111684+00:00",
+    "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
+    "stale_age_seconds": 0.0,
+    "deprecated": true,
+    "archived_to": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/legacy_state_archive/status_summary.json.20260401T105605Z",
+    "replacement_paths": {
+      "paper": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-paper.json",
+      "live": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json"
+    }
   }
 }

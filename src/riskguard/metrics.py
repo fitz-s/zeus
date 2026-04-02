@@ -1,4 +1,4 @@
-"""RiskGuard metrics: Brier, directional accuracy, win rate. Spec §7.2."""
+"""RiskGuard metrics for authoritative settlement data only. Spec §7.2."""
 
 import logging
 
@@ -34,14 +34,6 @@ def directional_accuracy(
     return correct / len(p_forecasts)
 
 
-def win_rate(pnl_list: list[float]) -> float:
-    """Fraction of trades with positive P&L."""
-    if not pnl_list:
-        return PROBABILITY_DECISION_THRESHOLD
-    wins = sum(1 for p in pnl_list if p > 0)
-    return wins / len(pnl_list)
-
-
 def evaluate_brier(score: float, thresholds: dict) -> RiskLevel:
     """Map Brier score to risk level. Spec §7.3."""
     if score >= thresholds["brier_red"]:
@@ -49,15 +41,6 @@ def evaluate_brier(score: float, thresholds: dict) -> RiskLevel:
     elif score >= thresholds["brier_orange"]:
         return RiskLevel.ORANGE
     elif score >= thresholds["brier_yellow"]:
-        return RiskLevel.YELLOW
-    return RiskLevel.GREEN
-
-
-def evaluate_win_rate(rate: float, thresholds: dict) -> RiskLevel:
-    """Map win rate to risk level."""
-    if rate < thresholds["win_rate_orange"]:
-        return RiskLevel.ORANGE
-    elif rate < thresholds["win_rate_yellow"]:
         return RiskLevel.YELLOW
     return RiskLevel.GREEN
 

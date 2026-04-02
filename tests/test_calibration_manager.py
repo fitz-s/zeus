@@ -42,7 +42,7 @@ NYC = City(
 
 LONDON = City(
     name="London", lat=51.4775, lon=-0.4614,
-    timezone="Europe/London", cluster="Europe",
+    timezone="Europe/London", cluster="Europe-Maritime",
     settlement_unit="C", wu_station="EGLL",
 )
 
@@ -55,7 +55,7 @@ class TestBucketRouting:
         assert route_to_bucket(NYC, "2026-07-15") == "US-Northeast_JJA"
 
     def test_london_spring(self):
-        assert route_to_bucket(LONDON, "2026-04-10") == "Europe_MAM"
+        assert route_to_bucket(LONDON, "2026-04-10") == "Europe-Maritime_MAM"
 
     def test_december_is_winter(self):
         assert season_from_date("2026-12-01") == "DJF"

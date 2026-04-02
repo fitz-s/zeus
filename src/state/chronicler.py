@@ -16,12 +16,15 @@ def log_event(
     event_type: str,
     trade_id: str | None = None,
     details: dict | None = None,
+    env: str = "",
 ) -> None:
     """Append an event to the chronicle. Never updates existing records."""
+    from src.config import settings
     now = datetime.now(timezone.utc).isoformat()
     details_json = json.dumps(details or {})
+    env = env or settings.mode
 
     conn.execute("""
-        INSERT INTO chronicle (event_type, trade_id, timestamp, details_json)
-        VALUES (?, ?, ?, ?)
-    """, (event_type, trade_id, now, details_json))
+        INSERT INTO chronicle (event_type, trade_id, timestamp, details_json, env)
+        VALUES (?, ?, ?, ?, ?)
+    """, (event_type, trade_id, now, details_json, env))
