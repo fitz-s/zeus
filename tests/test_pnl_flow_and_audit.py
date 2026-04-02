@@ -354,6 +354,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["control"]["strategy_gates"]["opening_inertia"] is False
     assert status["control"]["recommended_controls"] == ["tighten_risk"]
     assert status["control"]["recommended_strategy_gates"] == ["center_buy"]
+    assert status["control"]["recommended_but_not_gated"] == ["center_buy"]
+    assert status["control"]["gated_but_not_recommended"] == ["opening_inertia"]
     assert status["runtime"]["chain_state_counts"]["exit_pending_missing"] == 1
     assert status["runtime"]["exit_state_counts"]["retry_pending"] == 1
     assert status["runtime"]["unverified_entries"] == 1

@@ -440,6 +440,18 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual control/operator backlog after this slice:
   - the remaining question is now squarely automation policy: whether and when those recommendations should be auto-applied instead of merely surfaced.
 
+## Control/Operator Slice 4 (gate drift surfaced)
+- Landed protections:
+  - `status_summary.control` now explicitly shows:
+    - `recommended_but_not_gated`
+    - `gated_but_not_recommended`
+  - this makes the gap between current manual controls and RiskGuard recommendations directly visible without external diffing.
+- Validation evidence for this slice:
+  - targeted status tests after the slice: `29 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual control/operator backlog after this slice:
+  - the remaining question is no longer “can we see the drift?”, but whether any of that drift should auto-resolve or remain an operator decision.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:

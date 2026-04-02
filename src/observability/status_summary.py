@@ -104,6 +104,14 @@ def write_status(cycle_summary: dict = None) -> None:
     for name, bucket in strategy_summary.items():
         bucket["gated"] = not current_strategy_gates.get(name, True)
         bucket["recommended_gate"] = name in recommended_strategy_gates
+    recommended_but_not_gated = sorted(
+        strategy for strategy in recommended_strategy_gates
+        if current_strategy_gates.get(strategy, True)
+    )
+    gated_but_not_recommended = sorted(
+        strategy for strategy, enabled in current_strategy_gates.items()
+        if enabled is False and strategy not in recommended_strategy_gates
+    )
 
     chain_state_counts: dict[str, int] = {}
     exit_state_counts: dict[str, int] = {}
@@ -126,6 +134,8 @@ def write_status(cycle_summary: dict = None) -> None:
             "strategy_gates": strategy_gates(),
             "recommended_controls": risk_details.get("recommended_controls", []),
             "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
+            "recommended_but_not_gated": recommended_but_not_gated,
+            "gated_but_not_recommended": gated_but_not_recommended,
         },
         "risk": {
             "level": _get_risk_level(),
