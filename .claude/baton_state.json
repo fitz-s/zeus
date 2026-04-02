@@ -12,11 +12,11 @@
     {
       "owner": "Main",
       "task_id": "P0-D",
-      "goal": "Drive the next runtime-spine closure slice after landing pending/live verification owner contraction"
+      "goal": "Drive the next runtime-spine closure slice after landing Day0 exit authority"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-D slice 3 (pending/live verification owner contraction), keep P0-D active for the remaining runtime-spine gaps",
+  "last_decision": "CLOSE P0-D slice 4 (Day0 exit authority), keep P0-D active for the remaining runtime-spine gaps",
   "backlog_source": "task.md"
 }
