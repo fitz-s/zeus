@@ -422,6 +422,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual health/learning backlog after this slice:
   - the remaining work is no longer surface duplication, but deciding which parts of the learning surface should drive automated controls or model evolution.
 
+## Learning Consumer Slice 2 (strategy-aware learning summary)
+- Landed protections:
+  - the unified learning surface now carries a `by_strategy` view that merges authoritative settlement truth with entry-side execution truth, giving outer consumers a first strategy-oriented learned-current-regime surface without scraping multiple sections independently.
+- Validation evidence for this slice:
+  - targeted DB/status tests after the slice: `57 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual learning backlog after this slice:
+  - what remains is less about assembling current-regime learning truth and more about deciding how that truth should alter controls, gating, or model adaptation.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:

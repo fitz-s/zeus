@@ -395,6 +395,48 @@ def query_learning_surface_summary(
     no_trades = query_no_trade_cases(conn, hours=hours, env=env)
     execution_summary = query_execution_event_summary(conn, env=env, limit=execution_limit)
 
+    by_strategy: dict[str, dict] = {}
+    for row in settlements:
+        strategy = str(row.get("strategy") or "unclassified")
+        bucket = by_strategy.setdefault(
+            strategy,
+            {
+                "settlement_count": 0,
+                "settlement_pnl": 0.0,
+                "settlement_accuracy": None,
+                "settlement_wins": 0,
+                "entry_attempted": 0,
+                "entry_filled": 0,
+                "entry_rejected": 0,
+            },
+        )
+        bucket["settlement_count"] += 1
+        bucket["settlement_pnl"] += float(row.get("pnl", 0.0) or 0.0)
+        if row.get("outcome") == 1:
+            bucket["settlement_wins"] += 1
+
+    for strategy, bucket in by_strategy.items():
+        count = bucket["settlement_count"]
+        bucket["settlement_pnl"] = round(bucket["settlement_pnl"], 2)
+        bucket["settlement_accuracy"] = round(bucket["settlement_wins"] / count, 4) if count else None
+        bucket.pop("settlement_wins", None)
+
+    for strategy, execution_bucket in execution_summary.get("by_strategy", {}).items():
+        bucket = by_strategy.setdefault(
+            strategy,
+            {
+                "settlement_count": 0,
+                "settlement_pnl": 0.0,
+                "settlement_accuracy": None,
+                "entry_attempted": 0,
+                "entry_filled": 0,
+                "entry_rejected": 0,
+            },
+        )
+        bucket["entry_attempted"] = execution_bucket.get("entry_attempted", 0)
+        bucket["entry_filled"] = execution_bucket.get("entry_filled", 0)
+        bucket["entry_rejected"] = execution_bucket.get("entry_rejected", 0)
+
     no_trade_stage_counts: dict[str, int] = {}
     for case in no_trades:
         stage = str(case.get("rejection_stage") or "UNKNOWN")
@@ -406,4 +448,5 @@ def query_learning_surface_summary(
         "settlement_degraded_count": degraded_settlements,
         "no_trade_stage_counts": no_trade_stage_counts,
         "execution": execution_summary,
+        "by_strategy": by_strategy,
     }

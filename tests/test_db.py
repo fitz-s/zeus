@@ -991,6 +991,8 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
     assert summary["settlement_degraded_count"] == 0
     assert summary["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert summary["execution"]["overall"]["entry_rejected"] == 1
+    assert summary["by_strategy"]["center_buy"]["settlement_count"] == 1
+    assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
