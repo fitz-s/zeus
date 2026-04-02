@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.config import STATE_DIR, settings, state_path
-from src.control.control_plane import get_edge_threshold_multiplier, is_entries_paused, strategy_gates
+from src.control.control_plane import (
+    get_edge_threshold_multiplier,
+    is_entries_paused,
+    recommended_autosafe_commands_from_status,
+    recommended_commands_from_status,
+    review_required_commands_from_status,
+    strategy_gates,
+)
 from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import get_connection, query_execution_event_summary
 from src.state.decision_chain import query_no_trade_cases
@@ -210,6 +217,12 @@ def write_status(cycle_summary: dict = None) -> None:
         "no_trade": {},
         "cycle": cycle_summary or {},
     }
+    status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
+    status["control"]["review_required_commands"] = review_required_commands_from_status(status)
+    status["control"]["recommended_commands"] = recommended_commands_from_status(
+        status,
+        include_review_required=True,
+    )
     try:
         conn = get_connection()
         status["execution"] = query_execution_event_summary(conn)

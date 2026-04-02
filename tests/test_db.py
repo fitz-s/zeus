@@ -999,6 +999,75 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
+def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch, tmp_path):
+    import src.state.decision_chain as decision_chain_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 4, 2, 23, 30, tzinfo=timezone.utc)
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    older_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "older",
+                "city": "NYC",
+                "target_date": "2026-04-02",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "rejection_stage": "EDGE_INSUFFICIENT",
+                "rejection_reasons": ["small"],
+            }
+        ]
+    }
+    newer_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "newer",
+                "city": "NYC",
+                "target_date": "2026-04-02",
+                "range_label": "41-42°F",
+                "direction": "buy_yes",
+                "rejection_stage": "RISK_REJECTED",
+                "rejection_reasons": ["risk"],
+            }
+        ]
+    }
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "opening_hunt",
+            "2026-04-02T00:00:00+00:00",
+            "2026-04-02T00:01:00+00:00",
+            json.dumps(older_artifact),
+            "2026-04-02T00:30:00+00:00",
+            "paper",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "opening_hunt",
+            "2026-04-02T23:00:00+00:00",
+            "2026-04-02T23:01:00+00:00",
+            json.dumps(newer_artifact),
+            "2026-04-02T23:15:00+00:00",
+            "paper",
+        ),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(decision_chain_module, "datetime", FrozenDatetime)
+    cases = decision_chain_module.query_no_trade_cases(conn, hours=1, env="paper")
+    conn.close()
+
+    assert [case["decision_id"] for case in cases] == ["newer"]
+
+
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,

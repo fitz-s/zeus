@@ -16,16 +16,23 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import settings, state_path
-from src.control.control_plane import (
-    recommended_autosafe_commands_from_status,
-    recommended_commands_from_status,
-    review_required_commands_from_status,
-)
 from src.state.db import get_connection
 from src.state.decision_chain import query_no_trade_cases
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
+STATUS_REQUIRED_KEYS = ("control", "runtime", "execution", "learning", "truth")
+STATUS_CONTROL_REQUIRED_KEYS = (
+    "recommended_auto_commands",
+    "review_required_commands",
+    "recommended_commands",
+)
+RISK_DETAILS_REQUIRED_KEYS = (
+    "execution_quality_level",
+    "strategy_signal_level",
+    "recommended_controls",
+    "recommended_strategy_gates",
+)
 
 
 def _mode() -> str:
@@ -85,6 +92,16 @@ def _parse_launchctl_pid(output: str) -> int:
     return 0
 
 
+def _missing_required_keys(payload: dict | None, required: tuple[str, ...], *, prefix: str = "") -> list[str]:
+    if not isinstance(payload, dict):
+        return [prefix.rstrip(".")] if prefix else list(required)
+    missing: list[str] = []
+    for key in required:
+        if key not in payload:
+            missing.append(f"{prefix}{key}" if prefix else key)
+    return missing
+
+
 def check() -> dict:
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -131,14 +148,25 @@ def check() -> dict:
         try:
             with open(status_path) as f:
                 status = json.load(f)
-            result["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
-            result["review_required_commands"] = review_required_commands_from_status(status)
-            result["recommended_commands"] = recommended_commands_from_status(
-                status,
-                include_review_required=True,
+            status_contract_missing = _missing_required_keys(status, STATUS_REQUIRED_KEYS)
+            control = status.get("control", {}) if isinstance(status, dict) else {}
+            status_contract_missing.extend(
+                _missing_required_keys(control, STATUS_CONTROL_REQUIRED_KEYS, prefix="control.")
             )
-            result["action_required"] = bool(result["recommended_commands"])
-            result["auto_action_available"] = bool(result["recommended_auto_commands"])
+            result["status_contract_missing_keys"] = status_contract_missing
+            result["status_contract_valid"] = not status_contract_missing
+            if result["status_contract_valid"]:
+                result["recommended_auto_commands"] = list(control.get("recommended_auto_commands", []))
+                result["review_required_commands"] = list(control.get("review_required_commands", []))
+                result["recommended_commands"] = list(control.get("recommended_commands", []))
+                result["action_required"] = bool(result["recommended_commands"])
+                result["auto_action_available"] = bool(result["recommended_auto_commands"])
+            else:
+                result["recommended_auto_commands"] = []
+                result["review_required_commands"] = []
+                result["recommended_commands"] = []
+                result["action_required"] = False
+                result["auto_action_available"] = False
             result["last_cycle"] = status.get("timestamp", "unknown")
             result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
             risk_details = status.get("risk", {}).get("details", {}) or {}
@@ -188,13 +216,17 @@ def check() -> dict:
             conn = sqlite3.connect(str(risk_state_path))
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT level, checked_at FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+                "SELECT level, checked_at, details_json FROM risk_state ORDER BY checked_at DESC LIMIT 1"
             ).fetchone()
             conn.close()
 
             if row is not None:
                 result["riskguard_level"] = row["level"]
                 result["riskguard_checked_at"] = row["checked_at"]
+                details_json = row["details_json"] if "details_json" in row.keys() else None
+                details = json.loads(details_json) if details_json else {}
+                result["riskguard_contract_missing_keys"] = _missing_required_keys(details, RISK_DETAILS_REQUIRED_KEYS)
+                result["riskguard_contract_valid"] = not result["riskguard_contract_missing_keys"]
                 age_seconds = _status_age_seconds(row["checked_at"])
                 if age_seconds is not None:
                     result["riskguard_age_seconds"] = round(age_seconds, 1)
@@ -204,12 +236,15 @@ def check() -> dict:
             else:
                 result["riskguard_state"] = "empty"
                 result["riskguard_fresh"] = False
+                result["riskguard_contract_valid"] = False
         except Exception:
             result["riskguard_state"] = "corrupt"
             result["riskguard_fresh"] = False
+            result["riskguard_contract_valid"] = False
     else:
         result["riskguard_state"] = "missing"
         result["riskguard_fresh"] = False
+        result["riskguard_contract_valid"] = False
 
     if "recent_no_trade_stage_counts" not in result:
         try:
@@ -238,8 +273,10 @@ def check() -> dict:
     result["healthy"] = (
         bool(result.get("daemon_alive"))
         and bool(result.get("status_fresh"))
+        and bool(result.get("status_contract_valid"))
         and bool(result.get("riskguard_alive"))
         and bool(result.get("riskguard_fresh"))
+        and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
         and not bool(result.get("cycle_failed"))
     )
