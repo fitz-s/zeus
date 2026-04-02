@@ -966,3 +966,26 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_db.py -k 'learning_surface_summary_does_not_cap_regime_scoped_samples or learning_surface_summary_respects_current_regime_start or learning_surface_summary'` → `3 passed`
   - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
 - Residual note: this closes the remaining “boundary-aware but still truncated” learning-surface blocker from detailed review. Remaining P0/P1 work is now much closer to formal acceptance/closure than to further semantic rewiring.
+
+## 2026-04-02 — P0/P1 acceptance checkpoint
+- Detailed review lane is now effectively clear for the current base:
+  - concrete review blockers found during this round were:
+    - enum/value mismatch in runtime status
+    - boundary-aware-but-capped learning summaries
+  - both are now landed and covered
+- Adversarial blocker slices closed this round:
+  - `status.risk` now fails closed on cycle/runtime summary inconsistency
+  - RiskGuard bootstrap no-row path now fails closed
+  - weak `opening_inertia` edge-compression pressure was downgraded by a stricter sample/span contract
+  - restart-time `zeus.db` / `risk_state-paper.db` corruption was operationally recovered and current runtime truth is healthy
+- Current acceptance evidence:
+  - `./.venv/bin/pytest -q` → `468 passed, 3 skipped`
+  - `./.venv/bin/python scripts/healthcheck.py` → `healthy: true`
+  - `risk_level: GREEN`
+  - `status_contract_valid: true`
+  - `riskguard_contract_valid: true`
+  - `recommended_commands: []`
+- Queue consequence:
+  - `P1-F` detailed review lane can close as DONE for the current P0/P1 base.
+  - `P1-G` adversarial review lane can close as DONE for the current P0/P1 base.
+  - `P0-D` is no longer “active unresolved blocker work”; it moves to REVIEW as a structurally closed runtime base with only optional future tightening left.
