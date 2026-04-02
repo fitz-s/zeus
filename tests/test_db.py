@@ -1166,6 +1166,7 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     )
     log_settlement_event(conn, old_pos, winning_bin="39-40°F", won=True, outcome=1)
     log_settlement_event(conn, new_pos, winning_bin="41-42°F", won=True, outcome=1)
+    log_position_event(conn, "ORDER_REJECTED", old_pos, details={"status": "rejected"}, source="execution", timestamp=old_ts)
     log_position_event(conn, "ORDER_REJECTED", new_pos, details={"status": "rejected"}, source="execution")
     conn.commit()
 
@@ -1180,6 +1181,8 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     assert summary["no_trade_stage_counts"] == {"RISK_REJECTED": 1}
     assert summary["by_strategy"]["center_buy"]["settlement_pnl"] == 5.0
     assert summary["by_strategy"]["center_buy"]["no_trade_count"] == 1
+    assert summary["execution"]["overall"]["entry_rejected"] == 1
+    assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):

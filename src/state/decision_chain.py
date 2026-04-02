@@ -429,7 +429,12 @@ def query_learning_surface_summary(
 
     settlements = query_authoritative_settlement_rows(conn, limit=settlement_limit, env=env, not_before=not_before)
     no_trades = query_no_trade_cases(conn, hours=hours, env=env, not_before=not_before)
-    execution_summary = query_execution_event_summary(conn, env=env, limit=execution_limit)
+    execution_summary = query_execution_event_summary(
+        conn,
+        env=env,
+        limit=execution_limit,
+        not_before=not_before,
+    )
 
     by_strategy: dict[str, dict] = {}
     for row in settlements:

@@ -1173,24 +1173,33 @@ def query_execution_event_summary(
     *,
     env: str | None = None,
     limit: int = 500,
+    not_before: str | None = None,
 ) -> dict:
     query_env = settings.mode if env is None else env
-    rows = conn.execute(
-        """
-        SELECT event_type, strategy
-        FROM position_events
-        WHERE env = ?
-          AND event_type IN (
+    filters = [
+        "env = ?",
+        """event_type IN (
             'ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED',
             'EXIT_ORDER_ATTEMPTED', 'EXIT_ORDER_FILLED',
             'EXIT_RETRY_SCHEDULED', 'EXIT_BACKOFF_EXHAUSTED',
             'EXIT_FILL_CHECK_FAILED', 'EXIT_FILL_CHECKED',
             'EXIT_FILL_CONFIRMED', 'EXIT_RETRY_RELEASED'
-          )
+          )""",
+    ]
+    params: list[object] = [query_env]
+    if not_before is not None:
+        filters.append("timestamp >= ?")
+        params.append(not_before)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT event_type, strategy
+        FROM position_events
+        WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         LIMIT ?
         """,
-        (query_env, limit),
+        params,
     ).fetchall()
 
     def _blank() -> dict:
