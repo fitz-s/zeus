@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -869,6 +870,57 @@ def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     assert summary["overall"]["exit_attempted"] == 1
     assert summary["overall"]["exit_retry_scheduled"] == 1
     assert summary["by_strategy"]["center_buy"]["entry_filled"] == 1
+
+
+def test_query_no_trade_cases_filters_by_env(tmp_path):
+    from src.state.decision_chain import query_no_trade_cases
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    paper_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "paper-1",
+                "city": "NYC",
+                "target_date": "2026-04-01",
+                "range_label": "39-40°F",
+                "direction": "buy_yes",
+                "rejection_stage": "EDGE_INSUFFICIENT",
+                "rejection_reasons": ["small"],
+            }
+        ]
+    }
+    live_artifact = {
+        "no_trade_cases": [
+            {
+                "decision_id": "live-1",
+                "city": "NYC",
+                "target_date": "2026-04-01",
+                "range_label": "41-42°F",
+                "direction": "buy_yes",
+                "rejection_stage": "RISK_REJECTED",
+                "rejection_reasons": ["risk"],
+            }
+        ]
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("opening_hunt", now, now, json.dumps(paper_artifact), now, "paper"),
+    )
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
+        ("opening_hunt", now, now, json.dumps(live_artifact), now, "live"),
+    )
+    conn.commit()
+
+    paper_cases = query_no_trade_cases(conn, hours=24, env="paper")
+    live_cases = query_no_trade_cases(conn, hours=24, env="live")
+    conn.close()
+
+    assert [case["decision_id"] for case in paper_cases] == ["paper-1"]
+    assert [case["decision_id"] for case in live_cases] == ["live-1"]
 
 
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
