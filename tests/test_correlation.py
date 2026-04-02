@@ -10,16 +10,20 @@ class TestCorrelation:
         assert get_correlation("US-Northeast", "US-Northeast") == 1.0
 
     def test_nearby_clusters(self):
-        c = get_correlation("US-Northeast", "US-Midwest")
+        c = get_correlation("US-Northeast", "US-GreatLakes")
         assert 0.4 <= c <= 0.8
 
     def test_distant_clusters(self):
-        c = get_correlation("US-Pacific", "Europe")
+        c = get_correlation("US-California-Coast", "Europe-Continental")
         assert c <= 0.2
 
+    def test_new_cluster_taxonomy_entries_are_wired(self):
+        assert get_correlation("US-Rockies", "US-Pacific-Northwest") > 0.0
+        assert get_correlation("Asia-Northeast", "Europe-Maritime") > 0.0
+
     def test_symmetric(self):
-        assert get_correlation("US-Northeast", "Europe") == \
-               get_correlation("Europe", "US-Northeast")
+        assert get_correlation("US-Northeast", "Europe-Maritime") == \
+               get_correlation("Europe-Maritime", "US-Northeast")
 
 
 class TestCorrelatedExposure:
@@ -34,7 +38,7 @@ class TestCorrelatedExposure:
         assert exp == pytest.approx(0.15)
 
     def test_distant_cluster_minimal(self):
-        positions = [{"cluster": "Europe", "size_usd": 10.0}]
-        exp = correlated_exposure(positions, "US-Pacific", 0.05, 100.0)
+        positions = [{"cluster": "Europe-Continental", "size_usd": 10.0}]
+        exp = correlated_exposure(positions, "US-California-Coast", 0.05, 100.0)
         # 0.05 (new) + 0.10 * 0.1 (distant) = 0.06
         assert exp == pytest.approx(0.06)

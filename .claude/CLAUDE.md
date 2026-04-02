@@ -10,6 +10,46 @@ Every module exists to serve the lifecycle of a trade. A trade is born (discover
 
 **The 10 P0 bugs from code review were ALL interface bugs, not logic bugs.** Each module's internal math was correct. But when module A's output passed to module B, semantic context was lost. This is exactly how Rainstorm died.
 
+## System Phase: OPERATING (not building)
+
+Zeus is past the building phase. Paper trading shows $244 profit. The codebase has 231+ tests, 59 source files, and a running daemon. **Every change from this point is a change to a live system with real state, real positions, and real money at stake.**
+
+In building phase, the question is "does it work?" In operating phase, the question is "what happens when it breaks at 3am and nobody is watching?"
+
+### Structural Decisions, Not Mechanism Counting
+
+When facing a new risk category (e.g., "paper→live needs isolation"), do NOT enumerate individual failure modes and patch each one. That's打地鼠 (whack-a-mole). Instead:
+
+1. **Identify the structural decision** — what one design choice, if made correctly, makes an entire category of failure impossible?
+2. **Trace the decision through all surfaces** — a structural decision has N consequences on N different modules. List them all. They are not "N mechanisms" — they are one decision expressed N times.
+3. **Implement the decision once, at the lowest level** — e.g., `state_path()` in config.py covers 5 files with one function. Not 5 separate path changes.
+4. **Verify the decision covers the future** — 1 month, 3 months, 1 year. If the decision blocks a plausible future (multi-platform, backtest mode, parallel paper+live), it's the wrong decision.
+
+Example: The prompt said "Zeus has 7/22 of Rainstorm's chain-safety mechanisms, missing 15." This framing suggests 15 separate patches needed. The structural analysis showed: 22 mechanisms = 5 structural decisions. Implementing 5 decisions covered all 22.
+
+### The 5 Structural Decisions (Live Safety)
+
+| # | Decision | What it covers | Single point of control |
+|---|----------|---------------|------------------------|
+| 1 | **Exit = Order Lifecycle** | Sell order, retry/backoff, collateral, rounding, crash recovery | `exit_lifecycle.py` |
+| 2 | **Chain Truth with Uncertainty** | Reconciliation, immutable snapshot, quarantine, ignored tokens, incomplete API | `chain_reconciliation.py` |
+| 3 | **Entry = Pending State** | Fill verification, pending_tracked lifecycle, post-trade refresh | `fill_tracker.py` |
+| 4 | **Provenance** | Paper/live isolation, env tagging, contamination guard, state path isolation | `config.state_path()` + `Position.env` |
+| 5 | **Single-threaded per Mode** | Cycle overlap prevention | `main.py` cycle lock |
+
+When a new live-mode risk is discovered, first ask: "Which structural decision does this belong to?" If it doesn't belong to any of the 5, it might be a new structural decision — or it might be a symptom of an incomplete existing one.
+
+### Provenance Model (State Architecture Foundation)
+
+Zeus's state has two orthogonal dimensions: **content type** and **provenance**.
+
+**Content types and their isolation:**
+- **World data** (ENS, observations, settlements, calibration) → shared `zeus.db`, no mode tagging. Paper's calibration pairs feed live's Platt refit — they come from real settlements.
+- **Decision data** (trade_decisions, chronicle, decision_log) → shared `zeus.db` with `env` column. Paper and live decisions in same DB enables cross-env comparison.
+- **Process state** (positions, strategy_tracker, status_summary, control_plane, risk_state) → physically isolated via `state_path()`. Paper and live daemons cannot read each other's state.
+
+**`state_path()` is the single control point.** All per-process files must use it. zeus.db does not (shared world data). If this invariant is violated, contamination becomes possible.
+
 ## Core Debug Principle
 
 **Code shows function. Code NEVER shows logic.** When facing bugs:
@@ -18,6 +58,16 @@ Every module exists to serve the lifecycle of a trade. A trade is born (discover
 - Before fixing ANY bug: understand WHY the code was written this way, trace the fix through ALL callers and dependents
 - Ask first: "Does Rainstorm have a design that makes this entire CATEGORY of bug impossible?" If yes, port the design. Only then fix individuals.
 - "看一步想十步" — every fix must consider 10 steps of downstream consequences
+
+### Operating-Phase Debug Protocol
+
+In building phase, bugs are in YOUR code. In operating phase, bugs are in the INTERACTION between your code, the chain, the API, time, and concurrent state.
+
+When something goes wrong in production:
+1. **Don't fix the symptom.** A position stuck in `sell_pending` is not "fix sell_pending." It's "why did the exit lifecycle state machine not transition?"
+2. **Check which structural decision is incomplete.** Every live failure maps to one of the 5 decisions. If it doesn't, you found a 6th.
+3. **The fix must be a property of the decision, not a patch on the symptom.** Adding `if exit_state == "sell_pending" and stuck_for > 1h: force_close()` is a patch. Making `check_pending_exits()` handle all non-terminal states is a structural fix.
+4. **Verify the fix covers unknown variants.** If CLOB returns a new status string tomorrow that you've never seen, does the state machine handle it? If not, the fix is incomplete.
 
 ## Design Authority
 
@@ -221,8 +271,14 @@ Zeus 用 VWMP 定价、hold-to-settlement、EDGE_REVERSAL 作为唯一
 
 ### Architecture
 - Standalone Python daemon (launchd). NOT OpenClaw multi-agent.
-- RiskGuard is separate process with own SQLite DB.
+- RiskGuard is separate process with own SQLite DB (mode-isolated via `state_path()`).
 - Single config file. No `.get(key, FALLBACK)` pattern.
+- Paper/live state isolation via `config.state_path()` — one function, all per-process files.
+- `zeus.db` shared between modes (world data + env-tagged decisions).
+- Exit lifecycle: `exit_lifecycle.py` (sell order state machine, not `close_position()` direct).
+- Entry lifecycle: `fill_tracker.py` (pending_tracked → entered/voided).
+- Collateral check: `collateral.py` (fail-closed before every sell).
+- Cycle overlap: `threading.Lock` in `main.py` (no concurrent cycles).
 
 ---
 

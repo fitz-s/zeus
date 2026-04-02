@@ -23,6 +23,7 @@ TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "cel
 
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
+_ACTIVE_EVENTS_CACHE: list[dict] | None = None
 
 
 def find_weather_markets(
@@ -32,7 +33,7 @@ def find_weather_markets(
 
     Returns list of enriched event dicts with parsed city, date, outcomes.
     """
-    events = _fetch_events_by_tags()
+    events = _get_active_events()
     if not events:
         events = _fetch_events_by_keyword("temperature")
 
@@ -54,7 +55,7 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     Paper mode uses Gamma event data, not live CLOB VWMP, as the observable
     market price source during monitor cycles.
     """
-    events = _fetch_events_by_tags()
+    events = _get_active_events()
     if not events:
         events = _fetch_events_by_keyword("temperature")
 
@@ -63,6 +64,18 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
             if outcome.get("market_id") == market_id:
                 return float(outcome["price"])
     return None
+
+
+def _get_active_events() -> list[dict]:
+    global _ACTIVE_EVENTS_CACHE
+    if _ACTIVE_EVENTS_CACHE is None:
+        _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
+    return list(_ACTIVE_EVENTS_CACHE)
+
+
+def _clear_active_events_cache() -> None:
+    global _ACTIVE_EVENTS_CACHE
+    _ACTIVE_EVENTS_CACHE = None
 
 
 def _fetch_events_by_tags() -> list[dict]:

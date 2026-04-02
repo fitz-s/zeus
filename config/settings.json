@@ -1,36 +1,67 @@
 {
   "capital_base_usd": 150,
   "mode": "paper",
-
   "discovery": {
     "opening_hunt_interval_min": 30,
-    "update_reaction_times_utc": ["07:00", "09:00", "19:00", "21:00"],
+    "update_reaction_times_utc": [
+      "07:00",
+      "09:00",
+      "19:00",
+      "21:00"
+    ],
     "day0_interval_min": 15,
-    "ecmwf_open_data_times_utc": ["01:30", "13:30"],
+    "ecmwf_open_data_times_utc": [
+      "01:30",
+      "13:30"
+    ],
     "max_lead_days": 7,
-    "preferred_lead_days": [3, 4, 5],
+    "preferred_lead_days": [
+      3,
+      4,
+      5
+    ],
     "min_hours_to_resolution": 6
   },
-
   "ensemble": {
     "primary": "ecmwf_ifs025",
     "crosscheck": "gfs025",
+    "primary_members": 51,
+    "crosscheck_members": 31,
+    "n_mc": 5000,
+    "instrument_noise_f": 0.5,
+    "instrument_noise_c": 0.28,
+    "bimodal_kde_order": 10,
+    "bimodal_gap_ratio": 0.3,
+    "boundary_window": 0.5,
+    "unimodal_range_epsilon": 0.5,
     "conflict_kl_threshold": 0.15
   },
-
   "calibration": {
     "method": "platt",
     "refit_every_n": 50,
-    "seasonal_dates": ["03-20", "06-21", "09-22", "12-21"],
-    "maturity": {"level1": 150, "level2": 50, "level3": 15}
+    "n_bootstrap": 200,
+    "seasonal_dates": [
+      "03-20",
+      "06-21",
+      "09-22",
+      "12-21"
+    ],
+    "maturity": {
+      "level1": 150,
+      "level2": 50,
+      "level3": 15
+    }
   },
-
+  "day0": {
+    "n_mc": 5000,
+    "obs_dominates_threshold": 0.8
+  },
   "edge": {
     "n_bootstrap": 500,
     "base_alpha": {
       "level1": 0.65,
       "level2": 0.55,
-      "level3": 0.40,
+      "level3": 0.4,
       "level4": 0.25,
       "level5": 0.25
     },
@@ -39,22 +70,111 @@
     "_spread_tight_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city using per-city ensemble spread percentiles.",
     "spread_wide_f": 5.0,
     "_spread_wide_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city using per-city ensemble spread percentiles.",
-    "fdr_alpha": 0.10,
+    "fdr_alpha": 0.1,
     "_fdr_alpha_note": "HARDCODED. Replace after 500+ candidate evaluations using observed false positive rate vs target FDR.",
     "opening_alpha_bonus": 0.15
   },
-
   "sizing": {
     "kelly_multiplier": 0.25,
     "_kelly_multiplier_note": "HARDCODED. Replace after 500+ settlements using empirical edge-estimation error and optimal Kelly fraction.",
-    "max_single_position_pct": 0.10,
-    "max_portfolio_heat_pct": 0.50,
+    "max_single_position_pct": 0.1,
+    "max_portfolio_heat_pct": 0.5,
     "max_correlated_pct": 0.25,
-    "max_city_pct": 0.20,
+    "max_city_pct": 0.2,
     "max_region_pct": 0.35,
-    "min_order_usd": 1.00
+    "min_order_usd": 1.0
   },
-
+  "correlation": {
+    "default_cross_cluster": 0.1,
+    "matrix": {
+      "US-Northeast": {
+        "US-GreatLakes": 0.6,
+        "US-Southeast-Inland": 0.4,
+        "US-Florida": 0.25,
+        "US-Texas-Triangle": 0.25,
+        "US-California-Coast": 0.1,
+        "US-Pacific-Northwest": 0.1,
+        "US-Rockies": 0.2,
+        "Europe-Maritime": 0.15,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-GreatLakes": {
+        "US-Southeast-Inland": 0.35,
+        "US-Florida": 0.15,
+        "US-Texas-Triangle": 0.45,
+        "US-California-Coast": 0.15,
+        "US-Pacific-Northwest": 0.15,
+        "US-Rockies": 0.4,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Pacific-Northwest": {
+        "US-California-Coast": 0.45,
+        "US-Rockies": 0.35,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Southeast-Inland": {
+        "US-Florida": 0.6,
+        "US-Texas-Triangle": 0.45,
+        "US-California-Coast": 0.1,
+        "US-Rockies": 0.15,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Florida": {
+        "US-Texas-Triangle": 0.25,
+        "US-California-Coast": 0.1,
+        "US-Rockies": 0.1,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-Texas-Triangle": {
+        "US-California-Coast": 0.15,
+        "US-Rockies": 0.35,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "US-California-Coast": {
+        "US-Rockies": 0.25,
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.15,
+        "Asia-East-China": 0.1
+      },
+      "US-Rockies": {
+        "Europe-Maritime": 0.1,
+        "Europe-Continental": 0.1,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Europe-Maritime": {
+        "Europe-Continental": 0.45,
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Europe-Continental": {
+        "Asia-Northeast": 0.1,
+        "Asia-East-China": 0.1
+      },
+      "Asia-Northeast": {
+        "Asia-East-China": 0.45
+      },
+      "Asia-East-China": {}
+    }
+  },
   "exit": {
     "reversal_confirmations": 2,
     "_reversal_confirmations_note": "Legacy alias retained for compatibility. Use consecutive_confirmations for new code.",
@@ -74,27 +194,32 @@
     "_buy_no_ceiling_note": "HARDCODED. Replace after observing deep buy_no reversals and false-hold rate.",
     "buy_yes_floor": -0.01,
     "_buy_yes_floor_note": "HARDCODED. Replace after analyzing historical forward-edge noise floor for buy_yes exits.",
-    "buy_yes_ceiling": -0.10,
-    "_buy_yes_ceiling_note": "HARDCODED. Replace after observing deep buy_yes reversals and false-hold rate."
+    "buy_yes_ceiling": -0.1,
+    "_buy_yes_ceiling_note": "HARDCODED. Replace after observing deep buy_yes reversals and false-hold rate.",
+    "divergence_soft_threshold": 0.2,
+    "_divergence_soft_threshold_note": "HARDCODED. Soft divergence trigger requires confirmation from adverse market velocity. Replace after replay + live divergence audit.",
+    "divergence_hard_threshold": 0.3,
+    "_divergence_hard_threshold_note": "HARDCODED. Hard divergence panic threshold. Replace after replay + live divergence audit.",
+    "divergence_velocity_confirm": -0.05,
+    "_divergence_velocity_confirm_note": "HARDCODED. Minimum adverse 1h market velocity required to confirm soft divergence panic."
   },
-
   "riskguard": {
     "brier_yellow": 0.25,
-    "brier_orange": 0.30,
+    "brier_orange": 0.3,
     "brier_red": 0.35,
     "accuracy_orange": 0.45,
-    "win_rate_yellow": 0.40,
+    "win_rate_yellow": 0.4,
     "win_rate_orange": 0.35,
     "max_daily_loss_pct": 0.08,
     "max_weekly_loss_pct": 0.15,
-    "max_drawdown_pct": 0.20,
+    "max_drawdown_pct": 0.2,
     "staleness_hours": 6
   },
-
   "execution": {
     "order_type": "limit_only",
     "limit_offset_pct": 0.02,
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true
-  }
+  },
+  "bias_correction_enabled": false
 }

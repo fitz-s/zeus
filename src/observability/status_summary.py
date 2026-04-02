@@ -1,7 +1,7 @@
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
-Written to state/status_summary.json for Venus/OpenClaw to read.
+Written to the mode-qualified truth file for Venus/OpenClaw to read.
 """
 
 import json
@@ -10,12 +10,31 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import STATE_DIR, settings
-from src.state.portfolio import PortfolioState, load_portfolio, portfolio_heat
+from src.config import STATE_DIR, settings, state_path
+from src.control.control_plane import (
+    get_edge_threshold_multiplier,
+    is_entries_paused,
+    recommended_autosafe_commands_from_status,
+    recommended_commands_from_status,
+    review_required_commands_from_status,
+    strategy_gates,
+)
+from src.state.decision_chain import query_learning_surface_summary
+from src.state.db import get_connection, query_execution_event_summary
+from src.state.decision_chain import query_no_trade_cases
+from src.state.portfolio import ADMIN_EXITS, PortfolioState, load_portfolio, portfolio_heat
+from src.state.strategy_tracker import load_tracker
+from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
-STATUS_PATH = STATE_DIR / "status_summary.json"
+STATUS_PATH = state_path("status_summary.json")
+
+
+def _enum_text(value, default: str) -> str:
+    if value in (None, ""):
+        return default
+    return str(getattr(value, "value", value))
 
 
 def _get_risk_level() -> str:
@@ -27,19 +46,136 @@ def _get_risk_level() -> str:
         return "UNKNOWN"
 
 
+def _get_risk_details() -> dict:
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(str(state_path("risk_state.db")))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT details_json FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row is None or not row["details_json"]:
+            return {}
+        details = json.loads(row["details_json"])
+        return details if isinstance(details, dict) else {}
+    except Exception:
+        return {}
+
+
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     portfolio = load_portfolio()
+    generated_at = datetime.now(timezone.utc).isoformat()
+    risk_details = _get_risk_details()
+    riskguard_level = _get_risk_level()
+    if cycle_summary is None and STATUS_PATH.exists():
+        try:
+            with open(STATUS_PATH) as f:
+                prior = json.load(f)
+            cycle_summary = prior.get("cycle", {})
+        except Exception:
+            cycle_summary = {}
+
+    strategy_summary: dict[str, dict] = {}
+    for pos in portfolio.positions:
+        strategy = pos.strategy or "unclassified"
+        bucket = strategy_summary.setdefault(
+            strategy,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+            },
+        )
+        bucket["open_positions"] += 1
+        bucket["open_exposure_usd"] += float(pos.size_usd)
+        bucket["unrealized_pnl"] += float(pos.unrealized_pnl)
+
+    for exit_row in portfolio.recent_exits:
+        if exit_row.get("exit_reason") in ADMIN_EXITS:
+            continue
+        strategy = exit_row.get("strategy") or "unclassified"
+        bucket = strategy_summary.setdefault(
+            strategy,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+            },
+        )
+        bucket["realized_pnl"] += float(exit_row.get("pnl", 0.0) or 0.0)
+
+    for bucket in strategy_summary.values():
+        bucket["open_exposure_usd"] = round(bucket["open_exposure_usd"], 2)
+        bucket["realized_pnl"] = round(bucket["realized_pnl"], 2)
+        bucket["unrealized_pnl"] = round(bucket["unrealized_pnl"], 2)
+        bucket["total_pnl"] = round(bucket["realized_pnl"] + bucket["unrealized_pnl"], 2)
+    recommended_strategy_gates = set(risk_details.get("recommended_strategy_gates", []) or [])
+    recommended_strategy_gate_reasons = {
+        str(strategy): list(reasons)
+        for strategy, reasons in (risk_details.get("recommended_strategy_gate_reasons", {}) or {}).items()
+        if isinstance(reasons, list)
+    }
+    current_strategy_gates = strategy_gates()
+    for name, bucket in strategy_summary.items():
+        bucket["gated"] = not current_strategy_gates.get(name, True)
+        bucket["recommended_gate"] = name in recommended_strategy_gates
+        bucket["recommended_gate_reasons"] = list(recommended_strategy_gate_reasons.get(name, []))
+    recommended_but_not_gated = sorted(
+        strategy for strategy in recommended_strategy_gates
+        if current_strategy_gates.get(strategy, True)
+    )
+    gated_but_not_recommended = sorted(
+        strategy for strategy, enabled in current_strategy_gates.items()
+        if enabled is False and strategy not in recommended_strategy_gates
+    )
+    recommended_controls = list(risk_details.get("recommended_controls", []))
+    recommended_control_reasons = {
+        str(control): list(reasons)
+        for control, reasons in (risk_details.get("recommended_control_reasons", {}) or {}).items()
+        if isinstance(reasons, list)
+    }
+    recommended_controls_not_applied: list[str] = []
+    if "tighten_risk" in recommended_controls and get_edge_threshold_multiplier() <= 1.0:
+        recommended_controls_not_applied.append("tighten_risk")
+    if "review_strategy_gates" in recommended_controls and recommended_but_not_gated:
+        recommended_controls_not_applied.append("review_strategy_gates")
+
+    chain_state_counts: dict[str, int] = {}
+    exit_state_counts: dict[str, int] = {}
+    for pos in portfolio.positions:
+        chain_key = _enum_text(pos.chain_state, "unknown")
+        chain_state_counts[chain_key] = chain_state_counts.get(chain_key, 0) + 1
+        exit_key = _enum_text(pos.exit_state, "none")
+        exit_state_counts[exit_key] = exit_state_counts.get(exit_key, 0) + 1
 
     status = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": generated_at,
         "process": {
             "pid": os.getpid(),
             "mode": settings.mode,
             "version": "zeus_v2",
         },
+        "control": {
+            "entries_paused": is_entries_paused(),
+            "edge_threshold_multiplier": get_edge_threshold_multiplier(),
+            "strategy_gates": strategy_gates(),
+            "recommended_controls": recommended_controls,
+            "recommended_control_reasons": recommended_control_reasons,
+            "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
+            "recommended_strategy_gate_reasons": recommended_strategy_gate_reasons,
+            "recommended_but_not_gated": recommended_but_not_gated,
+            "gated_but_not_recommended": gated_but_not_recommended,
+            "recommended_controls_not_applied": recommended_controls_not_applied,
+        },
         "risk": {
-            "level": _get_risk_level(),
+            "level": riskguard_level,
+            "riskguard_level": riskguard_level,
+            "details": risk_details,
         },
         "portfolio": {
             "open_positions": len(portfolio.positions),
@@ -52,15 +188,127 @@ def write_status(cycle_summary: dict = None) -> None:
             "effective_bankroll": round(portfolio.effective_bankroll, 2),
             "bankroll": round(portfolio.effective_bankroll, 2),
             "positions": [
-                {"trade_id": p.trade_id, "city": p.city, "direction": p.direction,
-                 "size": p.size_usd, "edge": p.edge, "bin": p.bin_label[:30],
-                 "mark_price": p.last_monitor_market_price,
-                 "unrealized_pnl": round(p.unrealized_pnl, 2)}
+                {
+                    "trade_id": p.trade_id,
+                    "city": p.city,
+                    "direction": p.direction,
+                    "strategy": p.strategy,
+                    "state": p.state,
+                    "chain_state": _enum_text(p.chain_state, "unknown"),
+                    "exit_state": _enum_text(p.exit_state, ""),
+                    "entry_fill_verified": p.entry_fill_verified,
+                    "admin_exit_reason": p.admin_exit_reason,
+                    "size_usd": p.size_usd,
+                    "shares": p.effective_shares,
+                    "entry_price": p.entry_price,
+                    "edge": p.edge,
+                    "bin_label": p.bin_label,
+                    "decision_snapshot_id": p.decision_snapshot_id,
+                    "day0_entered_at": p.day0_entered_at,
+                    "mark_price": p.last_monitor_market_price,
+                    "unrealized_pnl": round(p.unrealized_pnl, 2),
+                }
                 for p in portfolio.positions
             ],
         },
+        "runtime": {
+            "chain_state_counts": chain_state_counts,
+            "exit_state_counts": exit_state_counts,
+            "unverified_entries": sum(
+                1 for pos in portfolio.positions
+                if pos.state == "pending_tracked" or not pos.entry_fill_verified
+            ),
+            "day0_positions": sum(1 for pos in portfolio.positions if pos.state == "day0_window"),
+        },
+        "strategy": strategy_summary,
+        "execution": {},
+        "learning": {},
+        "no_trade": {},
         "cycle": cycle_summary or {},
     }
+    status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
+    status["control"]["review_required_commands"] = review_required_commands_from_status(status)
+    status["control"]["recommended_commands"] = recommended_commands_from_status(
+        status,
+        include_review_required=True,
+    )
+    try:
+        tracker = load_tracker()
+        current_regime_started_at = str(tracker.accounting.get("current_regime_started_at") or "")
+        conn = get_connection()
+        status["execution"] = query_execution_event_summary(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+        if current_regime_started_at:
+            status["execution"]["current_regime_started_at"] = current_regime_started_at
+        status["learning"] = query_learning_surface_summary(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+        if current_regime_started_at:
+            status["learning"]["current_regime_started_at"] = current_regime_started_at
+        recent_no_trades = query_no_trade_cases(conn, hours=24)
+        stage_counts: dict[str, int] = {}
+        for case in recent_no_trades:
+            stage = str(case.get("rejection_stage") or "UNKNOWN")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        status["no_trade"] = {
+            "recent_stage_counts": stage_counts,
+        }
+        conn.close()
+    except Exception:
+        status["execution"] = {"error": "execution_summary_unavailable"}
+        status["learning"] = {"error": "learning_summary_unavailable"}
+        status["no_trade"] = {"error": "no_trade_summary_unavailable"}
+
+    consistency_issues: list[str] = []
+    cycle_risk_level = str((cycle_summary or {}).get("risk_level") or "")
+    if cycle_risk_level and cycle_risk_level != riskguard_level:
+        consistency_issues.append(
+            f"cycle_risk_level_mismatch:{cycle_risk_level}->{riskguard_level}"
+        )
+    if bool((cycle_summary or {}).get("failed", False)):
+        consistency_issues.append("cycle_failed")
+    if status.get("execution", {}).get("error"):
+        consistency_issues.append("execution_summary_unavailable")
+    if status.get("learning", {}).get("error"):
+        consistency_issues.append("learning_summary_unavailable")
+    if status.get("no_trade", {}).get("error"):
+        consistency_issues.append("no_trade_summary_unavailable")
+
+    status["risk"]["consistency_check"] = {
+        "ok": not consistency_issues,
+        "issues": consistency_issues,
+        "cycle_risk_level": cycle_risk_level or None,
+    }
+    if consistency_issues:
+        status["risk"]["level"] = "RED"
+
+    learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
+    for name, learning_bucket in learning_by_strategy.items():
+        bucket = strategy_summary.setdefault(
+            name,
+            {
+                "open_positions": 0,
+                "open_exposure_usd": 0.0,
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "total_pnl": 0.0,
+                "gated": not current_strategy_gates.get(name, True),
+                "recommended_gate": name in recommended_strategy_gates,
+                "recommended_gate_reasons": list(recommended_strategy_gate_reasons.get(name, [])),
+            },
+        )
+        bucket["settlement_count"] = learning_bucket.get("settlement_count", 0)
+        bucket["settlement_pnl"] = learning_bucket.get("settlement_pnl", 0.0)
+        bucket["settlement_accuracy"] = learning_bucket.get("settlement_accuracy")
+        bucket["no_trade_count"] = learning_bucket.get("no_trade_count", 0)
+        bucket["no_trade_stage_counts"] = dict(learning_bucket.get("no_trade_stage_counts", {}) or {})
+        bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
+        bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
+        bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
+    status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
 
     # Atomic write
     import tempfile

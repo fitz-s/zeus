@@ -3,6 +3,16 @@ state/risk_state.db
 state/baseline_results.json
 state/ensemble-log/
 state/positions.json
+state/*-paper.json
+state/*-paper.db
+state/*.db-shm
+state/*.db-wal
+state/legacy_state_archive/
+logs/*.log
+logs/*.err
+.omx/
+.omc/
+equity_curve.png
 .DS_Store
 __pycache__/
 *.pyc

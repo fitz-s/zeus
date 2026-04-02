@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.calibration.manager import season_from_date
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name, cities_by_alias
+from src.contracts import SettlementSemantics
 from src.data.market_scanner import _parse_temp_range
 from src.state.db import get_connection, init_schema
 from src.types import Bin
@@ -129,14 +130,14 @@ def run_etl() -> dict:
             if bins:
                 # Simple member counting (no MC noise — TIGGE values are already single-point)
                 p_raw = np.zeros(len(bins))
-                member_ints = np.round(values).astype(int)
+                member_values = SettlementSemantics.for_city(city).round_values(values)
                 for i, b in enumerate(bins):
                     if b.is_open_low:
-                        p_raw[i] = np.mean(member_ints <= b.high)
+                        p_raw[i] = np.mean(member_values <= b.high)
                     elif b.is_open_high:
-                        p_raw[i] = np.mean(member_ints >= b.low)
+                        p_raw[i] = np.mean(member_values >= b.low)
                     else:
-                        p_raw[i] = np.mean((member_ints >= b.low) & (member_ints <= b.high))
+                        p_raw[i] = np.mean((member_values >= b.low) & (member_values <= b.high))
 
                 total = p_raw.sum()
                 if total > 0:
@@ -196,7 +197,7 @@ def _get_bins_for_settlement(conn, city: str, target_date: str) -> list[Bin]:
         low, high = _parse_temp_range(r["range_label"])
         if low is None and high is None:
             continue
-        bins.append(Bin(low=low, high=high, label=r["range_label"]))
+        bins.append(Bin(low=low, high=high, label=r["range_label"], unit=city.settlement_unit))
 
     # Sort by boundary
     def sort_key(b):

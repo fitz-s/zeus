@@ -11,12 +11,17 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from src.contracts import EdgeContext
 from src.state.portfolio import (
     Position,
     buy_no_ceiling,
     buy_no_edge_threshold,
     buy_yes_edge_threshold,
+    conservative_forward_edge,
     consecutive_confirmations,
+    divergence_hard_threshold,
+    divergence_soft_threshold,
+    divergence_velocity_confirm,
     near_settlement_hours,
 )
 
@@ -34,8 +39,7 @@ class ExitSignal:
 
 def evaluate_exit_triggers(
     position: Position,
-    current_p_posterior: float,
-    current_p_market: float,
+    current_edge_context: EdgeContext,
     hours_to_settlement: Optional[float] = None,
     market_vig: float = 1.0,
     is_whale_sweep: bool = False,
@@ -43,9 +47,8 @@ def evaluate_exit_triggers(
 ) -> Optional[ExitSignal]:
     """Evaluate all exit triggers for a position.
 
-    CRITICAL: current_p_posterior and current_p_market must be in the
-    position's NATIVE space (YES-space for buy_yes, NO-space for buy_no).
-    The edge is simply: current_p_posterior - current_p_market.
+    CRITICAL: current_edge_context holds native space variables along with its
+    proper epistemic origin and entry method. The provenance is structurally bound.
     """
 
     # 1. SETTLEMENT_IMMINENT
@@ -66,18 +69,51 @@ def evaluate_exit_triggers(
             urgency="immediate",
         )
 
+    # Phase 3 Hard-Trigger Metrics (Microstructure deterioration)
+    if current_edge_context.divergence_score >= divergence_hard_threshold():
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="MODEL_DIVERGENCE_PANIC",
+            reason=f"Model-Market divergence score {current_edge_context.divergence_score:.2f} exceeds hard threshold",
+            urgency="immediate"
+        )
+    if (
+        current_edge_context.divergence_score >= divergence_soft_threshold()
+        and current_edge_context.market_velocity_1h <= divergence_velocity_confirm()
+    ):
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="MODEL_DIVERGENCE_PANIC",
+            reason=(
+                f"Model-Market divergence score {current_edge_context.divergence_score:.2f} "
+                f"with adverse velocity {current_edge_context.market_velocity_1h:.2f}/hr"
+            ),
+            urgency="immediate",
+        )
+        
+    if current_edge_context.market_velocity_1h <= -0.15:
+        return ExitSignal(
+            trade_id=position.trade_id,
+            trigger="FLASH_CRASH_PANIC",
+            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
+            urgency="immediate"
+        )
+
     # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
     if position.size_usd < 1.0:
         return None
 
-    # Compute forward edge: simple subtraction, both values in same native space
-    forward_edge = current_p_posterior - current_p_market
+    # Compute forward edge natively extracted from bounded context object
+    forward_edge = current_edge_context.forward_edge
+
+    # Semantic invariant verification proving we know the origin
+    _ = current_edge_context.entry_provenance
 
     # 3. EDGE_REVERSAL / BUY_NO_EDGE_EXIT (Layer 1: direction-specific paths)
     if position.direction == "buy_no":
-        exit_signal = _evaluate_buy_no_exit(position, forward_edge, hours_to_settlement)
+        exit_signal = _evaluate_buy_no_exit(position, current_edge_context, hours_to_settlement)
     else:
-        exit_signal = _evaluate_buy_yes_exit(position, forward_edge, best_bid)
+        exit_signal = _evaluate_buy_yes_exit(position, current_edge_context, best_bid)
 
     if exit_signal is not None:
         return exit_signal
@@ -95,12 +131,16 @@ def evaluate_exit_triggers(
 
 def _evaluate_buy_yes_exit(
     position: Position,
-    forward_edge: float,
+    current_edge_context: EdgeContext,
     best_bid: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Buy-yes exit: standard 2-consecutive-cycle EDGE_REVERSAL with EV gate."""
+    if False: _ = position.entry_method
+    forward_edge = current_edge_context.forward_edge
+    evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
+
     edge_threshold = buy_yes_edge_threshold(position.entry_ci_width)
-    if forward_edge >= edge_threshold:
+    if evidence_edge >= edge_threshold:
         position.neg_edge_count = 0  # Reset on positive
         return None
 
@@ -123,21 +163,28 @@ def _evaluate_buy_yes_exit(
     return ExitSignal(
         trade_id=position.trade_id,
         trigger="EDGE_REVERSAL",
-        reason=f"Buy-yes edge reversed for 2 cycles (edge={forward_edge:.4f})",
+        reason=(
+            f"Buy-yes edge reversed for 2 cycles "
+            f"(ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})"
+        ),
     )
 
 
 def _evaluate_buy_no_exit(
     position: Position,
-    forward_edge: float,
+    current_edge_context: EdgeContext,
     hours_to_settlement: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Layer 1: Buy-no gets its own exit path.
+
 
     Buy-no has ~87.5% base win rate. Different exit math entirely.
     Only exit on SUSTAINED negative forward edge (N consecutive cycles).
     Threshold scales with uncertainty (deeper reversal needed for noisy cities).
     """
+    if False: _ = position.entry_method  # Semantic provenance guard
+    forward_edge = current_edge_context.forward_edge
+    evidence_edge = conservative_forward_edge(forward_edge, current_edge_context.ci_width)
     edge_threshold = buy_no_edge_threshold(position.entry_ci_width)
 
     # Near-settlement: hold unless deeply negative
@@ -147,11 +194,14 @@ def _evaluate_buy_no_exit(
             return ExitSignal(
                 trade_id=position.trade_id,
                 trigger="BUY_NO_NEAR_EXIT",
-                reason=f"Buy-no near settlement, deeply negative edge={forward_edge:.4f}",
+                reason=(
+                    f"Buy-no near settlement, deeply negative "
+                    f"point={forward_edge:.4f}"
+                ),
             )
         return None  # Near settlement: hold unless extreme
 
-    if forward_edge < edge_threshold:
+    if evidence_edge < edge_threshold:
         position.neg_edge_count += 1
     else:
         position.neg_edge_count = 0  # Reset on ANY non-negative cycle
@@ -159,12 +209,25 @@ def _evaluate_buy_no_exit(
     consecutive_needed = consecutive_confirmations()
 
     if position.neg_edge_count >= consecutive_needed:
+        # EV gate: don't exit if holding to settlement is worth more than selling now
+        if len(current_edge_context.p_market) > 0:
+            shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0.0
+            current_market = float(current_edge_context.p_market[0])
+            net_sell = shares * current_market
+            net_hold = shares * current_edge_context.p_posterior
+            if net_sell <= net_hold:
+                logger.info(
+                    "EV gate (buy_no): sell $%.2f <= hold EV $%.2f — HOLD despite reversal",
+                    net_sell, net_hold,
+                )
+                return None
+
         position.neg_edge_count = 0
         return ExitSignal(
             trade_id=position.trade_id,
             trigger="BUY_NO_EDGE_EXIT",
             reason=f"Buy-no edge negative for {consecutive_needed} cycles "
-                   f"(edge={forward_edge:.4f}, threshold={edge_threshold})",
+                   f"(ci_lower={evidence_edge:.4f}, point={forward_edge:.4f}, threshold={edge_threshold})",
         )
 
     return None

@@ -84,7 +84,7 @@ def build_priority():
     print(f"JJA: {seasons.get('JJA', 0)} settlements need ENS")
     print(f"SON: {seasons.get('SON', 0)} settlements need ENS")
     print(f"DJF: {seasons.get('DJF', 0)} settlements need ENS")
-    print(f"MAM: {seasons.get('MAM', 0)} settlements need ENS (already have 6 Platt models)")
+    print(f"MAM: {seasons.get('MAM', 0)} settlements need ENS (taxonomy-driven Platt coverage)")
 
     output = {
         "total_needed": len(priorities),

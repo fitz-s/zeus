@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from src.execution.executor import execute_order, OrderResult
+from src.execution.executor import create_execution_intent, execute_intent, OrderResult
+from src.contracts import EdgeContext, EntryMethod
+import numpy as np
 from src.state.portfolio import (
     Position, PortfolioState, load_portfolio, save_portfolio,
     add_position, remove_position, portfolio_heat,
@@ -54,7 +56,7 @@ class TestPortfolio:
         ))
         add_position(state, Position(
             trade_id="t2", market_id="m2", city="Chicago",
-            cluster="US-Midwest", target_date="2026-01-15",
+            cluster="US-GreatLakes", target_date="2026-01-15",
             bin_label="30-32", direction="buy_yes",
             size_usd=5.0, entry_price=0.30, p_posterior=0.50,
             edge=0.20, entered_at="2026-01-12T00:00:00Z",
@@ -87,13 +89,36 @@ class TestPortfolio:
 class TestExecutor:
     def test_paper_fill(self):
         edge = BinEdge(
-            bin=Bin(low=39, high=40, label="39-40"),
+            bin=Bin(low=39, high=40, label="39-40", unit="F"),
             direction="buy_yes", edge=0.10,
             ci_lower=0.03, ci_upper=0.17,
             p_model=0.50, p_market=0.40, p_posterior=0.50,
             entry_price=0.40, p_value=0.02, vwmp=0.42,
         )
-        result = execute_order(edge, size_usd=5.0, mode="opening_hunt", market_id="m1")
+        edge_context = EdgeContext(
+            p_raw=np.array([0.50]),
+            p_cal=np.array([0.50]),
+            p_market=np.array([0.40]),
+            p_posterior=0.50,
+            forward_edge=0.10,
+            alpha=0.65,
+            confidence_band_upper=0.17,
+            confidence_band_lower=0.03,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+        intent = create_execution_intent(
+            edge_context=edge_context,
+            edge=edge,
+            size_usd=5.0,
+            mode="opening_hunt",
+            market_id="m1",
+            token_id="yes-token",
+            no_token_id="no-token",
+        )
+        result = execute_intent(intent, edge.vwmp, edge.bin.label)
 
         assert result.status == "filled"
         assert result.fill_price is not None

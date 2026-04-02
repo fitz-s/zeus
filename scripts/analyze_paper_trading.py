@@ -15,17 +15,20 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.state.truth_files import current_mode, read_mode_truth_json
+
 
 def analyze():
+    mode = current_mode()
     conn = sqlite3.connect(str(PROJECT_ROOT / "state" / "zeus.db"))
     conn.row_factory = sqlite3.Row
 
     result = {}
 
     # 1. Trade summary
-    entries = conn.execute("SELECT * FROM chronicle WHERE event_type='ENTRY'").fetchall()
-    exits = conn.execute("SELECT * FROM chronicle WHERE event_type='EXIT'").fetchall()
-    settlements = conn.execute("SELECT * FROM chronicle WHERE event_type='SETTLEMENT'").fetchall()
+    entries = conn.execute("SELECT * FROM chronicle WHERE env = ? AND event_type='ENTRY'", (mode,)).fetchall()
+    exits = conn.execute("SELECT * FROM chronicle WHERE env = ? AND event_type='EXIT'", (mode,)).fetchall()
+    settlements = conn.execute("SELECT * FROM chronicle WHERE env = ? AND event_type='SETTLEMENT'", (mode,)).fetchall()
 
     directions = Counter()
     cities = Counter()
@@ -47,6 +50,7 @@ def analyze():
             bin_types["center"] += 1
 
     result["trades"] = {
+        "mode": mode,
         "entries": len(entries), "exits": len(exits), "settlements": len(settlements),
         "directions": dict(directions),
         "cities": dict(cities),
@@ -85,15 +89,23 @@ def analyze():
 
     # 4. Portfolio state
     try:
-        with open(PROJECT_ROOT / "state" / "positions.json") as f:
-            pf = json.load(f)
-        total_exposure = sum(p["size_usd"] for p in pf.get("positions", []))
-        bankroll = pf.get("bankroll", 150)
+        pf, truth = read_mode_truth_json("positions.json")
+        status, status_truth = read_mode_truth_json("status_summary.json")
         result["portfolio"] = {
-            "positions": len(pf.get("positions", [])),
-            "total_exposure_usd": round(total_exposure, 2),
-            "heat_pct": round(total_exposure / bankroll * 100, 1) if bankroll > 0 else 0,
-            "bankroll": bankroll,
+            "positions": int(status["portfolio"]["open_positions"]),
+            "total_exposure_usd": float(status["portfolio"]["total_exposure_usd"]),
+            "heat_pct": float(status["portfolio"]["heat_pct"]),
+            "bankroll": float(status["portfolio"]["bankroll"]),
+            "realized_pnl": float(status["portfolio"]["realized_pnl"]),
+            "unrealized_pnl": float(status["portfolio"]["unrealized_pnl"]),
+            "total_pnl": float(status["portfolio"]["total_pnl"]),
+            "truth_mode": truth.get("mode"),
+            "truth_generated_at": truth.get("generated_at"),
+            "truth_source_path": truth.get("source_path"),
+            "truth_stale_age_seconds": truth.get("stale_age_seconds"),
+            "status_source_path": status_truth.get("source_path"),
+            "status_generated_at": status_truth.get("generated_at"),
+            "status_stale_age_seconds": status_truth.get("stale_age_seconds"),
         }
     except FileNotFoundError:
         result["portfolio"] = {"positions": 0}
@@ -116,11 +128,16 @@ def analyze():
 
     # Save
     output_path = PROJECT_ROOT / "state" / "paper_trading_analysis.json"
-    with open(output_path, "w") as f:
-        json.dump(result, f, indent=2)
+    rendered = json.dumps(result, indent=2)
+    try:
+        with open(output_path, "w") as f:
+            f.write(rendered)
+    except OSError as exc:
+        result["output_write_error"] = str(exc)
+        rendered = json.dumps(result, indent=2)
 
     # Print summary
-    print(json.dumps(result, indent=2))
+    print(rendered)
     return result
 
 

@@ -7,6 +7,15 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from src.signal.ensemble_signal import select_hours_for_target_date
+
+
+def _parse_forecast_timestamp(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 def remaining_member_maxes_for_day0(
     members_hourly: np.ndarray,
@@ -20,23 +29,21 @@ def remaining_member_maxes_for_day0(
 
     tz = ZoneInfo(timezone_name)
     now_local = (now or datetime.now(tz)).astimezone(tz)
-    idxs: list[int] = []
-    for idx, ts in enumerate(times):
-        dt_utc = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
-        dt_local = dt_utc.astimezone(tz)
-        if dt_local.date() != target_d:
-            continue
-        if dt_local < now_local:
-            continue
-        idxs.append(idx)
-
-    if not idxs:
-        for idx, ts in enumerate(times):
-            dt_utc = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
-            if dt_utc.astimezone(tz).date() == target_d:
-                idxs.append(idx)
-
-    if not idxs:
+    try:
+        target_day_idxs = select_hours_for_target_date(
+            target_d,
+            tz,
+            times=times,
+        )
+    except ValueError:
         return np.array([]), 0.0
 
-    return members_hourly[:, idxs].max(axis=1), float(len(idxs))
+    remaining_idxs = [
+        int(idx)
+        for idx in target_day_idxs
+        if _parse_forecast_timestamp(times[int(idx)]).astimezone(tz) >= now_local
+    ]
+    if not remaining_idxs:
+        return np.array([]), 0.0
+
+    return members_hourly[:, remaining_idxs].max(axis=1), float(len(remaining_idxs))

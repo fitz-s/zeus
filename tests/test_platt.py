@@ -14,6 +14,8 @@ from src.calibration.platt import (
     calibrate_and_normalize,
     P_CLAMP_LOW,
     P_CLAMP_HIGH,
+    WIDTH_NORMALIZED_SPACE,
+    normalize_bin_probability_for_calibration,
 )
 
 
@@ -121,6 +123,28 @@ class TestExtendedPlattPredict:
         with pytest.raises(RuntimeError, match="not fitted"):
             cal.predict(0.5, 3.0)
 
+    def test_predict_for_bin_uses_width_normalized_input_space(self):
+        cal = ExtendedPlattCalibrator()
+        cal.fitted = True
+        cal.A = 1.0
+        cal.B = 0.0
+        cal.C = 0.0
+        cal.input_space = WIDTH_NORMALIZED_SPACE
+
+        result = cal.predict_for_bin(0.40, 3.0, bin_width=2.0)
+        assert result == pytest.approx(0.20, abs=1e-6)
+
+
+class TestWidthNormalization:
+    def test_range_bin_probability_normalizes_by_width(self):
+        assert normalize_bin_probability_for_calibration(0.40, bin_width=2.0) == pytest.approx(0.20)
+
+    def test_point_bin_probability_is_unchanged(self):
+        assert normalize_bin_probability_for_calibration(0.10, bin_width=1.0) == pytest.approx(0.10)
+
+    def test_shoulder_probability_stays_raw(self):
+        assert normalize_bin_probability_for_calibration(0.07, bin_width=None) == pytest.approx(0.07)
+
 
 class TestCalibrateAndNormalize:
     def test_sums_to_one(self):
@@ -145,3 +169,21 @@ class TestCalibrateAndNormalize:
                                0.03, 0.03, 0.02, 0.01, 0.01])
         result = calibrate_and_normalize(p_raw_vec, cal, lead_days=3.0)
         assert np.all(result > 0)
+
+    def test_width_aware_calibration_path(self):
+        cal = ExtendedPlattCalibrator()
+        cal.fitted = True
+        cal.A = 1.0
+        cal.B = 0.0
+        cal.C = 0.0
+        cal.input_space = WIDTH_NORMALIZED_SPACE
+
+        p_raw_vec = np.array([0.40, 0.10])
+        result = calibrate_and_normalize(
+            p_raw_vec,
+            cal,
+            lead_days=3.0,
+            bin_widths=[2.0, 1.0],
+        )
+
+        np.testing.assert_array_almost_equal(result, [2 / 3, 1 / 3])
