@@ -157,6 +157,19 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - broader post-entry execution attribution (`entry_alpha_usd` / slippage / downstream accounting surfaces) can still be tightened;
   - if needed later, Day0 could still be upgraded from “durably emitted phase” to an even richer explicit event taxonomy, but the missing timestamp/truth-surface problem is now closed.
 
+## Consumer Truth Slice 1 (env-filtered authoritative readers)
+- Landed protections:
+  - authoritative settlement readers now accept and honor `env`, instead of scanning the shared `zeus.db` across paper/live indiscriminately;
+  - `query_settlement_events()`, `query_authoritative_settlement_rows()`, `query_settlement_records()`, and `query_legacy_settlement_records()` now filter by environment, defaulting to the current runtime mode when no override is passed;
+  - this closes the highest-leverage cross-env truth seam for `RiskGuard` and other settlement consumers built on the shared DB.
+- Validation evidence for this slice:
+  - targeted DB/RiskGuard tests after the slice: `39 passed`
+  - full suite after landing the slice: `430 passed, 3 skipped`
+- Residual high-value backlog after this slice:
+  - broader strategy-aware / execution-aware RiskGuard behavior is still not closed;
+  - some remaining operator surfaces still compress too much runtime truth into status summaries;
+  - chain rescue vs normal fill remains a deliberate two-path runtime authority model even though the sharpest seams are now reduced.
+
 ## Planned Team Shape (new round)
 - **Main** — architecture authority, contract freeze, integration, final acceptance, queue discipline.
 - **runtime lane** — lifecycle authority, pending/live rescue, Day0 terminal-phase behavior, exit/event wiring.

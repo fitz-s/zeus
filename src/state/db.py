@@ -1081,10 +1081,15 @@ def query_settlement_events(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
 ) -> list[dict]:
     """Load recent canonical settlement stage events from the durable event spine."""
     filters = ["event_type = 'POSITION_SETTLED'"]
+    query_env = settings.mode if env is None else env
     params: list[object] = []
+    if query_env:
+        filters.append("env = ?")
+        params.append(query_env)
     if city is not None:
         filters.append("city = ?")
         params.append(city)
@@ -1113,6 +1118,7 @@ def query_authoritative_settlement_rows(
     *,
     city: str | None = None,
     target_date: str | None = None,
+    env: str | None = None,
 ) -> list[dict]:
     """Prefer stage-level settlement events, then fall back to legacy decision_log blobs."""
     stage_events = query_settlement_events(
@@ -1120,6 +1126,7 @@ def query_authoritative_settlement_rows(
         limit=limit,
         city=city,
         target_date=target_date,
+        env=env,
     )
     normalized_stage = [
         normalized
@@ -1135,6 +1142,7 @@ def query_authoritative_settlement_rows(
         limit=limit,
         city=city,
         target_date=target_date,
+        env=env,
     )
     return legacy_rows[:limit]
 

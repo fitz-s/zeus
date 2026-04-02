@@ -3,20 +3,20 @@
   "live_teammates": [],
   "ready": [
     {
-      "owner": "unassigned",
       "task_id": "P1-E",
-      "goal": "Continue learning-loop migration from authoritative ledger and evaluated opportunity set"
+      "owner": "Main",
+      "goal": "Continue learning-loop and consumer migration from env-filtered authoritative readers"
     }
   ],
   "active": [
     {
       "owner": "Main",
-      "task_id": "P0-D",
-      "goal": "Drive the next runtime-spine closure slice after landing durable Day0 lifecycle timestamping"
+      "task_id": "P1-E",
+      "goal": "Drive the next truth/consumer slice after landing env-filtered authoritative settlement readers"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE P0-D slice 6 (durable Day0 lifecycle timestamping), keep P0-D active for the remaining runtime-spine gaps",
+  "last_decision": "CLOSE the env-filtered authoritative reader slice and move the active baton from late P0-D cleanup to P1-E consumer/learning migration",
   "backlog_source": "task.md"
 }

@@ -24,6 +24,34 @@ from src.state.portfolio import load_portfolio
 logger = logging.getLogger(__name__)
 
 
+def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
+    summary: dict[str, dict] = {}
+    for row in rows:
+        strategy = str(row.get("strategy") or "unclassified")
+        bucket = summary.setdefault(
+            strategy,
+            {
+                "count": 0,
+                "pnl": 0.0,
+                "wins": 0,
+                "accuracy": None,
+            },
+        )
+        bucket["count"] += 1
+        pnl = row.get("pnl")
+        if pnl is not None:
+            bucket["pnl"] += float(pnl)
+        outcome = row.get("outcome")
+        if outcome == 1:
+            bucket["wins"] += 1
+
+    for strategy, bucket in summary.items():
+        count = bucket["count"]
+        bucket["pnl"] = round(bucket["pnl"], 2)
+        bucket["accuracy"] = round(bucket["wins"] / count, 4) if count else None
+    return summary
+
+
 def init_risk_db(conn: sqlite3.Connection) -> None:
     """Create risk_state tables."""
     conn.executescript("""
@@ -78,6 +106,7 @@ def tick() -> RiskLevel:
 
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
+    strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
 
     # Compute metrics from authoritative settlement rows only.
     b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
@@ -131,6 +160,7 @@ def tick() -> RiskLevel:
             "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
             "settlement_metric_ready_count": len(metric_ready_rows),
             "accuracy": round(d_accuracy, 4),
+            "strategy_settlement_summary": strategy_settlement_summary,
         }),
         now,
     ))
