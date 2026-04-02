@@ -36,8 +36,13 @@ def analysis_spread_sigma_multiplier(
     covariate through a named policy boundary but still returns the neutral
     multiplier until a later P2-H behavior change is chosen.
     """
-    _ = ensemble_spread, unit
-    return 1.0
+    if ensemble_spread is None:
+        return 1.0
+    base_sigma = sigma_instrument(unit).value
+    reference_spread = base_sigma * 4.0
+    spread = max(0.0, float(ensemble_spread))
+    ratio = min(1.0, spread / reference_spread) if reference_spread > 0 else 1.0
+    return 1.0 + 0.1 * ratio
 
 
 def day0_temporal_closure_weight(

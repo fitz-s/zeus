@@ -1166,3 +1166,24 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma'` → `11 passed`
   - `./.venv/bin/pytest -q` → `477 passed, 3 skipped`
+
+## 2026-04-02 — P2-H second behavior-changing step: mild spread-aware sigma inflation
+- With the spread seam in place, the next small forecast-layer change makes it active in a tightly bounded way. This is the first heteroscedastic move, but deliberately conservative.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_spread_sigma_multiplier(...)` now ramps from `1.0x` to `1.1x`
+    - baseline spread is defined as `4 * sigma_instrument(unit)`
+    - any spread above that baseline saturates at the 10% uplift
+  - composed with the earlier lead-continuous multiplier, analysis sigma is now both:
+    - lead-aware
+    - mildly spread-aware
+- Why this is a reasonable first heteroscedastic step:
+  - bounded to +10% from spread alone
+  - preserves the existing instrument-noise anchor
+  - uses the already-extracted seam rather than adding a new hardcoded branch elsewhere
+  - still small enough to be reviewable before a richer learned sigma policy lands
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the spread-multiplier endpoints and the composed sigma behavior.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma'` → `11 passed`
+  - `./.venv/bin/pytest -q` → `477 passed, 3 skipped`

@@ -13,7 +13,7 @@ from src.signal.forecast_uncertainty import (
 def test_analysis_bootstrap_sigma_matches_current_instrument_sigma():
     assert analysis_bootstrap_sigma("F") == sigma_instrument("F").value
     assert analysis_bootstrap_sigma("C") == sigma_instrument("C").value
-    assert analysis_bootstrap_sigma("F", lead_days=6.0, ensemble_spread=7.5) == sigma_instrument("F").value * 1.2
+    assert analysis_bootstrap_sigma("F", lead_days=6.0, ensemble_spread=7.5) == sigma_instrument("F").value * 1.2 * 1.1
 
 
 def test_day0_post_peak_sigma_matches_existing_formula_endpoints():
@@ -36,10 +36,11 @@ def test_analysis_lead_sigma_multiplier_is_continuous_and_bounded():
     assert analysis_lead_sigma_multiplier(10.0) == 1.2
 
 
-def test_analysis_spread_sigma_multiplier_is_neutral_for_now():
+def test_analysis_spread_sigma_multiplier_is_bounded_and_monotone():
     assert analysis_spread_sigma_multiplier(None, unit="F") == 1.0
-    assert analysis_spread_sigma_multiplier(2.5, unit="F") == 1.0
-    assert analysis_spread_sigma_multiplier(1.0, unit="C") == 1.0
+    assert analysis_spread_sigma_multiplier(0.0, unit="F") == 1.0
+    assert analysis_spread_sigma_multiplier(1.0, unit="F") == 1.05
+    assert analysis_spread_sigma_multiplier(3.0, unit="F") == 1.1
 
 
 def test_day0_temporal_closure_weight_matches_existing_endpoints():
