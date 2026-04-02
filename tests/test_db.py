@@ -948,6 +948,8 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
                             "target_date": "2026-04-01",
                             "range_label": "39-40°F",
                             "direction": "buy_yes",
+                            "strategy": "center_buy",
+                            "edge_source": "center_buy",
                             "rejection_stage": "EDGE_INSUFFICIENT",
                             "rejection_reasons": ["small"],
                         }
@@ -992,6 +994,8 @@ def test_query_learning_surface_summary_combines_settlement_no_trade_and_executi
     assert summary["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert summary["execution"]["overall"]["entry_rejected"] == 1
     assert summary["by_strategy"]["center_buy"]["settlement_count"] == 1
+    assert summary["by_strategy"]["center_buy"]["no_trade_count"] == 1
+    assert summary["by_strategy"]["center_buy"]["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 

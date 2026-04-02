@@ -84,6 +84,8 @@ class NoTradeCase:
     range_label: str
     direction: DirectionAlias
     rejection_stage: str
+    strategy: str = ""
+    edge_source: str = ""
     rejection_reasons: list[str] = field(default_factory=list)
     best_edge: float = 0.0
     model_prob: float = 0.0
@@ -405,6 +407,8 @@ def query_learning_surface_summary(
                 "settlement_pnl": 0.0,
                 "settlement_accuracy": None,
                 "settlement_wins": 0,
+                "no_trade_count": 0,
+                "no_trade_stage_counts": {},
                 "entry_attempted": 0,
                 "entry_filled": 0,
                 "entry_rejected": 0,
@@ -428,6 +432,8 @@ def query_learning_surface_summary(
                 "settlement_count": 0,
                 "settlement_pnl": 0.0,
                 "settlement_accuracy": None,
+                "no_trade_count": 0,
+                "no_trade_stage_counts": {},
                 "entry_attempted": 0,
                 "entry_filled": 0,
                 "entry_rejected": 0,
@@ -441,6 +447,24 @@ def query_learning_surface_summary(
     for case in no_trades:
         stage = str(case.get("rejection_stage") or "UNKNOWN")
         no_trade_stage_counts[stage] = no_trade_stage_counts.get(stage, 0) + 1
+        strategy = str(case.get("strategy") or "")
+        if strategy:
+            bucket = by_strategy.setdefault(
+                strategy,
+                {
+                    "settlement_count": 0,
+                    "settlement_pnl": 0.0,
+                    "settlement_accuracy": None,
+                    "no_trade_count": 0,
+                    "no_trade_stage_counts": {},
+                    "entry_attempted": 0,
+                    "entry_filled": 0,
+                    "entry_rejected": 0,
+                },
+            )
+            bucket["no_trade_count"] += 1
+            stage_counts = bucket.setdefault("no_trade_stage_counts", {})
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
     degraded_settlements = sum(1 for row in settlements if row.get("is_degraded", False))
     return {

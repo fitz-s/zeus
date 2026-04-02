@@ -597,6 +597,8 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     assert summary["strategy_gate_rejections"] == 1
     assert payload["trade_cases"] == []
     assert payload["no_trade_cases"][0]["rejection_stage"] == "RISK_REJECTED"
+    assert payload["no_trade_cases"][0]["strategy"] == "opening_inertia"
+    assert payload["no_trade_cases"][0]["edge_source"] == "opening_inertia"
     assert payload["no_trade_cases"][0]["rejection_reasons"] == ["strategy_gate_disabled:opening_inertia"]
 
 
