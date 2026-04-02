@@ -143,6 +143,11 @@ def check() -> dict:
             strategy = status.get("strategy", {}) or {}
             if isinstance(strategy, dict):
                 result["strategy_summary"] = strategy
+            learning = status.get("learning", {}) or {}
+            if isinstance(learning, dict):
+                result["learning_summary"] = learning
+                if "no_trade_stage_counts" in learning:
+                    result["recent_no_trade_stage_counts"] = learning["no_trade_stage_counts"]
             control = status.get("control", {}) or {}
             if isinstance(control, dict):
                 result["control_state"] = control
@@ -192,17 +197,18 @@ def check() -> dict:
         result["riskguard_state"] = "missing"
         result["riskguard_fresh"] = False
 
-    try:
-        conn = get_connection(_zeus_db_path())
-        no_trade_cases = query_no_trade_cases(conn, hours=24)
-        conn.close()
-        stage_counts: dict[str, int] = {}
-        for case in no_trade_cases:
-            stage = str(case.get("rejection_stage") or "UNKNOWN")
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
-        result["recent_no_trade_stage_counts"] = stage_counts
-    except Exception:
-        result["recent_no_trade_stage_counts"] = {}
+    if "recent_no_trade_stage_counts" not in result:
+        try:
+            conn = get_connection(_zeus_db_path())
+            no_trade_cases = query_no_trade_cases(conn, hours=24)
+            conn.close()
+            stage_counts: dict[str, int] = {}
+            for case in no_trade_cases:
+                stage = str(case.get("rejection_stage") or "UNKNOWN")
+                stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            result["recent_no_trade_stage_counts"] = stage_counts
+        except Exception:
+            result["recent_no_trade_stage_counts"] = {}
 
     try:
         from scripts.validate_assumptions import run_validation

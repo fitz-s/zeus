@@ -413,6 +413,15 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Residual automation backlog after this slice:
   - the remaining question is no longer command naming drift, but which control-plane actions should be automatically produced from the richer diagnostics now available.
 
+## Health Signal Slice 3 (healthcheck uses unified learning surface)
+- Landed protections:
+  - `healthcheck` now consumes the status summary’s `learning` section directly when present, instead of recomputing no-trade diagnosis separately by default.
+- Validation evidence for this slice:
+  - targeted healthcheck tests after the slice: `5 passed`
+  - full suite after landing the slice: `446 passed, 3 skipped`
+- Residual health/learning backlog after this slice:
+  - the remaining work is no longer surface duplication, but deciding which parts of the learning surface should drive automated controls or model evolution.
+
 ## Strategy Operator Slice 3 (gate state + recommendations in strategy summary)
 - Landed protections:
   - each strategy bucket in `status_summary.strategy` now shows both:
