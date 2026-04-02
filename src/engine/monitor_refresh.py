@@ -5,6 +5,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 """
 
 import logging
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -31,6 +32,11 @@ from src.types import Bin
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
+_MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
+
+
+def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
+    setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
 
 
 def _refresh_ens_member_counting(
@@ -49,10 +55,12 @@ def _refresh_ens_member_counting(
     if False: _ = None.selected_method; _ = None.entry_method
     requested_lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
     if requested_lead_days < 0:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
 
     ens_result = fetch_ensemble(city, forecast_days=int(requested_lead_days) + 2)
     if ens_result is None or not validate_ensemble(ens_result):
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
     lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, ens_result.get("fetch_time")))
 
@@ -68,6 +76,7 @@ def _refresh_ens_member_counting(
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
 
     single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
@@ -123,6 +132,7 @@ def _refresh_ens_member_counting(
         p_cal_native = p_cal_yes
 
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+    _set_monitor_probability_fresh(position, True)
     return current_p_posterior, [*applied, "alpha_posterior"]
 
 
@@ -150,16 +160,20 @@ def _refresh_day0_observation(
     if False: _ = None.selected_method; _ = None.entry_method
     obs = _fetch_day0_observation(city, target_d)
     if obs is None:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation"]
     if not obs.get("observation_time"):
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
 
     ens_result = fetch_ensemble(city, forecast_days=2)
     if ens_result is None or not validate_ensemble(ens_result):
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     try:
@@ -175,6 +189,7 @@ def _refresh_day0_observation(
         temporal_context = None
 
     if temporal_context is None:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
 
     remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
@@ -185,6 +200,7 @@ def _refresh_day0_observation(
         now=temporal_context.current_utc_timestamp,
     )
     if remaining_member_maxes.size == 0:
+        _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     day0 = Day0Signal(
@@ -231,6 +247,7 @@ def _refresh_day0_observation(
     )
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+    _set_monitor_probability_fresh(position, True)
     return current_p_posterior, [*applied, "alpha_posterior"]
 
 
@@ -409,7 +426,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         }
         refresh_pos = pos
         if pos.state == "day0_window" and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-            refresh_pos = Position(**{**pos.__dict__, "entry_method": EntryMethod.DAY0_OBSERVATION.value})
+            refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+        setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
         current_p_posterior = recompute_native_probability(
             refresh_pos,
             current_p_market=current_p_market,
@@ -420,10 +438,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         )
         pos.selected_method = refresh_pos.selected_method
         pos.applied_validations = list(refresh_pos.applied_validations)
+        prob_refresh_is_fresh = getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
         # Persist monitor state on Position
         pos.last_monitor_prob = current_p_posterior
-        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_prob_is_fresh = True if prob_refresh_is_fresh is None else bool(prob_refresh_is_fresh)
         pos.last_monitor_edge = current_p_posterior - current_p_market
         if not market_refreshed:
             pos.last_monitor_market_price = current_p_market

@@ -249,6 +249,43 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     assert event["details"]["condition_id"] == "cond-1"
 
 
+@pytest.mark.parametrize("exit_state", ["exit_intent", "sell_placed", "sell_pending", "retry_pending"])
+def test_chain_reconciliation_does_not_void_exit_in_flight_positions(exit_state):
+    """Chain sync must defer phantom authority while a sell order is in flight."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    exiting = _make_position(
+        trade_id=f"exit-{exit_state}",
+        token_id="tok_exit_001",
+        no_token_id="tok_exit_no_001",
+        state="holding",
+        chain_state="synced",
+        exit_state=exit_state,
+    )
+    healthy = _make_position(
+        trade_id="healthy-sync-1",
+        token_id="tok_live_001",
+        no_token_id="tok_live_no_001",
+        state="holding",
+        chain_state="unknown",
+        condition_id="cond-live-1",
+    )
+    portfolio = _make_portfolio(exiting, healthy)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_live_001", size=25.0, avg_price=0.40, cost=10.0, condition_id="cond-live-1")],
+    )
+
+    assert stats["voided"] == 0
+    assert stats["skipped_pending_exit"] == 1
+    assert exiting in portfolio.positions
+    assert exiting.exit_state == exit_state
+    assert exiting.chain_state == "exit_pending_missing"
+    assert healthy.chain_state == "synced"
+    assert healthy.condition_id == "cond-live-1"
+
+
 # ---- Test 4: Retry respects cooldown ----
 
 
@@ -725,6 +762,48 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
     assert edge_ctx.p_market[0] == pytest.approx(0.37)
 
 
+def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
+    """Day0 fallback may reuse stored probability, but it must not relabel it fresh."""
+    from src.contracts import EntryMethod
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        state="day0_window",
+        city="Chicago",
+        target_date="2026-04-01",
+        entry_method=EntryMethod.ENS_MEMBER_COUNTING.value,
+        selected_method="",
+        p_posterior=0.61,
+        last_monitor_prob_is_fresh=True,
+        applied_validations=["alpha_posterior"],
+    )
+
+    class DummyClob:
+        paper_mode = True
+
+    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.41)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda city, target_d: {
+            "high_so_far": 44.0,
+            "current_temp": 43.0,
+            "source": "wu_api",
+            # Missing observation_time forces fallback to the stored posterior.
+        },
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert pos.last_monitor_market_price == pytest.approx(0.41)
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_prob == pytest.approx(0.61)
+    assert pos.last_monitor_prob_is_fresh is False
+    assert edge_ctx.p_posterior == pytest.approx(0.61)
+    assert "missing_observation_timestamp" in pos.applied_validations
+
+
 # ---- Bonus: Quarantine does NOT expire before 48h ----
 
 
@@ -914,6 +993,35 @@ def test_incomplete_chain_response_skips_voiding():
     assert stats["voided"] == 0
     assert pos in portfolio.positions
     assert stats.get("skipped_void_incomplete_api", 0) > 0
+
+
+def test_incomplete_chain_response_does_not_mark_exit_pending_missing():
+    """A globally incomplete chain snapshot must not escalate retrying exits into exit-missing recovery."""
+    from src.state.chain_reconciliation import reconcile
+
+    exiting = _make_position(
+        state="holding",
+        token_id="tok_retry_yes",
+        no_token_id="tok_retry_no",
+        exit_state="retry_pending",
+        chain_state="synced",
+    )
+    healthy = _make_position(
+        trade_id="healthy-other",
+        token_id="tok_other_yes",
+        no_token_id="tok_other_no",
+        state="holding",
+        chain_state="synced",
+    )
+    portfolio = _make_portfolio(exiting, healthy)
+
+    stats = reconcile(portfolio, chain_positions=[])
+
+    assert stats["voided"] == 0
+    assert stats.get("skipped_pending_exit", 0) == 0
+    assert stats.get("skipped_void_incomplete_api", 0) >= 2
+    assert exiting.chain_state == "synced"
+    assert exiting in portfolio.positions
 
 
 # ---- Autonomous Discovery Tests ----

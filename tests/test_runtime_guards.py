@@ -1202,6 +1202,95 @@ def test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode():
     assert ctx.best_bid == pytest.approx(0.46)
 
 
+def test_monitoring_skips_sell_pending_when_chain_already_missing():
+    pos = Position(
+        trade_id="retry-missing-chain",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        chain_state="exit_pending_missing",
+        exit_state="sell_pending",
+        last_exit_order_id="sell-order-keep",
+        next_exit_retry_at="2026-04-01T00:05:00Z",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("should not record exit")
+
+    class LiveClob:
+        paper_mode = False
+        def get_order_status(self, order_id):
+            return {"status": "UNKNOWN"}
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert pos.exit_state == "sell_pending"
+    assert summary["monitor_skipped_exit_pending_missing"] == 1
+
+
+def test_monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery():
+    pos = Position(
+        trade_id="retry-missing-chain-close",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        chain_state="exit_pending_missing",
+        exit_state="retry_pending",
+        next_exit_retry_at=None,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def __init__(self):
+            self.exits = []
+        def record_exit(self, position):
+            self.exits.append(position)
+
+    class LiveClob:
+        paper_mode = False
+        def get_order_status(self, order_id):
+            return {"status": "UNKNOWN"}
+
+    tracker = Tracker()
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        tracker,
+        summary,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is True
+    assert portfolio.positions == []
+    assert tracker.exits[0].exit_reason == "EXIT_CHAIN_MISSING_REVIEW_REQUIRED"
+    assert summary["exit_chain_missing_closed"] == 1
+
+
 def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     parsed = ensemble_client._parse_response(
