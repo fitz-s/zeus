@@ -66,6 +66,20 @@ def day0_observation_weight(
     return max(base, daylight_progress * 0.35)
 
 
+def day0_blended_highs(
+    *,
+    observed_high: float,
+    remaining_member_highs,
+    observation_weight: float,
+):
+    """Current Phase-0 residual blending policy, extracted behind a seam."""
+    import numpy as np
+
+    remaining = np.asarray(remaining_member_highs, dtype=float)
+    residual_excess = np.maximum(0.0, remaining - float(observed_high))
+    return float(observed_high) + residual_excess * (1.0 - float(observation_weight))
+
+
 def analysis_bootstrap_sigma(
     unit: str,
     *,

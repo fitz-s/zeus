@@ -1108,3 +1108,20 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Verification evidence:
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure'` → `8 passed`
   - `./.venv/bin/pytest -q` → `474 passed, 3 skipped`
+
+## 2026-04-02 — P2-H fourth seam: day0 residual-blend extraction
+- This slice continues the day0-side seam cleanup for forecast-layer work. The existing “observed high as hard floor + residual upside scaled by observation weight” rule is now centralized behind the forecast uncertainty layer instead of being embedded inline in `Day0Signal`.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new `day0_blended_highs(...)`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - now delegates final-high residual fusion to the seam helper instead of carrying the vector formula inline
+- Why this slice matters:
+  - it completes a second piece of the day0 forecast policy extraction
+  - it makes future `solar backbone + online residual update` work easier to land without mixing policy changes into probability plumbing
+  - it remains behavior-preserving and low blast radius
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py` now locks the hard-floor and observation-weight endpoint behavior of `day0_blended_highs(...)`.
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs'` → `9 passed`
+  - `./.venv/bin/pytest -q` → `475 passed, 3 skipped`

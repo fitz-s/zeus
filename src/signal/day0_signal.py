@@ -8,7 +8,12 @@ This constraint dramatically narrows probability distribution near settlement.
 import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
-from src.signal.forecast_uncertainty import day0_post_peak_sigma
+from src.signal.forecast_uncertainty import (
+    day0_blended_highs,
+    day0_observation_weight,
+    day0_post_peak_sigma,
+    day0_temporal_closure_weight,
+)
 from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
 
 
@@ -112,8 +117,11 @@ class Day0Signal:
             # Day0 fusion: the observed high is a hard floor, while residual upside
             # above that floor should shrink continuously as the observation becomes
             # more dominant later in the day.
-            residual_excess = np.maximum(0.0, noised - self.obs_high)
-            final_highs = self.obs_high + residual_excess * (1.0 - obs_weight)
+            final_highs = day0_blended_highs(
+                observed_high=self.obs_high,
+                remaining_member_highs=noised,
+                observation_weight=obs_weight,
+            )
             final_settled = self._settle(final_highs)
 
             for i, b in enumerate(bins):
@@ -144,41 +152,29 @@ class Day0Signal:
         independent closure signals reduce the remaining forecast freedom rather
         than being added as disconnected heuristics.
         """
-        base = self._temporal_closure_weight()
-
+        pre_sunrise = False
+        post_sunset = False
         if self._solar_day is not None and self._current_local_hour is not None:
             phase = self._solar_day.phase(self._current_local_hour)
-            if phase == DaylightPhase.PRE_SUNRISE:
-                return min(base, 0.05)
-            if phase == DaylightPhase.POST_SUNSET:
-                return 1.0
-
-        if self._daylight_progress is None:
-            return base
-        if self._daylight_progress <= 0.0:
-            return min(base, 0.05)
-        if self._daylight_progress >= 1.0:
-            return 1.0
-        return max(base, self._daylight_progress * 0.35)
+            pre_sunrise = phase == DaylightPhase.PRE_SUNRISE
+            post_sunset = phase == DaylightPhase.POST_SUNSET
+        return day0_observation_weight(
+            hours_remaining=self.hours_remaining,
+            peak_confidence=self._peak_confidence,
+            daylight_progress=self._daylight_progress,
+            ens_dominance=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
+            pre_sunrise=pre_sunrise,
+            post_sunset=post_sunset,
+        )
 
     def _temporal_closure_weight(self) -> float:
         """Monotone fusion of residual-time, diurnal, solar, and ENS-dominance evidence."""
-        time_closure = float(np.clip(1.0 - self.hours_remaining / 12.0, 0.0, 1.0))
-        peak_signal = float(np.clip(self._peak_confidence, 0.0, 1.0))
-        daylight_signal = (
-            float(np.clip(self._daylight_progress, 0.0, 1.0))
-            if self._daylight_progress is not None
-            else time_closure
+        return day0_temporal_closure_weight(
+            hours_remaining=self.hours_remaining,
+            peak_confidence=self._peak_confidence,
+            daylight_progress=self._daylight_progress,
+            ens_dominance=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
         )
-        ens_dominance = float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0))
-
-        residual_freedom = (
-            (1.0 - time_closure)
-            * (1.0 - 0.75 * peak_signal)
-            * (1.0 - 0.50 * daylight_signal)
-            * (1.0 - 0.35 * ens_dominance)
-        )
-        return float(np.clip(1.0 - residual_freedom, 0.0, 1.0))
 
     def obs_dominates(self) -> bool:
         """True if observation already exceeds most ENS remaining forecasts.

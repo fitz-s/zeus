@@ -1,5 +1,6 @@
 from src.signal.ensemble_signal import sigma_instrument
 from src.signal.forecast_uncertainty import (
+    day0_blended_highs,
     analysis_bootstrap_sigma,
     day0_observation_weight,
     day0_post_peak_sigma,
@@ -60,3 +61,19 @@ def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior(
         pre_sunrise=False,
         post_sunset=True,
     ) == 1.0
+
+
+def test_day0_blended_highs_preserves_hard_floor_and_weight_endpoints():
+    highs = day0_blended_highs(
+        observed_high=45.0,
+        remaining_member_highs=[44.0, 46.0, 48.0],
+        observation_weight=0.0,
+    )
+    assert list(highs) == [45.0, 46.0, 48.0]
+
+    dominated = day0_blended_highs(
+        observed_high=45.0,
+        remaining_member_highs=[44.0, 46.0, 48.0],
+        observation_weight=1.0,
+    )
+    assert list(dominated) == [45.0, 45.0, 45.0]
