@@ -1621,3 +1621,32 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or spread_context or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context'` → `23 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or kelly_uses_effective_bankroll or evaluator_epistemic_context_includes_model_bias_reference or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
   - `./.venv/bin/pytest -q` → `491 passed, 3 skipped`
+
+## 2026-04-02 — P2-H first bounded mean-offset behavior change
+- The current P2-H slice is no longer purely metadata/context work on the mean side. The forecast-layer mean seam now performs the first small, bounded behavior change instead of staying a hardcoded identity.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_mean_context(...)` now converts `bias_reference` into a bounded lead-scaled offset when:
+      - a bias-reference row exists
+      - upstream forecast input is not already marked `bias_corrected`
+    - the offset is conservative by construction:
+      - scaled by `lead_factor = clamp(lead_days, 0..6) / 6`
+      - discounted by `discount_factor` from the bias row (default `0.7`)
+      - capped at `± 2 * sigma_instrument(unit)`
+    - `analysis_member_maxes(...)` now applies that seam output, so the mean/location layer has a first real effect on analysis inputs
+- Why this matters:
+  - P2-H is no longer only “ready for future mean work”; it now has the first bounded mean/location behavior that can be shown in artifacts and code review
+  - the behavior stays packaging-safe because it is:
+    - tied to explicit bias-reference provenance
+    - disabled when forecasts were already bias-corrected upstream
+    - clipped to a small instrument-scale envelope
+  - this is a clean mini-milestone to stop on before broader P2-H work (richer day0 backbone, stronger heteroscedastic sigma, fuller learned mean policy)
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - now locks:
+      - lead-scaled bias offset behavior
+      - `bias_corrected=True` guard
+      - hard cap on extreme raw bias offsets
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py tests/test_instrument_invariants.py -k 'sigma or observation_weight or temporal_closure or blended_highs or lead_sigma or spread_sigma or spread_context or member_maxes or backbone_high or mean_offset or sigma_context or mean_context or residual_adjustment or nowcast_blend or backbone_context'` → `25 passed`
+  - `./.venv/bin/pytest -q` → `493 passed, 3 skipped`
