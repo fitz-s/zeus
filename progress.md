@@ -1045,3 +1045,12 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Queue consequence:
   - `P1-E` can close as DONE for the current base
   - the active backlog now shifts entirely to future-phase work rather than unresolved P0/P1 closure
+
+## 2026-04-02 — phase shift to P2-H
+- With `P0-D`, `P1-E`, `P1-F`, and `P1-G` closed for the current base, the active program is no longer runtime-spine closure; it is the first forecast-layer de-hardcode lane.
+- Queue consequence:
+  - `P2-H` is now the next READY lane
+  - `P2-I` remains blocked behind richer, cleaner forecast-layer evidence
+- First principle for the next lane:
+  - do not jump straight to learned decision policy
+  - first create a clean forecast-layer seam where `day0` and `dayN` uncertainty policy can evolve without being hardcoded into unrelated modules
