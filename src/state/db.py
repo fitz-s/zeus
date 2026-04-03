@@ -1621,6 +1621,13 @@ def log_reconciled_entry_event(conn: sqlite3.Connection, pos, *, timestamp: str,
     }
     if details:
         payload.update(details)
+    legacy_columns_present = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(
+        _table_columns(conn, "position_events")
+    )
+    if not _legacy_runtime_position_event_schema_available(conn):
+        if _canonical_position_surface_available(conn) and not legacy_columns_present:
+            return
+        _assert_legacy_runtime_position_event_schema(conn)
     log_position_event(
         conn,
         "POSITION_LIFECYCLE_UPDATED",

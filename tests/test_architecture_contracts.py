@@ -724,6 +724,118 @@ def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_ev
     conn.close()
 
 
+def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.db import apply_architecture_kernel_schema, log_reconciled_entry_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    log_reconciled_entry_event(
+        conn,
+        pos,
+        timestamp="2026-04-03T00:10:00Z",
+        details={"reason": "pending_fill_rescued"},
+    )
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
+    from src.state.db import log_reconciled_entry_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL
+        );
+        """
+    )
+
+    try:
+        log_reconciled_entry_event(
+            conn,
+            _runtime_position(state="entered", chain_state="synced"),
+            timestamp="2026-04-03T00:10:00Z",
+            details={"reason": "pending_fill_rescued"},
+        )
+    except RuntimeError as exc:
+        assert "legacy runtime position_events schema not installed" in str(exc)
+    else:
+        raise AssertionError("expected malformed legacy schema to fail loudly")
+
+    conn.close()
+
+
+def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
+    from src.state.db import apply_architecture_kernel_schema, log_reconciled_entry_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    conn.executescript(
+        """
+        ALTER TABLE position_events ADD COLUMN runtime_trade_id TEXT;
+        ALTER TABLE position_events ADD COLUMN position_state TEXT;
+        ALTER TABLE position_events ADD COLUMN strategy TEXT;
+        ALTER TABLE position_events ADD COLUMN source TEXT;
+        ALTER TABLE position_events ADD COLUMN details_json TEXT;
+        ALTER TABLE position_events ADD COLUMN timestamp TEXT;
+        ALTER TABLE position_events ADD COLUMN env TEXT;
+        """
+    )
+
+    try:
+        log_reconciled_entry_event(
+            conn,
+            _runtime_position(state="entered", chain_state="synced"),
+            timestamp="2026-04-03T00:10:00Z",
+            details={"reason": "pending_fill_rescued"},
+        )
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected hybrid drift schema to fail loudly")
+
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_remains_blocked_on_canonical_bootstrap_due_to_query_assumptions():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.condition_id = "cond-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    # match buy_yes token
+    portfolio.positions[0].token_id = ""
+    portfolio.positions[0].no_token_id = ""
+    portfolio.positions[0].token_id = "tok-1"
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except sqlite3.OperationalError as exc:
+        assert "runtime_trade_id" in str(exc)
+    else:
+        raise AssertionError("expected canonical bootstrap reconciliation path to remain explicitly blocked")
+
+    conn.close()
+
+
 def test_chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db():
     from src.state.chronicler import log_event
     from src.state.db import apply_architecture_kernel_schema
