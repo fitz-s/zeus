@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
-- State: `FROZEN / READY TO IMPLEMENT`
+- State: `APPROVED / READY TO COMMIT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -73,17 +73,17 @@ Make the reconciliation pending-fill query path tolerate canonically bootstrappe
 
 ## Immediate checklist
 
-- [ ] implement reconciliation query-path compatibility in `src/state/chain_reconciliation.py`
-- [ ] preserve fail-loud behavior for malformed/non-canonical unexpected states
-- [ ] add targeted architecture-contract coverage
-- [ ] append durable packet transition to `architects_progress.md` when implementation lands
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] implement reconciliation query-path compatibility in `src/state/chain_reconciliation.py`
+- [x] preserve fail-loud behavior for malformed/non-canonical unexpected states
+- [x] add targeted architecture-contract coverage
+- [x] append durable packet transition to `architects_progress.md` when implementation lands
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Fix only the reconciliation query-path compatibility blocker.
-2. Keep reconciliation caller migration for a later successor packet.
+1. Commit and push this accepted reconciliation query blocker packet without mixing unrelated working-tree dirt.
+2. Freeze the successor reconciliation builder packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep reconciliation caller migration separate from this query-compat packet.

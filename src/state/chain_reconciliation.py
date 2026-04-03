@@ -84,8 +84,31 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     if conn is not None:
         from src.state.db import log_reconciled_entry_event, update_trade_lifecycle
 
+    def _legacy_rescue_query_available() -> bool:
+        if conn is None:
+            return False
+        rows = conn.execute("PRAGMA table_info(position_events)").fetchall()
+        columns = {row[1] for row in rows}
+        if not columns:
+            raise RuntimeError("reconciliation rescue query legacy schema not installed")
+
+        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
+
+        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(columns)
+        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns)
+
+        if has_canonical and has_legacy:
+            raise RuntimeError("reconciliation rescue query does not support hybrid position_events schema")
+        if has_legacy:
+            return True
+        if has_canonical:
+            return False
+        raise RuntimeError("reconciliation rescue query legacy schema not installed")
+
     def _already_logged_rescue_event(position) -> bool:
         if conn is None:
+            return False
+        if not _legacy_rescue_query_available():
             return False
         row = conn.execute(
             """

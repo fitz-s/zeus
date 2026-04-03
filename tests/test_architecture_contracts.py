@@ -805,7 +805,7 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
     conn.close()
 
 
-def test_reconciliation_pending_fill_path_remains_blocked_on_canonical_bootstrap_due_to_query_assumptions():
+def test_reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -826,12 +826,47 @@ def test_reconciliation_pending_fill_path_remains_blocked_on_canonical_bootstrap
     portfolio.positions[0].token_id = "tok-1"
     chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
 
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["rescued_pending"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    conn.executescript(
+        """
+        ALTER TABLE position_events ADD COLUMN runtime_trade_id TEXT;
+        ALTER TABLE position_events ADD COLUMN position_state TEXT;
+        ALTER TABLE position_events ADD COLUMN strategy TEXT;
+        ALTER TABLE position_events ADD COLUMN source TEXT;
+        ALTER TABLE position_events ADD COLUMN details_json TEXT;
+        ALTER TABLE position_events ADD COLUMN timestamp TEXT;
+        ALTER TABLE position_events ADD COLUMN env TEXT;
+        """
+    )
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.condition_id = "cond-1"
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
     try:
         reconcile(portfolio, chain_positions, conn=conn)
-    except sqlite3.OperationalError as exc:
-        assert "runtime_trade_id" in str(exc)
+    except RuntimeError as exc:
+        assert "hybrid position_events schema" in str(exc)
     else:
-        raise AssertionError("expected canonical bootstrap reconciliation path to remain explicitly blocked")
+        raise AssertionError("expected hybrid drift reconciliation path to fail loudly")
 
     conn.close()
 

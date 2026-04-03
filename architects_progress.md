@@ -187,3 +187,49 @@ Archive policy:
   - then run adversarial review
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 10:57 America/Chicago] P1.7B-RECONCILIATION-QUERY-COMPAT landed locally with green targeted evidence
+- Author: `Architects mainline lead`
+- Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Status delta:
+  - touched reconciliation query path now degrades cleanly on canonically bootstrapped DBs
+  - targeted compatibility evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db or log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_position_events_schema or log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema or reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat or reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema or harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_skips_canonical_write_without_prior_canonical_history or harvester_settlement_path_preserves_legacy_behavior_on_legacy_db or harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit or harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable or harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat or settlement_builder or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `23 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'query_position_events or log_trade_entry_emits_position_event or log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `6 passed`
+- Decisions frozen:
+  - generic fail-loud legacy query behavior remains for malformed legacy and hybrid drift states
+  - touched reconciliation query path now no-ops cleanly on canonical-only DBs
+  - no reconciliation caller migration is claimed in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the narrowed reconciliation query compatibility claim
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 11:19 America/Chicago] P1.7B-RECONCILIATION-QUERY-COMPAT adversarial review resolved and architect approved
+- Author: `Architects mainline lead`
+- Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db or log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_position_events_schema or log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema or reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat or reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema or harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_skips_canonical_write_without_prior_canonical_history or harvester_settlement_path_preserves_legacy_behavior_on_legacy_db or harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit or harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable or harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat or settlement_builder or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `23 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'query_position_events or log_trade_entry_emits_position_event or log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `6 passed`
+  - critic verdict after narrowed claim + synchronized slim control surfaces: `APPROVE`
+- Decisions frozen:
+  - touched reconciliation query path now distinguishes canonical bootstrap from malformed legacy and hybrid drift states
+  - reconciliation pending-fill rescue no longer crashes on canonical-only DBs because of legacy-only `position_events` columns
+  - no reconciliation caller migration is claimed in this packet
+  - packet is not migration-safe or cutover-safe by itself
+- Open uncertainties:
+  - the reconciliation rescue builder layer is still ahead
+- Next required action:
+  - commit and push `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Owner:
+  - Architects mainline lead
