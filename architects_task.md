@@ -177,6 +177,7 @@ Explicitly forbidden for edits in the next packet:
 - no active hard blocker at freeze time
 - carry-forward fact: `P-GATE-01-CONSOLIDATE-ADVISORY` is closed and pushed
 - queue fact: `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are frozen behind this packet
+- queue-freeze commit/push completed as `2e5a8c5`
 
 ### Ready-to-commit slice
 `Not started yet. First slice should be a read-only boundary inventory + contract-map assessment inside P-BOUND-01’s allowed file set.`

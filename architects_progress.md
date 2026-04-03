@@ -444,6 +444,25 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:01 America/Chicago] Remaining current-phase `P-*` queue committed and pushed
+- Packet: `CURRENT-P-QUEUE-FREEZE`
+- Status delta:
+  - queue freeze committed as `2e5a8c5`
+  - branch pushed to `origin/Architects`
+  - cloud-visible next active packet is now `P-BOUND-01`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to `architects_progress.md`, `architects_task.md`, and the four new `work_packets/P-*.md` files
+- Decisions frozen:
+  - the remaining current-phase order is now repo-local and cloud-visible
+  - foundation-mainline planning and team opening remain gated behind closure of `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01`
+- Open uncertainties:
+  - execution mode for `P-BOUND-01` still needs to be selected at packet start based on the first real slice shape
+- Next required action:
+  - start `P-BOUND-01`
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
