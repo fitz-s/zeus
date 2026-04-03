@@ -1674,6 +1674,42 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 04:30 America/Chicago] P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE reopened by adversarial review
+- Packet: `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- Status delta:
+  - attack review found a real runtime-truth contradiction in the schema-present path
+  - packet could not be accepted honestly under its frozen boundaries
+- Basis / evidence:
+  - `cycle_runtime` entry path still routes through legacy telemetry helpers before/after the canonical helper
+  - touched legacy helpers in `src/state/db.py` still depend on legacy `position_events` / `trade_decisions` surfaces and can crash on canonically bootstrapped DBs
+- Decisions frozen:
+  - do not accept the packet as a present-tense guarded dual-write claim
+  - revert unaccepted caller-migration code before proceeding
+  - freeze a narrower blocker packet before retrying the caller migration
+- Open uncertainties:
+  - exact compatibility change needed in `src/state/db.py`
+- Next required action:
+  - freeze and execute the blocker packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 04:30 America/Chicago] P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT frozen
+- Packet: `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- Status delta:
+  - blocker packet frozen to remove the legacy entry telemetry compatibility contradiction
+- Basis / evidence:
+  - `P1.5` cannot complete cleanly until touched legacy entry telemetry helpers stop crashing on canonically bootstrapped DBs
+- Decisions frozen:
+  - keep this slice on `src/state/db.py` compatibility only
+  - do not migrate any runtime caller in this packet
+  - team remains closed by default
+- Open uncertainties:
+  - exact helper-level skip semantics still need implementation review
+- Next required action:
+  - land the compatibility change and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
