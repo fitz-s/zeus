@@ -46,11 +46,15 @@ def test_negative_constraints_cover_strategy_fallback():
     ids = {item["id"] for item in negative["constraints"]}
     assert "NC-03" in ids
 
-def test_risk_actions_exist_in_schema():
+def test_strategy_policy_tables_exist_in_schema():
     sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS strategy_health" in sql
+    assert "execution_decay_flag" in sql
+    assert "edge_compression_flag" in sql
     assert "CREATE TABLE IF NOT EXISTS risk_actions" in sql
     assert "threshold_multiplier" in sql
     assert "allocation_multiplier" in sql
+    assert "CREATE TABLE IF NOT EXISTS control_overrides" in sql
 
 def test_schema_has_append_only_triggers():
     sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
@@ -263,6 +267,50 @@ def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
         "phase": "pending_entry",
         "strategy_key": "center_buy",
     }
+    conn.close()
+
+
+def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    apply_architecture_kernel_schema(conn)
+
+    strategy_health_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
+    }
+    risk_action_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(risk_actions)").fetchall()
+    }
+    control_override_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
+    }
+
+    assert {
+        "strategy_key",
+        "as_of",
+        "open_exposure_usd",
+        "risk_level",
+        "execution_decay_flag",
+        "edge_compression_flag",
+    }.issubset(strategy_health_columns)
+    assert {
+        "action_id",
+        "strategy_key",
+        "action_type",
+        "precedence",
+        "status",
+    }.issubset(risk_action_columns)
+    assert {
+        "override_id",
+        "target_type",
+        "target_key",
+        "action_type",
+        "precedence",
+    }.issubset(control_override_columns)
+
     conn.close()
 
 

@@ -6,26 +6,26 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 freeze pass`
+- Last updated by: `Codex P3.1 acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P3 strategy-aware protective spine`
-- Active packet: `P3.1-STRATEGY-POLICY-TABLES`
-- Active packet state: `frozen / ready for execution`
+- Active packet: `none (P3.1-STRATEGY-POLICY-TABLES accepted and pushed)`
+- Active packet state: `awaiting next freeze`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - no team is active
 
 ## Current next action
 
-1. Read the current packet `required_reads` before implementation.
-2. Keep `P3.1-STRATEGY-POLICY-TABLES` confined to durable strategy-policy table/bootstrap surfaces.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. If P3 continues, freeze `P3.2-POLICY-RESOLVER` next.
+2. Keep the next P3 slice on policy resolution only.
+3. Keep out-of-scope local dirt excluded from the next packet commit.
 
 ## Current out-of-scope dirt
 
@@ -40,5 +40,6 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P3.1-STRATEGY-POLICY-TABLES.md`
-6. current packet `required_reads`
+5. `docs/architecture/zeus_durable_architecture_spec.md` — P3 section
+6. `work_packets/P3.1-STRATEGY-POLICY-TABLES.md`
+7. freeze the next packet before further implementation
