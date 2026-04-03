@@ -768,3 +768,28 @@ Archive policy:
   - run the closeout evidence suite and adversarially review the closeout claim
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 14:12 America/Chicago] P1.8-CANONICAL-AUTHORITY-CLOSEOUT accepted and pushed; Stage 2 / P1 closed
+- Author: `Architects mainline lead`
+- Packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
+- Status delta:
+  - closeout packet committed and pushed
+  - Stage 2 canonical-authority rollout is now closed honestly
+  - no remaining P1 packet is required under current repo law
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'apply_architecture_kernel_schema_bootstraps_fresh_db or transaction_boundary_helper_rejects_legacy_init_schema or transaction_boundary_helper_rejects_incomplete_projection_payload or db_no_longer_owns_canonical_append_project_bodies or entry_builder_emits_pending_entry_batch_and_projection or entry_builder_emits_filled_batch_and_projection_that_append_cleanly or settlement_builder_emits_settled_event_and_projection_that_append_cleanly or reconciliation_rescue_builder_emits_chain_synced_event_and_projection_that_append_cleanly or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or chain_size_corrected_builder_emits_chain_size_corrected_event_and_projection_that_append_cleanly or chain_quarantined_builder_requires_explicit_strategy_key or chain_quarantined_builder_emits_quarantined_event_and_projection or lifecycle_builder_module_exists or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db or reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat or reconciliation_pending_fill_path_writes_canonical_rows_when_prior_history_exists or reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db or reconciliation_size_correction_path_writes_canonical_rows_when_prior_history_exists or reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db or reconciliation_size_correction_path_skips_canonical_write_without_prior_history or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_skips_canonical_write_without_prior_canonical_history or harvester_settlement_path_preserves_legacy_behavior_on_legacy_db or harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat'` -> `26 passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_db.py -k 'chain_quarantine_keeps_direction_unknown or chain_quarantine_explicitly_warns_exclusion_without_db_calls or quarantine_blocks_new_entries or query_position_events or init_schema_creates_all_tables or init_schema_idempotent or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env'` -> `7 passed`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent or cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_schema_present or cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_on_canonical_db or cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper or execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db or execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db'` -> `6 passed`
+  - explicit adversarial review of the closeout claim returned `APPROVE`
+- Decisions frozen:
+  - P1 closes with chain-only quarantines explicitly excluded from canonical lifecycle truth under current law and made visible rather than silent
+  - broader replay/cutover parity remains a later-phase concern and does not block honest P1 closure
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P2.1-EXECUTOR-EXIT-PATH`
+- Open uncertainties:
+  - no remaining uncertainty blocks P1 closure
+- Next required action:
+  - stop at the current user-request horizon (`P1 closed`)
+- Owner:
+  - Architects mainline lead

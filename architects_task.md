@@ -17,25 +17,24 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
-- State: `FROZEN / READY FOR EXECUTION`
-- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
+- Packet: `none (P1 closed)`
+- State: `IDLE / STOP BOUNDARY REACHED`
+- Execution mode: `SOLO_EXECUTE`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Run the narrow Stage 2 / P1 closeout evidence suite and close P1 only if repo-truth evidence proves canonical authority is honestly installed.
+No active packet. Current run horizon is satisfied because P1 is closed.
 
 ## Allowed files
 
-- `work_packets/P1.8-CANONICAL-AUTHORITY-CLOSEOUT.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
 - `src/**`
 - `tests/**`
@@ -45,31 +44,28 @@ Run the narrow Stage 2 / P1 closeout evidence suite and close P1 only if repo-tr
 - `architecture/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
-- runtime cutover surfaces
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no new runtime/schema/test implementation
-- no P2 work mixed in
+- no P2 work without a new frozen packet
 - no law rewrite
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker yet; packet outcome depends on the evidence suite
+- no active blocker inside P1; the current stop boundary is successful P1 closure
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] run authority checks
-- [ ] run the targeted P1 closeout suite
-- [ ] adversarially review the closeout claim
-- [ ] close P1 only if the evidence remains green
+- [x] Stage 2 / P1 closeout evidence suite is green
+- [x] adversarial review approved the closeout claim
+- [x] P1 is closed honestly
+- [ ] if resuming, freeze `P2.1-EXECUTOR-EXIT-PATH`
 
 ## Next required action
 
-1. Run the packet evidence suite.
-2. Decide closeout vs reopen strictly from the evidence.
-3. Keep out-of-scope dirt excluded from any commit.
+1. Stop at the current user-request horizon (`P1 closed`).
+2. If continuing later, freeze the first Stage 3 packet before any implementation.
