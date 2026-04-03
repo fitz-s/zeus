@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 closeout pass`
+- Last updated by: `Codex P3.2 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,55 +17,67 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `AWAITING NEXT FREEZE`
+- Packet: `P3.2-POLICY-RESOLVER`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Freeze the next P3 packet on policy resolution only before further implementation begins.
+Create the standalone strategy policy resolver before any P3 evaluator or riskguard behavior wiring begins.
 
 ## Allowed files
 
 - `work_packets/P3.2-POLICY-RESOLVER.md`
+- `src/riskguard/policy.py`
+- `tests/test_riskguard.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files until the next packet is frozen
+- all non-allowed files
 - `AGENTS.md`
-- `src/**`
-- `tests/**`
-- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
+- `migrations/**`
+- `src/control/**`
+- `src/engine/**`
+- `src/execution/**`
+- `src/state/**`
+- `src/supervisor_api/**`
+- `src/riskguard/riskguard.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_db.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_live_safety_invariants.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no implementation before the next packet is frozen
-- no runtime/schema edits inside this control-only closeout slice
+- no evaluator-consumption work in this packet
+- no cycle-runner or control-plane behavior changes in this packet
+- no riskguard emission work in this packet
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside this closeout slice
+- no blocker inside packet scope
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] read the P3 policy-resolver authority surfaces
-- [ ] freeze `P3.2-POLICY-RESOLVER`
-- [ ] keep out-of-scope dirt excluded from the next packet commit
+- [ ] read packet authority and scoped runtime surfaces
+- [ ] implement the standalone policy resolver
+- [ ] verify targeted resolver evidence
+- [ ] keep out-of-scope dirt excluded from the packet commit
 
 ## Next required action
 
-1. Freeze `P3.2-POLICY-RESOLVER`.
-2. Keep the next P3 slice on policy resolution only.
-3. Keep out-of-scope dirt excluded from any commit.
+1. Implement the standalone policy resolver slice.
+2. Keep `P3.2-POLICY-RESOLVER` on resolver/test surfaces only.
+3. Keep out-of-scope local dirt excluded from any commit.

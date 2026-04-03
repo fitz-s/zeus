@@ -1158,3 +1158,23 @@ Archive policy:
   - stop at the current packet boundary or freeze `P3.2-POLICY-RESOLVER` next if P3 continues
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 17:46 America/Chicago] P3.2-POLICY-RESOLVER frozen
+- Author: `Architects mainline lead`
+- Packet: `P3.2-POLICY-RESOLVER`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `P3.1-STRATEGY-POLICY-TABLES` is accepted and pushed as the table-contract prerequisite
+  - `docs/architecture/zeus_durable_architecture_spec.md` names policy resolution as the next P3 slice before evaluator consumption
+  - repo inspection shows current protective behavior still routes through direct control-plane helpers and advisory risk output, so a standalone resolver is the next narrow seam
+- Decisions frozen:
+  - keep this packet on standalone policy resolution only
+  - do not widen into evaluator consumption, riskguard emission, or control-plane write-path changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact hard-safety layering semantics need implementation review inside packet scope
+- Next required action:
+  - implement `P3.2-POLICY-RESOLVER` and run targeted resolver tests
+- Owner:
+  - Architects mainline lead
