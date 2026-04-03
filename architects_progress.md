@@ -1998,6 +1998,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:35 America/Chicago] P1.6B-HARVESTER-CHRONICLE-COMPAT committed and pushed
+- Packet: `P1.6B-HARVESTER-CHRONICLE-COMPAT`
+- Status delta:
+  - packet committed as `c3d4180`
+  - branch pushed to `origin/Architects`
+  - chronicle-helper blocker removal is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `src/state/chronicler.py`, targeted tests, and control surfaces
+- Decisions frozen:
+  - touched chronicle helper now distinguishes canonical bootstrap from drifted/non-canonical missing-chronicle states
+  - harvester chronicle call paths no longer crash on canonical-only DBs
+  - no harvester migration is claimed in this packet
+- Open uncertainties:
+  - settlement builder layer is still missing before harvester dual-write can be attempted honestly
+- Next required action:
+  - freeze the settlement-builder packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:35 America/Chicago] P1.6C-HARVESTER-SETTLEMENT-BUILDERS frozen
+- Packet: `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
+- Status delta:
+  - next harvester prep packet frozen after P1.6B closeout
+- Basis / evidence:
+  - helper-level canonical-schema crash paths around harvester are now removed
+  - canonical settlement payload construction still needs a dedicated builder layer
+- Decisions frozen:
+  - keep this slice on settlement builders only
+  - do not migrate harvester in this packet
+  - team remains closed by default
+- Open uncertainties:
+  - exact settlement builder signatures still need implementation review
+- Next required action:
+  - land the settlement builder layer and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
