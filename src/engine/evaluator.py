@@ -88,6 +88,7 @@ class EdgeDecision:
     applied_validations: list[str] = field(default_factory=list)
     decision_snapshot_id: str = ""
     edge_source: str = ""
+    strategy_key: str = ""
     # Signal data for decision chain recording
     p_raw: Optional[np.ndarray] = None
     p_cal: Optional[np.ndarray] = None
@@ -165,6 +166,18 @@ def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_so
 
 
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
+    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+        return "settlement_capture"
+    if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
+        return "opening_inertia"
+    if edge.bin.is_shoulder:
+        return "shoulder_sell"
+    if edge.direction == "buy_yes":
+        return "center_buy"
+    return "opening_inertia"
+
+
+def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
@@ -573,6 +586,7 @@ def evaluate_candidate(
         tokens = token_map[bin_idx]
         decision_validations = list(entry_validations)
         edge_source = _edge_source_for(candidate, edge)
+        strategy_key = _strategy_key_for(candidate, edge)
 
         # Anti-churn layers 5, 6, 7
         if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
@@ -586,6 +600,7 @@ def evaluate_candidate(
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                strategy_key=strategy_key,
             ))
             continue
         check_token = tokens["token_id"] if edge.direction == "buy_yes" else tokens["no_token_id"]
@@ -600,6 +615,7 @@ def evaluate_candidate(
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                strategy_key=strategy_key,
             ))
             continue
         if has_same_city_range_open(portfolio, city.name, edge.bin.label):
@@ -613,6 +629,7 @@ def evaluate_candidate(
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                strategy_key=strategy_key,
             ))
             continue
 
@@ -659,6 +676,7 @@ def evaluate_candidate(
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                strategy_key=strategy_key,
             ))
             continue
 
@@ -691,6 +709,7 @@ def evaluate_candidate(
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                strategy_key=strategy_key,
             ))
             continue
 
@@ -719,6 +738,7 @@ def evaluate_candidate(
             applied_validations=[*decision_validations, "anti_churn"],
             decision_snapshot_id=snapshot_id,
             edge_source=edge_source,
+            strategy_key=strategy_key,
             p_raw=p_raw,
             p_cal=p_cal,
             p_market=p_market,

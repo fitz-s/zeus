@@ -783,6 +783,58 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:12 America/Chicago] P0.2 patch landed locally with green targeted evidence
+- Packet: `P0.2-ATTRIBUTION-FREEZE`
+- Status delta:
+  - evaluator now emits explicit `strategy_key` on the touched edge-decision path
+  - cycle runtime now preserves `strategy_key` and rejects missing/invalid attribution on the touched materialization path
+  - touched position and no-trade record surfaces now carry `strategy_key`
+  - targeted runtime-guard and architecture-contract tests are green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "strategy_classification_preserves_day0_and_update_semantics or materialize_position_preserves_evaluator_strategy_key or materialize_position_rejects_missing_strategy_key"` -> `3 passed`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py` -> `9 passed`
+- Decisions frozen:
+  - packet remains inside the touched runtime path only
+  - no schema or migration work was pulled in
+  - no team execution is used
+- Open uncertainties:
+  - adversarial review has not yet attacked the packet
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 00:20 America/Chicago] P0.2 adversarial review resolved and architect approved
+- Packet: `P0.2-ATTRIBUTION-FREEZE`
+- Status delta:
+  - both required adversarial reviews completed
+  - in-scope contradictions were fixed
+  - architect verification returned `APPROVE`
+- Basis / evidence:
+  - internal attack review found:
+    - dropped `strategy_key` on risk-rejected branch
+    - execution-stub re-inference
+    - portfolio load / recent exit persistence gaps
+    - decision-chain by-strategy preference gap
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p0-2-attribution-freeze-attack-20260403T055349Z.md`
+  - architect verdict: `APPROVE`
+  - post-fix regression:
+    - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "strategy_classification_preserves_day0_and_update_semantics or materialize_position_preserves_evaluator_strategy_key or materialize_position_rejects_missing_strategy_key or execution_stub_does_not_reinvent_strategy_without_strategy_key or load_portfolio_backfills_strategy_key_from_legacy_strategy"` -> `5 passed`
+    - `.venv/bin/pytest -q tests/test_architecture_contracts.py` -> `9 passed`
+- Decisions frozen:
+  - `strategy_key` now propagates on the touched entry/no-trade/persistence surfaces
+  - execution stub no longer invents strategy from metadata
+  - legacy portfolio loads backfill `strategy_key` from existing valid `strategy` and reject mismatches
+  - this packet still avoids schema, migration, and later P0 batching
+- Open uncertainties:
+  - rollback remains code-only; already-written runtime artifacts are still a packet-external data-boundary caveat
+  - broader runtime suites remain outside this packet’s targeted evidence set
+- Next required action:
+  - commit and push `P0.2-ATTRIBUTION-FREEZE`
+- Owner:
+  - execution owner: Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

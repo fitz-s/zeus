@@ -56,7 +56,7 @@ Closed current-phase queue:
 `P0.2-ATTRIBUTION-FREEZE`
 
 ### State
-`FROZEN / READY TO EXECUTE`
+`ACCEPTED LOCALLY / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -118,11 +118,11 @@ Explicitly forbidden for edits in this packet:
 ### Current blocker
 - no active hard blocker
 - `FOUNDATION-MAINLINE-PLAN` is complete and pushed
-- next blocker is executional: the first runtime attribution freeze slice is not yet landed
+- explicit adversarial review is complete
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside this packet’s versioned scope
 
 ### Ready-to-commit slice
-`P0.2-ATTRIBUTION-FREEZE is frozen — next execution slice is to make evaluator/cycle-runtime stop relying on downstream strategy invention and to add invalid/missing attribution rejection tests on the touched path.`
+`P0.2 accepted locally — evaluator emits canonical strategy_key on the touched path, downstream touched runtime surfaces stop inventing strategy, invalid/missing attribution is rejected on materialization, and post-attack fixes are in place. Next step is commit/push.`
 
 ---
 
@@ -135,9 +135,9 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — packet intake
-- [ ] confirm exact evaluator / runtime / record surfaces to touch
-- [ ] confirm the smallest first-slice file set inside this packet
-- [ ] confirm targeted tests for invalid/missing attribution rejection
+- [x] confirm exact evaluator / runtime / record surfaces to touch
+- [x] confirm the smallest first-slice file set inside this packet
+- [x] confirm targeted tests for invalid/missing attribution rejection
 
 ### Phase C — bounded packet design
 - [x] keep work inside `P0.2` only
@@ -146,7 +146,11 @@ Explicitly forbidden for edits in this packet:
 
 ### Phase D — evidence bundle
 - [x] append planning completion + packet freeze result to `architects_progress.md`
-- [ ] commit and push the packet freeze
+- [x] run targeted runtime-guard tests
+- [x] run architecture-contract verification
+- [x] run explicit adversarial review
+- [x] obtain architect verification
+- [ ] commit and push the packet execution slice
 
 ---
 

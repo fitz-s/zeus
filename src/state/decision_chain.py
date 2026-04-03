@@ -84,6 +84,7 @@ class NoTradeCase:
     range_label: str
     direction: DirectionAlias
     rejection_stage: str
+    strategy_key: str = ""
     strategy: str = ""
     edge_source: str = ""
     rejection_reasons: list[str] = field(default_factory=list)
@@ -181,6 +182,7 @@ class SettlementRecord:
     outcome: int
     pnl: float
     decision_snapshot_id: str = ""
+    strategy_key: str = ""
     edge_source: str = ""
     strategy: str = ""
     settled_at: str = ""
@@ -345,6 +347,7 @@ def _normalize_legacy_settlement_record(
         "outcome": _coerce_int(record.get("outcome")),
         "pnl": _coerce_float(record.get("pnl")),
         "decision_snapshot_id": str(record.get("decision_snapshot_id") or ""),
+        "strategy_key": str(record.get("strategy_key") or ""),
         "edge_source": str(record.get("edge_source") or ""),
         "strategy": str(record.get("strategy") or ""),
         "settled_at": str(record.get("settled_at") or artifact_timestamp or ""),
@@ -453,7 +456,7 @@ def query_learning_surface_summary(
 
     by_strategy: dict[str, dict] = {}
     for row in settlements:
-        strategy = str(row.get("strategy") or "unclassified")
+        strategy = str(row.get("strategy_key") or row.get("strategy") or "unclassified")
         bucket = by_strategy.setdefault(
             strategy,
             {
@@ -501,7 +504,7 @@ def query_learning_surface_summary(
     for case in no_trades:
         stage = str(case.get("rejection_stage") or "UNKNOWN")
         no_trade_stage_counts[stage] = no_trade_stage_counts.get(stage, 0) + 1
-        strategy = str(case.get("strategy") or "")
+        strategy = str(case.get("strategy_key") or case.get("strategy") or "")
         if strategy:
             bucket = by_strategy.setdefault(
                 strategy,
