@@ -26,6 +26,7 @@ from src.state.portfolio import (
     Position,
     PortfolioState,
     close_position,
+    void_position,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,8 @@ def place_sell_order(
 # CLOB statuses that indicate a fill
 FILL_STATUSES = frozenset({"MATCHED", "FILLED"})
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
+EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
+EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -130,6 +133,19 @@ def is_exit_cooldown_active(position: Position) -> bool:
     if deadline is None:
         return False
     return _utcnow() < deadline
+
+
+def handle_exit_pending_missing(portfolio: PortfolioState, position: Position) -> dict:
+    """Own the `exit_pending_missing` escalation path for pending exits."""
+
+    if position.chain_state != "exit_pending_missing":
+        return {"action": "ignore", "position": None}
+    if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
+        closed = void_position(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
+        return {"action": "closed", "position": closed}
+    if position.exit_state in EXIT_LIFECYCLE_OWNED_STATES:
+        return {"action": "skip", "position": None}
+    return {"action": "ignore", "position": None}
 
 
 def execute_exit(

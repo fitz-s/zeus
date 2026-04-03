@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 3 / P2 execution-truth mainline`
-- Active packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Active packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
 - Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P2.1-EXECUTOR-EXIT-PATH`
+- Last accepted packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Execute `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
-2. Keep scope on evidence/control-surface closeout only
-3. Reopen the path only if the evidence disproves the current claim
+1. Execute `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
+2. Keep scope on the economic-close/settlement split only
+3. Do not widen into cutover or broader migration claims in this packet
 
 ## Current out-of-scope dirt
 
@@ -38,5 +38,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT.md`
+5. `work_packets/P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT.md`
 6. current packet `required_reads`

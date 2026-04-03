@@ -31,8 +31,8 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `Stage 3 / P2 execution-truth mainline`
-- Last accepted packet: `P2.1-EXECUTOR-EXIT-PATH`
-- Current active packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Last accepted packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
+- Current active packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
 - Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
@@ -855,5 +855,129 @@ Archive policy:
   - whether the current cycle-runtime exit-intent evidence is sufficient for honest acceptance
 - Next required action:
   - run the closeout evidence suite and adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:46 America/Chicago] P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Status delta:
+  - cycle-runtime exit-intent routing slice is now honestly accepted
+  - no separate implementation packet remains for that narrow slice
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `rg -n "close_position" src/engine/cycle_runtime.py` -> no matches
+  - `rg -n "build_exit_intent|execute_exit\(|check_pending_exits|check_pending_retries|is_exit_cooldown_active" src/engine/cycle_runtime.py` -> explicit exit-intent / exit-lifecycle wiring
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py -k 'build_exit_intent_carries_boundary_fields or execute_exit_routes_live_sell_through_executor_exit_path or monitoring_phase_persists_live_exit_telemetry_chain or monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills or live_exit_never_closes_without_fill or stranded_exit_intent_recovered or check_pending_exits_does_not_retry_bare_exit_intent_without_error or check_pending_exits_emits_void_semantics_for_rejected_sell'` -> `8 passed`
+  - explicit adversarial review of the closeout claim returned `APPROVE`
+- Decisions frozen:
+  - monitoring-phase orchestration already builds explicit exit intent before execution
+  - orchestration code does not directly terminalize positions in the accepted exit-intent slice
+  - `exit_pending_missing` / pending-exit recovery remains a separate slice and was not smuggled into this acceptance
+- Open uncertainties:
+  - pending-exit handling still needs its own explicit closeout gate
+- Next required action:
+  - freeze `P2.3-PENDING-EXIT-HANDLING-CLOSEOUT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:46 America/Chicago] P2.3-PENDING-EXIT-HANDLING-CLOSEOUT frozen
+- Author: `Architects mainline lead`
+- Packet: `P2.3-PENDING-EXIT-HANDLING-CLOSEOUT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - repo truth already appears to have substantial pending-exit state-machine handling in place
+  - the next narrow step is to accept or reopen that slice from evidence before moving into economic-close vs settlement surgery
+- Decisions frozen:
+  - keep this slice verification-only unless evidence reveals a real gap
+  - do not widen into economic-close or settlement semantics
+  - keep team closed by default
+- Open uncertainties:
+  - whether the current pending-exit evidence is sufficient for honest acceptance
+- Next required action:
+  - run the closeout evidence suite and adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:50 America/Chicago] P2.3-PENDING-EXIT-HANDLING-CLOSEOUT reopened before acceptance
+- Author: `Architects mainline lead`
+- Packet: `P2.3-PENDING-EXIT-HANDLING-CLOSEOUT`
+- Status delta:
+  - closeout claim rejected before acceptance
+  - packet superseded by a narrower implementation packet
+- Basis / evidence:
+  - adversarial review found `cycle_runtime.py` still calls `void_position(...)` directly for `exit_pending_missing` recovery states
+  - pending-exit ownership claim was therefore too broad for honest acceptance
+- Decisions frozen:
+  - do not accept the pending-exit slice on narrative momentum
+  - convert the slice into an ownership-transfer packet instead
+- Open uncertainties:
+  - the narrow ownership-transfer implementation still needs landing and proof
+- Next required action:
+  - freeze `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:50 America/Chicago] P2.3-PENDING-EXIT-OWNERSHIP-HARDENING frozen
+- Author: `Architects mainline lead`
+- Packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `exit_pending_missing` escalation still lives partly in `cycle_runtime.py`
+  - the next narrow step is to transfer that ownership into `exit_lifecycle.py` before any pending-exit closeout claim can be honest
+- Decisions frozen:
+  - keep this slice on ownership transfer only
+  - do not widen into economic-close or settlement semantics
+  - keep team closed by default
+- Open uncertainties:
+  - the exact helper boundary still needs implementation review
+- Next required action:
+  - land the ownership transfer and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:56 America/Chicago] P2.3-PENDING-EXIT-OWNERSHIP-HARDENING accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
+- Status delta:
+  - pending-exit ownership transfer is now honestly accepted
+  - `cycle_runtime.py` no longer directly terminalizes the `exit_pending_missing` recovery branch
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `rg -n "void_position\(|handle_exit_pending_missing|exit_pending_missing" src/engine/cycle_runtime.py src/execution/exit_lifecycle.py` -> ownership transfer confirmed
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py -k 'monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery or monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle or monitoring_skips_sell_pending_when_chain_already_missing or live_exit_never_closes_without_fill or stranded_exit_intent_recovered or chain_reconciliation_does_not_void_exit_in_flight_positions'` -> `9 passed`
+  - explicit adversarial review of the narrowed packet claim returned `APPROVE`
+- Decisions frozen:
+  - pending-exit escalation ownership now lives in `exit_lifecycle.py`
+  - no economic-close or settlement semantics were changed in this packet
+  - the next real implementation surface is the economic-close / settlement split
+- Open uncertainties:
+  - no remaining uncertainty blocks the final P2 packet freeze
+- Next required action:
+  - freeze `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:56 America/Chicago] P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT frozen
+- Author: `Architects mainline lead`
+- Packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `close_position()` still conflates economic exit and settlement in present runtime truth
+  - exit-lifecycle and harvester both still rely on that conflation
+  - this is the final real implementation surface needed for honest P2 closure
+- Decisions frozen:
+  - keep this slice on economic-close vs settlement separation only
+  - do not widen into cutover or broader migration claims
+  - keep team closed by default
+- Open uncertainties:
+  - the minimum guard surface around economically closed positions still needs implementation review
+- Next required action:
+  - land the split and targeted tests
+  - then run adversarial review
 - Owner:
   - Architects mainline lead

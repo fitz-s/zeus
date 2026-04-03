@@ -17,18 +17,27 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
 - State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Prove or reopen the current cycle-runtime exit-intent path without widening into pending-exit or settlement semantics.
+Split economic close from settlement so exit fill is no longer terminal settlement truth, while harvester becomes the sole owner of the final settlement transition.
 
 ## Allowed files
 
-- `work_packets/P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT.md`
+- `work_packets/P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT.md`
+- `src/state/portfolio.py`
+- `src/execution/exit_lifecycle.py`
+- `src/execution/harvester.py`
+- `src/engine/cycle_runtime.py`
+- `src/engine/lifecycle_events.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_live_safety_invariants.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_db.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -37,8 +46,9 @@ Prove or reopen the current cycle-runtime exit-intent path without widening into
 
 - all non-allowed files
 - `AGENTS.md`
-- `src/**`
-- `tests/**`
+- `src/riskguard/**`
+- `src/control/**`
+- `src/supervisor_api/**`
 - `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -50,25 +60,25 @@ Prove or reopen the current cycle-runtime exit-intent path without widening into
 
 ## Non-goals
 
-- no pending-exit handling change
-- no economic-close vs settlement change
-- no new runtime implementation unless the evidence reopens the claim
+- no cutover or migration claims
 - no schema changes
 - no team launch
 
 ## Current blocker state
 
-- no blocker yet; the packet outcome depends on the evidence suite
+- no blocker yet inside packet scope
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] run the targeted cycle-runtime exit-intent evidence suite
-- [ ] adversarially review the closeout claim
-- [ ] accept or reopen strictly from the evidence
+- [ ] split economic-close vs settlement helpers in runtime truth
+- [ ] make exit fill non-terminal and harvester settlement terminal
+- [ ] guard economically closed positions from active reprocessing
+- [ ] verify paper/live parity and canonical mapping impacts
+- [ ] run adversarial review before acceptance
 
 ## Next required action
 
-1. Run the packet evidence suite.
-2. Decide closeout vs reopen strictly from the evidence.
+1. Land the economic-close/settlement split in the allowed files only.
+2. Verify with targeted tests and explicit adversarial review.
 3. Keep out-of-scope dirt excluded from any commit.

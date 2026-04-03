@@ -1733,6 +1733,67 @@ def test_monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery
     assert summary["exit_chain_missing_closed"] == 1
 
 
+def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(monkeypatch):
+    pos = Position(
+        trade_id="retry-missing-chain-close",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        chain_state="exit_pending_missing",
+        exit_state="retry_pending",
+        next_exit_retry_at=None,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def __init__(self):
+            self.exits = []
+
+        def record_exit(self, position):
+            self.exits.append(position)
+
+    closed = Position(
+        trade_id="retry-missing-chain-close",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="voided",
+        exit_reason="EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
+    )
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.handle_exit_pending_missing",
+        lambda portfolio, position: {"action": "closed", "position": closed},
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "void_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cycle_runtime should delegate exit_pending_missing closure")),
+    )
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        type("LiveClob", (), {"paper_mode": False})(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is True
+    assert summary["exit_chain_missing_closed"] == 1
+
+
 def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     parsed = ensemble_client._parse_response(
