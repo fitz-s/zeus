@@ -1393,6 +1393,78 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-03 03:26 America/Chicago] P1.2-CANONICAL-SCHEMA-BOOTSTRAP frozen
+- Packet: `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- Status delta:
+  - first post-`FOUNDATION-TEAM-GATE` mainline packet frozen
+  - active mainline advanced from Stage 1 closeout into Stage 2 canonical-authority rollout
+  - packet narrowed to explicit canonical-schema bootstrap plus legacy-collision guard
+- Basis / evidence:
+  - `work_packets/FOUNDATION-MAINLINE-PLAN.md` starts Stage 2 with schema add
+  - `docs/architecture/zeus_durable_architecture_spec.md` names Packet C as P1 schema addition
+  - repo truth already contains migration SQL plus helper-level canonical append/project scaffolding
+  - runtime truth still lacks `position_current`, and legacy `init_schema()` still provisions a non-canonical `position_events` table
+- Decisions frozen:
+  - keep this slice on bootstrap/guard logic plus targeted tests only
+  - do not mutate `init_schema()` into a pretend-canonical installer
+  - do not rename or repurpose the legacy live-table surface in this slice
+  - do not mix unrelated local `AGENTS.md` dirt or `zeus_final_tribunal_overlay/` reference material into this packet
+- Open uncertainties:
+  - later P1 packets still need the broader module/wiring path
+  - the legacy `position_events` naming collision remains unresolved beyond explicit detection
+- Next required action:
+  - land the bootstrap helper and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 03:28 America/Chicago] P1.2-CANONICAL-SCHEMA-BOOTSTRAP reopened by adversarial review
+- Packet: `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- Status delta:
+  - attack review found a real hidden pseudo-cutover risk
+  - packet remained open while the schema-bootstrap slice was narrowed and made explicitly non-runtime-ready
+- Basis / evidence:
+  - critic found that a canonically bootstrapped DB could still hit raw legacy-helper failures
+  - packet metadata was under-classified for a K0 schema/truth-contract slice
+- Decisions frozen:
+  - reclassify the packet as schema-bearing rather than plain refactor
+  - add explicit legacy-helper misuse guards instead of leaving raw operational failures
+  - record caller-audit and concrete canonical-row evidence before acceptance
+- Open uncertainties:
+  - broader runtime consumers beyond the guarded helper set still remain later migration work
+- Next required action:
+  - land the explicit misuse guards and evidence, then rerun adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 03:28 America/Chicago] P1.2-CANONICAL-SCHEMA-BOOTSTRAP adversarial review resolved and architect approved
+- Packet: `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - packet reclassified to `schema_packet` with `schema_changes: true`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'apply_architecture_kernel_schema or transaction_boundary_helper or runtime_ready or callers or exposes_canonical_transaction_boundary_helpers'` -> `9 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent'` -> `2 passed`
+  - caller audit: `runtime_callers []`
+  - canonical row example:
+    - `canonical_event_row {'event_id': 'evt-evidence-1', 'position_id': 'pos-evidence-1', 'strategy_key': 'center_buy', 'event_type': 'POSITION_OPEN_INTENT'}`
+    - `canonical_projection_row {'position_id': 'pos-evidence-1', 'phase': 'pending_entry', 'strategy_key': 'center_buy'}`
+  - explicit transitional guard:
+    - `legacy runtime position_events helpers do not support canonically bootstrapped databases; this Stage-2 bootstrap path is not runtime-ready until a later migration/cutover packet lands`
+- Decisions frozen:
+  - this packet is a transitional Stage-2 bootstrap/guard slice, not schema convergence
+  - `init_schema()` remains the descriptive legacy/transitional runtime bootstrap in this slice
+  - replay/parity remains staged-advisory
+  - no cutover, dual-write, or DB-first read behavior is claimed
+- Open uncertainties:
+  - broader runtime compatibility for canonically bootstrapped DBs remains later migration work
+- Next required action:
+  - commit and push `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions

@@ -225,6 +225,122 @@ def test_transaction_boundary_helper_rejects_legacy_init_schema():
     conn.close()
 
 
+def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
+    from src.state.db import apply_architecture_kernel_schema, append_event_and_project
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    apply_architecture_kernel_schema(conn)
+
+    event_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+    }
+    current_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+
+    assert {"event_id", "position_id", "sequence_no", "strategy_key", "payload_json"}.issubset(event_columns)
+    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
+
+    append_event_and_project(conn, _canonical_event(), _canonical_projection())
+    event_row = conn.execute(
+        "SELECT event_id, position_id, strategy_key, event_type FROM position_events"
+    ).fetchone()
+    projection_row = conn.execute(
+        "SELECT position_id, phase, strategy_key FROM position_current WHERE position_id = 'pos-1'"
+    ).fetchone()
+
+    assert dict(event_row) == {
+        "event_id": "evt-1",
+        "position_id": "pos-1",
+        "strategy_key": "center_buy",
+        "event_type": "POSITION_OPEN_INTENT",
+    }
+    assert dict(projection_row) == {
+        "position_id": "pos-1",
+        "phase": "pending_entry",
+        "strategy_key": "center_buy",
+    }
+    conn.close()
+
+
+def test_apply_architecture_kernel_schema_rejects_legacy_runtime_position_events():
+    from src.state.db import apply_architecture_kernel_schema, init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    try:
+        apply_architecture_kernel_schema(conn)
+    except RuntimeError as exc:
+        assert "legacy position_events table blocks canonical schema bootstrap" in str(exc)
+    else:
+        raise AssertionError("expected legacy runtime schema collision to be rejected")
+
+    current_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    assert not current_columns
+    conn.close()
+
+
+def test_canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers():
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        log_position_event,
+        query_position_events,
+        query_settlement_events,
+    )
+
+    class _Pos:
+        trade_id = "legacy-rt-1"
+        state = "active"
+        env = "paper"
+        city = "NYC"
+        target_date = "2026-04-03"
+        market_id = "mkt-1"
+        bin_label = "39-40°F"
+        direction = "buy_yes"
+        strategy = "center_buy"
+        edge_source = "center_buy"
+        decision_snapshot_id = "snap-1"
+        order_id = ""
+        entry_order_id = ""
+        last_exit_order_id = ""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    for fn, args in (
+        (log_position_event, ("POSITION_SETTLED", _Pos())),
+        (query_position_events, ("legacy-rt-1",)),
+        (query_settlement_events, tuple()),
+    ):
+        try:
+            fn(conn, *args)
+        except RuntimeError as exc:
+            assert "not runtime-ready until a later migration/cutover packet lands" in str(exc)
+        else:
+            raise AssertionError(f"expected {fn.__name__} to reject canonical bootstrap DB")
+
+    conn.close()
+
+
+def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_tests():
+    forbidden_hits: list[str] = []
+    for path in ROOT.rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/state/db.py" or rel.startswith("tests/"):
+            continue
+        if "apply_architecture_kernel_schema(" in path.read_text(errors="ignore"):
+            forbidden_hits.append(rel)
+
+    assert forbidden_hits == []
+
+
 def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
     from src.state.db import append_event_and_project
 
@@ -250,6 +366,7 @@ def test_db_exposes_canonical_transaction_boundary_helpers():
     text = (ROOT / "src/state/db.py").read_text()
     assert "def append_event_and_project" in text
     assert "def append_many_and_project" in text
+    assert "def apply_architecture_kernel_schema" in text
 
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
