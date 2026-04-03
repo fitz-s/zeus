@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `Stage 2 canonical-authority rollout`
 - Active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
-- Active packet state: `frozen`
+- Active packet state: `landed locally / under review`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS` (`df0844c`)
 - Execution mode default: `solo`
@@ -23,11 +23,10 @@ Metadata:
 
 ## Current next action
 
-1. Implement the reconciliation size-correction migration in `src/state/chain_reconciliation.py`
-2. Add targeted architecture-contract coverage in `tests/test_architecture_contracts.py`
-3. Run adversarial review
-4. Accept, commit, push
-5. Freeze the successor packet only after `P1.7F` closes
+1. Commit and push `P1.7F`
+2. Determine whether the chain-quarantine branch can be packetized without inventing strategy attribution
+3. Freeze the successor packet only if repo law allows it
+4. Otherwise stop at the human-decision boundary
 
 ## Current out-of-scope dirt
 

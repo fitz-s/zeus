@@ -1293,6 +1293,195 @@ def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_sch
     conn.close()
 
 
+def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_history_exists():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["updated"] == 1
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, size_usd FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+    assert [(row["event_type"], row["sequence_no"]) for row in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+        ("CHAIN_SIZE_CORRECTED", 4),
+    ]
+    assert dict(projection_row) == {
+        "phase": "active",
+        "shares": 22.0,
+        "cost_basis_usd": 11.0,
+        "size_usd": 11.0,
+    }
+    assert portfolio.positions[0].shares == 22.0
+    conn.close()
+
+
+def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import init_schema, query_position_events
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["updated"] == 1
+    assert portfolio.positions[0].shares == 22.0
+    assert query_position_events(conn, "rt-pos-1") == []
+    conn.close()
+
+
+def test_reconciliation_size_correction_path_skips_canonical_write_without_prior_history():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["updated"] == 0
+    assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
+    assert portfolio.positions[0].shares == 20.0
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    conn.close()
+
+
+def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_rows():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.executescript(
+        """
+        ALTER TABLE position_events ADD COLUMN runtime_trade_id TEXT;
+        ALTER TABLE position_events ADD COLUMN position_state TEXT;
+        ALTER TABLE position_events ADD COLUMN strategy TEXT;
+        ALTER TABLE position_events ADD COLUMN source TEXT;
+        ALTER TABLE position_events ADD COLUMN details_json TEXT;
+        ALTER TABLE position_events ADD COLUMN timestamp TEXT;
+        ALTER TABLE position_events ADD COLUMN env TEXT;
+        """
+    )
+
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "hybrid position_events schema" in str(exc)
+    else:
+        raise AssertionError("expected hybrid drift size-correction path to fail loudly")
+
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    assert [(row["event_type"], row["sequence_no"]) for row in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+    ]
+    assert portfolio.positions[0].shares == 20.0
+    conn.close()
+
+
+def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("append-failed")
+
+    monkeypatch.setattr("src.state.db.append_many_and_project", _boom)
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "canonical reconciliation size-correction dual-write failed" in str(exc)
+    else:
+        raise AssertionError("expected size-correction dual-write failure to surface explicitly")
+
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    assert [(row["event_type"], row["sequence_no"]) for row in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+    ]
+    assert portfolio.positions[0].shares == 20.0
+    conn.close()
+
+
 def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows():
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile

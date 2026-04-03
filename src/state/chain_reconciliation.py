@@ -137,6 +137,37 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             raise RuntimeError(f"canonical rescue baseline phase mismatch: expected pending_entry, got {phase!r}")
         return True
 
+    def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
+        if conn is None:
+            return False
+        try:
+            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
+        except Exception:
+            return False
+        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
+
+        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        if has_canonical and has_legacy:
+            raise RuntimeError("reconciliation size-correction does not support hybrid position_events schema")
+        try:
+            row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        if row is None:
+            if _has_canonical_position_history(position_id):
+                raise RuntimeError("canonical size-correction baseline missing current projection")
+            return False
+        phase = str(row[0] or "")
+        if phase != expected_phase:
+            raise RuntimeError(
+                f"canonical size-correction baseline phase mismatch: expected {expected_phase!r}, got {phase!r}"
+            )
+        return True
+
     def _append_canonical_rescue_if_available(position: Position) -> bool:
         if conn is None:
             return False
@@ -156,6 +187,38 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         except Exception as exc:
             raise RuntimeError(
                 f"canonical reconciliation rescue dual-write failed for {position.trade_id}: {exc}"
+            ) from exc
+
+        return True
+
+    def _append_canonical_size_correction_if_available(
+        position: Position,
+        *,
+        local_shares_before: float,
+    ) -> bool:
+        if conn is None:
+            return False
+        expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
+        if not _canonical_size_correction_baseline_available(
+            getattr(position, "trade_id", ""),
+            expected_phase=expected_phase,
+        ):
+            return False
+
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project
+
+        try:
+            events, projection = build_chain_size_corrected_canonical_write(
+                position,
+                local_shares_before=local_shares_before,
+                sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                source_module="src.state.chain_reconciliation",
+            )
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            raise RuntimeError(
+                f"canonical reconciliation size-correction dual-write failed for {position.trade_id}: {exc}"
             ) from exc
 
         return True
@@ -349,21 +412,39 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             stats["voided"] += 1
         else:
             local_shares = pos.effective_shares
-            pos.chain_state = "synced"
-            pos.chain_shares = chain.size
-            pos.chain_verified_at = now
-            pos.condition_id = pos.condition_id or chain.condition_id
+            corrected = replace(pos)
+            corrected.chain_state = "synced"
+            corrected.chain_shares = chain.size
+            corrected.chain_verified_at = now
+            corrected.condition_id = corrected.condition_id or chain.condition_id
             if chain.avg_price > 0:
-                pos.entry_price = chain.avg_price
+                corrected.entry_price = chain.avg_price
             if chain.cost > 0:
-                pos.cost_basis_usd = chain.cost
-                pos.size_usd = chain.cost
+                corrected.cost_basis_usd = chain.cost
+                corrected.size_usd = chain.cost
             if abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
-                pos.shares = chain.size
+                corrected.shares = chain.size
+                if not _append_canonical_size_correction_if_available(
+                    corrected,
+                    local_shares_before=local_shares,
+                ) and not _legacy_rescue_query_available():
+                    stats["skipped_size_correction_missing_canonical_baseline"] = (
+                        stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
+                    )
+                    continue
                 stats["updated"] += 1
-            if pos.state in {"entered", "unknown"}:
-                pos.state = "holding"
+            if corrected.state in {"entered", "unknown"}:
+                corrected.state = "holding"
+            pos.chain_state = corrected.chain_state
+            pos.chain_shares = corrected.chain_shares
+            pos.chain_verified_at = corrected.chain_verified_at
+            pos.condition_id = corrected.condition_id
+            pos.entry_price = corrected.entry_price
+            pos.cost_basis_usd = corrected.cost_basis_usd
+            pos.size_usd = corrected.size_usd
+            pos.shares = corrected.shares
+            pos.state = corrected.state
             stats["synced"] += 1
 
     # Rule 3: Chain but NOT local → QUARANTINE (skip ignored tokens)

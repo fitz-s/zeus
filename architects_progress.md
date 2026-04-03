@@ -33,7 +33,7 @@ Archive policy:
 - Mainline stage: `Stage 2 canonical-authority rollout`
 - Last accepted packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS` (`df0844c`)
 - Current active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
-- Current packet status: `frozen`
+- Current packet status: `landed locally / under review`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
@@ -580,5 +580,51 @@ Archive policy:
 - Next required action:
   - land the size-correction migration and targeted tests
   - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 12:38 America/Chicago] P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE landed locally with green targeted evidence
+- Author: `Architects mainline lead`
+- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Status delta:
+  - reconciliation size-correction branch now appends canonical `CHAIN_SIZE_CORRECTED` lifecycle facts when canonical schema is present and prior canonical position history exists
+  - targeted size-correction caller-migration evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'reconciliation_size_correction_path_writes_canonical_rows_when_prior_history_exists or reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db or reconciliation_size_correction_path_skips_canonical_write_without_prior_history or reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_rows or reconciliation_size_correction_failure_is_explicit_before_in_memory_mutation or chain_size_corrected_builder or chain_quarantined_builder or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `21 passed`
+- Decisions frozen:
+  - canonical size-correction writes only occur when prior canonical position history exists
+  - legacy size-correction behavior remains on legacy-schema runtimes
+  - hybrid or invalid canonical baselines fail loudly before new canonical rows are appended
+  - no broader reconciliation migration or cutover claim is made in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the size-correction migration claim
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:39 America/Chicago] P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE adversarial review resolved and architect approved
+- Author: `Architects mainline lead`
+- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Status delta:
+  - explicit adversarial review completed
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - attack review found no blocker-level issue in the size-correction-only claim
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'reconciliation_size_correction_path_writes_canonical_rows_when_prior_history_exists or reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db or reconciliation_size_correction_path_skips_canonical_write_without_prior_history or reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_rows or reconciliation_size_correction_failure_is_explicit_before_in_memory_mutation or chain_size_corrected_builder or chain_quarantined_builder or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `21 passed`
+- Decisions frozen:
+  - canonical size-correction writes only occur when prior canonical position history exists
+  - legacy size-correction behavior remains on legacy-schema runtimes
+  - hybrid or invalid canonical baselines fail loudly before new canonical rows are appended
+  - no broader reconciliation migration or cutover claim is made in this packet
+- Open uncertainties:
+  - the remaining chain-quarantine branch still lacks a safe strategy-key source in repo truth
+- Next required action:
+  - commit and push `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
 - Owner:
   - Architects mainline lead
