@@ -31,9 +31,9 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `Stage 2 canonical-authority rollout`
-- Last accepted packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS` (`719b6b7`)
-- Current active packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
-- Current packet status: `landed locally / under review`
+- Last accepted packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE` (`b1abe44`)
+- Current active packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Current packet status: `frozen`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
@@ -374,6 +374,46 @@ Archive policy:
   - adversarial review has not yet attacked the pending-fill rescue migration claim
 - Next required action:
   - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:21 America/Chicago] P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
+- Status delta:
+  - packet committed as `b1abe44`
+  - packet pushed to `origin/Architects`
+  - first reconciliation pending-fill rescue caller migration is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to `chain_reconciliation.py`, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - canonical rescue writes only occur when prior canonical position history exists and the current canonical projection phase is `pending_entry`
+  - legacy rescue behavior remains on legacy-schema runtimes
+  - no broader reconciliation migration or cutover claim is made in this packet
+- Open uncertainties:
+  - remaining reconciliation event families are still ahead
+- Next required action:
+  - freeze the chain-event builder packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:21 America/Chicago] P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - pending-fill rescue branch is now migrated
+  - remaining reconciliation event families include chain size correction and quarantine facts
+- Decisions frozen:
+  - keep this slice on chain-event builders only
+  - do not widen to caller migration in this packet
+  - keep team closed by default
+- Open uncertainties:
+  - exact chain-event builder signatures still need implementation review
+- Next required action:
+  - land the builder layer and targeted tests
+  - then run adversarial review
 - Owner:
   - Architects mainline lead
 

@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
-- Active packet state: `landed locally / under review`
+- Active packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Active packet state: `frozen`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS` (`719b6b7`)
+- Last accepted packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE` (`b1abe44`)
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,10 +23,11 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next remaining reconciliation event-builder packet
-2. Continue the remaining P1 reconciliation family packet-by-packet
-3. Keep parity/cutover out of scope until the dual-write family is genuinely complete
-4. Keep team closed unless a later packet clearly justifies it
+1. Implement the reconciliation chain-event builder layer in `src/engine/lifecycle_events.py`
+2. Add targeted architecture-contract coverage in `tests/test_architecture_contracts.py`
+3. Run adversarial review
+4. Accept, commit, push
+5. Freeze the successor packet only after `P1.7E` closes
 
 ## Current out-of-scope dirt
 
@@ -39,5 +40,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE.md`
+5. `work_packets/P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS.md`
 6. current packet `required_reads`

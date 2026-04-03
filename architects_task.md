@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
-- State: `APPROVED / READY TO COMMIT`
+- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- State: `FROZEN / READY TO IMPLEMENT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Migrate the reconciliation pending-fill rescue path to append canonical rescue/sync lifecycle facts when canonical schema is present, prior canonical position history exists, and the current canonical projection phase is `pending_entry`, while preserving existing legacy behavior on legacy-schema runtimes and keeping other reconciliation paths untouched.
+Extend `src/engine/lifecycle_events.py` with pure reconciliation chain-event builders for chain size correction and quarantine facts so later reconciliation packets can append those canonical lifecycle facts without inventing payloads inline.
 
 ## Allowed files
 
-- `work_packets/P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE.md`
-- `src/state/chain_reconciliation.py`
+- `work_packets/P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS.md`
+- `src/engine/lifecycle_events.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -48,7 +48,7 @@ Migrate the reconciliation pending-fill rescue path to append canonical rescue/s
 - `src/state/chronicler.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
-- `src/engine/lifecycle_events.py`
+- `src/state/chain_reconciliation.py`
 - `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -59,7 +59,7 @@ Migrate the reconciliation pending-fill rescue path to append canonical rescue/s
 
 ## Non-goals
 
-- no reconciliation caller migration beyond pending-fill rescue
+- no reconciliation caller migration
 - no broader dual-write in caller code
 - no DB-first reads
 - no exit-path migration
@@ -73,17 +73,17 @@ Migrate the reconciliation pending-fill rescue path to append canonical rescue/s
 
 ## Immediate checklist
 
-- [x] implement reconciliation pending-fill rescue dual-write in `src/state/chain_reconciliation.py`
-- [x] keep legacy rescue behavior in place on legacy-schema runtimes
-- [x] add targeted architecture-contract coverage
-- [x] append durable packet transition to `architects_progress.md` when implementation lands
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] implement reconciliation chain-event builders in `src/engine/lifecycle_events.py`
+- [ ] keep the builder layer detached from reconciliation caller wiring
+- [ ] add targeted architecture-contract coverage
+- [ ] append durable packet transition to `architects_progress.md` when implementation lands
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Commit and push this accepted reconciliation rescue packet without mixing unrelated working-tree dirt.
-2. Freeze the next remaining reconciliation event-builder packet after push.
-3. Keep other reconciliation branches and broader state rewiring out of scope.
-4. Keep team closed by default.
+1. Add the pure reconciliation chain-event builder layer.
+2. Keep caller migration for a later packet.
+3. Keep cutover and broader state rewiring out of scope.
+4. Keep unrelated working-tree dirt out of the packet commit.
