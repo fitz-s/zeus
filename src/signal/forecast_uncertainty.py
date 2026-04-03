@@ -551,7 +551,7 @@ def day0_nowcast_context(
             age_hours = None
             freshness_factor = 0.0
     trusted_source = source_factor >= 1.0
-    fresh_observation = freshness_factor > 0.0
+    fresh_observation = age_hours is not None and age_hours <= 1.0 and freshness_factor > 0.0
 
     return {
         "hours_remaining": float(hours_remaining),

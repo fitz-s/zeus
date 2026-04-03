@@ -197,6 +197,20 @@ class TestDay0Signal:
         assert p_stale[5] + p_stale[6] > p_fresh[5] + p_fresh[6]
         assert p_stale[3] < p_fresh[3]
 
+    def test_one_and_half_hour_old_trusted_post_sunset_observation_does_not_count_as_fresh(self):
+        sig = Day0Signal(
+            observed_high_so_far=38.0,
+            current_temp=36.0,
+            hours_remaining=8.0,
+            member_maxes_remaining=np.full(51, 50.0),
+            daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T01:30:00+00:00",
+        )
+        assert sig.forecast_context()["backbone"]["nowcast"]["fresh_observation"] is False
+        assert sig.observation_weight() < 1.0
+
     def test_untrusted_observation_source_does_not_activate_nowcast_blend(self):
         sig = Day0Signal(
             observed_high_so_far=45.0,
