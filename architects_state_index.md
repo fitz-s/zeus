@@ -6,25 +6,25 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.2 freeze pass`
+- Last updated by: `Codex P3.2 closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 strategy-aware protective spine`
-- Active packet: `P3.2-POLICY-RESOLVER`
-- Active packet state: `frozen / ready for execution`
+- Stage: `P3 pre-freeze after policy resolver`
+- Active packet: `none`
+- Active packet state: `awaiting next freeze`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Last accepted packet: `P3.2-POLICY-RESOLVER`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - next packet still defaults to `NO_TEAM_DEFAULT`
 
 ## Current next action
 
-1. Read the current packet `required_reads` before implementation.
-2. Keep `P3.2-POLICY-RESOLVER` confined to policy resolution only.
+1. Freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues.
+2. Keep the next P3 slice on evaluator consumption only.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -41,4 +41,4 @@ Metadata:
 3. `architects_task.md`
 4. `architects_progress.md`
 5. `work_packets/P3.2-POLICY-RESOLVER.md`
-6. current packet `required_reads`
+6. freeze the next packet before further implementation
