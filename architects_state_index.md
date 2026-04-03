@@ -11,25 +11,25 @@ Metadata:
 
 ## Current state
 
-- Stage: `Stage 3 / P2 execution-truth mainline`
-- Active packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
-- Active packet state: `frozen / ready for execution`
+- Stage: `Stage 3 / P2 execution-truth mainline closed`
+- Active packet: `none (P2 closed)`
+- Active packet state: `idle / run-horizon stop boundary reached`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
+- Last accepted packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - no team is active
 
 ## Current next action
 
-1. Execute `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
-2. Keep scope on the economic-close/settlement split only
-3. Do not widen into cutover or broader migration claims in this packet
+1. No active P2 work remains.
+2. If/when mainline resumes beyond this stop boundary, freeze `P3.1-STRATEGY-POLICY-TABLES` next.
+3. Keep out-of-scope dirt excluded from any future commit.
 
 ## Current out-of-scope dirt
 
-- `AGENTS.md` has unrelated local dirt outside the active packet scope
+- `AGENTS.md` has unrelated local dirt outside the closed packet scope
 - `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
 
 ## Fresh-session read order
@@ -38,5 +38,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT.md`
-6. current packet `required_reads`
+5. if resuming: freeze the first P3 packet before implementation

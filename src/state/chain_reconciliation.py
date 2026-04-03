@@ -383,6 +383,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             stats["synced"] += 1
             continue
 
+        if pos.state == "economically_closed":
+            stats["skipped_economically_closed"] = stats.get("skipped_economically_closed", 0) + 1
+            continue
+
         if chain is None:
             if skip_voiding:
                 continue  # Don't void — API response is suspect

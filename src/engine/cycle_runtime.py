@@ -413,6 +413,9 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if pending_exit_resolution["action"] == "skip":
             summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
             continue
+        if pos.state == "economically_closed":
+            summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
+            continue
         if pos.exit_state in ("sell_placed", "sell_pending"):
             continue
         if pos.exit_state == "backoff_exhausted":

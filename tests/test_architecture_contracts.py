@@ -430,6 +430,7 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
     assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantined")) == "quarantined"
     assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantine_expired")) == "quarantined"
     assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
+    assert canonical_phase_for_position(_runtime_position(state="economically_closed")) == "economically_closed"
     assert canonical_phase_for_position(_runtime_position(state="settled")) == "settled"
     assert canonical_phase_for_position(_runtime_position(state="admin_closed")) == "admin_closed"
 
@@ -1881,6 +1882,52 @@ def test_harvester_settlement_path_uses_day0_window_as_phase_before_when_applica
     ).fetchone()
     assert dict(event_row) == {
         "phase_before": "day0_window",
+        "phase_after": "settled",
+    }
+    conn.close()
+
+
+def test_harvester_settlement_path_uses_economically_closed_phase_before_when_applicable():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="economically_closed", chain_state="synced")
+    pos.exit_price = 0.46
+    pos.exit_reason = "forward edge failed"
+    pos.pnl = 1.5
+    pos.last_exit_at = "2026-04-03T00:30:00Z"
+    entry_events, entry_projection = build_entry_canonical_write(
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 1
+    event_row = conn.execute(
+        "SELECT phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    assert dict(event_row) == {
+        "phase_before": "economically_closed",
         "phase_after": "settled",
     }
     conn.close()

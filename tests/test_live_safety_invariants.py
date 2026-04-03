@@ -398,6 +398,38 @@ def test_chain_reconciliation_does_not_void_exit_in_flight_positions(exit_state)
     assert healthy.condition_id == "cond-live-1"
 
 
+def test_chain_reconciliation_does_not_void_economically_closed_positions():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    exiting = _make_position(
+        trade_id="economic-close-1",
+        token_id="tok_econ_001",
+        no_token_id="tok_econ_no_001",
+        state="economically_closed",
+        exit_state="sell_filled",
+        chain_state="synced",
+    )
+    healthy = _make_position(
+        trade_id="healthy-sync-1",
+        token_id="tok_live_001",
+        no_token_id="tok_live_no_001",
+        state="holding",
+        chain_state="unknown",
+        condition_id="cond-live-1",
+    )
+    portfolio = _make_portfolio(exiting, healthy)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_live_001", size=25.0, avg_price=0.40, cost=10.0, condition_id="cond-live-1")],
+    )
+
+    assert stats["voided"] == 0
+    assert stats["skipped_economically_closed"] == 1
+    assert exiting in portfolio.positions
+    assert healthy.chain_state == "synced"
+
+
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     from src.state.chain_reconciliation import ChainPosition, reconcile
 

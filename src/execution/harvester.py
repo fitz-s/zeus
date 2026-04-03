@@ -33,7 +33,11 @@ from src.state.db import (
     query_settlement_events,
 )
 from src.state.portfolio import (
-    PortfolioState, close_position, load_portfolio, save_portfolio, void_position,
+    PortfolioState,
+    compute_settlement_close,
+    load_portfolio,
+    save_portfolio,
+    void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
 
@@ -63,6 +67,8 @@ def _has_canonical_position_history(conn, position_id: str) -> bool:
 
 
 def _canonical_phase_before_for_settlement(pos) -> str:
+    if getattr(pos, "state", "") == "economically_closed":
+        return "economically_closed"
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
@@ -73,6 +79,7 @@ def _dual_write_canonical_settlement_if_available(
     winning_bin: str,
     won: bool,
     outcome: int,
+    phase_before: str | None = None,
 ) -> bool:
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project
@@ -91,7 +98,7 @@ def _dual_write_canonical_settlement_if_available(
             won=won,
             outcome=outcome,
             sequence_no=_next_canonical_sequence_no(conn, getattr(pos, "trade_id", "")),
-            phase_before=_canonical_phase_before_for_settlement(pos),
+            phase_before=phase_before or _canonical_phase_before_for_settlement(pos),
             source_module="src.execution.harvester",
         )
         append_many_and_project(conn, events, projection)
@@ -593,7 +600,11 @@ def _settle_positions(
             exit_price = 1.0 if won else 0.0
         else:
             exit_price = 1.0 if not won else 0.0
-        closed = close_position(portfolio, pos.trade_id, exit_price, "SETTLEMENT")
+        phase_before = _canonical_phase_before_for_settlement(pos)
+        settlement_price = exit_price
+        if getattr(pos, "state", "") == "economically_closed":
+            settlement_price = getattr(pos, "exit_price", exit_price)
+        closed = compute_settlement_close(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
         pnl = closed.pnl if closed is not None else round(shares * exit_price - pos.size_usd, 2)
         outcome = 1 if exit_price > 0 else 0
 
@@ -657,6 +668,7 @@ def _settle_positions(
             winning_bin=winning_label,
             won=won,
             outcome=outcome,
+            phase_before=phase_before,
         )
         settled += 1
 

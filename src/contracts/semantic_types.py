@@ -19,6 +19,7 @@ class LifecycleState(str, Enum):
     ENTERED = "entered"
     HOLDING = "holding"
     DAY0_WINDOW = "day0_window"
+    ECONOMICALLY_CLOSED = "economically_closed"
     SETTLED = "settled"
     VOIDED = "voided"
     ADMIN_CLOSED = "admin_closed"

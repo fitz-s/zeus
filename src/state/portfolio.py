@@ -788,31 +788,71 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
     return ordered
 
 
+INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed"})
+
+
+def _compute_realized_pnl(position: Position, exit_price: float) -> float:
+    if position.entry_price <= 0:
+        return 0.0
+    return round(position.effective_shares * exit_price - position.effective_cost_basis_usd, 2)
+
+
+def compute_economic_close(
+    state: PortfolioState,
+    trade_id: str,
+    exit_price: float,
+    exit_reason: str,
+) -> Optional[Position]:
+    """Mark a position economically closed without removing it from runtime truth."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    for pos in state.positions:
+        if pos.trade_id != trade_id:
+            continue
+        pos.state = "economically_closed"
+        pos.exit_price = exit_price
+        pos.exit_reason = exit_reason
+        pos.last_exit_at = now
+        pos.pnl = _compute_realized_pnl(pos, exit_price)
+        _track_exit(state, pos)
+        return pos
+    return None
+
+
+def compute_settlement_close(
+    state: PortfolioState,
+    trade_id: str,
+    settlement_price: float,
+    exit_reason: str = "SETTLEMENT",
+) -> Optional[Position]:
+    """Finalize settlement and remove the position from active runtime truth."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    closed = None
+
+    for pos_ref in list(state.positions):
+        if pos_ref.trade_id != trade_id:
+            continue
+        pos = state.positions.pop(state.positions.index(pos_ref))
+        was_economically_closed = pos.state == "economically_closed"
+        pos.state = "settled"
+        pos.last_exit_at = now
+        if not was_economically_closed:
+            pos.exit_price = settlement_price
+            pos.exit_reason = exit_reason
+            pos.pnl = _compute_realized_pnl(pos, settlement_price)
+            _track_exit(state, pos)
+        closed = pos
+
+    return closed
+
+
 def close_position(
     state: PortfolioState, trade_id: str,
     exit_price: float, exit_reason: str,
 ) -> Optional[Position]:
-    """Close a position with known exit price. Computes P&L.
-
-    L4: closes ALL same-token positions (handles GHOST_DUPLICATE).
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    closed = None
-
-    for i, p in enumerate(list(state.positions)):
-        if p.trade_id == trade_id:
-            pos = state.positions.pop(state.positions.index(p))
-            pos.state = "settled"
-            pos.exit_price = exit_price
-            pos.exit_reason = exit_reason
-            pos.last_exit_at = now
-            # P&L: (exit - entry) * shares
-            if pos.entry_price > 0:
-                pos.pnl = round(pos.effective_shares * exit_price - pos.effective_cost_basis_usd, 2)
-            _track_exit(state, pos)
-            closed = pos
-
-    return closed
+    """Legacy settlement terminalizer. Delegates to compute_settlement_close."""
+    return compute_settlement_close(state, trade_id, exit_price, exit_reason)
 
 
 def void_position(
@@ -935,11 +975,11 @@ def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]
     local metadata (city, range, direction, decision context).
     """
     if chain_view is None or getattr(chain_view, "is_stale", True):
-        return [p for p in state.positions if p.state not in ("voided", "settled")]
+        return [p for p in state.positions if p.state not in INACTIVE_RUNTIME_STATES]
 
     merged = []
     for pos in state.positions:
-        if pos.state in ("voided", "settled"):
+        if pos.state in INACTIVE_RUNTIME_STATES:
             continue
 
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -961,7 +1001,7 @@ def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]
 
 def total_exposure_usd(state: PortfolioState) -> float:
     """Total open exposure in USD."""
-    return sum(p.size_usd for p in state.positions)
+    return sum(p.size_usd for p in state.positions if p.state not in INACTIVE_RUNTIME_STATES)
 
 
 def portfolio_heat_for_bankroll(state: PortfolioState, bankroll: float) -> float:
@@ -975,7 +1015,7 @@ def city_exposure_for_bankroll(state: PortfolioState, city: str, bankroll: float
     """City exposure against an explicit entry bankroll/cap."""
     if bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.city == city)
+    total = sum(p.size_usd for p in state.positions if p.city == city and p.state not in INACTIVE_RUNTIME_STATES)
     return total / bankroll
 
 
@@ -983,7 +1023,7 @@ def cluster_exposure_for_bankroll(state: PortfolioState, cluster: str, bankroll:
     """Cluster exposure against an explicit entry bankroll/cap."""
     if bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.cluster == cluster)
+    total = sum(p.size_usd for p in state.positions if p.cluster == cluster and p.state not in INACTIVE_RUNTIME_STATES)
     return total / bankroll
 
 
@@ -998,7 +1038,7 @@ def city_exposure(state: PortfolioState, city: str) -> float:
     """Exposure to a specific city as fraction of bankroll."""
     if state.effective_bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.city == city)
+    total = sum(p.size_usd for p in state.positions if p.city == city and p.state not in INACTIVE_RUNTIME_STATES)
     return total / state.effective_bankroll
 
 
@@ -1006,7 +1046,7 @@ def cluster_exposure(state: PortfolioState, cluster: str) -> float:
     """Exposure to a cluster/region as fraction of bankroll."""
     if state.effective_bankroll <= 0:
         return 0.0
-    total = sum(p.size_usd for p in state.positions if p.cluster == cluster)
+    total = sum(p.size_usd for p in state.positions if p.cluster == cluster and p.state not in INACTIVE_RUNTIME_STATES)
     return total / state.effective_bankroll
 
 

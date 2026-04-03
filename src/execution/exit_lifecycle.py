@@ -1,10 +1,10 @@
 """Exit lifecycle: state machine for live sell orders.
 
-GOLDEN RULE: close_position() is ONLY called after CLOB confirms FILLED.
-In paper mode, close_position() is called directly (no chain interaction).
+GOLDEN RULE: confirmed sell fill creates economic close, not settlement.
+Settlement remains a later harvester-owned transition.
 
 State machine:
-  "" → exit_intent → sell_placed → sell_pending → sell_filled (close_position)
+  "" → exit_intent → sell_placed → sell_pending → sell_filled (economically_closed)
                     ↘ retry_pending → (back to "" after cooldown for re-evaluation)
                     → backoff_exhausted (hold to settlement, stop retrying)
   exit_intent with no order = stranded by exception → recovered via check_pending_exits
@@ -22,10 +22,10 @@ from typing import Optional
 from src.execution.collateral import check_sell_collateral
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.portfolio import (
+    compute_economic_close,
     ExitContext,
     Position,
     PortfolioState,
-    close_position,
     void_position,
 )
 
@@ -175,7 +175,7 @@ def execute_exit(
 
     if paper_mode:
         position.exit_state = "exit_intent"
-        closed = close_position(
+        closed = compute_economic_close(
             portfolio,
             position.trade_id,
             exit_intent.current_market_price,
@@ -330,7 +330,7 @@ def _execute_live_exit(
             status = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
                 actual_price = _extract_fill_price(sell_result, current_market_price, best_bid)
-                closed = close_position(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
+                closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
                     closed.exit_state = "sell_filled"
                     if conn is not None:
@@ -463,7 +463,7 @@ def check_pending_exits(
             # Filled! Close the position.
             actual_price = pos.last_monitor_market_price or pos.entry_price
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
-            closed = close_position(portfolio, pos.trade_id, actual_price, exit_reason)
+            closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
                 closed.exit_state = "sell_filled"
                 stats["filled_positions"].append(closed)

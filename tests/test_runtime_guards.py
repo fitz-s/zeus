@@ -31,7 +31,16 @@ from src.contracts.exceptions import ObservationUnavailableError
 from src.state.db import get_connection, init_schema, query_position_events
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
-from src.state.portfolio import ExitContext, ExitDecision, PortfolioState, Position, load_portfolio, save_portfolio
+from src.state.portfolio import (
+    ExitContext,
+    ExitDecision,
+    PortfolioState,
+    Position,
+    load_portfolio,
+    portfolio_heat,
+    save_portfolio,
+    total_exposure_usd,
+)
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge, Day0TemporalContext
 
@@ -2255,7 +2264,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert summary["monitors"] == 1
     assert summary["exits"] == 1
     assert artifact.exit_cases == []
-    assert portfolio.positions == []
+    assert portfolio.positions == [pos]
     assert captured["context"].fresh_prob == pytest.approx(0.41)
     assert captured["context"].fresh_prob_is_fresh is True
     assert captured["context"].current_market_price == pytest.approx(0.46)
@@ -2310,7 +2319,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
 
     assert fill_event["source"] == "exit_lifecycle"
     assert fill_event["runtime_trade_id"] == "live-exit-1"
-    assert fill_event["position_state"] == "settled"
+    assert fill_event["position_state"] == "economically_closed"
     assert fill_event["order_id"] == "sell-order-1"
     assert fill_event["city"] == "NYC"
     assert fill_event["target_date"] == "2026-04-01"
@@ -2331,7 +2340,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert fill_event["details"]["current_market_price"] == pytest.approx(0.46)
     assert fill_event["details"]["shares"] == pytest.approx(25.0)
 
-    assert pos.state == "settled"
+    assert pos.state == "economically_closed"
     assert pos.exit_state == "sell_filled"
     assert pos.exit_trigger == "EDGE_REVERSAL"
     assert pos.exit_reason == "forward edge failed"
@@ -2345,6 +2354,51 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert fill_event["timestamp"] != attempt_event["timestamp"]
 
     conn.close()
+
+
+def test_monitoring_skips_economically_closed_positions(monkeypatch):
+    pos = _position(
+        trade_id="econ-close-1",
+        state="economically_closed",
+        exit_state="sell_filled",
+        exit_reason="forward edge failed",
+        exit_price=0.46,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("economically closed positions should not be re-exited")
+
+    monkeypatch.setattr(Position, "evaluate_exit", lambda self, ctx: (_ for _ in ()).throw(AssertionError("economically closed positions should not be monitored for exit")))
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        type("LiveClob", (), {"paper_mode": False})(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert summary["monitor_skipped_economic_close"] == 1
+
+
+def test_economically_closed_position_does_not_count_as_open_exposure():
+    portfolio = PortfolioState(
+        bankroll=100.0,
+        positions=[
+            _position(trade_id="closed-1", state="economically_closed", size_usd=10.0),
+            _position(trade_id="open-1", state="holding", size_usd=5.0),
+        ],
+    )
+
+    assert total_exposure_usd(portfolio) == pytest.approx(5.0)
+    assert portfolio_heat(portfolio) == pytest.approx(0.05)
 
 
 def test_materialize_position_carries_semantic_snapshot_jsons():
@@ -2550,6 +2604,8 @@ def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
     )
 
     assert outcome == "paper_exit: forward edge failed"
+    assert pos in portfolio.positions
+    assert pos.state == "economically_closed"
     assert pos.exit_state == "sell_filled"
 
 

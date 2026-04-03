@@ -30,11 +30,11 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Stage 3 / P2 execution-truth mainline`
-- Last accepted packet: `P2.3-PENDING-EXIT-OWNERSHIP-HARDENING`
-- Current active packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
-- Current packet status: `frozen / ready for execution`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
+- Mainline stage: `Stage 3 / P2 execution-truth mainline closed`
+- Last accepted packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
+- Current active packet: `none (P2 closed)`
+- Current packet status: `idle / run-horizon stop boundary reached`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no active technical blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
@@ -979,5 +979,30 @@ Archive policy:
 - Next required action:
   - land the split and targeted tests
   - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 15:17 America/Chicago] P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT accepted and pushed; P2 closed
+- Author: `Architects mainline lead`
+- Packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
+- Status delta:
+  - economic close vs settlement split is now honestly accepted
+  - P2 packet chain is fully complete and accepted
+  - no remaining P2 packet is required under current repo law
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py -k 'monitoring_phase_persists_live_exit_telemetry_chain or monitoring_skips_economically_closed_positions or economically_closed_position_does_not_count_as_open_exposure or execute_exit_accepts_prebuilt_exit_intent_in_paper_mode or live_exit_never_closes_without_fill or paper_exit_does_not_use_sell_order or chain_reconciliation_does_not_void_economically_closed_positions or chain_reconciliation_does_not_void_exit_in_flight_positions or monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery or monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle'` -> `13 passed`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py tests/test_db.py -k 'lifecycle_builders_map_runtime_states_to_canonical_phases or settlement_builder_emits_settled_event_and_projection_that_append_cleanly or harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable or harvester_settlement_path_uses_economically_closed_phase_before_when_applicable or manual_portfolio_state_does_not_write_real_exit_audit or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or query_authoritative_settlement_rows_prefers_position_events'` -> `8 passed`
+  - explicit adversarial review of the final P2 packet claim returned `APPROVE`
+- Decisions frozen:
+  - exit fill now yields `economically_closed` rather than `settled`
+  - harvester is the sole owner of the final settlement transition
+  - economically closed positions are excluded from active/runtime reprocessing while awaiting settlement
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.1-STRATEGY-POLICY-TABLES`
+- Open uncertainties:
+  - no remaining uncertainty blocks P2 closure
+- Next required action:
+  - stop at the current user-request horizon (`P2 closed`)
 - Owner:
   - Architects mainline lead

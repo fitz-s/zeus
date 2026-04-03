@@ -17,68 +17,55 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
-- State: `FROZEN / READY FOR EXECUTION`
-- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
+- Packet: `none (P2 closed)`
+- State: `IDLE / RUN-HORIZON STOP BOUNDARY REACHED`
+- Execution mode: `SOLO_EXECUTE`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Split economic close from settlement so exit fill is no longer terminal settlement truth, while harvester becomes the sole owner of the final settlement transition.
+No active packet. Current run horizon is satisfied because P2 is closed.
 
 ## Allowed files
 
-- `work_packets/P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT.md`
-- `src/state/portfolio.py`
-- `src/execution/exit_lifecycle.py`
-- `src/execution/harvester.py`
-- `src/engine/cycle_runtime.py`
-- `src/engine/lifecycle_events.py`
-- `tests/test_runtime_guards.py`
-- `tests/test_live_safety_invariants.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
-- `src/riskguard/**`
-- `src/control/**`
-- `src/supervisor_api/**`
+- `src/**`
+- `tests/**`
 - `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
-- runtime cutover surfaces
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no cutover or migration claims
-- no schema changes
+- no P3 work without a new frozen packet
+- no law rewrite
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker yet inside packet scope
+- no active blocker inside P2; the current stop boundary is successful P2 closure
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] split economic-close vs settlement helpers in runtime truth
-- [ ] make exit fill non-terminal and harvester settlement terminal
-- [ ] guard economically closed positions from active reprocessing
-- [ ] verify paper/live parity and canonical mapping impacts
-- [ ] run adversarial review before acceptance
+- [x] P2 packet chain is complete and accepted
+- [x] adversarial review approved the final P2 packet claim
+- [x] P2 is closed honestly
+- [ ] if resuming, freeze `P3.1-STRATEGY-POLICY-TABLES`
 
 ## Next required action
 
-1. Land the economic-close/settlement split in the allowed files only.
-2. Verify with targeted tests and explicit adversarial review.
-3. Keep out-of-scope dirt excluded from any commit.
+1. Stop at the current user-request horizon (`P2 closed`).
+2. If continuing later, freeze the first P3 packet before any implementation.
