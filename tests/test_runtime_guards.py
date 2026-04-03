@@ -826,7 +826,162 @@ def test_strategy_classification_preserves_day0_and_update_semantics():
         MarketCandidate(discovery_mode=DiscoveryMode.UPDATE_REACTION.value, **base_candidate),
         shoulder_no,
     ) == "shoulder_sell"
+    assert evaluator_module._strategy_key_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.DAY0_CAPTURE.value, **base_candidate),
+        center_edge,
+    ) == "settlement_capture"
+    assert evaluator_module._strategy_key_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value, **base_candidate),
+        center_edge,
+    ) == "opening_inertia"
+    assert evaluator_module._strategy_key_for(
+        MarketCandidate(discovery_mode=DiscoveryMode.UPDATE_REACTION.value, **base_candidate),
+        shoulder_no,
+    ) == "shoulder_sell"
     assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
+
+
+def test_materialize_position_preserves_evaluator_strategy_key():
+    decision = evaluator_module.EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=10.0,
+        decision_id="d1",
+        selected_method="ens_member_counting",
+        edge_source="opening_inertia",
+        strategy_key="center_buy",
+    )
+    result = types.SimpleNamespace(
+        trade_id="t1",
+        fill_price=0.6,
+        submitted_price=0.6,
+        shares=5.0,
+        timeout_seconds=None,
+        order_id="o1",
+        status="filled",
+    )
+    city = types.SimpleNamespace(name="New York", cluster="US", settlement_unit="F")
+    candidate = types.SimpleNamespace(target_date="2026-04-01", hours_since_open=2.0)
+    deps = types.SimpleNamespace(
+        _utcnow=lambda: datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        _classify_edge_source=lambda mode, edge: "opening_inertia",
+        Position=cycle_runner.Position,
+        settings=types.SimpleNamespace(mode="paper"),
+    )
+
+    pos = cycle_runtime.materialize_position(
+        candidate,
+        decision,
+        result,
+        cycle_runner.PortfolioState(),
+        city,
+        DiscoveryMode.UPDATE_REACTION,
+        state="entered",
+        bankroll_at_entry=100.0,
+        deps=deps,
+    )
+
+    assert pos.strategy_key == "center_buy"
+    assert pos.strategy == "center_buy"
+
+
+def test_materialize_position_rejects_missing_strategy_key():
+    decision = evaluator_module.EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=10.0,
+        decision_id="d1",
+        selected_method="ens_member_counting",
+        edge_source="opening_inertia",
+        strategy_key="",
+    )
+    result = types.SimpleNamespace(
+        trade_id="t1",
+        fill_price=0.6,
+        submitted_price=0.6,
+        shares=5.0,
+        timeout_seconds=None,
+        order_id="o1",
+        status="filled",
+    )
+    city = types.SimpleNamespace(name="New York", cluster="US", settlement_unit="F")
+    candidate = types.SimpleNamespace(target_date="2026-04-01", hours_since_open=2.0)
+    deps = types.SimpleNamespace(
+        _utcnow=lambda: datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        _classify_edge_source=lambda mode, edge: "opening_inertia",
+        Position=cycle_runner.Position,
+        settings=types.SimpleNamespace(mode="paper"),
+    )
+
+    with pytest.raises(ValueError, match="strategy_key"):
+        cycle_runtime.materialize_position(
+            candidate,
+            decision,
+            result,
+            cycle_runner.PortfolioState(),
+            city,
+            DiscoveryMode.UPDATE_REACTION,
+            state="entered",
+            bankroll_at_entry=100.0,
+            deps=deps,
+        )
+
+
+def test_execution_stub_does_not_reinvent_strategy_without_strategy_key():
+    decision = evaluator_module.EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        decision_id="d1",
+        edge_source="opening_inertia",
+        strategy_key="",
+        decision_snapshot_id="snap1",
+    )
+    result = types.SimpleNamespace(trade_id="t1", order_id="o1", status="rejected")
+    city = types.SimpleNamespace(name="New York")
+    candidate = types.SimpleNamespace(target_date="2026-04-01")
+    deps = types.SimpleNamespace(_classify_edge_source=lambda mode, edge: "opening_inertia")
+
+    stub = cycle_runtime._execution_stub(
+        candidate,
+        decision,
+        result,
+        city,
+        DiscoveryMode.UPDATE_REACTION,
+        deps=deps,
+    )
+
+    assert stub.strategy_key == ""
+    assert stub.strategy == ""
+
+
+def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
+    path = tmp_path / "positions-paper.json"
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "t1",
+            "market_id": "m1",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2026-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "token_id": "yes123",
+            "no_token_id": "no456",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+        }],
+        "bankroll": 150.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert state.positions[0].strategy_key == "center_buy"
+    assert state.positions[0].strategy == "center_buy"
 
 
 def test_lead_days_use_city_local_reference_time():

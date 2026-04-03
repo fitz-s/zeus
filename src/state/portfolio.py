@@ -26,6 +26,13 @@ from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
 
+CANONICAL_STRATEGY_KEYS = {
+    "settlement_capture",
+    "shoulder_sell",
+    "center_buy",
+    "opening_inertia",
+}
+
 POSITIONS_PATH = state_path("positions.json")
 
 
@@ -146,6 +153,7 @@ class Position:
     applied_validations: list[str] = field(default_factory=list)
 
     # Strategy + attribution
+    strategy_key: str = ""
     strategy: str = ""  # "settlement_capture" | "shoulder_sell" | "center_buy" | "opening_inertia"
     edge_source: str = ""
     discovery_mode: str = ""
@@ -681,7 +689,15 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         filtered = {k: v for k, v in p.items() if k in position_fields}
         if "env" not in p:
             filtered["env"] = current_mode
-        positions.append(Position(**filtered))
+        pos = Position(**filtered)
+        if not pos.strategy_key and pos.strategy in CANONICAL_STRATEGY_KEYS:
+            pos.strategy_key = pos.strategy
+        if pos.strategy_key and pos.strategy and pos.strategy_key != pos.strategy:
+            raise RuntimeError(
+                f"strategy_key mismatch for {pos.trade_id}: "
+                f"strategy_key={pos.strategy_key}, strategy={pos.strategy}"
+            )
+        positions.append(pos)
 
     # Contamination guard: every position's env must match current mode
     for pos in positions:
@@ -864,6 +880,7 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "decision_snapshot_id": pos.decision_snapshot_id,
         "entered_at": pos.entered_at,
         # Strategy attribution
+        "strategy_key": pos.strategy_key,
         "strategy": pos.strategy,
         "edge_source": pos.edge_source,
         "discovery_mode": pos.discovery_mode,
