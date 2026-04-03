@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
-- State: `LANDED LOCALLY / UNDER REVIEW`
+- State: `APPROVED / READY TO COMMIT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -73,17 +73,17 @@ Migrate the reconciliation size-correction branch to append canonical `CHAIN_SIZ
 
 ## Immediate checklist
 
-- [ ] implement reconciliation size-correction dual-write in `src/state/chain_reconciliation.py`
-- [ ] keep legacy size-correction behavior in place on legacy-schema runtimes
-- [ ] add targeted architecture-contract coverage
-- [ ] append durable packet transition to `architects_progress.md` when implementation lands
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] implement reconciliation size-correction dual-write in `src/state/chain_reconciliation.py`
+- [x] keep legacy size-correction behavior in place on legacy-schema runtimes
+- [x] add targeted architecture-contract coverage
+- [x] append durable packet transition to `architects_progress.md` when implementation lands
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Migrate only the reconciliation size-correction branch.
-2. Keep quarantine and other reconciliation branches out of scope.
+1. Commit and push this accepted size-correction packet without mixing unrelated working-tree dirt.
+2. Determine whether the unresolved chain-quarantine attribution problem can be packetized without new law.
 3. Keep team closed by default.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Stop only if the next packet requires a new human decision.
