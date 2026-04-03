@@ -7,3 +7,5 @@ pandas>=2.0
 dash>=2.14
 plotly>=5.18
 pytest>=7.4
+
+PyYAML>=6.0
