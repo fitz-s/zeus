@@ -2160,6 +2160,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 06:01 America/Chicago] P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE committed and pushed
+- Packet: `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
+- Status delta:
+  - packet committed as `b6339b9`
+  - branch pushed to `origin/Architects`
+  - first harvester caller migration is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `harvester.py`, targeted tests, and control surfaces
+- Decisions frozen:
+  - harvester settlement emits canonical rows only when prior canonical position history exists
+  - legacy settlement writes remain on legacy-schema runtimes
+  - no broader reconciliation/parity/cutover claim is made in this packet
+- Open uncertainties:
+  - remaining P1 reconciliation-family work is still pending
+- Next required action:
+  - freeze the reconciliation lifecycle-event compatibility packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 06:01 America/Chicago] P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT frozen
+- Packet: `P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT`
+- Status delta:
+  - next reconciliation blocker packet frozen after P1.6D closeout
+- Basis / evidence:
+  - `log_reconciled_entry_event()` still routes through the generic legacy event helper and can fail on canonical-only DBs
+  - reconciliation is the next remaining P1 dual-write family after cycle-runtime and harvester settlement slices
+- Decisions frozen:
+  - keep this slice on reconciliation lifecycle-event compatibility only
+  - do not migrate reconciliation in this packet
+  - team remains closed by default
+- Open uncertainties:
+  - exact reconciliation-event compatibility semantics still need implementation review
+- Next required action:
+  - land the compatibility change and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
