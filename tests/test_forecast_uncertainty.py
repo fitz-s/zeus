@@ -179,6 +179,71 @@ def test_analysis_mean_context_suppresses_offset_below_sample_floor():
     assert ctx["offset"] == 0.0
 
 
+def test_analysis_mean_context_attenuates_offset_for_high_mae():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=6.0,
+        ensemble_mean=42.0,
+        city_name="NYC",
+        season="MAM",
+        forecast_source="ecmwf_ifs025",
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": 2.0,
+            "discount_factor": 0.7,
+            "n_samples": 30,
+            "mae": 1.5,
+        },
+    )
+    assert ctx["sample_factor"] == 1.0
+    assert ctx["mae"] == 1.5
+    assert 0.0 < ctx["mae_factor"] < 1.0
+    assert ctx["raw_offset"] == __import__("pytest").approx(-0.4666666666666667)
+    assert ctx["offset"] == ctx["raw_offset"]
+
+
+def test_analysis_mean_context_suppresses_offset_for_extreme_mae():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=6.0,
+        ensemble_mean=42.0,
+        city_name="NYC",
+        season="MAM",
+        forecast_source="ecmwf_ifs025",
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": 2.0,
+            "discount_factor": 0.7,
+            "n_samples": 30,
+            "mae": sigma_instrument("F").value * 4.0,
+        },
+    )
+    assert ctx["mae_factor"] == 0.0
+    assert ctx["raw_offset"] == 0.0
+    assert ctx["offset"] == 0.0
+
+
+def test_analysis_member_maxes_reflects_mae_attenuation():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(
+        raw,
+        unit="F",
+        lead_days=6.0,
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": 2.0,
+            "discount_factor": 0.7,
+            "n_samples": 30,
+            "mae": 1.5,
+        },
+    )
+    expected_offset = -0.4666666666666667
+    assert list(adjusted) == __import__("pytest").approx([v + expected_offset for v in raw])
+
+
 def test_analysis_sigma_context_explains_components():
     ctx = analysis_sigma_context(unit="F", lead_days=3.0, ensemble_spread=1.0, city_name="NYC", season="MAM", forecast_source="ecmwf_ifs025")
     assert ctx["unit"] == "F"

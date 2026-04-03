@@ -107,6 +107,8 @@ def analysis_mean_context(
     raw_offset = 0.0
     sample_factor = 1.0
     n_samples = None
+    mae = None
+    mae_factor = 1.0
     try:
         if "n_samples" in bias_reference and bias_reference.get("n_samples") is not None:
             n_samples = int(bias_reference.get("n_samples"))
@@ -115,11 +117,24 @@ def analysis_mean_context(
     except (TypeError, ValueError):
         n_samples = None
         sample_factor = 1.0
+    try:
+        if "mae" in bias_reference and bias_reference.get("mae") is not None:
+            mae = float(bias_reference.get("mae"))
+            if mae > 0 and base_sigma > 0:
+                if mae <= base_sigma:
+                    mae_factor = 1.0
+                elif mae >= base_sigma * 4.0:
+                    mae_factor = 0.0
+                else:
+                    mae_factor = 1.0 - ((mae - base_sigma) / (base_sigma * 3.0))
+    except (TypeError, ValueError):
+        mae = None
+        mae_factor = 1.0
     if not bias_corrected and bias_reference:
         try:
             bias = float(bias_reference.get("bias", 0.0))
             discount = float(bias_reference.get("discount_factor", 0.7))
-            raw_offset = -bias * discount * lead_factor * sample_factor
+            raw_offset = -bias * discount * lead_factor * sample_factor * mae_factor
         except (TypeError, ValueError):
             raw_offset = 0.0
     max_abs_offset = base_sigma * 2.0
@@ -133,6 +148,8 @@ def analysis_mean_context(
         "bias_reference": bias_reference or {},
         "n_samples": n_samples,
         "sample_factor": sample_factor,
+        "mae": mae,
+        "mae_factor": mae_factor,
         "lead_days": lead_days,
         "lead_factor": lead_factor,
         "ensemble_mean": ensemble_mean,
