@@ -216,15 +216,15 @@ class TestDay0Signal:
         dominated = Day0Signal(
             observed_high_so_far=50.0,
             current_temp=48.0,
-            hours_remaining=6.0,
+            hours_remaining=10.0,
             member_maxes_remaining=np.full(51, 45.0),
-            daylight_progress=0.5,
+            daylight_progress=0.1,
         )
         not_dominated = Day0Signal(
             observed_high_so_far=40.0,
             current_temp=38.0,
-            hours_remaining=6.0,
+            hours_remaining=10.0,
             member_maxes_remaining=np.full(51, 50.0),
-            daylight_progress=0.5,
+            daylight_progress=0.1,
         )
         assert dominated.observation_weight() > not_dominated.observation_weight()
