@@ -13,6 +13,19 @@ Current-phase or long-lived: Long-lived, with monthly command review.
 - OMC commands are the **approved secondary** orchestration path.
 - “One-key” means bootstrap + approved execution pattern, not packet-less autonomy.
 
+## 0.1 Current-phase execution gate
+
+Before foundation-mainline planning or team opening, close the remaining current-phase packet queue in this order:
+
+1. `P-BOUND-01`
+2. `P-ROLL-01`
+3. `P-STATE-01`
+4. `P-OPS-01`
+
+Only after those four packets close may Zeus:
+- write the foundation-mainline architecture plan
+- prepare team execution
+
 ## 1. OMX install / setup / doctor
 
 ```bash
@@ -48,26 +61,26 @@ $deep-interview "Clarify the Zeus packet scope, non-goals, blast radius, and evi
 
 ### Planning lock
 ```text
-$ralplan "Produce the approved Zeus work packet for WP-STATE-01. Preserve current-vs-target truth split."
+$ralplan "Produce the approved Zeus work packet for P-STATE-01. Preserve current-vs-target truth split."
 ```
 
 ### Single-owner completion loop
 ```text
-$ralph "Execute approved Zeus packet WP-STATE-01 to completion. Do not widen scope beyond the packet."
+$ralph "Execute approved Zeus packet P-STATE-01 to completion. Do not widen scope beyond the packet."
 ```
 
 ### Parallel execution
 ```text
-$team 3:executor "Execute approved Zeus packet WP-MATH-01 in parallel."
+$team 3:executor "Execute approved Zeus packet P-MATH-01 in parallel."
 ```
 
-Use `$team` only after packet approval.
+Use `$team` only after packet approval and after the current-phase `P-*` queue is closed when work is still in the tribunal lane.
 
 ## 3. OMX team runtime
 
 ### Start
 ```bash
-omx team 3:executor "execute approved Zeus packet WP-MATH-01"
+omx team 3:executor "execute approved Zeus packet P-MATH-01"
 ```
 
 ### Status
@@ -206,7 +219,7 @@ Artifacts land under:
 
 ### OMX primary package kickoff
 ```text
-$ralplan "Packet WP-STATE-01.
+$ralplan "Packet P-STATE-01.
 Objective: remove governance drift from strategy attribution and timezone fallback.
 Allowed files: src/state/strategy_tracker.py, src/data/observation_client.py, targeted tests/docs only.
 Forbidden files: migrations/**, docs/architecture/**, docs/governance/**.
@@ -215,7 +228,7 @@ Required evidence: targeted tests, architecture-contract review, rollback note."
 
 ### OMC secondary kickoff
 ```text
-/team 2:executor "Execute approved Zeus packet WP-MATH-01 only. Respect repo AGENTS, scoped AGENTS, and forbidden files."
+/team 2:executor "Execute approved Zeus packet P-MATH-01 only. Respect repo AGENTS, scoped AGENTS, and forbidden files."
 ```
 
 ### Advisory review kickoff

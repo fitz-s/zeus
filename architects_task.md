@@ -115,7 +115,7 @@ After these four packets close:
 ## Current Active Packet
 
 ### Packet
-`P-STATE-01`
+`P-OPS-01`
 
 ### State
 `VERIFIED / READY TO COMMIT`
@@ -124,17 +124,17 @@ After these four packets close:
 `RALPH_NOW`
 
 ### Objective
-Remove the highest-risk current-phase state drift by eliminating strategy fallback and authority-sensitive date fallback without widening into schema, control-plane, or authority-law edits.
+Freeze the operator command, runbook, and first-phase guidance surfaces so they explicitly gate foundation-mainline planning and team opening behind closure of the current-phase packet queue.
 
 ### Why this packet is next
 - user explicitly set the remaining queue order
-- `P-BOUND-01` and `P-ROLL-01` are now closed
-- `P-STATE-01` is the first remaining packet that touches runtime behavior directly
+- `P-BOUND-01`, `P-ROLL-01`, and `P-STATE-01` are now closed
+- `P-OPS-01` is the last remaining current-phase packet before foundation-mainline planning
 
 ### Owner model
-- Required: one named execution owner for `P-STATE-01`
+- Required: one named execution owner for `P-OPS-01`
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent runtime/evidence reviewer
+- Verifier remains independent docs/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
@@ -148,12 +148,11 @@ Remove the highest-risk current-phase state drift by eliminating strategy fallba
 
 ### Allowed edit surface
 Only the following may be edited in the next packet:
-- `src/state/strategy_tracker.py`
-- `src/data/observation_client.py`
-- targeted tests/docs only
+- `docs/governance/zeus_omx_omc_*`
+- `docs/governance/zeus_first_phase_execution_plan.md`
 - `architects_progress.md`
 - `architects_task.md`
-- `work_packets/P-STATE-01.md`
+- `work_packets/P-OPS-01.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in the next packet:
@@ -161,16 +160,15 @@ Explicitly forbidden for edits in the next packet:
 - `architecture/**`
 - `migrations/**`
 - `docs/governance/**`
-- `docs/rollout/**`
-- `src/control/**`
-- `src/supervisor_api/**`
+- `docs/rollout/**` except the allowed first-phase plan file
+- `src/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no schema widening
-- no control-plane widening
+- no runtime code edits
+- no live cutover claim
 - no authority-law rewrites
 - no team execution yet
 
@@ -178,11 +176,11 @@ Explicitly forbidden for edits in the next packet:
 - no active hard blocker
 - carry-forward fact: `P-BOUND-01` is closed and pushed in `5778e8b`
 - carry-forward fact: `P-ROLL-01` is closed and pushed in `9fa9c7a`
-- queue fact: `P-OPS-01` remains frozen behind this packet
-- no current hard blocker; targeted runtime evidence is complete
+- carry-forward fact: `P-STATE-01` is closed and pushed in `96ec8a0`
+- no current hard blocker; docs-only evidence is complete
 
 ### Ready-to-commit slice
-`P-STATE-01 landed locally — strategy_tracker no longer defaults unknown strategy to opening_inertia, observation_client no longer uses implicit date.today() fallback for ASOS→WU offset lookup, and targeted regression tests now lock both behaviors.`
+`P-OPS-01 landed locally — cookbook, runbook, and first-phase plan now explicitly gate foundation-mainline planning and team opening behind closure of the current-phase queue.`
 
 ---
 
@@ -200,9 +198,9 @@ Explicitly forbidden for edits in the next packet:
 - [x] classify each as `present`, `missing`, `partial`, or `drifted`
 
 Inventory result:
-- `src/state/strategy_tracker.py` -> `drifted / unknown strategy falls back to opening_inertia`
-- `src/data/observation_client.py` -> `drifted / _get_asos_wu_offset uses implicit date.today() fallback`
-- targeted regression tests were added in `tests/test_truth_layer.py` and `tests/test_observation_contract.py`
+- `docs/governance/zeus_omx_omc_command_cookbook.md` -> `present / examples still used legacy packet names and lacked explicit queue gate`
+- `docs/governance/zeus_omx_omc_operator_runbook.md` -> `present / lacked explicit current-phase gate before team opening`
+- `docs/governance/zeus_first_phase_execution_plan.md` -> `present / needed explicit queue-before-mainline note`
 
 ### Phase C — bounded packet design
 - [x] identify the narrowest boundary delta needed
@@ -210,24 +208,23 @@ Inventory result:
 - [x] keep all non-boundary packet families out of scope
 
 Current slice shape:
-- keep the packet limited to the two drift files plus targeted tests
-- reject unknown strategy attribution instead of inventing a governance bucket
-- require explicit target_date for authority-sensitive offset lookup
-- keep schema/control/governance surfaces out of scope
+- keep the packet docs-only
+- update examples to current `P-*` packet names
+- make the current-phase queue gate explicit before foundation-mainline planning and team opening
+- keep runtime/schema/governance-law edits out of scope
 
 ### Phase D — evidence bundle
 - [x] run `python3 scripts/check_work_packets.py`
-- [x] record targeted drift-removal note
+- [x] record operator-gate note
 - [x] append execution result to `architects_progress.md`
-- [x] run `.venv/bin/pytest -q tests/test_truth_layer.py tests/test_observation_contract.py`
+- [x] review docs-only diff
 - [ ] commit and push once the packet slice lands
 
 Evidence snapshot:
-- drift-removal note:
-  - `strategy_tracker.py` no longer invents a governance bucket for unknown strategy
-  - `observation_client.py` no longer uses implicit local-today fallback in `_get_asos_wu_offset`
-- targeted test output:
-  - `.venv/bin/pytest -q tests/test_truth_layer.py tests/test_observation_contract.py` -> `10 passed`
+- operator-gate note:
+  - current-phase queue is now explicit in command docs, runbook, and first-phase plan
+  - team opening remains blocked until the queue closes
+  - foundation-mainline planning remains blocked until the queue closes
 
 ---
 

@@ -599,6 +599,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-03 00:41 America/Chicago] P-STATE-01 committed and pushed
+- Packet: `P-STATE-01`
+- Status delta:
+  - packet committed as `96ec8a0`
+  - branch pushed to `origin/Architects`
+  - current-phase queue advanced to `P-OPS-01`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to the two drift files, targeted tests, and Architects ledgers
+- Decisions frozen:
+  - the two patch-now runtime drifts are now closed
+  - `P-OPS-01` is the final remaining current-phase packet
+- Open uncertainties:
+  - broader runtime suites remain available later, but targeted evidence for the drift surfaces is already green
+- Next required action:
+  - close `P-OPS-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-03 00:46 America/Chicago] P-OPS-01 patch landed locally
+- Packet: `P-OPS-01`
+- Status delta:
+  - command cookbook, operator runbook, and first-phase plan now encode the current-phase queue gate explicitly
+  - operator docs now say foundation-mainline planning and team opening wait until `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01` closes
+- Basis / evidence:
+  - cookbook examples updated from legacy `WP-*` examples to current `P-*` examples
+  - runbook now states the current-phase queue gate before team opening
+  - first-phase execution plan now records the queue that must close before foundation-mainline planning
+- Decisions frozen:
+  - `P-OPS-01` remains docs-only
+  - team opening is still explicitly blocked until this packet itself is closed
+- Open uncertainties:
+  - the next phase after this packet is no longer another current-phase packet; it is foundation-mainline planning
+- Next required action:
+  - verify packet grammar and docs-only diff, then commit and push `P-OPS-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
