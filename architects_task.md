@@ -56,7 +56,7 @@ Closed current-phase queue:
 `FOUNDATION-MAINLINE-PLAN`
 
 ### State
-`READY TO FREEZE`
+`FROZEN / PUSHED / READY TO EXECUTE`
 
 ### Execution mode verdict
 `RALPLAN_NEXT`
@@ -108,11 +108,12 @@ Explicitly forbidden for edits in this planning packet:
 
 ### Current blocker
 - no active hard blocker
-- the planning packet is now frozen
+- the planning packet is now frozen and pushed in `7fff4d4`
 - the next blocker is executional: the stage-map/planning artifact itself is not yet written
+- repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside this packet’s versioned scope
 
 ### Ready-to-commit slice
-`Planning freeze landed locally — the next execution slice is to extract the stage map, goals, automation path, and team-opening gate from the tribunal overlay and mature foundation package.`
+`Planning freeze is pushed — the next execution slice is to extract the stage map, goals, automation path, and team-opening gate from the tribunal overlay and mature foundation package.`
 
 ---
 
@@ -137,8 +138,8 @@ Explicitly forbidden for edits in this planning packet:
 - [ ] keep the completed current-phase queue closed
 
 ### Phase D — evidence bundle
-- [ ] append planning freeze result to `architects_progress.md`
-- [ ] commit and push the planning freeze
+- [x] append planning freeze result to `architects_progress.md`
+- [x] commit and push the planning freeze
 
 ---
 
