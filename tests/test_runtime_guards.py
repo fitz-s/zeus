@@ -36,6 +36,7 @@ from src.state.portfolio import (
     ExitDecision,
     PortfolioState,
     Position,
+    has_same_city_range_open,
     load_portfolio,
     portfolio_heat,
     save_portfolio,
@@ -688,6 +689,7 @@ def test_chain_quarantine_keeps_direction_unknown():
     assert stats["quarantined"] == 1
     pos = portfolio.positions[0]
     assert pos.direction == "unknown"
+    assert pos.state == "quarantined"
     assert pos.chain_state == "quarantined"
     assert pos.strategy == ""
 
@@ -1738,6 +1740,8 @@ def test_monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery
     assert p_dirty is True
     assert t_dirty is True
     assert portfolio.positions == []
+    assert tracker.exits[0].state == "admin_closed"
+    assert tracker.exits[0].admin_exit_reason == "EXIT_CHAIN_MISSING_REVIEW_REQUIRED"
     assert tracker.exits[0].exit_reason == "EXIT_CHAIN_MISSING_REVIEW_REQUIRED"
     assert summary["exit_chain_missing_closed"] == 1
 
@@ -1775,7 +1779,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
-        state="voided",
+        state="admin_closed",
         exit_reason="EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
     )
 
@@ -1801,6 +1805,43 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
     assert p_dirty is True
     assert t_dirty is True
     assert summary["exit_chain_missing_closed"] == 1
+
+
+def test_monitoring_skips_backoff_exhausted_chain_missing_until_settlement():
+    pos = Position(
+        trade_id="backoff-missing-chain",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="exit_pending_missing",
+        exit_state="backoff_exhausted",
+        next_exit_retry_at=None,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("backoff_exhausted chain-missing positions should wait for settlement, not admin-close")
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        type("LiveClob", (), {"paper_mode": False})(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert portfolio.positions == [pos]
+    assert summary["monitor_skipped_exit_pending_missing"] == 1
 
 
 def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
@@ -2297,7 +2338,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert posted_event["details"]["last_exit_order_id"] == "sell-order-1"
     assert attempt_event["source"] == "exit_lifecycle"
     assert attempt_event["runtime_trade_id"] == "live-exit-1"
-    assert attempt_event["position_state"] == "day0_window"
+    assert attempt_event["position_state"] == "pending_exit"
     assert attempt_event["order_id"] == "sell-order-1"
     assert attempt_event["city"] == "NYC"
     assert attempt_event["target_date"] == "2026-04-01"
@@ -2399,6 +2440,17 @@ def test_economically_closed_position_does_not_count_as_open_exposure():
 
     assert total_exposure_usd(portfolio) == pytest.approx(5.0)
     assert portfolio_heat(portfolio) == pytest.approx(0.05)
+
+
+def test_inactive_positions_do_not_count_as_same_city_range_open():
+    portfolio = PortfolioState(
+        positions=[
+            _position(trade_id="closed-1", state="economically_closed", city="NYC", bin_label="39-40°F"),
+            _position(trade_id="admin-1", state="admin_closed", city="NYC", bin_label="39-40°F"),
+        ],
+    )
+
+    assert has_same_city_range_open(portfolio, "NYC", "39-40°F") is False
 
 
 def test_materialize_position_carries_semantic_snapshot_jsons():
@@ -2529,6 +2581,7 @@ def test_execute_exit_routes_live_sell_through_executor_exit_path(monkeypatch):
     assert calls["intent"].token_id == pos.token_id
     assert calls["intent"].shares == pytest.approx(pos.effective_shares)
     assert calls["intent"].current_price == pytest.approx(0.46)
+    assert pos.state == "pending_exit"
     assert pos.exit_state == "sell_pending"
 
 
@@ -2573,6 +2626,7 @@ def test_execute_exit_rejected_orderresult_preserves_retry_semantics(monkeypatch
 
     assert outcome == "sell_error: sell_api_down"
     assert pos in portfolio.positions
+    assert pos.state == "pending_exit"
     assert pos.exit_state == "retry_pending"
     assert pos.last_exit_error == "sell_api_down"
 
@@ -2786,7 +2840,22 @@ def test_check_pending_exits_does_not_retry_bare_exit_intent_without_error():
 
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
-    assert pos.exit_state == "exit_intent"
+    assert pos.exit_state == ""
+    assert pos.state == "entered"
+
+
+def test_check_pending_exits_restores_entered_state_after_bare_exit_intent_release():
+    pos = _position(state="entered")
+    pos.exit_state = "exit_intent"
+    pos.last_exit_error = ""
+    portfolio = PortfolioState(positions=[pos])
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=None, conn=None)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos.exit_state == ""
+    assert pos.state == "entered"
 
 
 def test_check_pending_exits_emits_void_semantics_for_rejected_sell(monkeypatch, tmp_path):

@@ -54,6 +54,10 @@ def canonical_phase_for_position(position: Any) -> str:
         return "economically_closed"
     if state == "admin_closed":
         return "admin_closed"
+    if state == "quarantined":
+        return "quarantined"
+    if state == "pending_exit":
+        return "pending_exit"
     if chain_state in {"quarantined", "quarantine_expired"}:
         return "quarantined"
     if exit_state in PENDING_EXIT_STATES or chain_state == "exit_pending_missing":

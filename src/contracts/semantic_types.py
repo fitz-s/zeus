@@ -16,9 +16,11 @@ class Direction(str, Enum):
 
 class LifecycleState(str, Enum):
     PENDING_TRACKED = "pending_tracked"
+    PENDING_EXIT = "pending_exit"
     ENTERED = "entered"
     HOLDING = "holding"
     DAY0_WINDOW = "day0_window"
+    QUARANTINED = "quarantined"
     ECONOMICALLY_CLOSED = "economically_closed"
     SETTLED = "settled"
     VOIDED = "voided"

@@ -416,6 +416,20 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if pos.state == "economically_closed":
             summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
             continue
+        if pos.state == "admin_closed":
+            summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
+            continue
+        if pos.state == "pending_exit":
+            if pos.exit_state == "backoff_exhausted":
+                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                continue
+            if is_exit_cooldown_active(pos):
+                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                continue
+            check_pending_retries(pos, conn=conn)
+            if pos.state == "pending_exit":
+                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                continue
         if pos.exit_state in ("sell_placed", "sell_pending"):
             continue
         if pos.exit_state == "backoff_exhausted":

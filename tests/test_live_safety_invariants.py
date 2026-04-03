@@ -3,7 +3,7 @@
 These verify cross-module relationships that prevent ghost positions,
 phantom P&L, and local↔chain divergence in live mode.
 
-GOLDEN RULE: close_position() is ONLY called after confirmed FILLED.
+GOLDEN RULE: economic close is ONLY created after confirmed FILLED.
 """
 
 import logging
@@ -82,7 +82,7 @@ def _make_clob(
     """Create mock CLOB client."""
     clob = MagicMock()
     clob.paper_mode = False
-    clob.get_order_status.return_value = {"status": order_status}
+    clob.get_order_status.return_value = sell_result or {"status": order_status}
     clob.get_balance.return_value = balance
     clob.cancel_order.return_value = {"status": "CANCELLED"}
     return clob
@@ -91,7 +91,7 @@ def _make_clob(
 # ---- Test 1: GOLDEN RULE ----
 
 def test_live_exit_never_closes_without_fill():
-    """GOLDEN RULE: close_position only called after confirmed FILLED.
+    """GOLDEN RULE: economic close only created after confirmed FILLED.
 
     If CLOB returns OPEN (not filled), position must remain open with
     retry_pending state. It must NOT be closed or voided.
@@ -116,7 +116,7 @@ def test_live_exit_never_closes_without_fill():
 
     # Position must still be in portfolio (not closed)
     assert pos in portfolio.positions
-    assert pos.state != "settled"
+    assert pos.state == "pending_exit"
     assert pos.state != "voided"
     # Exit state should indicate sell was placed but not filled
     assert pos.exit_state in ("sell_placed", "sell_pending")
@@ -430,6 +430,30 @@ def test_chain_reconciliation_does_not_void_economically_closed_positions():
     assert healthy.chain_state == "synced"
 
 
+def test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only_quarantine():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    exiting = _make_position(
+        trade_id="economic-close-1",
+        token_id="tok_econ_001",
+        no_token_id="tok_econ_no_001",
+        state="economically_closed",
+        exit_state="sell_filled",
+        chain_state="synced",
+    )
+    portfolio = _make_portfolio(exiting)
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok_econ_001", size=25.0, avg_price=0.40, cost=10.0, condition_id="cond-live-1")],
+    )
+
+    assert stats["quarantined"] == 1
+    quarantine = next(pos for pos in portfolio.positions if pos.trade_id.startswith("quarantine_"))
+    assert quarantine.state == "quarantined"
+    assert quarantine.chain_state == "quarantined"
+
+
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     from src.state.chain_reconciliation import ChainPosition, reconcile
 
@@ -560,8 +584,10 @@ def test_paper_exit_does_not_use_sell_order():
 
     # No sell order should have been placed
     mock_sell.assert_not_called()
-    # Position should be closed
+    # Position should be economically closed, not settled
     assert "paper_exit" in outcome
+    assert pos in portfolio.positions
+    assert pos.state == "economically_closed"
 
 
 # ---- Test 7: Collateral check blocks underfunded sell ----
@@ -1173,7 +1199,7 @@ def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     portfolio = _make_portfolio(pos)
     conn = get_connection(tmp_path / "deferred-fill.db")
     init_schema(conn)
-    clob = _make_clob(order_status="FILLED")
+    clob = _make_clob(sell_result={"status": "FILLED", "avgPrice": 0.39})
 
     stats = check_pending_exits(portfolio, clob, conn=conn)
     events = query_position_events(conn, "deferred-fill-1")
@@ -1181,6 +1207,9 @@ def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     assert stats["filled"] == 1
     assert stats["retried"] == 0
     fill_event = next(event for event in events if event["event_type"] == "EXIT_ORDER_FILLED")
+    assert pos.state == "economically_closed"
+    assert pos.exit_price == pytest.approx(0.39)
+    assert fill_event["details"]["fill_price"] == pytest.approx(0.39)
     assert fill_event["details"]["best_bid"] == pytest.approx(0.39)
     assert fill_event["details"]["current_market_price"] == pytest.approx(0.44)
 

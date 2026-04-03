@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Stage 3 / P2 execution-truth mainline reopened for repair`
-- Last accepted packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT` (reopened by contradiction)
-- Current active packet: `P2R-EXECUTION-TRUTH-REPAIR`
-- Current packet status: `frozen / repair in progress`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
+- Mainline stage: `Stage 3 / P2 execution-truth mainline repaired and re-closed`
+- Last accepted packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- Current active packet: `none (P2 repaired and re-closed)`
+- Current packet status: `idle / run-horizon stop boundary reached`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - active semantic contradiction between prior P2-closed control claims and current runtime truth
+  - no active technical blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1044,5 +1044,30 @@ Archive policy:
 - Next required action:
   - land the repair and targeted tests
   - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 16:19 America/Chicago] P2R-EXECUTION-TRUTH-REPAIR accepted and pushed; P2 repaired and re-closed
+- Author: `Architects mainline lead`
+- Packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- Status delta:
+  - the single repair packet is honestly accepted
+  - Stage 3 / P2 execution-truth mainline is repaired and re-closed
+  - no remaining P2 packet is required under current repo law
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_architecture_contracts.py tests/test_db.py` -> `213 passed`
+  - blocker-only critic review returned `no blocker remaining`
+  - final verifier review returned `no blocker remaining`
+- Decisions frozen:
+  - `pending_exit` is restored as bottom-layer runtime lifecycle truth in the repaired surfaces
+  - reconciliation no longer injects holding-like lifecycle semantics for the repaired pending-exit/quarantine branches
+  - economically_closed / quarantined / admin_closed inactive semantics no longer leak into the repaired open/exposure/runtime surfaces
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.1-STRATEGY-POLICY-TABLES`
+- Open uncertainties:
+  - this acceptance does not claim broader migration/cutover/parity convergence or retirement of all legacy compatibility shims
+- Next required action:
+  - stop at the current user-request horizon (`P2 repaired and re-closed`)
 - Owner:
   - Architects mainline lead

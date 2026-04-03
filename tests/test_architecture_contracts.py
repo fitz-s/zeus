@@ -426,7 +426,9 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
     assert canonical_phase_for_position(_runtime_position(state="entered", chain_state="unknown")) == "active"
     assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="synced")) == "active"
     assert canonical_phase_for_position(_runtime_position(state="day0_window", chain_state="synced")) == "day0_window"
+    assert canonical_phase_for_position(_runtime_position(state="pending_exit", exit_state="sell_pending")) == "pending_exit"
     assert canonical_phase_for_position(_runtime_position(state="holding", exit_state="sell_pending", chain_state="exit_pending_missing")) == "pending_exit"
+    assert canonical_phase_for_position(_runtime_position(state="quarantined", chain_state="quarantined")) == "quarantined"
     assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantined")) == "quarantined"
     assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantine_expired")) == "quarantined"
     assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
@@ -1924,12 +1926,17 @@ def test_harvester_settlement_path_uses_economically_closed_phase_before_when_ap
 
     assert settled == 1
     event_row = conn.execute(
-        "SELECT phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+        "SELECT phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
     ).fetchone()
-    assert dict(event_row) == {
+    payload = json.loads(event_row["payload_json"])
+    assert {
+        "phase_before": event_row["phase_before"],
+        "phase_after": event_row["phase_after"],
+    } == {
         "phase_before": "economically_closed",
         "phase_after": "settled",
     }
+    assert payload["exit_reason"] == "SETTLEMENT"
     conn.close()
 
 
@@ -1959,6 +1966,67 @@ def test_harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstr
     )
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_harvester_settlement_path_skips_pending_exit_positions():
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="pending_exit", chain_state="exit_pending_missing")
+    pos.exit_state = "sell_pending"
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 0
+    assert portfolio.positions == [pos]
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle():
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="pending_exit", chain_state="exit_pending_missing")
+    pos.exit_state = "backoff_exhausted"
+    pos.exit_reason = "forward edge failed"
+    pos.exit_price = 0.46
+    pos.pnl = 1.5
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 1
     conn.close()
 
 

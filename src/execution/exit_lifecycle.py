@@ -24,9 +24,9 @@ from src.execution.executor import OrderResult, create_exit_order_intent, execut
 from src.state.portfolio import (
     compute_economic_close,
     ExitContext,
+    mark_admin_closed,
     Position,
     PortfolioState,
-    void_position,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,22 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _active_runtime_state(position: Position) -> str:
+    return "day0_window" if getattr(position, "day0_entered_at", "") else "holding"
+
+
+def _mark_pending_exit(position: Position) -> None:
+    if position.state != "pending_exit" and not getattr(position, "pre_exit_state", ""):
+        position.pre_exit_state = getattr(position.state, "value", position.state)
+    position.state = "pending_exit"
+
+
+def _release_pending_exit(position: Position) -> None:
+    if position.state == "pending_exit":
+        position.state = getattr(position, "pre_exit_state", "") or _active_runtime_state(position)
+        position.pre_exit_state = ""
+
+
 def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mode: bool) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
@@ -140,8 +156,11 @@ def handle_exit_pending_missing(portfolio: PortfolioState, position: Position) -
 
     if position.chain_state != "exit_pending_missing":
         return {"action": "ignore", "position": None}
+    _mark_pending_exit(position)
+    if position.exit_state == "backoff_exhausted":
+        return {"action": "skip", "position": None}
     if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
-        closed = void_position(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
+        closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
         return {"action": "closed", "position": closed}
     if position.exit_state in EXIT_LIFECYCLE_OWNED_STATES:
         return {"action": "skip", "position": None}
@@ -174,6 +193,7 @@ def execute_exit(
     _validate_exit_intent(position, exit_context, exit_intent, paper_mode=paper_mode)
 
     if paper_mode:
+        _mark_pending_exit(position)
         position.exit_state = "exit_intent"
         closed = compute_economic_close(
             portfolio,
@@ -268,6 +288,7 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
+    _mark_pending_exit(position)
     position.exit_state = "exit_intent"
 
     try:
@@ -327,7 +348,7 @@ def _execute_live_exit(
 
         # Quick fill check (non-blocking — next cycle does full check)
         if order_id and clob:
-            status = _check_order_fill(clob, order_id)
+            status, _ = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
                 actual_price = _extract_fill_price(sell_result, current_market_price, best_bid)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
@@ -419,10 +440,13 @@ def check_pending_exits(
     for pos in list(portfolio.positions):
         if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
             continue
+        _mark_pending_exit(pos)
 
         # exit_intent with no order ID = stranded from exception during place_sell_order
         if pos.exit_state == "exit_intent":
             if not pos.last_exit_error:
+                pos.exit_state = ""
+                _release_pending_exit(pos)
                 stats["unchanged"] += 1
                 continue
             _mark_exit_retry(pos, reason="STRANDED_EXIT_INTENT", error="exception_during_sell")
@@ -452,7 +476,7 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        status = _check_order_fill(clob, pos.last_exit_order_id)
+        status, status_payload = _check_order_fill(clob, pos.last_exit_order_id)
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
@@ -461,7 +485,11 @@ def check_pending_exits(
 
         if status in FILL_STATUSES:
             # Filled! Close the position.
-            actual_price = pos.last_monitor_market_price or pos.entry_price
+            actual_price = _extract_fill_price(
+                status_payload,
+                pos.last_monitor_market_price or pos.entry_price,
+                getattr(pos, "last_monitor_best_bid", None),
+            )
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
@@ -473,7 +501,7 @@ def check_pending_exits(
                         closed,
                         order_id=pos.last_exit_order_id,
                         fill_price=actual_price,
-                        current_market_price=actual_price,
+                        current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
                         timestamp=getattr(closed, "last_exit_at", None),
                     )
@@ -524,27 +552,28 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
 
     # Cooldown expired — position is eligible for exit re-evaluation
     position.exit_state = ""  # Reset to allow new exit attempt
+    _release_pending_exit(position)
     if conn is not None:
         from src.state.db import log_exit_retry_released_event
         log_exit_retry_released_event(conn, position)
     return True
 
 
-def _check_order_fill(clob, order_id: str) -> str:
-    """Check CLOB order status. Returns normalized status string."""
+def _check_order_fill(clob, order_id: str) -> tuple[str, object]:
+    """Check CLOB order status. Returns (normalized status, raw payload)."""
     try:
         payload = clob.get_order_status(order_id)
         if payload is None:
-            return ""
+            return "", None
         if isinstance(payload, str):
-            return payload.upper()
+            return payload.upper(), payload
         if isinstance(payload, dict):
             status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
-            return str(status).upper() if status else ""
-        return ""
+            return (str(status).upper() if status else "", payload)
+        return "", payload
     except Exception as exc:
         logger.warning("Order fill check failed for %s: %s", order_id, exc)
-        return ""
+        return "", None
 
 
 def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> OrderResult:
@@ -598,7 +627,7 @@ def _serialize_sell_result(sell_result: OrderResult | dict) -> dict:
 
 
 def _extract_fill_price(
-    sell_result: OrderResult | dict,
+    sell_result: OrderResult | dict | object,
     current_market_price: float,
     best_bid: Optional[float] = None,
 ) -> float:
@@ -624,6 +653,7 @@ def _mark_exit_retry(
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
+    _mark_pending_exit(position)
     position.exit_retry_count += 1
     position.last_exit_error = error[:500]
 

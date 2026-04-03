@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from src.state.portfolio import Position, PortfolioState, void_position
+from src.state.portfolio import INACTIVE_RUNTIME_STATES, Position, PortfolioState, void_position
 
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
@@ -303,12 +303,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     now = datetime.now(timezone.utc).isoformat()
 
     def _pending_exit_owned_by_exit_lifecycle(position: Position) -> bool:
-        return getattr(position, "exit_state", "") in PENDING_EXIT_STATES
+        return (
+            getattr(position, "state", "") == "pending_exit"
+            or getattr(position, "exit_state", "") in PENDING_EXIT_STATES
+        )
 
     # Count non-pending local positions for incomplete-response guard
     active_local = sum(
         1 for p in portfolio.positions
         if p.state != "pending_tracked"
+        and p.state not in INACTIVE_RUNTIME_STATES
         and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
     )
     # If chain returned 0 positions but we have active local positions,
@@ -328,14 +332,24 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if pos.state == "pending_tracked":
                 stats["skipped_pending"] += 1
             continue
-        local_tokens.add(tid)
+        state_name = getattr(pos.state, "value", pos.state)
+        if state_name in {"quarantined"}:
+            local_tokens.add(tid)
+        elif state_name not in INACTIVE_RUNTIME_STATES:
+            local_tokens.add(tid)
+
+        if pos.state in INACTIVE_RUNTIME_STATES:
+            state_name = getattr(pos.state, "value", pos.state)
+            key = f"skipped_{state_name}"
+            stats[key] = stats.get(key, 0) + 1
+            continue
 
         chain = chain_by_token.get(tid)
         if pos.state == "pending_tracked":
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
-            legacy_rescue_query_available = _legacy_rescue_query_available()
+            legacy_rescue_query_available = conn is None or _legacy_rescue_query_available()
             canonical_rescue_baseline_available = _canonical_rescue_baseline_available(getattr(pos, "trade_id", ""))
             if not legacy_rescue_query_available and not canonical_rescue_baseline_available:
                 stats["skipped_pending"] += 1
@@ -381,10 +395,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.entered_at = rescued.entered_at
             stats["rescued_pending"] += 1
             stats["synced"] += 1
-            continue
-
-        if pos.state == "economically_closed":
-            stats["skipped_economically_closed"] = stats.get("skipped_economically_closed", 0) + 1
             continue
 
         if chain is None:
@@ -438,8 +448,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     )
                     continue
                 stats["updated"] += 1
-            if corrected.state in {"entered", "unknown"}:
-                corrected.state = "holding"
             pos.chain_state = corrected.chain_state
             pos.chain_shares = corrected.chain_shares
             pos.chain_verified_at = corrected.chain_verified_at
@@ -474,7 +482,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 edge=0.0,
                 entered_at=datetime.now(timezone.utc).isoformat(),
                 token_id=tid,
-                state="holding",
+                state="quarantined",
                 strategy="",
                 edge_source="",
                 cost_basis_usd=chain.cost or (chain.size * chain.avg_price),

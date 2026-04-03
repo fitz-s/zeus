@@ -21,7 +21,7 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
-from src.contracts.semantic_types import Direction, LifecycleState, ChainState, DirectionAlias
+from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -197,6 +197,7 @@ class Position:
     # Live exit lifecycle (sell order state machine)
     exit_state: str = ""  # "" | "exit_intent" | "sell_placed" | "sell_pending" |
                           #   "sell_filled" | "retry_pending" | "backoff_exhausted"
+    pre_exit_state: str = ""  # authoritative runtime state before pending_exit
     exit_retry_count: int = 0
     next_exit_retry_at: Optional[str] = None  # ISO timestamp for retry cooldown
     last_exit_order_id: Optional[str] = None  # for stale cancel on retry
@@ -232,6 +233,10 @@ class Position:
             self.state = LifecycleState(self.state)
         if not isinstance(self.chain_state, ChainState):
             self.chain_state = ChainState(self.chain_state)
+        if not isinstance(self.exit_state, ExitState):
+            self.exit_state = ExitState(self.exit_state)
+        if self.pre_exit_state:
+            self.pre_exit_state = LifecycleState(self.pre_exit_state).value
 
 
     @property
@@ -788,7 +793,7 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
     return ordered
 
 
-INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed"})
+INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed", "quarantined", "admin_closed"})
 
 
 def _compute_realized_pnl(position: Position, exit_price: float) -> float:
@@ -810,6 +815,7 @@ def compute_economic_close(
         if pos.trade_id != trade_id:
             continue
         pos.state = "economically_closed"
+        pos.pre_exit_state = ""
         pos.exit_price = exit_price
         pos.exit_reason = exit_reason
         pos.last_exit_at = now
@@ -836,10 +842,11 @@ def compute_settlement_close(
         pos = state.positions.pop(state.positions.index(pos_ref))
         was_economically_closed = pos.state == "economically_closed"
         pos.state = "settled"
+        pos.pre_exit_state = ""
         pos.last_exit_at = now
+        pos.exit_reason = exit_reason
         if not was_economically_closed:
             pos.exit_price = settlement_price
-            pos.exit_reason = exit_reason
             pos.pnl = _compute_realized_pnl(pos, settlement_price)
             _track_exit(state, pos)
         closed = pos
@@ -853,6 +860,26 @@ def close_position(
 ) -> Optional[Position]:
     """Legacy settlement terminalizer. Delegates to compute_settlement_close."""
     return compute_settlement_close(state, trade_id, exit_price, exit_reason)
+
+
+def mark_admin_closed(
+    state: PortfolioState,
+    trade_id: str,
+    reason: str,
+) -> Optional[Position]:
+    """Remove a position into an explicit admin_closed terminal state."""
+
+    for i, p in enumerate(state.positions):
+        if p.trade_id == trade_id:
+            pos = state.positions.pop(i)
+            pos.state = "admin_closed"
+            pos.pre_exit_state = ""
+            pos.admin_exit_reason = reason
+            pos.exit_reason = reason
+            pos.last_exit_at = datetime.now(timezone.utc).isoformat()
+            _track_exit(state, pos)
+            return pos
+    return None
 
 
 def void_position(
@@ -1085,7 +1112,12 @@ def is_token_on_cooldown(state: PortfolioState, token_id: str, hours: float = 1.
 
 def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -> bool:
     """Layer 7: Block same city+range across different dates."""
-    return any(p.city == city and p.bin_label == bin_label for p in state.positions)
+    return any(
+        p.city == city
+        and p.bin_label == bin_label
+        and p.state not in INACTIVE_RUNTIME_STATES
+        for p in state.positions
+    )
 
 
 _V2_INTRODUCTION_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)

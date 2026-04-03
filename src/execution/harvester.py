@@ -580,6 +580,18 @@ def _settle_positions(
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
             continue
+        state_name = getattr(pos.state, "value", getattr(pos, "state", ""))
+        exit_state = getattr(pos, "exit_state", "")
+        chain_state = getattr(pos, "chain_state", "")
+        if (
+            state_name in {"pending_tracked", "quarantined", "admin_closed", "voided", "settled"}
+            or (state_name == "pending_exit" and exit_state != "backoff_exhausted")
+            or chain_state in {"quarantined", "quarantine_expired"}
+            or (chain_state == "exit_pending_missing" and exit_state != "backoff_exhausted")
+            or exit_state in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+        ):
+            logger.info("Skipping settlement for %s: runtime state still non-terminal for settlement", pos.trade_id)
+            continue
         if pos.direction not in {"buy_yes", "buy_no"}:
             logger.warning(
                 "Skipping settlement P&L for %s: unknown direction %r",
