@@ -58,7 +58,7 @@ Current completion ladder:
 `FOUNDATION-TEAM-GATE`
 
 ### State
-`ACCEPTED LOCALLY / READY TO COMMIT`
+`ACCEPTED / PUSHED / CLOSED`
 
 ### Execution mode verdict
 `RALPLAN_NEXT`
@@ -119,7 +119,7 @@ Explicitly forbidden for edits in this packet:
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 
 ### Ready-to-commit slice
-`FOUNDATION-TEAM-GATE accepted locally — staffing, lane ownership, verification path, cleanup/rollback path, and exact post-P0.5 team-autonomy conditions are now explicit. Next step is commit/push, without mixing Day0/K3 or unrelated AGENTS dirt.`
+`FOUNDATION-TEAM-GATE accepted and pushed — staffing, lane ownership, verification path, cleanup/rollback path, and exact post-P0.5 team-autonomy conditions are now explicit.`
 
 ---
 
@@ -146,17 +146,16 @@ Explicitly forbidden for edits in this packet:
 - [x] append team-gate freeze result to `architects_progress.md`
 - [x] run explicit adversarial review
 - [x] obtain final architect verification
-- [ ] commit and push the accepted team-gate packet
+- [x] commit and push the accepted team-gate packet
 
 ---
 
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push the accepted `FOUNDATION-TEAM-GATE` packet.
-2. Keep the unrelated Day0/K3 and AGENTS dirt out of the commit.
-3. After push, record that later packet-by-packet team autonomy is allowed in principle, but still only through later frozen packets and never for destructive/cutover work.
-4. Do not mutate Day0/K3 files under this packet.
-5. Keep destructive/cutover work human-gated.
+1. Freeze the first post-P0.5 eligible packet.
+2. Keep packet-by-packet team autonomy narrow and explicit.
+3. Do not mutate Day0/K3 files under the next mainline packet unless separately packetized there.
+4. Keep destructive/cutover work human-gated.
 
 If this cannot be done without a new packet, freeze that packet before acting.
