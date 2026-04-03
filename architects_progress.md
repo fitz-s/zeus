@@ -1035,6 +1035,52 @@ Recommended entry schema:
     - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "discovery_phase_records_observation_unavailable_as_no_trade or learning_summary_separates_no_data_from_no_edge or availability_status_helper_maps_rate_limited_and_chain or evaluator_ens_fetch_exception_becomes_explicit_availability_truth"` -> `4 passed`
     - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "strategy_key_manifest_is_frozen"` -> `1 passed`
 - Decisions frozen:
+  - touched path no longer hides availability failures in logs or generic price fallbacks
+  - diagnostics now retain unattributed no-data cases instead of dropping them
+  - packet remains bounded to runtime/diagnostic surfaces and avoids schema or broader learning rollout
+- Open uncertainties:
+  - rollback remains code-only; already-written decision_log artifacts still remain a data-boundary caveat
+- Next required action:
+  - commit and push `P0.4-DATA-AVAILABILITY-TRUTH`
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 01:24 America/Chicago] P0.5-IMPLEMENTATION-OS frozen
+- Packet: `P0.5-IMPLEMENTATION-OS`
+- Status delta:
+  - final P0 packet frozen
+  - queued behind active `P0.4` closeout
+- Basis / evidence:
+  - foundation spec `P0 sequence` ends with `P0.5 implementation OS install`
+  - later team autonomy remains blocked until P0.5 is complete and a later gate explicitly permits it
+- Decisions frozen:
+  - `P0.5` is frozen but not active yet
+  - `P0.4` must close first
+- Open uncertainties:
+  - `P0.5` execution scope still needs direct repo-surface inventory
+- Next required action:
+  - close `P0.4`, then rotate to `P0.5`
+- Owner:
+  - principal architect / Architects local lead
+
+## [2026-04-03 01:18 America/Chicago] P0.4 adversarial review resolved and architect approved
+- Packet: `P0.4-DATA-AVAILABILITY-TRUTH`
+- Status delta:
+  - both required adversarial reviews completed
+  - in-scope contradictions were fixed
+  - architect verification returned `APPROVE`
+- Basis / evidence:
+  - internal attack review found:
+    - fetch_ensemble failures disappearing into logs
+    - generic market-data fallback masking no-data truth
+    - weak proof for `RATE_LIMITED` / `CHAIN_UNAVAILABLE`
+    - diagnostics dropping unattributed no-data cases
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p0-4-data-availability-truth-attack-20260403T065331Z.md`
+  - architect verdict: `APPROVE`
+  - post-fix regression:
+    - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "discovery_phase_records_observation_unavailable_as_no_trade or learning_summary_separates_no_data_from_no_edge or availability_status_helper_maps_rate_limited_and_chain or evaluator_ens_fetch_exception_becomes_explicit_availability_truth"` -> `4 passed`
+    - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "strategy_key_manifest_is_frozen"` -> `1 passed`
+- Decisions frozen:
   - the touched path now records explicit availability truth instead of dropping it into logs
   - diagnostics now separate availability-driven no-trades from no-edge cases
   - packet remains bounded to runtime/diagnostic surfaces and avoids schema or broader learning rollout

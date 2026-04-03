@@ -87,6 +87,7 @@ class NoTradeCase:
     strategy_key: str = ""
     strategy: str = ""
     edge_source: str = ""
+    availability_status: str = ""
     rejection_reasons: list[str] = field(default_factory=list)
     best_edge: float = 0.0
     model_prob: float = 0.0
@@ -501,10 +502,16 @@ def query_learning_surface_summary(
         bucket["entry_rejected"] = execution_bucket.get("entry_rejected", 0)
 
     no_trade_stage_counts: dict[str, int] = {}
+    availability_status_counts: dict[str, int] = {}
     for case in no_trades:
         stage = str(case.get("rejection_stage") or "UNKNOWN")
         no_trade_stage_counts[stage] = no_trade_stage_counts.get(stage, 0) + 1
+        availability_status = str(case.get("availability_status") or "")
+        if availability_status:
+            availability_status_counts[availability_status] = availability_status_counts.get(availability_status, 0) + 1
         strategy = str(case.get("strategy_key") or case.get("strategy") or "")
+        if not strategy and availability_status:
+            strategy = "__availability_unattributed__"
         if strategy:
             bucket = by_strategy.setdefault(
                 strategy,
@@ -528,6 +535,7 @@ def query_learning_surface_summary(
         "settlement_sample_size": len(settlements),
         "settlement_degraded_count": degraded_settlements,
         "no_trade_stage_counts": no_trade_stage_counts,
+        "availability_status_counts": availability_status_counts,
         "execution": execution_summary,
         "by_strategy": by_strategy,
     }

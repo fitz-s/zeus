@@ -27,7 +27,9 @@ from src.engine.time_context import lead_days_to_target
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
+from src.contracts.exceptions import ObservationUnavailableError
 from src.state.db import get_connection, init_schema, query_position_events
+from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import ExitContext, ExitDecision, PortfolioState, Position, load_portfolio, save_portfolio
 from src.state.strategy_tracker import StrategyTracker
@@ -2354,6 +2356,137 @@ def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
 
     assert outcome == "paper_exit: forward edge failed"
     assert pos.exit_state == "sell_filled"
+
+
+def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-03T00:00:00Z")
+    tracker = StrategyTracker()
+    portfolio = PortfolioState()
+    summary = {"candidates": 0, "no_trades": 0}
+
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "outcomes": [],
+        "hours_since_open": 1.0,
+        "hours_to_resolution": 4.0,
+        "event_id": "evt1",
+        "slug": "slug1",
+    }
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.DAY0_CAPTURE: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        find_weather_markets=lambda **kwargs: [market],
+        get_current_observation=lambda *args, **kwargs: (_ for _ in ()).throw(ObservationUnavailableError("obs down")),
+        evaluate_candidate=lambda *args, **kwargs: [],
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=tracker,
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        deps=deps,
+    )
+
+    assert summary["no_trades"] == 1
+    case = artifact.no_trade_cases[0]
+    assert case.availability_status == "DATA_UNAVAILABLE"
+    assert case.rejection_stage == "SIGNAL_QUALITY"
+    conn.close()
+
+
+def test_learning_summary_separates_no_data_from_no_edge(tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    artifact = CycleArtifact(mode="paper", started_at="2026-04-03T00:00:00Z", completed_at="2026-04-03T00:05:00Z")
+    artifact.add_no_trade(
+        NoTradeCase(
+            decision_id="d1",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="",
+            direction="unknown",
+            rejection_stage="SIGNAL_QUALITY",
+            availability_status="DATA_UNAVAILABLE",
+            rejection_reasons=["obs down"],
+            timestamp="2026-04-03T00:00:00Z",
+        )
+    )
+    artifact.add_no_trade(
+        NoTradeCase(
+            decision_id="d2",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            rejection_stage="EDGE_INSUFFICIENT",
+            strategy_key="center_buy",
+            strategy="center_buy",
+            edge_source="center_buy",
+            rejection_reasons=["small edge"],
+            timestamp="2026-04-03T00:00:00Z",
+        )
+    )
+    store_artifact(conn, artifact, env="paper")
+
+    summary = query_learning_surface_summary(conn, env="paper")
+    conn.close()
+
+    assert summary["availability_status_counts"]["DATA_UNAVAILABLE"] == 1
+    assert summary["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
+
+
+def test_availability_status_helper_maps_rate_limited_and_chain():
+    assert cycle_runtime._availability_status_for_exception(RuntimeError("429 capacity exhausted")) == "RATE_LIMITED"
+    assert cycle_runtime._availability_status_for_exception(RuntimeError("chain rpc unavailable")) == "CHAIN_UNAVAILABLE"
+
+
+def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {"title": "38°F or below", "range_low": None, "range_high": 38, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.20},
+            {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.20},
+            {"title": "41°F or above", "range_low": 41, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.20},
+        ],
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("429 capacity exhausted")),
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=types.SimpleNamespace(),
+        limits=evaluator_module.RiskLimits(),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].availability_status == "RATE_LIMITED"
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
 
 
 def test_execute_exit_rejects_mismatched_exit_intent():

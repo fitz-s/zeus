@@ -526,6 +526,20 @@ def fetch_day0_observation(city, target_date: str, decision_time, *, deps):
         return getter(city)
 
 
+def _availability_status_for_exception(exc: Exception) -> str:
+    name = exc.__class__.__name__
+    text = str(exc).lower()
+    if "429" in text or "rate" in text or "limit" in text:
+        return "RATE_LIMITED"
+    if name == "MissingCalibrationError":
+        return "DATA_STALE"
+    if name == "ObservationUnavailableError":
+        return "DATA_UNAVAILABLE"
+    if "chain" in text:
+        return "CHAIN_UNAVAILABLE"
+    return "DATA_UNAVAILABLE"
+
+
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, deps):
     portfolio_dirty = False
     tracker_dirty = False
@@ -562,6 +576,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
 
             if isinstance(e, (ObservationUnavailableError, MissingCalibrationError)):
                 deps.logger.warning("Skipping candidate for %s: %s", city.name, e)
+                artifact.add_no_trade(
+                    deps.NoTradeCase(
+                        decision_id="",
+                        city=city.name,
+                        target_date=market["target_date"],
+                        range_label="",
+                        direction="unknown",
+                        rejection_stage="SIGNAL_QUALITY",
+                        strategy_key="",
+                        strategy="",
+                        edge_source="",
+                        availability_status=_availability_status_for_exception(e),
+                        rejection_reasons=[str(e)],
+                        timestamp=decision_time.isoformat(),
+                    )
+                )
+                summary["no_trades"] += 1
                 continue
             raise
 
@@ -629,6 +660,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 strategy="",
                                 strategy_key="",
                                 edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                availability_status=getattr(d, "availability_status", ""),
                                 rejection_reasons=["invalid_or_missing_strategy_key"],
                                 best_edge=d.edge.edge if d.edge else 0.0,
                                 model_prob=d.edge.p_posterior if d.edge else 0.0,
@@ -665,6 +697,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 strategy=strategy_name,
                                 strategy_key=strategy_name,
                                 edge_source=edge_source,
+                                availability_status=getattr(d, "availability_status", ""),
                                 rejection_reasons=[f"strategy_gate_disabled:{strategy_name}"],
                                 best_edge=d.edge.edge if d.edge else 0.0,
                                 model_prob=d.edge.p_posterior if d.edge else 0.0,
@@ -782,6 +815,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             strategy=strategy_name,
                             strategy_key=strategy_name,
                             edge_source=edge_source,
+                            availability_status=getattr(d, "availability_status", ""),
                             rejection_reasons=rejection_reasons,
                             best_edge=d.edge.edge if d.edge else 0.0,
                             model_prob=d.edge.p_posterior if d.edge else 0.0,
