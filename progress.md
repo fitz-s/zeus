@@ -1735,3 +1735,68 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py` → `41 passed`
   - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or day0_observation_path_rejects_missing_solar_context'` → `2 passed`
   - `./.venv/bin/pytest -q` → `499 passed, 3 skipped`
+
+## 2026-04-02 — Architects authority stack becomes repo entry law
+- The demo branch now carries a repo-native authority stack (`AGENTS.md`, architecture manifests, constitutions, scoped AGENTS) and runtime work is explicitly continuing under that law surface instead of the older `.claude/CLAUDE.md`-first posture.
+- Implementation / branch delta:
+  - branch baseline now includes the new authority install (`5499a41`)
+  - required read order and packet discipline are now repo-native rather than workspace-implied
+- Why this matters:
+  - current work must now distinguish:
+    - runtime facts that are true today
+    - target-law documents that define what changes are allowed next
+  - K3 forecast-layer work may continue, but truth/lifecycle/governance/control changes now require explicit packet discipline
+
+## 2026-04-02 — architecture manifest gates unblocked locally
+- The new authority stack added YAML-backed manifests, scripts, and architecture tests, but the repo virtualenv could not import `yaml`, so the new gate surface failed at collection time instead of surfacing meaningful contract regressions.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/requirements.txt`
+    - now includes `PyYAML>=6.0`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-ARCH-001-pyyaml-for-architecture-gates.md`
+    - records the narrow dependency packet for the new manifest/test surface
+- Why this matters:
+  - the new architecture manifests/tests/scripts are now executable in the local runtime instead of being dead law-on-paper
+  - later CI/gate work can now fail for semantic reasons instead of missing parser runtime
+- Verification evidence:
+  - `python3 scripts/check_work_packets.py` → `work packet grammar ok`
+  - `./.venv/bin/pytest -q tests/test_architecture_contracts.py` → `8 passed`
+
+## 2026-04-02 — P2-H MAE-aware mean-offset attenuation
+- The bounded mean-offset seam no longer treats every sufficiently sampled historical bias row as equally trustworthy. High-error (`mae`) bias rows now attenuate the mean-side correction before it reaches the analysis/bootstrap path.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `analysis_mean_context(...)` now derives `mae_factor`
+    - `analysis_mean_offset(...)` / `analysis_member_maxes(...)` inherit the same attenuation automatically
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-P2H-005-mae-aware-mean-offset.md`
+    - records the K3-only packet for this slice
+- Why this matters:
+  - mean-side correction is now reliability-aware on two axes:
+    - sample sufficiency (`n_samples`)
+    - historical error magnitude (`mae`)
+  - this keeps P2-H inside the forecast seam while making the mean correction less trusting of noisy bias rows
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `31 passed`
+  - `./.venv/bin/pytest -q` → `518 passed, 3 skipped`
+
+## 2026-04-02 — P2-H invalid bias provenance sanitization
+- The next low-noise P2-H slice hardens the same mean seam against malformed provenance. Non-finite / invalid bias-reference values no longer leak through as unstable offsets or dirty context fields.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - new internal normalization step for `bias_reference`
+    - non-finite `bias`, `mae`, `discount_factor` and invalid `n_samples` are now sanitized before mean-offset logic runs
+    - mean-context output now reflects normalized finite provenance only
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-P2H-006-sanitize-bias-provenance.md`
+    - records the narrow K3 packet for this hygiene slice
+- Why this matters:
+  - forecast-context artifacts no longer risk carrying `NaN`/invalid bias fields from malformed provenance
+  - the new sample-aware / MAE-aware mean logic now behaves deterministically even when provenance is partial or malformed
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - now locks:
+      - non-finite bias provenance is normalized away
+      - negative `mae` is treated as missing instead of a reliability signal
+      - invalid bias provenance does not move `analysis_member_maxes(...)`
+- Verification evidence:
+  - `python3 scripts/check_work_packets.py` → `work packet grammar ok`
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `34 passed`
+  - `./.venv/bin/pytest -q` → `521 passed, 3 skipped`
