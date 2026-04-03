@@ -425,7 +425,7 @@ def evaluate_candidate(
                 token_id=o["token_id"],
                 city=city.name,
                 target_date=target_d.isoformat(),
-                range_label=b.label,
+                range_label=bins[idx].label,
                 price=float(p_market[idx]),
                 volume=float(bid_sz + ask_sz),
                 bid=float(bid),
