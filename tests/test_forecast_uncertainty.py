@@ -244,6 +244,66 @@ def test_analysis_member_maxes_reflects_mae_attenuation():
     assert list(adjusted) == __import__("pytest").approx([v + expected_offset for v in raw])
 
 
+def test_analysis_mean_context_normalizes_non_finite_bias_provenance():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=6.0,
+        ensemble_mean=42.0,
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": float("nan"),
+            "discount_factor": float("inf"),
+            "n_samples": -1,
+            "mae": float("nan"),
+        },
+    )
+    assert ctx["bias_reference"] == {"source": "ecmwf"}
+    assert ctx["n_samples"] is None
+    assert ctx["mae"] is None
+    assert ctx["sample_factor"] == 1.0
+    assert ctx["mae_factor"] == 1.0
+    assert ctx["raw_offset"] == 0.0
+    assert ctx["offset"] == 0.0
+
+
+def test_analysis_mean_context_treats_negative_mae_as_missing():
+    ctx = analysis_mean_context(
+        unit="F",
+        lead_days=6.0,
+        ensemble_mean=42.0,
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": 2.0,
+            "discount_factor": 0.7,
+            "n_samples": 30,
+            "mae": -1.0,
+        },
+    )
+    assert ctx["mae"] is None
+    assert ctx["mae_factor"] == 1.0
+    assert ctx["raw_offset"] == __import__("pytest").approx(-1.4)
+
+
+def test_analysis_member_maxes_ignore_invalid_bias_provenance():
+    raw = [40.0, 42.0, 41.5]
+    adjusted = analysis_member_maxes(
+        raw,
+        unit="F",
+        lead_days=6.0,
+        bias_corrected=False,
+        bias_reference={
+            "source": "ecmwf",
+            "bias": float("nan"),
+            "discount_factor": 0.7,
+            "n_samples": 30,
+            "mae": 1.0,
+        },
+    )
+    assert list(adjusted) == raw
+
+
 def test_analysis_sigma_context_explains_components():
     ctx = analysis_sigma_context(unit="F", lead_days=3.0, ensemble_spread=1.0, city_name="NYC", season="MAM", forecast_source="ecmwf_ifs025")
     assert ctx["unit"] == "F"

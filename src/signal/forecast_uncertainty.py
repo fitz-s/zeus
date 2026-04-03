@@ -8,9 +8,50 @@ signal consumers.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 
 from src.signal.ensemble_signal import sigma_instrument
+
+
+def _finite_float(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _normalized_bias_reference(bias_reference: dict | None) -> dict:
+    raw = dict(bias_reference or {})
+    normalized: dict = {}
+
+    source = raw.get("source")
+    if source:
+        normalized["source"] = str(source)
+
+    bias = _finite_float(raw.get("bias"))
+    if bias is not None:
+        normalized["bias"] = bias
+
+    mae = _finite_float(raw.get("mae"))
+    if mae is not None and mae >= 0.0:
+        normalized["mae"] = mae
+
+    discount = _finite_float(raw.get("discount_factor"))
+    if discount is not None and discount >= 0.0:
+        normalized["discount_factor"] = discount
+
+    try:
+        n_samples = int(raw.get("n_samples"))
+    except (TypeError, ValueError):
+        n_samples = None
+    if n_samples is not None and n_samples >= 0:
+        normalized["n_samples"] = n_samples
+
+    return normalized
 
 
 def analysis_member_maxes(
@@ -103,40 +144,29 @@ def analysis_mean_context(
     base_sigma = sigma_instrument(unit).value
     lead = 0.0 if lead_days is None else min(6.0, max(0.0, float(lead_days)))
     lead_factor = lead / 6.0
-    bias_reference = bias_reference or {}
+    bias_reference = _normalized_bias_reference(bias_reference)
     raw_offset = 0.0
     sample_factor = 1.0
     n_samples = None
     mae = None
     mae_factor = 1.0
-    try:
-        if "n_samples" in bias_reference and bias_reference.get("n_samples") is not None:
-            n_samples = int(bias_reference.get("n_samples"))
-            if n_samples < 20:
-                sample_factor = 0.0
-    except (TypeError, ValueError):
-        n_samples = None
-        sample_factor = 1.0
-    try:
-        if "mae" in bias_reference and bias_reference.get("mae") is not None:
-            mae = float(bias_reference.get("mae"))
-            if mae > 0 and base_sigma > 0:
-                if mae <= base_sigma:
-                    mae_factor = 1.0
-                elif mae >= base_sigma * 4.0:
-                    mae_factor = 0.0
-                else:
-                    mae_factor = 1.0 - ((mae - base_sigma) / (base_sigma * 3.0))
-    except (TypeError, ValueError):
-        mae = None
-        mae_factor = 1.0
+    if "n_samples" in bias_reference and bias_reference.get("n_samples") is not None:
+        n_samples = int(bias_reference.get("n_samples"))
+        if n_samples < 20:
+            sample_factor = 0.0
+    if "mae" in bias_reference and bias_reference.get("mae") is not None:
+        mae = float(bias_reference.get("mae"))
+        if mae > 0 and base_sigma > 0:
+            if mae <= base_sigma:
+                mae_factor = 1.0
+            elif mae >= base_sigma * 4.0:
+                mae_factor = 0.0
+            else:
+                mae_factor = 1.0 - ((mae - base_sigma) / (base_sigma * 3.0))
     if not bias_corrected and bias_reference:
-        try:
-            bias = float(bias_reference.get("bias", 0.0))
-            discount = float(bias_reference.get("discount_factor", 0.7))
-            raw_offset = -bias * discount * lead_factor * sample_factor * mae_factor
-        except (TypeError, ValueError):
-            raw_offset = 0.0
+        bias = float(bias_reference.get("bias", 0.0))
+        discount = float(bias_reference.get("discount_factor", 0.7))
+        raw_offset = -bias * discount * lead_factor * sample_factor * mae_factor
     max_abs_offset = base_sigma * 2.0
     offset = max(-max_abs_offset, min(max_abs_offset, raw_offset))
     return {
