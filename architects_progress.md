@@ -234,6 +234,57 @@ Recommended entry schema:
 - Owner:
   - gate owner: Architects local lead (current Codex session)
 
+## [2026-04-02 22:16 America/Chicago] Slice 1 committed and pushed
+- Packet: `P-GATE-01`
+- Status delta:
+  - Slice 1 committed as `eba4321`
+  - branch pushed to `origin/Architects`
+- Basis / evidence:
+  - Git push completed successfully to `https://github.com/yuxuan53/zeus.git`
+- Decisions frozen:
+  - `P-GATE-01` Slice 1 is now cloud-visible
+- Open uncertainties:
+  - root `AGENTS.md` still has an unpushed local delta outside `P-GATE-01`
+- Next required action:
+  - decide whether to leave `AGENTS.md` local or land it as a separate bounded slice
+- Owner:
+  - gate owner: Architects local lead (current Codex session)
+
+## [2026-04-02 22:19 America/Chicago] User authorized root AGENTS push
+- Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
+- Status delta:
+  - scope expanded by explicit user instruction to allow pushing `AGENTS.md`
+  - new narrow single-owner slice selected under instruction-surface work
+- Basis / evidence:
+  - user instruction: `agent.md can push`
+  - root `AGENTS.md` remains the primary repo instruction surface and should not drift between local and cloud truth
+- Decisions frozen:
+  - this is a separate bounded governance slice, not a widening of `P-GATE-01`
+  - allowed files are `AGENTS.md`, `architects_progress.md`, and `architects_task.md` only
+- Open uncertainties:
+  - none on permission; the user explicitly granted it
+- Next required action:
+  - review the root `AGENTS.md` delta, update both Architects ledgers, commit, and push
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
+- Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
+- Status delta:
+  - root `AGENTS.md` reviewed as a routing/reasoning-policy sync
+  - active Architects ledger/task files rotated to the new slice
+- Basis / evidence:
+  - local diff remains confined to root `AGENTS.md`
+  - no runtime, schema, workflow, or scoped-AGENTS files were added to this slice
+- Decisions frozen:
+  - commit will include `AGENTS.md`, `architects_progress.md`, and `architects_task.md` only
+- Open uncertainties:
+  - none material; only normal push risk remains
+- Next required action:
+  - run `git diff --check`, commit, and push immediately
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ---
 
 ## Active Open Questions

@@ -30,25 +30,25 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
 ## Current Active Packet
 
 ### Packet
-`P-GATE-01`
+`P-INSTR-01-SLICE-ROOT-AGENTS`
 
 ### State
-`ACTIVE / RALPH_NOW / SLICE 1 LANDED LOCALLY`
+`ACTIVE / RALPH_NOW / ROOT AGENTS SYNC AUTHORIZED`
 
 ### Execution mode verdict
 `RALPH_NOW`
 
 ### Objective
-Activate architecture enforcement in advisory mode before any runtime, schema, or cutover work. The packet is a single-owner governance/verification packet limited to CI/check/test surfaces and explicit gate severity.
+Land the existing root `AGENTS.md` routing-policy update as a narrow single-owner governance slice, while keeping `architects_progress.md` and `architects_task.md` current so the team can recover state from GitHub alone.
 
 ### Why this packet is active first
-- Zeus is being treated as normative-authority-installed while still in runtime-mixed-transition mode.
-- First-phase ordering remains authority install -> enforcement install -> controlled cleanup.
-- `P-GATE-01` is positioned after `P-BOUND-01` and before `P-ROLL-01`, `P-STATE-01`, and `P-MIG-01`.
-- Replay parity is advisory-first, not hard-blocking yet.
+- the user explicitly approved pushing `AGENTS.md`
+- root `AGENTS.md` is the primary repo instruction surface
+- leaving a local-only root-instruction delta would create visible drift between local execution truth and cloud review truth
+- this is a narrow, bounded, single-owner governance patch and does not need team execution
 
 ### Owner model
-- Required: one named gate owner for execution
+- Required: one named execution owner for this root-instruction slice
 - Tribunal/principal architect remains the scope-freezing authority
 - Verifier remains independent gate/evidence review
 - Critic remains contradiction / blast-radius review
@@ -59,46 +59,42 @@ Activate architecture enforcement in advisory mode before any runtime, schema, o
 - verifier: `gpt-5.4-mini high`
 
 ### Current execution owner
-- gate owner: `Architects local lead (current Codex session)`
+- execution owner: `Architects local lead (current Codex session)`
 - verifier/critic support remains advisory-only unless a later bounded slice needs explicit re-review
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `.github/workflows/**`
-- `scripts/check_*`
-- `scripts/replay_parity.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_cross_module_invariants.py`
+- `AGENTS.md`
+- `architects_progress.md`
+- `architects_task.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in this packet:
 - all non-allowed files
+- all scoped `AGENTS.md`
+- `.github/workflows/**`
+- `scripts/**`
+- `tests/**`
 - `src/**`
 - `migrations/**`
 - `architecture/**`
-- `docs/architecture/**`
-- `docs/governance/**` including boundary/runbook/cookbook/delta-ledger surfaces
+- `docs/**`
 - `.claude/CLAUDE.md`
-- root/scoped `AGENTS.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no runtime behavior change
-- no schema or migration work
-- no live cutover
-- no `position_current` rollout
-- no historical migration
-- no boundary-note/runbook/cookbook authorship
-- no authority-file rewrite
-- no outer-host automation expansion
+- no runtime/schema/workflow changes
+- no scoped `AGENTS.md` changes
+- no authority expansion beyond the existing root routing contract delta
+- no packet widening back into `P-GATE-01`
 
 ### Current blocker
-- no active hard blocker for Slice 1 execution
-- operational note: use repo `.venv` for Python gate runs; system `python3` in this session is missing `PyYAML`
-- advisory carry-forward: semgrep currently reports findings in `src/control/control_plane.py` and `src/state/strategy_tracker.py`, so semgrep must remain advisory in this packet until a later packet triages or fixes them
+- no active hard blocker
+- user explicitly authorized pushing `AGENTS.md`
+- carry-forward note: the previously landed `P-GATE-01` workflow slice remains valid and already pushed in commit `eba4321`
 
 ### Ready-to-commit slice
-`Slice 1 — add the initial advisory architecture workflow under .github/workflows/ that wires the currently implemented manifest, module-boundary, packet-grammar, invariant, semgrep, and replay-parity gates with explicit severity/rationale/review conditions, while keeping semgrep and replay parity advisory.`
+`Slice 2 — commit the existing root AGENTS routing-policy update together with synchronized progress/task ledgers, then push so cloud review sees the same instruction truth as the local leader session.`
 
 ---
 
@@ -108,58 +104,45 @@ Explicitly forbidden for edits in this packet:
 - [x] confirm the current session has read the required authority surfaces
 - [x] confirm `P-BOUND-01` prerequisite is satisfied in the live repo state
 - [x] confirm no one is attempting runtime/schema/cutover work under this packet
+- [x] confirm the user explicitly approved pushing `AGENTS.md`
 
 ### Phase B — allowed-surface inspection
-- [x] inspect `.github/workflows/**`
-- [x] inspect `scripts/check_*`
-- [x] inspect `scripts/replay_parity.py`
-- [x] inspect `tests/test_architecture_contracts.py`
-- [x] inspect `tests/test_cross_module_invariants.py`
-- [x] classify each surface as `present`, `missing`, `partial`, or `drifted`
+- [x] inspect `AGENTS.md`
+- [x] inspect current local diff for root-instruction changes
+- [x] confirm the two Architects control files will carry the current execution truth
 
 Inventory result:
-- `.github/workflows/**` -> `missing` active workflow; only scoped `AGENTS.md` exists
-- `scripts/check_kernel_manifests.py` -> `present`
-- `scripts/check_module_boundaries.py` -> `present`
-- `scripts/check_work_packets.py` -> `present`
-- `scripts/replay_parity.py` -> `present / staged-advisory`
-- `tests/test_architecture_contracts.py` -> `present`
-- `tests/test_cross_module_invariants.py` -> `present`
+- `AGENTS.md` -> `partial / locally modified / not yet pushed`
+- `architects_progress.md` -> `present / active ledger`
+- `architects_task.md` -> `present / active control surface`
 
 ### Phase C — bounded enforcement design
-- [x] make the first bounded set of gate surfaces explicit with severity and rationale
-- [x] keep replay parity warn-only / staged-waiver until dual-write + `position_current` exist
-- [x] keep any external-workspace-dependent checks advisory, never blocking
-- [x] assign owner, rationale, and sunset/review condition to every gate in Slice 1
+- [x] keep this slice narrow and single-owner
+- [x] ensure the root `AGENTS.md` delta is treated as governance/instruction sync, not runtime work
+- [x] keep all other packet families out of scope
+- [x] record the carry-forward relationship to pushed `P-GATE-01` Slice 1
 
-Slice 1 gate shape:
-- blocking: `architecture-manifests`, `module-boundaries`, `packet-grammar`, `kernel-invariants`
-- advisory: `semgrep-zeus`, `replay-parity`
-- external-workspace-dependent audits remain out of the workflow and therefore non-blocking in this slice
+Slice 2 shape:
+- land root `AGENTS.md` routing/reasoning contract already present locally
+- keep progress/task synchronized with the new active packet state
+- commit and push immediately after local contradiction review
 
 ### Phase D — evidence bundle
-- [x] produce blocking vs advisory verdict
-- [x] record maintenance-cost note
-- [x] capture check/test outputs
+- [x] record user authorization for `AGENTS.md` push
+- [x] capture affected-surface note
 - [x] write rollback note
 - [x] write unresolved uncertainty note
-- [x] write explicit runtime-evidence waiver
 - [x] append execution result to `architects_progress.md`
 
-Evidence snapshot for Slice 1:
-- blocking verdict baseline: manifest/module-boundary/packet checks pass locally
-- advisory verdict baseline: replay parity exits staged; semgrep finds current repo issues and therefore stays advisory in this packet
-- rollback note: revert the new workflow file plus the current `architects_progress.md` / `architects_task.md` updates
-- unresolved uncertainty: semgrep path-pattern warnings and current findings need later packetized triage before promotion to blocking
+Evidence snapshot for Slice 2:
+- affected-surface note: root instruction surface only; no runtime/schema/workflow edits
+- rollback note: revert `AGENTS.md` plus the paired `architects_progress.md` / `architects_task.md` updates
+- unresolved uncertainty: none on scope; only carry-forward is that semgrep/replay-parity promotion still belongs to a later packet
 
 Local verification completed:
-- workflow yaml parses cleanly
-- `python3 scripts/check_kernel_manifests.py` -> pass
-- `python3 scripts/check_module_boundaries.py` -> pass
-- `python3 scripts/check_work_packets.py` -> pass
-- `python3 scripts/replay_parity.py --ci` -> staged / advisory
-- `.venv/bin/pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py` -> `9 passed, 3 skipped`
-- `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src` -> 2 findings, remains advisory
+- root `AGENTS.md` diff manually reviewed against current repo routing contract
+- `git diff --check` will be run before commit
+- prior pushed packet reminder: `P-GATE-01` Slice 1 local checks already passed before commit `eba4321`
 
 ---
 
@@ -220,9 +203,9 @@ Recommended baton split:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Land Slice 1 by committing and pushing the new advisory workflow plus the control-surface updates.
-2. Verify the pushed branch shows the new advisory workflow on GitHub.
-3. Freeze the follow-on slice that decides whether `semgrep-zeus` can be promoted, split, or must remain advisory because of packet-external findings.
-4. Keep recording every blocker/proof transition in `architects_progress.md`.
+1. Commit and push this root `AGENTS.md` slice immediately.
+2. Verify GitHub now shows the pushed root instruction change alongside the updated Architects ledgers.
+3. Return the active packet to the next bounded follow-up after cloud confirmation.
+4. Keep recording every new slice in `architects_progress.md`.
 
 If this cannot be done without leaving the allowed file boundary, stop and freeze a new packet rather than forcing progress.

@@ -150,7 +150,66 @@ Use advisory lanes instead:
 - `/ccg`
 - read-only critique/review
 
-## 8. External boundary
+## 8. Model routing and reasoning-effort policy
+
+If you are a Codex / GPT-family model, the routing policy below applies.
+If you are not a Codex / GPT-family model, do not treat the model names below as required defaults; map the intent to your local runtime equivalent instead.
+
+Current routing contract for this repo:
+
+- Normal work in this repo should be covered by exactly three preferred models:
+  `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`.
+- Do not recommend or auto-route to `gpt-5.3-codex`, `gpt-5-codex`, or `gpt-5-codex-mini` unless the user explicitly asks for compatibility testing or model-comparison work.
+
+- `gpt-5.4` is the leader model.
+  Use it for architecture authority, contract freezing, cross-zone reasoning, packet judgment, final integration, and final acceptance.
+- `gpt-5.4-mini` is the verifier / writer / bounded-review model.
+  Use it for evidence collection, targeted review, bounded synthesis, documentation polish, and compact follow-up analysis.
+- `gpt-5.3-codex-spark` is the default scout subagent model.
+  Prefer it for narrow read-only lookup, repo mapping, symbol search, relationship tracing, diff triage, and repeated fact gathering.
+
+Child-agent default posture:
+
+- Prefer native subagents often.
+- Prefer 2 to 4 parallel `gpt-5.3-codex-spark` scout lanes before broad implementation when the task spans multiple files or multiple independent questions.
+- Keep spark batons small, concrete, read-only, and evidence-returning.
+- When spark is too small but the task is still bounded and non-authoritative, escalate to `gpt-5.4-mini` instead of introducing a second codex-default lane.
+- Keep final judgment, contract freezing, and acceptance on the leader `gpt-5.4`.
+- Do not use subagents as an excuse to skip main-thread reading of core law surfaces.
+
+Reasoning-effort policy:
+
+- `low`:
+  fast lookup, grep-like exploration, structure mapping, obvious transforms, quick summaries
+- `medium`:
+  bounded comparison, packet drafting, shortlist building, moderate synthesis, first-pass review
+- `high`:
+  implementation planning, non-trivial debugging, verifier judgments, code review with blast-radius concerns
+- `xhigh`:
+  architecture authority, governance / law edits, schema or control-plane decisions, contradictory truth-surface resolution, high-stakes final acceptance
+
+Invocation guidance:
+
+- read-only scout:
+  prefer `explore` or another read-only native child lane on `gpt-5.3-codex-spark` with `low`
+- broader scout, bounded synthesis, verifier support, or documentation follow-up:
+  use `gpt-5.4-mini` with `medium` or `high`
+- verifier / writer / targeted reviewer:
+  use `gpt-5.4-mini` with `medium` or `high`
+- architect / critic / final integrator:
+  use `gpt-5.4` with `high` or `xhigh`
+- only escalate to `omx team` after owner, file boundary, acceptance gate, and blocker policy are frozen
+
+Do not:
+
+- spend `xhigh` on routine scans
+- use spark for final architecture claims, governance edits, or overlapping write lanes
+- use mini for unresolved cross-zone design or kernel-law decisions
+- recommend `gpt-5.3-codex`, `gpt-5-codex`, or `gpt-5-codex-mini` as default lanes for normal Zeus work
+- assume long context removes the need for bounded batons
+- treat a temporary 1M leader window as permission for unbounded prompts; use it as headroom, not as the default working size
+
+## 9. External boundary
 
 OpenClaw and Venus are outside repo authority.
 
@@ -160,7 +219,7 @@ OpenClaw and Venus are outside repo authority.
 - Outward tools must not directly mutate repo truth, schema, or authority.
 - Never read or write external workspace state as if it were repo canonical truth unless the packet is explicitly boundary-focused.
 
-## 9. Evidence before completion
+## 10. Evidence before completion
 
 Completion requires:
 - changed files listed
@@ -169,7 +228,7 @@ Completion requires:
 - rollback note
 - unresolved uncertainty stated plainly
 
-## 10. Write style for agents
+## 11. Write style for agents
 
 Keep edits delta-shaped.
 Patch authority drift instead of rewriting everything.
