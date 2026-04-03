@@ -31,9 +31,9 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `Stage 2 canonical-authority rollout`
-- Last accepted packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS` (`df0844c`)
+- Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
 - Current active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
-- Current packet status: `landed locally / under review`
+- Current packet status: `blocked / human decision required`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
@@ -626,5 +626,44 @@ Archive policy:
   - the remaining chain-quarantine branch still lacks a safe strategy-key source in repo truth
 - Next required action:
   - commit and push `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 12:38 America/Chicago] P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Status delta:
+  - packet committed as `eead3bc`
+  - packet pushed to `origin/Architects`
+  - reconciliation size-correction caller migration is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to the size-correction branch, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - canonical size-correction writes only occur when prior canonical position history exists
+  - legacy size-correction behavior remains on legacy-schema runtimes
+  - no quarantine or broader reconciliation claim is made in this packet
+- Open uncertainties:
+  - the remaining chain-quarantine branch still lacks a safe strategy-key source
+- Next required action:
+  - freeze the chain-quarantine strategy-resolution blocker packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:38 America/Chicago] P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
+- Status delta:
+  - current active packet frozen as a true stop-boundary blocker
+- Basis / evidence:
+  - the remaining `CHAIN_QUARANTINED` migration branch has no safe repo-authorized `strategy_key` source for chain-only quarantines
+  - autonomous continuation would otherwise require inventing governance attribution
+- Decisions frozen:
+  - P1 cannot close autonomously before this decision
+  - team remains closed by default
+- Open uncertainties:
+  - exact human governance decision on chain-only quarantine attribution
+- Next required action:
+  - await human decision, then freeze a superseding packet
 - Owner:
   - Architects mainline lead

@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
-- State: `APPROVED / READY TO COMMIT`
+- Packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
+- State: `BLOCKED / HUMAN DECISION REQUIRED`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Migrate the reconciliation size-correction branch to append canonical `CHAIN_SIZE_CORRECTED` lifecycle facts when canonical schema is present and prior canonical position history exists, while preserving existing legacy behavior on legacy-schema runtimes.
+Freeze the unresolved chain-quarantine attribution contradiction and record the exact human decision required before P1 can close honestly.
 
 ## Allowed files
 
 - `work_packets/P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE.md`
-- `src/engine/lifecycle_events.py`
+- `src/**`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -59,11 +59,11 @@ Migrate the reconciliation size-correction branch to append canonical `CHAIN_SIZ
 
 ## Non-goals
 
-- no reconciliation caller migration beyond size correction
-- no broader dual-write in caller code
+- no code changes
+- no schema changes
+- no caller migration
 - no DB-first reads
-- no exit-path migration
-- no Day0/K3 work
+- no cutover
 - no team launch
 
 ## Current blocker state

@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Active packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
 - Active packet state: `landed locally / under review`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS` (`df0844c`)
+- Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -39,5 +39,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE.md`
+5. `work_packets/P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION.md`
 6. current packet `required_reads`
