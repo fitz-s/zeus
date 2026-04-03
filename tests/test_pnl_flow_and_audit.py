@@ -1657,6 +1657,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
             decision_id="dec1",
             decision_snapshot_id="snap1",
             edge_source="settlement_capture",
+            strategy_key="settlement_capture",
             applied_validations=["ens_fetch"],
         )],
     )
