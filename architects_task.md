@@ -58,7 +58,7 @@ Current completion ladder:
 `P1.6B-HARVESTER-CHRONICLE-COMPAT`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / BLOCKER_PACKET`
@@ -143,15 +143,15 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] make chronicle helper degrade cleanly on canonical DBs
-- [ ] preserve fail-loud behavior for malformed/non-canonical unexpected states
-- [ ] add targeted architecture-contract coverage for the compatibility change
+- [x] make chronicle helper degrade cleanly on canonical DBs
+- [x] preserve fail-loud behavior for malformed/non-canonical unexpected states
+- [x] add targeted architecture-contract coverage for the compatibility change
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep remaining harvester blockers explicit
-- [ ] keep team closed unless a new freeze explicitly justifies it
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep remaining harvester blockers explicit
+- [x] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -164,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Fix only the chronicle compatibility blocker.
-2. Keep harvester caller migration for a later successor packet.
+1. Commit and push this accepted chronicle blocker packet without mixing unrelated working-tree dirt.
+2. Freeze the actual harvester dual-write packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep harvester migration claims separate from this blocker packet.
 
 If this cannot be done without a new packet, freeze that packet before acting.
