@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -496,11 +497,71 @@ def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
     conn.close()
 
 
+def test_settlement_builder_emits_settled_event_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import (
+        build_entry_canonical_write,
+        build_settlement_canonical_write,
+    )
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    entry_events, entry_projection = build_entry_canonical_write(
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    settled_pos = _runtime_position(state="settled", chain_state="synced")
+    settled_pos.last_exit_at = "2026-04-03T01:00:00Z"
+    settled_pos.exit_price = 1.0
+    settled_pos.pnl = 10.0
+    settled_pos.exit_reason = "SETTLEMENT"
+
+    settlement_events, settlement_projection = build_settlement_canonical_write(
+        settled_pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=4,
+        phase_before="active",
+        source_module="src.execution.harvester",
+    )
+
+    append_many_and_project(conn, settlement_events, settlement_projection)
+
+    event_row = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert event_row["event_type"] == "SETTLED"
+    assert event_row["sequence_no"] == 4
+    assert event_row["phase_before"] == "active"
+    assert event_row["phase_after"] == "settled"
+    payload = json.loads(event_row["payload_json"])
+    assert payload["contract_version"] == "position_settled.v1"
+    assert payload["winning_bin"] == "39-40°F"
+    assert payload["outcome"] == 1
+    assert payload["exit_reason"] == "SETTLEMENT"
+    assert dict(projection_row) == {
+        "phase": "settled",
+        "strategy_key": "center_buy",
+    }
+    conn.close()
+
+
 def test_lifecycle_builder_module_exists():
     text = (ROOT / "src/engine/lifecycle_events.py").read_text()
     assert "def canonical_phase_for_position" in text
     assert "def build_position_current_projection" in text
     assert "def build_entry_canonical_write" in text
+    assert "def build_settlement_canonical_write" in text
 
 
 def test_log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db():

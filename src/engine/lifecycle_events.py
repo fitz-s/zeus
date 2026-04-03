@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 
+CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
+
 PENDING_EXIT_STATES = {
     "exit_intent",
     "sell_placed",
@@ -227,3 +229,59 @@ def build_entry_canonical_write(
         )
 
     return events, projection
+
+
+def build_settlement_canonical_write(
+    position: Any,
+    *,
+    winning_bin: str,
+    won: bool,
+    outcome: int,
+    sequence_no: int,
+    phase_before: str,
+    source_module: str = "src.execution.harvester",
+) -> tuple[list[dict], dict]:
+    projection = build_position_current_projection(position)
+    if projection["phase"] != "settled":
+        raise ValueError("settlement canonical builder requires a settled position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "last_exit_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "contract_version": CANONICAL_POSITION_SETTLED_CONTRACT_VERSION,
+            "winning_bin": winning_bin,
+            "position_bin": getattr(position, "bin_label", ""),
+            "won": bool(won),
+            "outcome": int(outcome),
+            "p_posterior": getattr(position, "p_posterior", None),
+            "exit_price": getattr(position, "exit_price", None),
+            "pnl": getattr(position, "pnl", None),
+            "exit_reason": getattr(position, "exit_reason", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:settled:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "SETTLED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_before,
+        "phase_after": "settled",
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "harvester_settlement",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:settled:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    return [event], projection

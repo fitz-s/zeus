@@ -58,7 +58,7 @@ Current completion ladder:
 `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / NO_TEAM_DEFAULT`
@@ -143,15 +143,15 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] add pure settlement builder helpers in `src/engine/lifecycle_events.py`
-- [ ] keep the builder layer detached from harvester caller wiring
-- [ ] add targeted architecture-contract coverage for the builder layer
+- [x] add pure settlement builder helpers in `src/engine/lifecycle_events.py`
+- [x] keep the builder layer detached from harvester caller wiring
+- [x] add targeted architecture-contract coverage for the builder layer
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep harvester caller migration out of scope
-- [ ] keep team closed unless a new freeze explicitly justifies it
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep harvester caller migration out of scope
+- [x] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -164,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Add the pure settlement builder layer.
-2. Keep harvester caller migration for a later packet.
+1. Commit and push this accepted settlement-builder packet without mixing unrelated working-tree dirt.
+2. Freeze the actual harvester dual-write packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep harvester caller migration separate from this builder packet.
 
 If this cannot be done without a new packet, freeze that packet before acting.

@@ -2036,6 +2036,47 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:35 America/Chicago] P1.6C-HARVESTER-SETTLEMENT-BUILDERS landed locally with green targeted evidence
+- Packet: `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
+- Status delta:
+  - pure settlement builder helpers landed locally
+  - targeted builder evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'settlement_builder or lifecycle_builder_module_exists or entry_builder_emits_filled_batch_and_projection_that_append_cleanly or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `14 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+- Decisions frozen:
+  - settlement payload construction is now isolated from harvester caller code
+  - no harvester migration or parity claim is made in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the settlement builder signatures/scope
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:42 America/Chicago] P1.6C-HARVESTER-SETTLEMENT-BUILDERS adversarial review resolved and architect approved
+- Packet: `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'settlement_builder or lifecycle_builder_module_exists or entry_builder_emits_filled_batch_and_projection_that_append_cleanly or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `14 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+  - critic verdict after builder-scope review: `APPROVE`
+- Decisions frozen:
+  - settlement payload construction is now isolated from harvester caller code
+  - no harvester dual-write, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - the actual harvester dual-write packet is still ahead
+- Next required action:
+  - commit and push `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
