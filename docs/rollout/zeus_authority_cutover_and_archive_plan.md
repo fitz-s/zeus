@@ -18,15 +18,20 @@ This file controls the transition from mixed authority to single canonical repo-
 - no present-tense claim beyond actual runtime convergence
 
 ## 2. Immediate actions
-1. install root/scoped `AGENTS.md`
-2. patch `.claude/CLAUDE.md` to compatibility shim
-3. publish delivery constitution and decision register
-4. publish boundary note and package map
+
+### Completed now
+1. root/scoped `AGENTS.md` installed
+2. `.claude/CLAUDE.md` patched to compatibility shim
+3. delivery constitution and decision register published
+4. boundary note and package map published
+
+### Still pending in current phase
 5. patch or stage demotion banners for:
    - `docs/specs/zeus_spec.md`
    - `docs/architecture/zeus_blueprint_v2.md`
    - `docs/architecture/zeus_design_philosophy.md`
    - `docs/plans/zeus_live_plan.md`
+6. keep runtime delta ledger current as remaining current-phase packets close
 
 ## 3. Demotion wording rule
 Every demoted doc should state:
@@ -44,8 +49,8 @@ Keep explicit until replaced:
 - `strategy_tracker` remains derived / demoted only
 
 ## 5. Patch-now items
-- remove default-bucket strategy fallback
-- remove implicit local-date fallback in observation context
+- remove default-bucket strategy fallback (`P-STATE-01`)
+- remove implicit local-date fallback in observation context (`P-STATE-01`)
 
 ## 6. Do not cut over yet
 Do not declare full runtime convergence until:
@@ -60,6 +65,7 @@ Archive later, not now:
 - stale historical queues
 - old “highest authority” claims once banners are installed and stable
 - redundant operator maps if they remain low-value after AGENTS adoption
+- any advisory-only boundary or rollout wording that becomes obsolete after canonical cutover
 
 ## 8. Rollback doctrine
 If cutover-doc package causes confusion:

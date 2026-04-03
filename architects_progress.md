@@ -522,6 +522,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-03 00:25 America/Chicago] P-BOUND-01 committed and pushed
+- Packet: `P-BOUND-01`
+- Status delta:
+  - packet committed as `5778e8b`
+  - branch pushed to `origin/Architects`
+  - current-phase queue advanced to `P-ROLL-01`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to the boundary note, audit script, and Architects ledgers
+- Decisions frozen:
+  - repo-local blockers and external advisory assumptions are now separated in the audit output
+  - `P-ROLL-01` is now the next packet
+- Open uncertainties:
+  - operator-facing docs still need to absorb the refined audit semantics later
+- Next required action:
+  - inventory and close `P-ROLL-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-03 00:29 America/Chicago] P-ROLL-01 patch landed locally
+- Packet: `P-ROLL-01`
+- Status delta:
+  - rollout docs updated to distinguish resolved vs open deltas
+  - archive/cutover plan updated to distinguish completed immediate actions from still-pending ones
+- Basis / evidence:
+  - delta ledger now marks `DELTA-02` to `DELTA-04` resolved
+  - delta ledger now marks `DELTA-10` narrowed rather than blocking
+  - cutover/archive plan now distinguishes completed current-phase setup from pending demotion/archive steps
+- Decisions frozen:
+  - `P-ROLL-01` remains docs-only
+  - no runtime code or cutover claim was introduced
+- Open uncertainties:
+  - `P-STATE-01` still needs to close `DELTA-07` and `DELTA-08`
+- Next required action:
+  - verify packet grammar and docs-only diff, then commit and push `P-ROLL-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
