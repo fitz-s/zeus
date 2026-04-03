@@ -560,6 +560,45 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-03 00:32 America/Chicago] P-ROLL-01 committed and pushed
+- Packet: `P-ROLL-01`
+- Status delta:
+  - packet committed as `9fa9c7a`
+  - branch pushed to `origin/Architects`
+  - current-phase queue advanced to `P-STATE-01`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to rollout docs, delta ledger, and Architects ledgers
+- Decisions frozen:
+  - rollout truth is now explicit about resolved / narrowed / open drift
+  - `P-STATE-01` is now the next packet
+- Open uncertainties:
+  - runtime drift still remains in `strategy_tracker.py` and `observation_client.py`
+- Next required action:
+  - land the targeted `P-STATE-01` runtime drift patch
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-03 00:38 America/Chicago] P-STATE-01 patch landed locally with evidence
+- Packet: `P-STATE-01`
+- Status delta:
+  - removed unknown-strategy fallback from `src/state/strategy_tracker.py`
+  - removed implicit `date.today()` fallback from `src/data/observation_client.py`
+  - added targeted regression tests for both behaviors
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_truth_layer.py tests/test_observation_contract.py` -> `10 passed`
+  - `git diff --check` -> clean
+- Decisions frozen:
+  - unknown strategy attribution is now rejected instead of defaulted to a governance bucket
+  - ASOS→WU offset lookup now requires explicit target_date instead of silently using local today
+- Open uncertainties:
+  - wider runtime suites have not yet been run for this packet; current evidence is targeted to the two changed behavior paths
+- Next required action:
+  - commit and push `P-STATE-01`, then rotate the active packet to `P-OPS-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

@@ -4,8 +4,14 @@ import json
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.config import load_cities
-from src.data.observation_client import _resolve_observation_context, _select_local_day_samples
+from src.data.observation_client import (
+    _get_asos_wu_offset,
+    _resolve_observation_context,
+    _select_local_day_samples,
+)
 
 
 def test_load_cities_preserves_zero_unit_specific_diurnal_amplitude(tmp_path):
@@ -61,3 +67,11 @@ def test_select_local_day_samples_excludes_previous_day_and_future_hours():
 
     assert [row[2] for row in selected] == ["morning"]
     assert max(temp for temp, _, _ in selected) == 72.0
+
+
+def test_get_asos_wu_offset_requires_explicit_target_date():
+    class DummyCity:
+        name = "Test City"
+
+    with pytest.raises(Exception, match="target_date must be explicit"):
+        _get_asos_wu_offset(DummyCity(), target_date=None)

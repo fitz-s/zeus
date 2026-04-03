@@ -90,3 +90,16 @@ def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl():
     assert tracker.to_dict()["strategies"]["opening_inertia"]["trades"][0]["trade_id"] == "t1"
     assert "trades" in tracker.to_dict()["strategies"]["opening_inertia"]
     assert "win_rate" not in tracker.to_dict()["strategies"]["opening_inertia"]
+
+
+def test_strategy_tracker_rejects_unknown_strategy_instead_of_defaulting():
+    tracker = StrategyTracker()
+
+    tracker.record_trade({
+        "trade_id": "bad1",
+        "strategy": "mystery_strategy",
+        "pnl": 1.0,
+    })
+
+    assert tracker.summary()["opening_inertia"] == {"trades": 0, "pnl": 0}
+    assert tracker.summary()["settlement_capture"] == {"trades": 0, "pnl": 0}
