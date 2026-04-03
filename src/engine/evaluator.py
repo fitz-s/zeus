@@ -9,7 +9,7 @@ import logging
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -34,6 +34,7 @@ from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
+from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import model_agreement
 from src.state.portfolio import (
     PortfolioState,
@@ -110,6 +111,21 @@ class EdgeDecision:
 
 def _decision_id() -> str:
     return str(uuid.uuid4())[:12]
+
+
+def _default_strategy_policy(strategy_key: str) -> StrategyPolicy:
+    threshold_multiplier = max(1.0, float(get_edge_threshold_multiplier()))
+    sources: list[str] = []
+    if threshold_multiplier > 1.0:
+        sources.append(f"hard_safety:tighten_risk:{threshold_multiplier:g}")
+    return StrategyPolicy(
+        strategy_key=strategy_key,
+        gated=False,
+        allocation_multiplier=1.0,
+        threshold_multiplier=threshold_multiplier,
+        exit_only=False,
+        sources=sources,
+    )
 
 
 def _to_jsonable(value):
@@ -416,9 +432,9 @@ def evaluate_candidate(
         try:
             bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(o["token_id"])
             p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
-            
+
             # Injection Point 7: Data completeness - record microstructure snapshot
-            import datetime
+            import datetime as dt
             from src.state.db import log_microstructure
             log_microstructure(
                 conn,
@@ -431,7 +447,7 @@ def evaluate_candidate(
                 bid=float(bid),
                 ask=float(ask),
                 spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                source_timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                source_timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
             )
         except Exception as e:
             try:
@@ -647,6 +663,13 @@ def evaluate_candidate(
         decision_validations = list(entry_validations)
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
+        policy_now = decision_time or datetime.now(timezone.utc)
+        policy = (
+            resolve_strategy_policy(conn, strategy_key, policy_now)
+            if conn is not None
+            else _default_strategy_policy(strategy_key)
+        )
+        decision_validations.append("strategy_policy")
 
         # Anti-churn layers 5, 6, 7
         if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
@@ -710,20 +733,39 @@ def evaluate_candidate(
         if current_heat > 0.25: # Global heat saturation 
             risk_throttle *= 0.5
             decision_validations.append("global_heat_throttled_50pct")
-            
+
         km = dynamic_kelly_mult(
             base=settings["sizing"]["kelly_multiplier"],
             ci_width=edge.ci_upper - edge.ci_lower,
             lead_days=lead_days_for_calibration,
             portfolio_heat=current_heat,
         )
-        control_risk_multiplier = max(1.0, float(get_edge_threshold_multiplier()))
-        if control_risk_multiplier > 1.0:
-            km = km / control_risk_multiplier
-            decision_validations.append(f"control_plane_risk_tightened_{control_risk_multiplier:g}x")
+        if policy.gated or policy.exit_only:
+            reason = "POLICY_EXIT_ONLY" if policy.exit_only else "POLICY_GATED"
+            if policy.sources:
+                reason = f"{reason}({','.join(policy.sources)})"
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="RISK_REJECTED",
+                rejection_reasons=[reason],
+                selected_method=selected_method,
+                applied_validations=list(decision_validations),
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
+        if policy.threshold_multiplier > 1.0:
+            km = km / policy.threshold_multiplier
+            decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
         
         # Apply RiskGraph Throttling Phase 3
         size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)
+        if policy.allocation_multiplier != 1.0:
+            size *= policy.allocation_multiplier
+            decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")
 
         if size < limits.min_order_usd:
             decisions.append(EdgeDecision(
