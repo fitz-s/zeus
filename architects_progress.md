@@ -403,6 +403,25 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 23:49 America/Chicago] Follow-up delta committed and pushed
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - follow-up delta committed as `56ce691`
+  - branch pushed to `origin/Architects`
+  - both the original advisory packet and the post-attack refinement are now cloud-visible
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to the same six packet-owned files
+- Decisions frozen:
+  - the current advisory gate verdict is now machine-checkable and explicitly non-overclaiming
+  - semgrep and replay parity still remain advisory; no silent promotion happened in this packet
+- Open uncertainties:
+  - the next packet still needs to decide how to handle semgrep path warnings and packet-external source findings
+- Next required action:
+  - verify cloud-visible state, then freeze the next bounded `P-*` packet
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

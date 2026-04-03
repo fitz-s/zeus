@@ -47,7 +47,7 @@ Current completion ladder:
 `P-GATE-01-CONSOLIDATE-ADVISORY`
 
 ### State
-`FOLLOW-UP DELTA VERIFIED / READY TO COMMIT`
+`COMMITTED / PUSHED / READY FOR NEXT PACKET`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -111,10 +111,10 @@ Explicitly forbidden for edits in this packet:
 - known advisory issue: semgrep still reports two findings outside this packet boundary and therefore remains advisory
 - packet-external carry-forward: semgrep path-pattern warnings and the two current semgrep findings still require a later packet
 - first packet commit/push completed as `9151dc6`
-- current follow-up delta is uncommitted but locally verified
+- follow-up delta commit/push completed as `56ce691`
 
 ### Ready-to-commit slice
-`Follow-up delta — add `_yaml_bootstrap.py` trigger coverage, reduce policy/test authority drift, soften brittle command pinning, and make the advisory-policy script explicitly state that workflow-shape green is not advisory-lane green.`
+`Follow-up delta completed — `_yaml_bootstrap.py` trigger coverage, reduced policy/test authority drift, softer command matching, and explicit “policy-green is not advisory-green” language are now pushed in commit 56ce691.`
 
 ---
 
@@ -163,7 +163,7 @@ Slice 1 shape:
 - [x] collect two attack-only adversarial reviews
 - [x] append execution result to `architects_progress.md`
 - [x] first packet commit/push (`9151dc6`)
-- [ ] commit and push the follow-up delta
+- [x] commit and push the follow-up delta (`56ce691`)
 
 Evidence snapshot for Slice 1:
 - affected-surface note: workflow/script/test/packet control surfaces only
@@ -259,9 +259,9 @@ Recommended baton split:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this narrow follow-up delta.
-2. Verify GitHub now shows both the original packet commit and the follow-up refinement.
-3. Freeze the next bounded `P-*` packet instead of widening this one.
+1. Verify GitHub now shows both `9151dc6` and `56ce691` plus the updated Architects ledgers.
+2. Freeze the next bounded `P-*` packet instead of widening this one.
+3. Preferred next packet: semgrep triage / severity-promotion decision for the advisory lane.
 3. Preferred next packet: semgrep remediation / promotion-decision packet that separates packet-external findings from rule-path drift.
 4. Only after the full `P-*` family closes, plan the foundation mainline automation program.
 
