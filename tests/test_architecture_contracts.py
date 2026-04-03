@@ -333,7 +333,7 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
     forbidden_hits: list[str] = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel == "src/state/db.py" or rel.startswith("tests/"):
+        if rel in {"src/state/db.py", "src/state/ledger.py"} or rel.startswith("tests/"):
             continue
         if "apply_architecture_kernel_schema(" in path.read_text(errors="ignore"):
             forbidden_hits.append(rel)
@@ -363,10 +363,24 @@ def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
 
 
 def test_db_exposes_canonical_transaction_boundary_helpers():
+    from src.state import db as state_db
+    from src.state import ledger as state_ledger
+    from src.state import projection as state_projection
+
+    assert state_db.append_event_and_project is state_ledger.append_event_and_project
+    assert state_db.append_many_and_project is state_ledger.append_many_and_project
+    assert state_db.apply_architecture_kernel_schema is state_ledger.apply_architecture_kernel_schema
+    assert (ROOT / "src/state/ledger.py").exists()
+    assert (ROOT / "src/state/projection.py").exists()
+    assert hasattr(state_projection, "upsert_position_current")
+
+
+def test_db_no_longer_owns_canonical_append_project_bodies():
     text = (ROOT / "src/state/db.py").read_text()
-    assert "def append_event_and_project" in text
-    assert "def append_many_and_project" in text
-    assert "def apply_architecture_kernel_schema" in text
+    assert "from src.state.ledger import (" in text
+    assert "def append_event_and_project(" not in text
+    assert "def append_many_and_project(" not in text
+    assert "def apply_architecture_kernel_schema(" not in text
 
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")

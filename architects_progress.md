@@ -1506,6 +1506,53 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 03:36 America/Chicago] P1.3-CANONICAL-LEDGER-API landed locally with green targeted evidence
+- Packet: `P1.3-CANONICAL-LEDGER-API`
+- Status delta:
+  - dedicated `src/state/ledger.py` and `src/state/projection.py` modules landed locally
+  - `src/state/db.py` now exposes the canonical helpers through compatibility imports instead of housing the implementation directly
+  - targeted architecture-contract evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'apply_architecture_kernel_schema or transaction_boundary_helper or runtime_ready or callers or exposes_canonical_transaction_boundary_helpers'` -> `9 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent'` -> `2 passed`
+- Decisions frozen:
+  - extraction stayed confined to canonical helper modules and compatibility exposure
+  - runtime wiring, dual-write, and DB-first reads remain deferred
+- Open uncertainties:
+  - adversarial review has not yet attacked the dedicated module extraction
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 03:38 America/Chicago] P1.3-CANONICAL-LEDGER-API adversarial review resolved and architect approved
+- Packet: `P1.3-CANONICAL-LEDGER-API`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'apply_architecture_kernel_schema or transaction_boundary_helper or runtime_ready or callers or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `10 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent'` -> `2 passed`
+  - module-surface proof:
+    - `db_append_source src.state.ledger`
+    - `db_append_many_source src.state.ledger`
+    - `db_apply_schema_source src.state.ledger`
+    - `projection_helper True`
+- Decisions frozen:
+  - `db.py` now exposes canonical helpers through compatibility imports instead of owning duplicate append/project bodies
+  - extraction remains distinct from runtime wiring, dual-write, and cutover
+  - `db.py` remains a mixed transitional surface and must not be overread as Stage-2 convergence
+- Open uncertainties:
+  - first runtime-caller migration remains a separate future packet
+- Next required action:
+  - commit and push `P1.3-CANONICAL-LEDGER-API`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
