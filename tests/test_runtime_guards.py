@@ -683,6 +683,29 @@ def test_chain_quarantine_keeps_direction_unknown():
     assert pos.strategy == ""
 
 
+def test_chain_quarantine_explicitly_warns_exclusion_without_db_calls(caplog):
+    class GuardConn:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("chain-only quarantine exclusion should not touch DB state")
+
+    portfolio = PortfolioState()
+    with caplog.at_level("WARNING"):
+        stats = reconcile(
+            portfolio,
+            [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
+            conn=GuardConn(),
+        )
+
+    assert stats["quarantined"] == 1
+    assert len(portfolio.positions) == 1
+    pos = portfolio.positions[0]
+    assert pos.trade_id.startswith("quarantine_")
+    assert pos.direction == "unknown"
+    assert pos.chain_state == "quarantined"
+    assert "EXCLUDED FROM CANONICAL MIGRATION" in caplog.text
+    assert "pending future governance design" in caplog.text
+
+
 def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)

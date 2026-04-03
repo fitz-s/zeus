@@ -728,3 +728,43 @@ Archive policy:
   - then run adversarial review
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 14:07 America/Chicago] P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Status delta:
+  - chain-only quarantine reconciliation now preserves the quarantined runtime object and emits an explicit exclusion warning
+  - packet committed and pushed as the last narrow runtime follow-through slice in the current P1 family
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k 'chain_quarantine_keeps_direction_unknown or chain_quarantine_explicitly_warns_exclusion_without_db_calls or quarantine_blocks_new_entries'` -> `3 passed`
+  - explicit adversarial review of the changed runtime path returned `APPROVE`
+- Decisions frozen:
+  - chain-only quarantines stay outside canonical lifecycle truth under current law
+  - the touched runtime path makes exclusion visibility explicit without inventing attribution or touching DB/canonical writes
+  - no new attribution surface is introduced
+- Open uncertainties:
+  - Stage 2 / P1 still needs an explicit closeout evidence pass before honest phase closure
+- Next required action:
+  - freeze `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:07 America/Chicago] P1.8-CANONICAL-AUTHORITY-CLOSEOUT frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `P1.7I` lands the last narrow runtime follow-through slice, but Stage 2 still requires an explicit closeout evidence gate
+  - durable spec and mainline plan both name projection parity / closeout evidence as part of P1 completion
+- Decisions frozen:
+  - keep this slice verification-only unless the evidence suite reveals a real remaining P1 gap
+  - do not mix any P2 work into this packet
+  - keep team closed by default
+- Open uncertainties:
+  - whether the targeted Stage 2 suite is sufficient to close P1 without reopening a remaining gap
+- Next required action:
+  - run the closeout evidence suite and adversarially review the closeout claim
+- Owner:
+  - Architects mainline lead

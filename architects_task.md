@@ -17,20 +17,18 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
 - State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Make the P1.7H exclusion explicit and non-silent by preserving the quarantined runtime object and emitting an explicit exclusion warning, without any canonical write, invented `strategy_key`, or widened governance/schema surface.
+Run the narrow Stage 2 / P1 closeout evidence suite and close P1 only if repo-truth evidence proves canonical authority is honestly installed.
 
 ## Allowed files
 
-- `work_packets/P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH.md`
-- `src/state/chain_reconciliation.py`
-- `tests/test_runtime_guards.py`
+- `work_packets/P1.8-CANONICAL-AUTHORITY-CLOSEOUT.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -39,16 +37,9 @@ Make the P1.7H exclusion explicit and non-silent by preserving the quarantined r
 
 - all non-allowed files
 - `AGENTS.md`
+- `src/**`
+- `tests/**`
 - `migrations/**`
-- `src/engine/**`
-- `src/execution/**`
-- `src/riskguard/**`
-- `src/control/**`
-- `src/supervisor_api/**`
-- `src/state/db.py`
-- `src/state/chronicler.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
@@ -59,28 +50,26 @@ Make the P1.7H exclusion explicit and non-silent by preserving the quarantined r
 
 ## Non-goals
 
-- no canonical lifecycle write for chain-only quarantines
-- no invented, inferred, or borrowed `strategy_key`
-- no new attribution field / enum / schema surface / reader contract
-- no broader reconciliation migration
+- no new runtime/schema/test implementation
+- no P2 work mixed in
+- no law rewrite
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no human-decision blocker remains for this packet
+- no blocker yet; packet outcome depends on the evidence suite
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] define the exact exclusion boundary inside the touched runtime path
-- [ ] preserve the quarantined runtime object and emit an explicit exclusion warning
-- [ ] prove no canonical write or invented attribution is introduced
-- [ ] run adversarial review before acceptance
+- [ ] run authority checks
+- [ ] run the targeted P1 closeout suite
+- [ ] adversarially review the closeout claim
+- [ ] close P1 only if the evidence remains green
 
 ## Next required action
 
-1. Read the packet-required runtime/test surfaces.
-2. Land the narrow exclusion-visibility behavior.
-3. Verify with targeted tests and explicit adversarial review.
-4. Keep out-of-scope dirt excluded from any commit.
+1. Run the packet evidence suite.
+2. Decide closeout vs reopen strictly from the evidence.
+3. Keep out-of-scope dirt excluded from any commit.
