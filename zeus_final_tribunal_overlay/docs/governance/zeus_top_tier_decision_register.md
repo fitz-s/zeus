@@ -247,7 +247,7 @@ What would overturn this: none without explicit human policy change
 
 ## 6. Unexpected but load-bearing findings
 
-1. **Foundation package incompleteness:** the provided foundation zip references `tests/test_cross_module_invariants.py`, `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`, and `ZEUS_PROGRESS.md`, but those files are not present in the uploaded foundation package. This weakens “machine-complete” claims and must be tracked before hardening CI.
+1. **Foundation package incompleteness:** the provided foundation zip references `tests/test_cross_module_invariants.py`, `docs/reference/zeus_first_principles_rethink.md`, and `ZEUS_PROGRESS.md`, but those files are not present in the uploaded foundation package. This weakens “machine-complete” claims and must be tracked before hardening CI.
 2. **Checked-in runtime state mismatch:** the current repo’s checked-in `state/` directory contains unsuffixed JSON plus zero-byte DB placeholders that do not match the code’s expected `state/zeus.db` and mode-qualified file conventions. The zip is therefore not trustworthy as a live runtime-state snapshot.
 3. **External workspace gap:** repo audit logic references workspace `AGENTS.md`, `HEARTBEAT.md`, `OPERATOR_RUNBOOK.md`, `IDENTITY.md`, `known_gaps.md`, and OpenClaw config, but those were not supplied in this session. Boundary design is actionable; boundary verification is incomplete.
 4. **OMC Codex team-runtime caution:** recent issue reports indicate `omc team N:codex` can fail to synchronize task status back into `.omc/state/team/*`, with `omc ask codex` suggested as workaround for advisory use.

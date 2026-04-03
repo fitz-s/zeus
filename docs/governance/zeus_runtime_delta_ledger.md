@@ -12,7 +12,7 @@ Every item below is a current-vs-target mismatch that must remain explicit until
 
 | ID | Mismatch | Status | Class | Why it matters | Action now | Later action |
 |---|---|---|---|---|---|---|
-| DELTA-01 | Foundation package references files not present in the uploaded foundation zip (`tests/test_cross_module_invariants.py`, `docs/reference/zeus_first_principles_rethink.md`, `ZEUS_PROGRESS.md`) | open | foundation completeness | blocks claims that the uploaded foundation package is fully self-contained | record openly; do not make CI assumptions silently | restore files or update manifests/workflows |
+| DELTA-01 | Foundation package references files not present in the uploaded foundation zip (`tests/test_cross_module_invariants.py`, `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`, `ZEUS_PROGRESS.md`) | open | foundation completeness | blocks claims that the uploaded foundation package is fully self-contained | record openly; do not make CI assumptions silently | restore files or update manifests/workflows |
 | DELTA-02 | Current repo has no root/scoped `AGENTS.md` | resolved | instruction surface | kept `.claude/CLAUDE.md` as de facto primary | root/scoped `AGENTS.md` installed | keep AGENTS authoritative and retire shim later if desired |
 | DELTA-03 | `.claude/CLAUDE.md` still routes to old architectural authority | resolved | authority drift | kept parallel authority active | patched to compatibility shim | retire or retain by human choice |
 | DELTA-04 | `WORKSPACE_MAP.md` still overclaims active/highest authority roles | resolved | documentation drift | zero-context agents could read the wrong source first | patched to orientation-only | keep synced or sunset |

@@ -139,7 +139,7 @@ Every 30 minutes: Venus wakes, reads Zeus state, runs healthcheck, reports to Di
   "sessionTarget": "isolated",
   "payload": {
     "kind": "agentTurn",
-    "message": "Spawn a Claude Code session via ACP pointed at workspace-venus/zeus/. Instruction: Read state/assumptions.json. For each assumption, query the actual data (zeus.db for recent markets, Gamma API for current bin structure, recent settlements for precision). Report any mismatch between assumptions and reality. Also: read src/engine/monitor_refresh.py and src/engine/evaluator.py — check that MC counts, settlement semantics, and bin handling are consistent between entry and monitor paths. Write findings to memory/YYYY-MM-DD.md."
+    "message": "通过 ACP 在 workspace-venus/zeus/ 启动 Claude Code 会话。请用中文汇报：阅读 state/assumptions.json，逐条对照真实数据（zeus.db 的近期市场、Gamma API 的当前 bin 结构、recent settlements 的 precision），报告任何假设与现实不一致；另外阅读 src/engine/monitor_refresh.py 和 src/engine/evaluator.py，检查 MC counts、settlement semantics 和 bin handling 在 entry 与 monitor 路径是否一致；把发现写入 memory/YYYY-MM-DD.md。所有结论、摘要和警示都用中文输出。"
   },
   "delivery": { "mode": "announce", "channelId": "1481437077605191700" }
 }

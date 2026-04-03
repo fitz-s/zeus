@@ -62,6 +62,30 @@ Program / packet / slice rules:
   - the next slice would cross into a higher-risk zone,
   - or a real blocker / contradiction appears.
 
+Micro-event logging rule:
+
+- Do not dump every small attempt into `architects_progress.md`.
+- Small events, retries, scout findings, timeout notes, and experiment breadcrumbs belong in `.omx/context/<packet>-worklog.md`.
+- `architects_progress.md` is packet-level durable state only.
+- `architects_task.md` is active control state only.
+- Spark scouts may draft or append micro-event worklog entries.
+- Spark scouts must not directly edit `architects_progress.md` or `architects_task.md`.
+- The leader is responsible for promoting a worklog fact into `architects_progress.md` only when it becomes a real packet state transition, blocker, or accepted evidence item.
+
+Preferred micro-event format:
+
+```md
+## [timestamp local] <packet> <slice-or-event>
+- Author:
+- Lane:
+- Type: scout | retry | timeout | evidence | blocker | note
+- Files:
+- Finding:
+- Evidence:
+- Suggested next slice:
+- Promote to architects_progress/task?: yes | no
+```
+
 Post-P0.5 autonomy rule:
 
 - Before `P0.5` is complete and accepted:
@@ -226,6 +250,8 @@ Treat these as routing safety rails, not theoretical hard ceilings.
 Child-agent default posture:
 
 - Prefer native subagents often.
+- Hard cap: no more than `6` active native subagents at once.
+- Preferred steady-state: `2` to `3` active lanes unless the packet explicitly justifies more.
 - Prefer 2 to 4 parallel `gpt-5.3-codex-spark` scout lanes before broad implementation when the task spans multiple files or multiple independent questions.
 - Keep spark batons small, concrete, read-only, and evidence-returning.
 - When spark is too small but the task is still bounded and non-authoritative, escalate to `gpt-5.4-mini` instead of introducing a second codex-default lane.
@@ -266,6 +292,7 @@ Scout escalation rule:
 
 - If a spark scout times out, returns ambiguous synthesis, or needs repeated retries because the baton is too broad, escalate the lane to `gpt-5.4-mini` instead of retrying spark indefinitely.
 - Spark is for narrow scouting, not for pretending medium-context synthesis is cheap.
+- If spawn attempts fail because the lane cap is reached, close or reuse an existing lane before creating a new one.
 
 Do not:
 

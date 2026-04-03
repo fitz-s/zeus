@@ -45,10 +45,10 @@
 | `docs/architecture/zeus_blueprint_v2.md` | Historical architectural rationale for position-centric design. | Historical |
 | `docs/strategy/data_strategy.md` | Data utilization and strategy planning. | Active |
 | `docs/reviews/zeus_review_phase2_strategic.md` | Strategic review and gap diagnosis (phase 2). | Historical |
-| `docs/reference/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |
-| `docs/reference/market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
-| `docs/reference/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |
-| `docs/reference/architecture_blueprint.md` | **SUPERSEDED by blueprint_v2.** Historical only. | Historical |
+| `docs/KEY_REFERENCE/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |
+| `docs/KEY_REFERENCE/market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
+| `docs/KEY_REFERENCE/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |
+| `docs/KEY_REFERENCE/architecture_blueprint.md` | **SUPERSEDED by blueprint_v2.** Historical only. | Historical |
 
 ## `config/` — Runtime Parameters
 

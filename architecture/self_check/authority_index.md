@@ -22,7 +22,7 @@ This is the first durable routing file for humans and coding agents.
 
 ### Historical rationale (non-authoritative)
 9. `docs/architecture/zeus_blueprint_v2.md`
-10. `docs/reference/zeus_first_principles_rethink.md`
+10. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
 11. `docs/progress/zeus_progress.md`
 
 ## 2. Precedence

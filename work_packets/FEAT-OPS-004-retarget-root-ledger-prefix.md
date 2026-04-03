@@ -15,7 +15,7 @@ zones_touched: []
 invariants_touched: [INV-10]
 required_reads:
   - AGENTS.md
-  - docs/reference/repo_layout.md
+  - docs/KEY_REFERENCE/repo_layout.md
   - .claude/baton_state.json
   - root_progress.md
   - root_task.md
@@ -24,7 +24,7 @@ files_may_change:
   - root_progress.md
   - root_task.md
   - .claude/baton_state.json
-  - docs/reference/repo_layout.md
+  - docs/KEY_REFERENCE/repo_layout.md
 files_may_not_change:
   - src/**
   - migrations/**

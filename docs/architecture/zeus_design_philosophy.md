@@ -4,13 +4,13 @@
 > Current authority order is defined in `architecture/self_check/authority_index.md`.
 > Principal current-phase architecture spec is `docs/architecture/zeus_durable_architecture_spec.md`.
 
-**地位（历史）：曾经作为 Zeus-Venus 系统的最高权威文档；当前已降级为历史解释面。**
+**地位（历史）：曾经作为 Zeus 系统的最高权威文档；当前已降级为历史解释面。**
 
 ---
 
 ## 一、根本问题
 
-三次失效弧线：Blueprint v1 → Rainstorm 死了 → Zeus spec → Zeus 重复 Rainstorm 的错 → design philosophy → 同样的翻译损失继续发生。
+三次失效弧线同样的翻译损失继续发生。
 
 每次的 root cause 相同：**关系约束从自然语言到代码的翻译过程中存在系统性的信息丢失。** Claude Code 系统性地做好函数（纯计算、单模块逻辑），系统性地做不好关系（跨模块约束、domain-specific transitions）。这不是能力问题，是注意力分配的物理属性——信号逻辑可算法化，关系约束需要发明。
 
@@ -126,9 +126,6 @@ Venus 运行在 OpenClaw 上。OpenClaw 提供：cron scheduling、ACP（spawn C
 - **Gap lifecycle management**：track known_gaps.md，escalate gaps that persist > 7 days，auto-close gaps when fix is detected in code
 - **Post-settlement analysis**：每次 settlement 后分析 P&L attribution by strategy/edge_source/city，写入 memory
 - **Alpha decay monitoring**：track edge magnitude trends per strategy over 30/60/90 days，alert on EDGE_COMPRESSION
-
-### 中期（需要少量新 code）
-
 - **Auto-test generation**：Venus 发现 gap → 不只提议 test，直接写 test file → commit → 如果 CI passes，gap closed
 - **Self-modifying HEARTBEAT.md**：Venus 发现新的 check 需要 → 自动添加到 HEARTBEAT.md → 下次 heartbeat 包含新 check
 - **Market structure monitoring**：每天 fetch Gamma API，compare against assumptions.json，detect bin format changes/new cities/unit switches（伦敦 °F→°C scenario）
@@ -144,7 +141,7 @@ Venus 运行在 OpenClaw 上。OpenClaw 提供：cron scheduling、ACP（spawn C
 - **Self-improvement loop**：Venus 读自己的 audit history → 分析哪类 gap 反复出现 → 建议 structural change 防止这一类 gap → 就像 Anthropic 分析 red team findings 来改进 training process
 - **Cross-referencing Rainstorm**：Rainstorm 的 rainstorm.db 有 14 个月的历史数据。Venus 可以 query 这些数据来验证 Zeus 的统计假设（e.g., "Platt A/B/C 在 Rainstorm 的 data 上是否 consistent？"）
 
-### 最终形态
+### 形态
 
 Venus 不只是 Zeus 的自我意识。Venus 是一个**能理解天气预测市场 domain 的 autonomous agent**——它理解 ENS forecast 的物理含义、WU settlement 的测量链、market microstructure 的参与者行为、alpha decay 的经济学。
 

@@ -16,7 +16,7 @@ invariants_touched: [INV-10]
 required_reads:
   - AGENTS.md
   - docs/README.md
-  - docs/reference/repo_layout.md
+  - docs/KEY_REFERENCE/repo_layout.md
   - .claude/baton_state.json
   - zeus_progress.md
   - zeus_task.md
@@ -26,7 +26,7 @@ files_may_change:
   - zeus_task.md
   - .claude/baton_state.json
   - docs/README.md
-  - docs/reference/repo_layout.md
+  - docs/KEY_REFERENCE/repo_layout.md
 files_may_not_change:
   - src/**
   - migrations/**

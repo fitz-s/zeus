@@ -1,4 +1,4 @@
-# Rainstorm: Agentic Weather Trading System — Architecture Blueprint
+# Agentic Weather Trading System — Architecture Blueprint
 
 *For Polymarket weather prediction markets. Designed for a solo developer with live capital at risk.*
 

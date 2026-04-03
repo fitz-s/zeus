@@ -1460,7 +1460,7 @@ This file is not principal architecture authority. It is a short operational bri
 
 ### E. Historical / explanatory references
 - `docs/architecture/zeus_blueprint_v2.md`
-- `docs/reference/zeus_first_principles_rethink.md`
+- `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
 - `docs/progress/zeus_progress.md`
 
 These remain useful, but they are no longer allowed to compete with A, B, or C on system law.

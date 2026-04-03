@@ -7,7 +7,7 @@ principal_authority:
   operator_brief: .claude/CLAUDE.md
   historical_references:
     - docs/architecture/zeus_blueprint_v2.md
-    - docs/reference/zeus_first_principles_rethink.md
+    - docs/KEY_REFERENCE/zeus_first_principles_rethink.md
     - docs/progress/zeus_progress.md
 
 semantic_atoms:
