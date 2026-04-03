@@ -1,4 +1,4 @@
-# zeus_progress.md
+# root_progress.md
 
 ## Mission
 Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces are fail-closed, durable, and operator-truthful before any signal expansion.
@@ -17,8 +17,8 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 - Main-thread direction is now: rebuild a **new** agent team around bounded lanes, while keeping architecture authority and final integration in the main thread.
 - A second external research document (`/Users/leofitz/Downloads/外部调研.md`) was added. It does **not** override runtime-spine work; it expands the roadmap by adding a second foundational track: **clock / target semantics closure before forecast-layer learned upgrades**.
 - Reset artifacts written:
-  - `zeus_progress.md` now records the new integrated direction and team shape.
-  - `zeus_task.md` now exposes `P0-A` through `P2-I` as the new authoritative live queue.
+  - `root_progress.md` now records the new integrated direction and team shape.
+  - `root_task.md` now exposes `P0-A` through `P2-I` as the new authoritative live queue.
   - `.claude/baton_state.json` now reflects the real post-dissolution state (`solo`), not the dead historical team.
 - Context policy for this round:
   - main model reads core authority docs and core runtime files directly;
@@ -572,7 +572,7 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 ## Recent Deltas
 - Main model read core spine files and `zeus框架优化.md` to establish initial truth map before delegation.
 - Main model verified the real runtime write paths: `cycle_runtime.py` is the orchestration loss point, `PortfolioState` is still open-position authority, `decision_log` is cycle-summary oriented, `chronicle` is append-only but sparse, `strategy_tracker` is derived and semantically dirty, `RiskGuard` is still settlement-row/portfolio averaged.
-- Shared team files initialized and confirmed as collaboration authority: `zeus_progress.md`, `zeus_task.md`.
+- Shared team files initialized and confirmed as collaboration authority: `root_progress.md`, `root_task.md`.
 - Existing `PLAN.md` now explicitly tracks the runtime-spine hardening lane.
 - lifecycle-planner froze a planning contract for T3: `Position.state` owns entry/hold/terminal lifecycle only, `exit_state` owns live sell-order lifecycle only, `chain_state` owns reconciliation confidence only. Proposed transition owners: entry fill reconciliation (`reconcile_pending_positions` / `fill_tracker`) for `pending_tracked -> entered|voided`; chain reconciliation for confidence updates plus `holding` normalization only; exit_lifecycle for all `exit_state` changes; close/void helpers for terminal `settled|voided`; future T6 owns `holding <-> day0_window` and T7 owns required `ExitContext` fail-closed gate.
 - lifecycle-planner flagged current leaks: raw string transitions spread across `portfolio.py`, `cycle_runtime.py`, `chain_reconciliation.py`, `fill_tracker.py`, and `exit_lifecycle.py`; monitoring still iterates by permissive skips instead of explicit lifecycle gating; quarantine expiry changes only `chain_state`, so protective runtime behavior is not yet encoded.
@@ -654,7 +654,7 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - Event-spine lane: settlement reader split and rescued-fill exactly-once events look real; exit telemetry runtime proof is now landed, but broader authority migration remains narrower than broad historical language implied.
   - Risk lane: tracker fake-authority cleanup is real; RiskGuard provenance switch is real but narrow; dead/misleading authority surfaces still exist in schema/tests.
 - The current active question is whether the landed operator-clear acknowledgement slice is truthful, minimal, and auditable under adversarial review. Broader exposure resolution still remains out of scope for this slice.
-- Historical task/workstream sprawl remains in this file and in `zeus_task.md`, but it is archive context only. It is not the active queue.
+- Historical task/workstream sprawl remains in this file and in `root_task.md`, but it is archive context only. It is not the active queue.
 
 ## Active Recovery Queue
 - R1 — Re-verify canonical settlement payload contract (`src/state/db.py` + RiskGuard consumer expectations)
@@ -677,7 +677,7 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 ## Current Baton State
 - Active owner: `adversary` on `#20`, reviewing the landed operator-clear acknowledgement slice.
 - Waiting owner: `repair`, to be reactivated after the adversarial verdict or for the next implementation slice.
-- Baton truth, backlog truth, and narrative truth must stay separated: `.claude/baton_state.json` for live ownership, `zeus_task.md` for queue truth, `zeus_progress.md` / `next_round_handoff.md` for narrative truth.
+- Baton truth, backlog truth, and narrative truth must stay separated: `.claude/baton_state.json` for live ownership, `root_task.md` for queue truth, `root_progress.md` / `next_round_handoff.md` for narrative truth.
 - The next live queue question is whether `#20` accepts the narrow operator-clear slice, blocks it, or sharpens one more smallest follow-up.
 - Baton semantics are coherent: two live teammates remain, but only one currently owns an active baton, so team mode is `single-worker`.
 

@@ -23,6 +23,6 @@
 - `.omx/`, `.omc/`: local orchestration/runtime metadata.
 
 ## Root Directory Policy
-- Keep root minimal: dependency manifests, `pytest.ini`, and active operator files like `zeus_progress.md` / `zeus_task.md`.
+- Keep root minimal: dependency manifests, `pytest.ini`, and active operator files like `root_progress.md` / `root_task.md`.
 - Keep `WORKSPACE_MAP.md` at repository root as the top-level navigation entry.
 - Do not place generated reports in root; write them to `docs/reports/`.
