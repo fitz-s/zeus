@@ -185,6 +185,9 @@ class Day0Signal:
             ens_dominance=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
             pre_sunrise=pre_sunrise,
             post_sunset=post_sunset,
+            observation_source=self._observation_source,
+            observation_time=self._observation_time,
+            current_utc_timestamp=self._current_utc_timestamp,
         )
 
     def _temporal_closure_weight(self) -> float:

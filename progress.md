@@ -1700,3 +1700,38 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `27 passed`
   - `./.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'epistemic_context_json or evaluator_epistemic_context_includes_model_bias_reference or kelly_uses_effective_bankroll or tighten_risk_reduces_kelly_multiplier or status_escalates_risk_when_cycle_failed_or_query_errors'` → `4 passed`
   - `./.venv/bin/pytest -q` → `497 passed, 3 skipped`
+
+## 2026-04-02 — P2-H freshness-gated Day0 finality
+- The next bounded Day0 slice closes a high-value authority seam: sunset/daylight finality is no longer unconditional. Day0 now only grants full post-sunset finality when the observation itself is both trusted and fresh.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_observation_weight(...)` now accepts observation provenance/time inputs
+    - post-sunset or `daylight_progress >= 1.0` now returns:
+      - `1.0` only when `day0_nowcast_context(...)` says the observation is both `trusted_source` and `fresh_observation`
+      - otherwise the function falls back to the base temporal-closure weight instead of forcing full lock
+    - `day0_nowcast_context(...)` now exposes:
+      - `trusted_source`
+      - `fresh_observation`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/day0_signal.py`
+    - `Day0Signal.observation_weight()` now threads observation source/time/current timestamp into the day0 authority seam, so stale observations can no longer silently masquerade as sunset-final truth
+- Why this matters:
+  - P2-H Day0 behavior is now more faithful to actual observation quality, not just daylight phase
+  - the new rule is still bounded and auditable:
+    - fresh trusted obs keep the prior full-finality behavior
+    - stale or weak-source obs still get a monotone late-day closure weight, but not full hard lock
+  - this is a cleaner bridge toward richer day0 backbone/nowcast work because freshness now affects the main Day0 authority path, not only a weak residual dampener
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - now locks:
+      - fresh trusted post-sunset observations still force full finality
+      - stale post-sunset observations fall back to base closure instead of `1.0`
+      - `day0_nowcast_context(...)` exposes `trusted_source` / `fresh_observation`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_day0_signal.py`
+    - now threads fresh observation metadata through the existing full-finality tests
+    - now proves stale post-sunset observations preserve more upside than fresh post-sunset observations
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py`
+    - day0 evaluator-path guard tests remained green with the new authority seam
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py` → `41 passed`
+  - `./.venv/bin/pytest -q tests/test_runtime_guards.py -k 'day0_observation_path_reaches_day0_signal or day0_observation_path_rejects_missing_solar_context'` → `2 passed`
+  - `./.venv/bin/pytest -q` → `499 passed, 3 skipped`

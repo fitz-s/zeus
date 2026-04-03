@@ -83,6 +83,9 @@ class TestDay0Signal:
             hours_remaining=8.0,
             member_maxes_remaining=np.full(51, 40.0),
             daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T00:30:00+00:00",
         )
         assert sig.observation_weight() == pytest.approx(1.0)
 
@@ -105,6 +108,9 @@ class TestDay0Signal:
             member_maxes_remaining=np.full(51, 40.0),
             solar_day=solar_day,
             current_local_hour=20.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T00:30:00+00:00",
         )
         assert sig.observation_weight() == pytest.approx(1.0)
 
@@ -132,6 +138,9 @@ class TestDay0Signal:
             hours_remaining=8.0,
             member_maxes_remaining=remaining,
             daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T00:30:00+00:00",
         )
         p = sig.p_vector(BINS, n_mc=400)
         # Fully sunset-locked: all probability should collapse into the observed bin.
@@ -152,11 +161,41 @@ class TestDay0Signal:
             hours_remaining=8.0,
             member_maxes_remaining=remaining,
             daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T00:30:00+00:00",
         )
         p_dawn = dawn.p_vector(BINS, n_mc=400)
         p_dusk = dusk.p_vector(BINS, n_mc=400)
         # Late-day logic should suppress the hot upside tail much more aggressively.
         assert p_dawn[-1] > p_dusk[-1]
+
+    def test_stale_post_sunset_observation_keeps_more_upside_than_fresh(self):
+        remaining = np.full(51, 50.0)
+        fresh = Day0Signal(
+            observed_high_so_far=38.0,
+            current_temp=36.0,
+            hours_remaining=8.0,
+            member_maxes_remaining=remaining,
+            daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T00:30:00+00:00",
+        )
+        stale = Day0Signal(
+            observed_high_so_far=38.0,
+            current_temp=36.0,
+            hours_remaining=8.0,
+            member_maxes_remaining=remaining,
+            daylight_progress=1.0,
+            observation_source="wu_api",
+            observation_time="2026-04-02T00:00:00+00:00",
+            current_utc_timestamp="2026-04-02T04:00:00+00:00",
+        )
+        p_fresh = fresh.p_vector(BINS, n_mc=400)
+        p_stale = stale.p_vector(BINS, n_mc=400)
+        assert p_stale[5] + p_stale[6] > p_fresh[5] + p_fresh[6]
+        assert p_stale[3] < p_fresh[3]
 
     def test_ens_dominance_strengthens_observation_weight(self):
         dominated = Day0Signal(

@@ -226,6 +226,9 @@ def day0_observation_weight(
     ens_dominance: float,
     pre_sunrise: bool,
     post_sunset: bool,
+    observation_source: str = "",
+    observation_time: str | None = None,
+    current_utc_timestamp: str | None = None,
 ) -> float:
     """Current Phase-0 day0 observation dominance policy, extracted behind a seam."""
     base = day0_temporal_closure_weight(
@@ -236,14 +239,21 @@ def day0_observation_weight(
     )
     if pre_sunrise:
         return min(base, 0.05)
+    nowcast = day0_nowcast_context(
+        hours_remaining=hours_remaining,
+        observation_source=observation_source,
+        observation_time=observation_time,
+        current_utc_timestamp=current_utc_timestamp,
+    )
+    finality_ready = nowcast["trusted_source"] and nowcast["fresh_observation"]
     if post_sunset:
-        return 1.0
+        return 1.0 if finality_ready else base
     if daylight_progress is None:
         return base
     if daylight_progress <= 0.0:
         return min(base, 0.05)
     if daylight_progress >= 1.0:
-        return 1.0
+        return 1.0 if finality_ready else base
     return max(base, daylight_progress * 0.35)
 
 
@@ -425,6 +435,8 @@ def day0_nowcast_context(
         except ValueError:
             age_hours = None
             freshness_factor = 0.0
+    trusted_source = source_factor >= 1.0
+    fresh_observation = freshness_factor > 0.0
 
     return {
         "hours_remaining": float(hours_remaining),
@@ -435,6 +447,8 @@ def day0_nowcast_context(
         "short_lead_progress": short_lead_progress,
         "age_hours": age_hours,
         "freshness_factor": freshness_factor,
+        "trusted_source": trusted_source,
+        "fresh_observation": fresh_observation,
         "blend_weight": 0.25 * short_lead_progress * source_factor * freshness_factor,
     }
 

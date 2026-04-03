@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H after adding the sample-aware mean gate, moving next toward either richer day0 finality gating or the next bounded forecast-layer reliability slice"
+      "goal": "Continue P2-H after freshness-gated Day0 finality, moving next toward the next bounded forecast-layer reliability or day0 backbone slice"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the sample-aware mean gate slice and keep P2-H active for the next bounded forecast-layer upgrade",
+  "last_decision": "CLOSE the freshness-gated Day0 finality slice and keep P2-H active for the next bounded forecast-layer upgrade",
   "backlog_source": "task.md"
 }
