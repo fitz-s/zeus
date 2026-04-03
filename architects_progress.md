@@ -1211,6 +1211,73 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 01:24 America/Chicago] FOUNDATION-TEAM-GATE execution slice landed locally
+- Packet: `FOUNDATION-TEAM-GATE`
+- Status delta:
+  - staffing map written
+  - lane ownership map written
+  - verification path written
+  - shutdown / rollback / cleanup path written
+  - exact post-P0.5 team-autonomy conditions written
+- Basis / evidence:
+  - packet now defines the actual gate content rather than only naming the gate
+  - out-of-scope Day0/K3 packet-family boundary remains explicit
+- Decisions frozen:
+  - team remains blocked until this packet is accepted
+  - later team autonomy is still packet-by-packet only
+- Open uncertainties:
+  - adversarial review and architect verification have not yet attacked/approved the fully written gate
+- Next required action:
+  - run adversarial review before acceptance
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 01:31 America/Chicago] FOUNDATION-TEAM-GATE adversarial review surfaced real gate gaps
+- Packet: `FOUNDATION-TEAM-GATE`
+- Status delta:
+  - attack review found in-scope contradictions in the gate text itself
+  - packet remains open while those contradictions are reconciled
+- Basis / evidence:
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-foundation-team-gate-attack-20260403T074632Z.md`
+  - internal attack review found:
+    - task/progress phase drift risk
+    - prose-only team-autonomy conditions
+    - incomplete rollback for the gate itself
+    - owner identity too session-scoped
+- Decisions frozen:
+  - do not accept the gate until the operational rubric, named owner, and rollback semantics are explicit
+  - out-of-scope Day0/K3 dirt remains fenced out
+- Open uncertainties:
+  - final architect verification still pending after the fixes
+- Next required action:
+  - reconcile the in-scope team-gate findings, then re-verify
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 01:38 America/Chicago] FOUNDATION-TEAM-GATE adversarial review resolved and architect approved
+- Packet: `FOUNDATION-TEAM-GATE`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-foundation-team-gate-attack-20260403T074632Z.md`
+  - internal attack review found:
+    - phase drift between task/progress
+    - prose-only gate conditions
+    - incomplete rollback for the gate itself
+    - weak owner identity
+  - architect verdict: `APPROVE`
+- Decisions frozen:
+  - team gate now defines staffing, lane ownership, verification path, cleanup/rollback path, and operational gate rubric
+  - `FOUNDATION-TEAM-GATE` is still a gate packet, not an actual team launch
+  - out-of-scope Day0/K3 packet family remains fenced out
+- Open uncertainties:
+  - unrelated local `AGENTS.md` dirt remains outside this packet’s commit scope
+- Next required action:
+  - commit and push `FOUNDATION-TEAM-GATE`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ## [2026-04-03 01:05 America/Chicago] P0.3 inventory completed
 - Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 - Status delta:

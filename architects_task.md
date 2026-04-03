@@ -58,7 +58,7 @@ Current completion ladder:
 `FOUNDATION-TEAM-GATE`
 
 ### State
-`FROZEN / DRIFT RECONCILED / READY TO EXECUTE`
+`ACCEPTED LOCALLY / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPLAN_NEXT`
@@ -73,6 +73,7 @@ Freeze the future team-opening gate packet that will turn post-P0.5 packet-by-pa
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
+- Named owner: `Architects mainline lead`
 - Tribunal/principal architect remains the scope-freezing authority
 - Verifier remains independent planning/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
@@ -114,11 +115,11 @@ Explicitly forbidden for edits in this packet:
 - no active hard blocker
 - active mainline packet drift acknowledged explicitly
 - local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `FOUNDATION-TEAM-GATE`
-- `FOUNDATION-TEAM-GATE` is now frozen, but not yet executed/accepted
+- `FOUNDATION-TEAM-GATE` execution slice is landed locally and accepted
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 
 ### Ready-to-commit slice
-`FOUNDATION-TEAM-GATE is frozen cleanly from the completed P0.5 contract. Next execution slice is to define staffing, lane ownership, verification path, and cleanup/rollback path without mutating out-of-scope Day0/K3 files.`
+`FOUNDATION-TEAM-GATE accepted locally — staffing, lane ownership, verification path, cleanup/rollback path, and exact post-P0.5 team-autonomy conditions are now explicit. Next step is commit/push, without mixing Day0/K3 or unrelated AGENTS dirt.`
 
 ---
 
@@ -131,27 +132,30 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the team gate packet
 
 ### Phase B — planning intake
-- [ ] define staffing
-- [ ] define lane ownership
-- [ ] define verification path
-- [ ] define shutdown / rollback / cleanup path
+- [x] define staffing
+- [x] define lane ownership
+- [x] define verification path
+- [x] define shutdown / rollback / cleanup path
 
 ### Phase C — bounded planning design
-- [ ] keep team autonomy packet-by-packet only
-- [ ] keep destructive/cutover work human-gated
+- [x] keep team autonomy packet-by-packet only
+- [x] keep destructive/cutover work human-gated
+- [x] define an operational gate rubric instead of prose-only eligibility
 
 ### Phase D — evidence bundle
 - [x] append team-gate freeze result to `architects_progress.md`
-- [ ] commit and push the team-gate freeze
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
+- [ ] commit and push the accepted team-gate packet
 
 ---
 
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Execute `FOUNDATION-TEAM-GATE`.
-2. Use the now-completed P0.5 rules as the base contract.
-3. Keep packet-by-packet team autonomy narrow and explicit.
+1. Commit and push the accepted `FOUNDATION-TEAM-GATE` packet.
+2. Keep the unrelated Day0/K3 and AGENTS dirt out of the commit.
+3. After push, record that later packet-by-packet team autonomy is allowed in principle, but still only through later frozen packets and never for destructive/cutover work.
 4. Do not mutate Day0/K3 files under this packet.
 5. Keep destructive/cutover work human-gated.
 
