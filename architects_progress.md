@@ -233,3 +233,42 @@ Archive policy:
   - commit and push `P1.7B-RECONCILIATION-QUERY-COMPAT`
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 11:19 America/Chicago] P1.7B-RECONCILIATION-QUERY-COMPAT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Status delta:
+  - packet committed as `7707766`
+  - packet pushed to `origin/Architects`
+  - reconciliation query-path compatibility is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to `src/state/chain_reconciliation.py`, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - touched reconciliation query path now distinguishes canonical bootstrap from malformed legacy and hybrid drift states
+  - no reconciliation caller migration is claimed in this packet
+- Open uncertainties:
+  - reconciliation rescue builder layer is still ahead
+- Next required action:
+  - freeze the reconciliation rescue builder packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 11:19 America/Chicago] P1.7C-RECONCILIATION-RESCUE-BUILDERS frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - helper-level canonical-schema crash paths around reconciliation are now removed
+  - canonical rescue payload construction still needs a dedicated builder layer
+- Decisions frozen:
+  - keep this slice on rescue builders only
+  - do not migrate reconciliation caller code in this packet
+  - keep team closed by default
+- Open uncertainties:
+  - exact reconciliation rescue builder signatures still need implementation review
+- Next required action:
+  - land the builder layer and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead
