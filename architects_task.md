@@ -55,21 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+`P1.6B-HARVESTER-CHRONICLE-COMPAT`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / BLOCKER_PACKET`
 
 ### Objective
-Make the settlement telemetry helper in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the remaining harvester compatibility inventory can proceed without this raw legacy-helper crash.
+Make the chronicle write helper degrade cleanly on canonically bootstrapped databases so the remaining harvester compatibility inventory can proceed without the current raw `chronicle` table failure.
 
 ### Why this packet is next
-- `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` is complete and pushed
-- the next remaining P1 dual-write family in spec order is harvester
-- repo truth shows `log_settlement_event()` still routes through the generic legacy event helper that fails on canonical-only DBs
+- `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT` is complete and pushed
+- the remaining explicit harvester blocker is the chronicle write path
+- repo truth shows `src/state/chronicler.py::log_event` still fails on canonical-only DBs
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -88,8 +88,8 @@ Make the settlement telemetry helper in `src/state/db.py` degrade cleanly on can
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT.md`
-- `src/state/db.py`
+- `work_packets/P1.6B-HARVESTER-CHRONICLE-COMPAT.md`
+- `src/state/chronicler.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -104,6 +104,7 @@ Explicitly forbidden for edits in this packet:
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
+- `src/state/db.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
 - `architecture/**`
@@ -124,33 +125,33 @@ Explicitly forbidden for edits in this packet:
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.6B-HARVESTER-CHRONICLE-COMPAT`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT landed — touched settlement telemetry helper degrades cleanly on canonical DBs, remaining harvester blockers stay explicit, and no harvester migration is claimed.`
+`P1.6B-HARVESTER-CHRONICLE-COMPAT landed — touched chronicle helper degrades cleanly on canonical DBs, remaining harvester blockers stay explicit, and no harvester migration is claimed.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` is complete
-- [x] confirm the next remaining P1 dual-write family is harvester
-- [x] freeze `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- [x] confirm `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT` is complete
+- [x] confirm the remaining explicit harvester blocker is the chronicle write path
+- [x] freeze `P1.6B-HARVESTER-CHRONICLE-COMPAT`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] make settlement telemetry helper degrade cleanly on canonical DBs
-- [x] preserve legacy-schema behavior for the touched helper
-- [x] add targeted architecture-contract coverage for the compatibility change
+- [ ] make chronicle helper degrade cleanly on canonical DBs
+- [ ] preserve fail-loud behavior for malformed/non-canonical unexpected states
+- [ ] add targeted architecture-contract coverage for the compatibility change
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
-- [x] keep team closed unless a new freeze explicitly justifies it
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep remaining harvester blockers explicit
+- [ ] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -163,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted settlement-telemetry blocker packet without mixing unrelated working-tree dirt.
-2. Freeze the next remaining harvester blocker packet after push.
+1. Fix only the chronicle compatibility blocker.
+2. Keep harvester caller migration for a later successor packet.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep harvester caller migration separate from this helper-compat packet.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.

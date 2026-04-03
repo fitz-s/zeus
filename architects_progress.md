@@ -1918,6 +1918,42 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:24 America/Chicago] P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT committed and pushed
+- Packet: `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- Status delta:
+  - packet committed as `9189533`
+  - branch pushed to `origin/Architects`
+  - settlement-helper blocker removal is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `src/state/db.py`, targeted tests, and control surfaces
+- Decisions frozen:
+  - touched settlement telemetry helper now distinguishes canonical bootstrap from malformed legacy schema
+  - remaining chronicle-backed harvester blocker is still explicit
+- Open uncertainties:
+  - the chronicle blocker remains before harvester migration can be attempted honestly
+- Next required action:
+  - freeze the chronicle blocker packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:24 America/Chicago] P1.6B-HARVESTER-CHRONICLE-COMPAT frozen
+- Packet: `P1.6B-HARVESTER-CHRONICLE-COMPAT`
+- Status delta:
+  - next harvester blocker packet frozen after P1.6A closeout
+- Basis / evidence:
+  - `src/state/chronicler.py::log_event` remains the next explicit canonical-schema blocker in the harvester settlement flow
+- Decisions frozen:
+  - keep this slice on chronicle helper compatibility only
+  - do not migrate harvester in this packet
+  - team remains closed by default
+- Open uncertainties:
+  - exact chronicle compatibility semantics still need implementation review
+- Next required action:
+  - land the chronicle compatibility change and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
