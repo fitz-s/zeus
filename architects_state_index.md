@@ -6,26 +6,26 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex mainline coordination pass`
+- Last updated by: `Codex GOV-01 closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `Governance methodology hardening`
-- Active packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
-- Active packet state: `frozen / ready for execution`
+- Stage: `P3 pre-freeze`
+- Active packet: `none`
+- Active packet state: `awaiting next freeze`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- Last accepted packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - next packet still defaults to `NO_TEAM_DEFAULT`
 
 ## Current next action
 
-1. Update AGENTS and the autonomous delivery constitution with the stricter closeout/reopen doctrine.
-2. Keep the packet on methodology surfaces only.
-3. Do not mix runtime/schema edits into this packet.
+1. Read the P3 section and packet authority surfaces.
+2. Freeze `P3.1-STRATEGY-POLICY-TABLES`.
+3. Keep out-of-scope local dirt excluded from the next packet commit.
 
 ## Current out-of-scope dirt
 
@@ -39,4 +39,6 @@ Metadata:
 3. `architects_task.md`
 4. `architects_progress.md`
 5. `work_packets/GOV-01-CLOSEOUT-METHODOLOGY-HARDENING.md`
-6. current packet `required_reads`
+6. `docs/governance/zeus_autonomous_delivery_constitution.md`
+7. `docs/architecture/zeus_durable_architecture_spec.md` — P3 section
+8. `work_packets/FOUNDATION-TEAM-GATE.md`
