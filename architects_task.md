@@ -58,13 +58,13 @@ Current completion ladder:
 `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 
 ### Objective
-Migrate the harvester settlement path to emit canonical settlement events/projection when canonical schema is present, while preserving existing legacy settlement writes on legacy-schema runtimes and keeping non-harvester callers untouched.
+Migrate the harvester settlement path to emit canonical settlement events/projection when canonical schema is present and prior canonical position history exists, while preserving existing legacy settlement writes on legacy-schema runtimes and keeping non-harvester callers untouched.
 
 ### Why this packet is next
 - `P1.6C-HARVESTER-SETTLEMENT-BUILDERS` is complete and pushed
@@ -130,7 +130,7 @@ Explicitly forbidden for edits in this packet:
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE landed — harvester settlement emits canonical settlement events/projection when canonical schema is present, and no other caller moves.`
+`P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE landed — harvester settlement emits canonical settlement events/projection when canonical schema is present and prior canonical position history exists, and no other caller moves.`
 
 ---
 
@@ -143,15 +143,15 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] dual-write canonical settlement batch in `harvester`
-- [ ] keep legacy settlement writes in place on legacy runtimes
-- [ ] add targeted architecture-contract coverage for the harvester settlement migration
+- [x] dual-write canonical settlement batch in `harvester`
+- [x] keep legacy settlement writes in place on legacy runtimes
+- [x] add targeted architecture-contract coverage for the harvester settlement migration
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep the packet on the harvester settlement caller only
-- [ ] keep team closed unless a new freeze explicitly justifies it
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep the packet on the harvester settlement caller only
+- [x] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -164,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Migrate only the harvester settlement caller.
-2. Keep other callers, cutover, and broader state rewiring out of scope.
-3. Keep team closed by default.
-4. Keep unrelated working-tree dirt out of the packet commit.
+1. Commit and push this accepted harvester settlement packet without mixing unrelated working-tree dirt.
+2. Freeze the next remaining P1 dual-write/reconciliation packet after push.
+3. Keep other callers, cutover, and broader state rewiring out of scope.
+4. Keep team closed by default until a later packet clearly justifies it.
 
 If this cannot be done without a new packet, freeze that packet before acting.
