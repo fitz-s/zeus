@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
-- State: `APPROVED / READY TO COMMIT`
+- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
+- State: `FROZEN / READY TO IMPLEMENT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Extend `src/engine/lifecycle_events.py` with pure reconciliation rescue builders so a later reconciliation packet can append canonical rescue/sync lifecycle facts without inventing payloads inline.
+Migrate the reconciliation pending-fill rescue path to append canonical rescue/sync lifecycle facts when canonical schema is present, while preserving existing legacy behavior on legacy-schema runtimes and keeping other reconciliation paths untouched.
 
 ## Allowed files
 
-- `work_packets/P1.7C-RECONCILIATION-RESCUE-BUILDERS.md`
-- `src/engine/lifecycle_events.py`
+- `work_packets/P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE.md`
+- `src/state/chain_reconciliation.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -48,7 +48,7 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation rescue builders
 - `src/state/chronicler.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
-- `src/state/chain_reconciliation.py`
+- `src/engine/lifecycle_events.py`
 - `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -59,7 +59,7 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation rescue builders
 
 ## Non-goals
 
-- no reconciliation caller migration
+- no reconciliation caller migration beyond pending-fill rescue
 - no broader dual-write in caller code
 - no DB-first reads
 - no exit-path migration
@@ -73,17 +73,17 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation rescue builders
 
 ## Immediate checklist
 
-- [x] implement reconciliation rescue builders in `src/engine/lifecycle_events.py`
-- [x] keep the builder layer detached from reconciliation caller wiring
-- [x] add targeted architecture-contract coverage
-- [x] append durable packet transition to `architects_progress.md` when implementation lands
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] implement reconciliation pending-fill rescue dual-write in `src/state/chain_reconciliation.py`
+- [ ] keep legacy rescue behavior in place on legacy-schema runtimes
+- [ ] add targeted architecture-contract coverage
+- [ ] append durable packet transition to `architects_progress.md` when implementation lands
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Commit and push this accepted reconciliation rescue builder packet without mixing unrelated working-tree dirt.
-2. Freeze the actual reconciliation migration packet after push.
-3. Keep cutover and broader state rewiring out of scope.
-4. Keep reconciliation caller migration separate from this builder packet.
+1. Migrate only the reconciliation pending-fill rescue branch.
+2. Keep other reconciliation branches and broader state rewiring out of scope.
+3. Keep team closed by default.
+4. Keep unrelated working-tree dirt out of the packet commit.
