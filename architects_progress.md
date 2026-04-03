@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 closeout pass`
+- Last updated by: `Codex P3.3 post-close repair pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 pre-freeze after policy tables`
-- Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Mainline stage: `P3 post-close review after snapshot repair`
+- Last accepted packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
 - Current active packet: `none`
-- Current packet status: `awaiting next freeze`
+- Current packet status: `awaiting rerun of post-close review before next freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
 - Current hard blockers:
-  - no active technical blocker inside the post-P3.1 closeout slice
+  - rerun the user-required post-close third-party critic + verifier after the snapshot repair before freezing P3.4
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1340,5 +1340,39 @@ Archive policy:
   - evaluator still retains a conn-less fallback policy path for non-runtime/test contexts; durable control-plane migration remains later work
 - Next required action:
   - run the user-required post-close third-party critic + verifier before freezing `P3.4-RISKGUARD-POLICY-EMISSION`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 18:30 America/Chicago] P3.3 post-close review found stale progress snapshot blocker
+- Author: `Architects mainline lead`
+- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Status delta:
+  - post-close critic blocked the next freeze until `architects_progress.md` current snapshot is synchronized
+- Basis / evidence:
+  - post-close critic found the durable current snapshot still pointed at the post-P3.1 boundary while later timeline entries already recorded accepted P3.2 and accepted P3.3 truth
+- Decisions frozen:
+  - do not freeze `P3.4-RISKGUARD-POLICY-EMISSION` on top of stale durable control state
+- Open uncertainties:
+  - none beyond repairing the stale snapshot and rerunning post-close review
+- Next required action:
+  - sync the top-level durable snapshot with accepted P3.3 truth, then rerun post-close critic + verifier
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 18:33 America/Chicago] P3.3 post-close snapshot sync repaired
+- Author: `Architects mainline lead`
+- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Status delta:
+  - durable current snapshot now matches accepted P3.3 repo truth
+- Basis / evidence:
+  - `architects_progress.md` current snapshot now reflects the accepted P3.3 boundary and the active post-close review gate
+- Decisions frozen:
+  - rerun post-close third-party critic + verifier before freezing `P3.4-RISKGUARD-POLICY-EMISSION`
+- Open uncertainties:
+  - none beyond the refreshed post-close review outcome
+- Next required action:
+  - rerun post-close third-party critic + verifier on the accepted P3.3 boundary
 - Owner:
   - Architects mainline lead
