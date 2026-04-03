@@ -1405,6 +1405,7 @@ def test_stranded_exit_intent_recovered():
     pos = _make_position(
         state="holding",
         exit_state="exit_intent",  # stranded by exception
+        last_exit_error="exception_during_sell",
     )
     portfolio = _make_portfolio(pos)
     clob = _make_clob()

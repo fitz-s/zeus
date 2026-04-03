@@ -330,6 +330,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
             self.applied_validations = ["ens_fetch"]
             self.decision_snapshot_id = "snap-1"
             self.edge_source = "center_buy"
+            self.strategy_key = "center_buy" if should_trade else ""
             self.edge_context = None
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
@@ -497,6 +498,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
             self.applied_validations = ["ens_fetch"]
             self.decision_snapshot_id = "snap-reject"
             self.edge_source = "center_buy"
+            self.strategy_key = "center_buy"
             self.edge_context = None
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
@@ -566,6 +568,7 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
             self.applied_validations = ["ens_fetch"]
             self.decision_snapshot_id = "snap-gated"
             self.edge_source = "opening_inertia"
+            self.strategy_key = "opening_inertia"
             self.edge_context = None
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
@@ -2171,11 +2174,23 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert captured["context"].market_vig is None
 
     assert [event["event_type"] for event in events] == [
+        "EXIT_INTENT",
+        "EXIT_ORDER_POSTED",
         "EXIT_ORDER_ATTEMPTED",
         "EXIT_ORDER_FILLED",
     ]
 
-    attempt_event, fill_event = events
+    intent_event, posted_event, attempt_event, fill_event = events
+    assert intent_event["event_type"] == "EXIT_INTENT"
+    assert intent_event["source"] == "exit_lifecycle"
+    assert intent_event["runtime_trade_id"] == "live-exit-1"
+    assert intent_event["details"]["status"] in ("", "triggered")
+    assert intent_event["details"]["exit_reason"] == "forward edge failed"
+    assert posted_event["event_type"] == "EXIT_ORDER_POSTED"
+    assert posted_event["source"] == "exit_lifecycle"
+    assert posted_event["runtime_trade_id"] == "live-exit-1"
+    assert posted_event["order_id"] == "sell-order-1"
+    assert posted_event["details"]["last_exit_order_id"] == "sell-order-1"
     assert attempt_event["source"] == "exit_lifecycle"
     assert attempt_event["runtime_trade_id"] == "live-exit-1"
     assert attempt_event["position_state"] == "day0_window"
@@ -2246,6 +2261,7 @@ def test_materialize_position_carries_semantic_snapshot_jsons():
         "size_usd": 10.0,
         "tokens": {"market_id": "m1", "token_id": "yes123", "no_token_id": "no456"},
         "decision_snapshot_id": "snap-1",
+        "strategy_key": "center_buy",
         "selected_method": "ens_member_counting",
         "applied_validations": ["ens_fetch"],
         "edge_source": "center_buy",
