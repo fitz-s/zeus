@@ -55,21 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.6B-HARVESTER-CHRONICLE-COMPAT`
+`P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
-`SOLO_EXECUTE / BLOCKER_PACKET`
+`SOLO_EXECUTE / NO_TEAM_DEFAULT`
 
 ### Objective
-Make the chronicle write helper degrade cleanly on canonically bootstrapped databases so the remaining harvester compatibility inventory can proceed without the current raw `chronicle` table failure.
+Extend `lifecycle_events.py` with pure settlement event/projection builders so a later harvester packet can dual-write canonical settlement lifecycle facts without inventing payloads inline.
 
 ### Why this packet is next
-- `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT` is complete and pushed
-- the remaining explicit harvester blocker is the chronicle write path
-- repo truth shows `src/state/chronicler.py::log_event` still fails on canonical-only DBs
+- `P1.6B-HARVESTER-CHRONICLE-COMPAT` is complete and pushed
+- the helper-level canonical-schema crash paths around harvester settlement flow are now removed
+- before wiring harvester itself, canonical settlement payload construction still needs a dedicated builder layer
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -88,8 +88,8 @@ Make the chronicle write helper degrade cleanly on canonically bootstrapped data
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.6B-HARVESTER-CHRONICLE-COMPAT.md`
-- `src/state/chronicler.py`
+- `work_packets/P1.6C-HARVESTER-SETTLEMENT-BUILDERS.md`
+- `src/engine/lifecycle_events.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -99,14 +99,14 @@ Explicitly forbidden for edits in this packet:
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
-- `src/engine/**`
+- `src/state/db.py`
+- `src/state/chronicler.py`
+- `src/state/ledger.py`
+- `src/state/projection.py`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
-- `src/state/db.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
 - `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -125,33 +125,33 @@ Explicitly forbidden for edits in this packet:
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.6B-HARVESTER-CHRONICLE-COMPAT`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.6B-HARVESTER-CHRONICLE-COMPAT landed — touched chronicle helper degrades cleanly on canonical DBs, remaining harvester blockers stay explicit, and no harvester migration is claimed.`
+`P1.6C-HARVESTER-SETTLEMENT-BUILDERS landed — pure settlement builders exist for canonical event/projection payloads, and no harvester caller migration is claimed.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT` is complete
-- [x] confirm the remaining explicit harvester blocker is the chronicle write path
-- [x] freeze `P1.6B-HARVESTER-CHRONICLE-COMPAT`
+- [x] confirm `P1.6B-HARVESTER-CHRONICLE-COMPAT` is complete
+- [x] confirm the next remaining prep step is the settlement builder layer
+- [x] freeze `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] make chronicle helper degrade cleanly on canonical DBs
-- [x] preserve fail-loud behavior for malformed/non-canonical unexpected states
-- [x] add targeted architecture-contract coverage for the compatibility change
+- [ ] add pure settlement builder helpers in `src/engine/lifecycle_events.py`
+- [ ] keep the builder layer detached from harvester caller wiring
+- [ ] add targeted architecture-contract coverage for the builder layer
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep remaining harvester blockers explicit
-- [x] keep team closed unless a new freeze explicitly justifies it
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep harvester caller migration out of scope
+- [ ] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -164,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted chronicle blocker packet without mixing unrelated working-tree dirt.
-2. Freeze the actual harvester dual-write packet after push.
+1. Add the pure settlement builder layer.
+2. Keep harvester caller migration for a later packet.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep harvester migration claims separate from this blocker packet.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.
