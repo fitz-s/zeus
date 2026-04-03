@@ -620,6 +620,315 @@ def test_entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db():
     assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
     conn.close()
 
+
+def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent():
+    from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
+    from src.state.db import init_schema
+
+    class _Logger:
+        def debug(self, *args, **kwargs):
+            return None
+
+    class _Deps:
+        logger = _Logger()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    wrote = _dual_write_canonical_entry_if_available(
+        conn,
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        deps=_Deps(),
+    )
+
+    assert wrote is False
+    events = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
+    assert events == 0
+    conn.close()
+
+
+def test_cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_schema_present():
+    from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
+    from src.state.db import apply_architecture_kernel_schema
+
+    class _Logger:
+        def debug(self, *args, **kwargs):
+            return None
+
+    class _Deps:
+        logger = _Logger()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    wrote = _dual_write_canonical_entry_if_available(
+        conn,
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        deps=_Deps(),
+    )
+
+    assert wrote is True
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key, order_status FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert [(r["event_type"], r["sequence_no"]) for r in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+    ]
+    assert dict(projection_row) == {
+        "phase": "active",
+        "strategy_key": "center_buy",
+        "order_status": "filled",
+    }
+    conn.close()
+
+
+def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_on_canonical_db():
+    from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        init_schema,
+        log_execution_report,
+        log_trade_entry,
+    )
+
+    class _Logger:
+        def debug(self, *args, **kwargs):
+            return None
+
+    class _Deps:
+        logger = _Logger()
+
+    class _Result:
+        status = "filled"
+        reason = None
+        submitted_price = 0.5
+        fill_price = 0.5
+        shares = 20.0
+        timeout_seconds = None
+        filled_at = "2026-04-03T00:05:00Z"
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+
+    legacy_conn = sqlite3.connect(":memory:")
+    legacy_conn.row_factory = sqlite3.Row
+    init_schema(legacy_conn)
+    log_trade_entry(legacy_conn, pos)
+    wrote_legacy = _dual_write_canonical_entry_if_available(
+        legacy_conn,
+        pos,
+        decision_id="dec-1",
+        deps=_Deps(),
+    )
+    log_execution_report(legacy_conn, pos, _Result())
+    assert wrote_legacy is False
+    assert legacy_conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] >= 2
+    legacy_conn.close()
+
+    canonical_conn = sqlite3.connect(":memory:")
+    canonical_conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(canonical_conn)
+    log_trade_entry(canonical_conn, pos)
+    wrote_canonical = _dual_write_canonical_entry_if_available(
+        canonical_conn,
+        pos,
+        decision_id="dec-1",
+        deps=_Deps(),
+    )
+    log_execution_report(canonical_conn, pos, _Result())
+    assert wrote_canonical is True
+    assert canonical_conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 3
+    assert canonical_conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 1
+    canonical_conn.close()
+
+
+def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
+    text = (ROOT / "src/engine/cycle_runtime.py").read_text()
+    marker = "log_trade_entry(conn, pos)"
+    start = text.index(marker)
+    snippet = text[start:start + 300]
+    assert marker in snippet
+    assert "_dual_write_canonical_entry_if_available(" in snippet
+
+
+def _discovery_phase_harness(*, conn: sqlite3.Connection):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import execute_discovery_phase
+    from src.engine.discovery_mode import DiscoveryMode
+    from src.state.db import query_position_events
+    from src.state.portfolio import Position
+
+    class _Artifact:
+        def add_trade(self, payload):
+            self.trade = payload
+
+        def add_no_trade(self, payload):
+            self.no_trade = payload
+
+    class _Tracker:
+        def record_entry(self, pos):
+            self.recorded = getattr(self, "recorded", 0) + 1
+
+    class _Logger:
+        def debug(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            return None
+
+        def error(self, *args, **kwargs):
+            return None
+
+    city = SimpleNamespace(name="NYC", cluster="US-Northeast", settlement_unit="F", timezone="America/New_York")
+    edge = SimpleNamespace(
+        direction="buy_yes",
+        bin=SimpleNamespace(label="39-40°F"),
+        p_posterior=0.6,
+        edge=0.1,
+        entry_price=0.5,
+        vwmp=0.5,
+        ci_lower=0.5,
+        ci_upper=0.7,
+    )
+    decision = SimpleNamespace(
+        should_trade=True,
+        edge=edge,
+        tokens={"market_id": "mkt-1", "token_id": "yes-1", "no_token_id": "no-1"},
+        size_usd=10.0,
+        decision_id="dec-1",
+        decision_snapshot_id="snap-1",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        selected_method="ens_member_counting",
+        applied_validations=[],
+        settlement_semantics_json=None,
+        epistemic_context_json=None,
+        edge_context_json=None,
+        p_raw=None,
+        p_cal=None,
+        p_market=None,
+        alpha=0.0,
+        agreement="AGREE",
+        edge_context=SimpleNamespace(p_posterior=0.6),
+    )
+    result = SimpleNamespace(
+        trade_id="trade-1",
+        status="filled",
+        fill_price=0.5,
+        submitted_price=0.5,
+        shares=20.0,
+        order_id="ord-1",
+        timeout_seconds=None,
+    )
+
+    portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)
+    artifact = _Artifact()
+    tracker = _Tracker()
+    summary = {"candidates": 0, "trades": 0, "no_trades": 0}
+
+    def _add_position(portfolio_obj, pos):
+        portfolio_obj.positions.append(pos)
+
+    deps = SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
+        find_weather_markets=lambda min_hours_to_resolution=6: [
+            {
+                "city": city,
+                "target_date": "2026-04-03",
+                "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40}],
+                "hours_since_open": 30.0,
+                "hours_to_resolution": 10.0,
+                "event_id": "evt-1",
+                "slug": "nyc-2026-04-03",
+            }
+        ],
+        MarketCandidate=lambda **kwargs: SimpleNamespace(**kwargs),
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        create_execution_intent=lambda **kwargs: SimpleNamespace(),
+        execute_intent=lambda *args, **kwargs: result,
+        add_position=_add_position,
+        is_strategy_enabled=lambda strategy_name: True,
+        _classify_edge_source=lambda mode, edge_obj: "center_buy",
+        Position=Position,
+        settings=SimpleNamespace(mode="paper"),
+        logger=_Logger(),
+        _utcnow=lambda: datetime(2026, 4, 3, 0, 5, tzinfo=timezone.utc),
+        DiscoveryMode=DiscoveryMode,
+        NoTradeCase=SimpleNamespace,
+    )
+
+    execute_discovery_phase(
+        conn,
+        SimpleNamespace(),
+        portfolio,
+        artifact,
+        tracker,
+        SimpleNamespace(),
+        DiscoveryMode.UPDATE_REACTION,
+        summary,
+        150.0,
+        datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
+        deps=deps,
+    )
+
+    return {
+        "portfolio": portfolio,
+        "artifact": artifact,
+        "tracker": tracker,
+        "summary": summary,
+        "query_position_events": query_position_events,
+    }
+
+
+def test_execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db():
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    result = _discovery_phase_harness(conn=conn)
+
+    assert len(result["portfolio"].positions) == 1
+    assert result["summary"]["trades"] == 1
+    events = result["query_position_events"](conn, "trade-1")
+    assert len(events) >= 2
+    conn.close()
+
+
+def test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db():
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    result = _discovery_phase_harness(conn=conn)
+
+    assert len(result["portfolio"].positions) == 1
+    assert result["summary"]["trades"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 3
+    row = conn.execute(
+        "SELECT phase, strategy_key, order_status FROM position_current WHERE position_id = 'trade-1'"
+    ).fetchone()
+    assert dict(row) == {
+        "phase": "active",
+        "strategy_key": "center_buy",
+        "order_status": "filled",
+    }
+    conn.close()
+
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
     jobs = workflow["jobs"]

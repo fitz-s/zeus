@@ -239,6 +239,27 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     )
 
 
+def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | None, deps) -> bool:
+    if conn is None:
+        return False
+
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project
+
+    try:
+        events, projection = build_entry_canonical_write(
+            pos,
+            decision_id=decision_id,
+            source_module="src.engine.cycle_runtime",
+        )
+        append_many_and_project(conn, events, projection)
+    except RuntimeError as exc:
+        deps.logger.debug("Canonical entry dual-write skipped for %s: %s", pos.trade_id, exc)
+        return False
+
+    return True
+
+
 def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     summary = {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False}
     if getattr(clob, "paper_mode", False):
@@ -779,6 +800,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         from src.state.db import log_execution_report, log_trade_entry
 
                         log_trade_entry(conn, pos)
+                        _dual_write_canonical_entry_if_available(
+                            conn,
+                            pos,
+                            decision_id=d.decision_id,
+                            deps=deps,
+                        )
                         log_execution_report(conn, pos, result)
                         portfolio_dirty = True
                         if result.status == "filled":
