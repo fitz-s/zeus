@@ -62,6 +62,32 @@ Program / packet / slice rules:
   - the next slice would cross into a higher-risk zone,
   - or a real blocker / contradiction appears.
 
+Closure / reopen rules:
+
+- Packet acceptance and phase closure are always **defeasible by later repo-truth contradiction**.
+- If repo truth later disproves a prior acceptance or closure claim, control surfaces must **reopen explicitly** rather than patch quietly around the contradiction.
+- Distinguish clearly between:
+  - packet family completed,
+  - current targeted evidence passed,
+  - bottom-layer semantic convergence actually achieved.
+- Do not collapse those into one “done” claim unless the evidence truly covers all three.
+
+Pre-closeout review rules:
+
+- Before any packet-family or phase-closeout claim, run the broadest review that is still packet-bounded:
+  - targeted tests/gates for the packet,
+  - broader affected-file checks when closure is being claimed,
+  - explicit adversarial review,
+  - at least one additional independent read-only review lane on the relevant bottom-layer surfaces for high-sensitivity runtime/governance work.
+- The point of critic/reviewer lanes before closeout is to surface blocker-level issues **before a human user does**.
+- If a human user can still trivially find additional blocker-level issues after an acceptance/closure claim, treat that as a **process failure signal**, not as normal “extra critic scope.”
+- In that situation:
+  - reopen the claim,
+  - freeze an explicit repair or superseding packet,
+  - update control surfaces to match repo truth,
+  - and only re-close after fresh evidence and review.
+- If multiple confirmed defects sit on the same bottom-layer truth boundary and the human explicitly directs one repair package, prefer one tightly bounded repair packet over artificial packet fragmentation.
+
 Micro-event logging rule:
 
 - Do not dump every small attempt into `architects_progress.md`.

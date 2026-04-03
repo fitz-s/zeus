@@ -30,11 +30,11 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Stage 3 / P2 execution-truth mainline repaired and re-closed`
+- Mainline stage: `Governance methodology hardening`
 - Last accepted packet: `P2R-EXECUTION-TRUTH-REPAIR`
-- Current active packet: `none (P2 repaired and re-closed)`
-- Current packet status: `idle / run-horizon stop boundary reached`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
+- Current active packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Current packet status: `frozen / ready for execution`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
@@ -1069,5 +1069,24 @@ Archive policy:
   - this acceptance does not claim broader migration/cutover/parity convergence or retirement of all legacy compatibility shims
 - Next required action:
   - stop at the current user-request horizon (`P2 repaired and re-closed`)
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 16:41 America/Chicago] GOV-01-CLOSEOUT-METHODOLOGY-HARDENING frozen
+- Author: `Architects mainline lead`
+- Packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - recent P2 repair exposed a method failure in closeout/reopen discipline, not just a runtime bug
+  - the user explicitly directed that AGENTS and the autonomous delivery constitution be updated
+- Decisions frozen:
+  - closure claims become explicitly defeasible by repo truth
+  - pre-closeout review must aim to catch blocker-level issues before a human user does
+  - a human finding extra blocker-level issues after closure is treated as process failure, not as normal follow-up critic scope
+- Open uncertainties:
+  - final wording still needs verification for scope and precision
+- Next required action:
+  - land the methodology wording updates and push them
 - Owner:
   - Architects mainline lead

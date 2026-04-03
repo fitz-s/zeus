@@ -228,6 +228,35 @@ Every package must supply:
 - rollback note
 - unresolved uncertainty note
 
+### 7.0 Closure and reopen doctrine
+
+Acceptance and closure claims are always defeasible by stronger repo truth.
+
+If later runtime/code/test truth contradicts a prior packet acceptance or phase-closeout claim:
+- repo truth wins
+- the claim must be reopened explicitly in control surfaces
+- the follow-up work must land in the same packet or an explicit superseding/repair packet
+- quiet patching around the contradiction is forbidden
+
+Package-family completion, passing packet tests, and true bottom-layer semantic convergence are related but non-identical states.
+Zeus must not collapse them into one “done” claim unless evidence actually covers all three.
+
+### 7.0.a Pre-closeout independent review rule
+
+Before any high-sensitivity packet-family or phase-closeout claim, the owner must gather review evidence aimed at catching blocker-level issues **before a human user does**:
+- packet-scoped tests/gates
+- broader affected-file review or suite when a family/phase closeout is being claimed
+- explicit adversarial review
+- at least one additional independent read-only reviewer/critic lane on the relevant bottom-layer surfaces
+
+If a human user can still trivially identify blocker-level issues after a closure claim:
+- treat that as a **review-process failure**
+- do not frame it as ordinary “extra critic follow-up”
+- reopen the claim and record the contradiction
+- freeze a repair or superseding packet before continuing
+
+When several confirmed defects sit on the same bottom-layer truth boundary and a human explicitly directs one repair package, Zeus may use one tightly bounded repair packet instead of artificial fragmentation, but that packet must still keep files, evidence, and non-goals explicit.
+
 ### 7.1 Minimum evidence by class
 - **Math:** targeted tests + strategy/risk evidence + no truth-contract drift
 - **Architecture:** tests + manifests/invariants reference + gate output + rollback
