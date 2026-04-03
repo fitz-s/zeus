@@ -873,6 +873,27 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:31 America/Chicago] P0.1 inventory completed
+- Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
+- Status delta:
+  - packet moved from frozen-next into active inventory/design state
+  - first-slice shape is now narrowed to RFC/scaffolding on the touched execution path
+- Basis / evidence:
+  - foundation spec `P0.1` requires explicit exit intent semantics before ledger work
+  - `src/execution/exit_lifecycle.py` already contains a live sell-order lifecycle and explicit `exit_intent` state
+  - `src/execution/executor.py` already contains sell-order primitives
+  - `src/engine/cycle_runtime.py` still contains local-close / void paths that define the live touchpoints
+- Decisions frozen:
+  - first P0.1 slice should stay scaffolding-first
+  - do not batch full monitor close-path cutover yet
+  - team remains disallowed
+- Open uncertainties:
+  - exact smallest execution slice still needs one more narrow packet-design decision
+- Next required action:
+  - define and land the first P0.1 scaffolding slice
+- Owner:
+  - execution owner: Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

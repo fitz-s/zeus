@@ -57,7 +57,7 @@ Current completion ladder:
 `P0.1-EXIT-SEMANTICS-SPLIT`
 
 ### State
-`FROZEN / READY TO EXECUTE`
+`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -123,7 +123,7 @@ Explicitly forbidden for edits in this packet:
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
 
 ### Ready-to-commit slice
-`P0.1 is frozen — next execution slice is to add ExitIntent / exit-event vocabulary scaffolding on the touched execution path without doing the full behavioral cutover yet.`
+`P0.1 inventory is complete — next execution slice is to add or normalize ExitIntent / exit-event vocabulary scaffolding on the touched execution path without doing the full behavioral cutover yet.`
 
 ---
 
@@ -137,9 +137,15 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — packet intake
-- [ ] confirm exact execution / runtime surfaces to touch
-- [ ] confirm the smallest first-slice file set inside this packet
-- [ ] confirm targeted tests for exit-event legality and scaffolding behavior
+- [x] confirm exact execution / runtime surfaces to touch
+- [x] confirm the smallest first-slice file set inside this packet
+- [x] confirm targeted tests for exit-event legality and scaffolding behavior
+
+Inventory result:
+- `src/execution/exit_lifecycle.py` -> `present / already has explicit exit lifecycle state machine`
+- `src/execution/executor.py` -> `present / already has live sell-order primitive`
+- `src/engine/cycle_runtime.py` -> `partial / still contains local close / void decision points that anchor the next slice`
+- `tests/test_runtime_guards.py` -> `present / best target for event-model legality tests`
 
 ### Phase C — bounded packet design
 - [x] keep work inside `P0.1` only
