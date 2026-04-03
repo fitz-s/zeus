@@ -57,7 +57,7 @@ Current completion ladder:
 `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 
 ### State
-`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
+`ACCEPTED LOCALLY / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -117,12 +117,12 @@ Explicitly forbidden for edits in this packet:
 ### Current blocker
 - no active hard blocker
 - `P0.1-EXIT-SEMANTICS-SPLIT` is complete and pushed in `3bc6b30`
-- next blocker is executional: the transaction-boundary slice is not yet landed
+- explicit adversarial review is complete
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
 - repo also has a pre-existing local `AGENTS.md` diff outside the active packet scope; it is not part of this packet
 
 ### Ready-to-commit slice
-`P0.3 inventory is complete — next execution slice is to define the touched authoritative transaction boundary in schema/write-path surfaces without widening into migration or cutover work.`
+`P0.3 accepted locally — canonical append+project scaffold exists against the migrated schema, semantic mismatches are rejected, legacy init-schema drift is surfaced explicitly, and the packet still does not pretend live migration adoption.`
 
 ---
 
@@ -158,10 +158,10 @@ Inventory result:
 
 ### Phase D — evidence bundle
 - [x] append prior packet closure + next packet freeze to `architects_progress.md`
-- [ ] run targeted transaction-boundary tests
-- [ ] run architecture-contract verification
-- [ ] run explicit adversarial review
-- [ ] obtain architect verification
+- [x] run targeted transaction-boundary tests
+- [x] run architecture-contract verification
+- [x] run explicit adversarial review
+- [x] obtain architect verification
 - [ ] commit and push the packet execution slice
 
 ---
