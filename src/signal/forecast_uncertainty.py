@@ -246,7 +246,7 @@ def day0_temporal_closure_weight(
     daylight_progress: float | None,
     ens_dominance: float,
 ) -> float:
-    """Current multiplicative day0 closure policy, extracted behind a seam."""
+    """Bounded day0 closure policy driven by the strongest active signal."""
     time_closure = min(1.0, max(0.0, 1.0 - float(hours_remaining) / 12.0))
     peak_signal = min(1.0, max(0.0, float(peak_confidence)))
     daylight_signal = (
@@ -255,14 +255,12 @@ def day0_temporal_closure_weight(
         else time_closure
     )
     ens_signal = min(1.0, max(0.0, float(ens_dominance)))
-
-    residual_freedom = (
-        (1.0 - time_closure)
-        * (1.0 - 0.75 * peak_signal)
-        * (1.0 - 0.50 * daylight_signal)
-        * (1.0 - 0.35 * ens_signal)
+    return max(
+        time_closure,
+        0.75 * peak_signal,
+        0.50 * daylight_signal,
+        0.35 * ens_signal,
     )
-    return 1.0 - residual_freedom
 
 
 def day0_observation_weight(

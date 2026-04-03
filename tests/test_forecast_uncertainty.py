@@ -335,6 +335,16 @@ def test_day0_temporal_closure_weight_matches_existing_endpoints():
     ) == 1.0
 
 
+def test_day0_temporal_closure_weight_uses_strongest_signal_instead_of_correlated_product():
+    weight = day0_temporal_closure_weight(
+        hours_remaining=6.0,
+        peak_confidence=0.4,
+        daylight_progress=0.5,
+        ens_dominance=0.5,
+    )
+    assert weight == 0.5
+
+
 def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior():
     assert day0_observation_weight(
         hours_remaining=10.0,
