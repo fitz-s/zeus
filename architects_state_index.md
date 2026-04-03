@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.2 closeout pass`
+- Last updated by: `Codex P3.2 acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues.
-2. Keep the next P3 slice on evaluator consumption only.
+1. Freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` before further implementation.
+2. Keep the next P3 slice on evaluator policy consumption only.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -40,5 +40,6 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P3.2-POLICY-RESOLVER.md`
-6. freeze the next packet before further implementation
+5. `docs/architecture/zeus_durable_architecture_spec.md` (`P3` section)
+6. `work_packets/P3.2-POLICY-RESOLVER.md`
+7. freeze the next P3 evaluator-consumption packet before implementation

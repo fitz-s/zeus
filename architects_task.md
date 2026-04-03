@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.2 closeout pass`
+- Last updated by: `Codex P3.2 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -24,7 +24,7 @@ Do not use this file for:
 
 ## Objective
 
-No live packet. Current run horizon is satisfied because `P3.2-POLICY-RESOLVER` is accepted and pushed.
+Freeze the next P3 packet on evaluator policy consumption only before further implementation begins.
 
 ## Allowed files
 
@@ -61,7 +61,6 @@ No live packet. Current run horizon is satisfied because `P3.2-POLICY-RESOLVER` 
 ## Immediate checklist
 
 - [x] P3.2 landed with green resolver evidence
-- [x] verifier and adversarial review returned no blocker
 - [x] P3.2 acceptance is recorded honestly
 - [ ] if resuming, freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION`
 
