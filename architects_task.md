@@ -55,23 +55,22 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+`P1.3-CANONICAL-LEDGER-API`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
 `SOLO_EXECUTE`
 
 ### Objective
-Add an explicit canonical-schema bootstrap entrypoint that can install the architecture-kernel tables on a fresh database, reject legacy name collision, and fail loudly when legacy runtime helpers are used against a canonically bootstrapped-but-not-runtime-ready database.
+Extract the canonical append/project API from `src/state/db.py` into dedicated `src/state/ledger.py` and `src/state/projection.py` modules while preserving current helper behavior and keeping runtime wiring/cutover out of scope.
 
 ### Why this packet is next
-- `FOUNDATION-TEAM-GATE` is complete and pushed
-- `FOUNDATION-MAINLINE-PLAN` moves the repo into Stage 2 canonical-authority rollout next
-- repo truth already contains migration SQL plus helper-level canonical append/project scaffolding, but there is still no explicit collision-aware schema bootstrap path
-- current runtime reality still lacks `position_current`, and legacy `init_schema()` would otherwise blur target-vs-runtime truth
-- adversarial review confirmed the slice must stay explicitly transitional and not runtime-ready
+- `P1.2-CANONICAL-SCHEMA-BOOTSTRAP` is complete and pushed
+- `FOUNDATION-MAINLINE-PLAN` Stage 2 continues from schema add into append/project API
+- repo truth still keeps the canonical API inside transitional `src/state/db.py`
+- the architecture spec requires dedicated ledger/projection modules before later dual-write work
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -90,8 +89,10 @@ Add an explicit canonical-schema bootstrap entrypoint that can install the archi
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.2-CANONICAL-SCHEMA-BOOTSTRAP.md`
+- `work_packets/P1.3-CANONICAL-LEDGER-API.md`
 - `src/state/db.py`
+- `src/state/ledger.py`
+- `src/state/projection.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -118,47 +119,44 @@ Explicitly forbidden for edits in this packet:
 - no runtime writer/reader cutover
 - no dual-write
 - no DB-first reads
-- no legacy-table rename/repurpose
+- no schema rename/repurpose
 - no Day0/K3 work
 - no team launch
-- no claim that a fresh canonical bootstrap is live-runtime compatible yet
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.3-CANONICAL-LEDGER-API`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.2-CANONICAL-SCHEMA-BOOTSTRAP landed — canonical schema bootstrap is explicit on fresh DBs, legacy collision is rejected loudly, legacy-helper misuse now fails loudly, and no runtime-ready/cutover behavior is claimed.`
+`P1.3-CANONICAL-LEDGER-API landed — canonical append/project helpers now live in dedicated ledger/projection modules, db.py preserves compatibility wrappers, and no runtime cutover is claimed.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `FOUNDATION-TEAM-GATE` is complete
-- [x] confirm Stage 2 is next in the foundation mainline
-- [x] freeze `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- [x] confirm `P1.2-CANONICAL-SCHEMA-BOOTSTRAP` is complete
+- [x] confirm Stage 2 append/project API is next in the foundation mainline
+- [x] freeze `P1.3-CANONICAL-LEDGER-API`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] add canonical-schema bootstrap entrypoint
-- [x] keep `init_schema()` legacy/transitional
-- [x] add targeted architecture-contract tests for fresh bootstrap and legacy collision rejection
-- [x] add explicit negative-compatibility guard for legacy helper misuse on canonical bootstrap DB
-- [x] add caller-audit coverage for the new bootstrap helper
+- [ ] extract canonical append helper into `src/state/ledger.py`
+- [ ] extract canonical projection helper into `src/state/projection.py`
+- [ ] keep `src/state/db.py` compatibility wrappers explicit
+- [ ] add targeted architecture-contract coverage for the extracted module surface
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep legacy `position_events` collision explicit
-- [x] keep replay/parity staged-advisory
-- [x] keep the packet explicitly not-runtime-ready
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep the packet extraction-only and not dual-write
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -166,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted packet without mixing unrelated working-tree dirt.
-2. Freeze the next Stage-2 packet after push.
+1. Extract the helper-level canonical API into dedicated modules.
+2. Keep db.py wrappers compatibility-only.
 3. Keep cutover, dual-write, and runtime rewiring for later packets.
-4. Preserve the explicit not-runtime-ready boundary until a later migration packet changes it.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.
