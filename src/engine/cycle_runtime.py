@@ -341,7 +341,7 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
 
 def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps):
     from src.engine.monitor_refresh import refresh_position
-    from src.execution.exit_lifecycle import ExitContext, check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
+    from src.execution.exit_lifecycle import ExitContext, build_exit_intent, check_pending_exits, check_pending_retries, execute_exit, is_exit_cooldown_active
     from src.state.chain_reconciliation import quarantine_resolution_reason
     exit_lifecycle_owned_states = {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
     exit_lifecycle_recovery_states = {"exit_intent", "retry_pending", "backoff_exhausted"}
@@ -493,6 +493,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
+                exit_intent = build_exit_intent(
+                    pos,
+                    replace(exit_context, exit_reason=exit_reason),
+                    paper_mode=paper_mode,
+                )
                 outcome = execute_exit(
                     portfolio=portfolio,
                     position=pos,
@@ -500,6 +505,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     paper_mode=paper_mode,
                     clob=clob,
                     conn=conn,
+                    exit_intent=exit_intent,
                 )
                 if "paper_exit" in outcome or "exit_filled" in outcome:
                     tracker.record_exit(pos)

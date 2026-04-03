@@ -894,6 +894,56 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead
 
+## [2026-04-03 00:38 America/Chicago] P0.1 scaffolding landed locally with green targeted evidence
+- Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
+- Status delta:
+  - explicit `ExitIntent` and exit-event vocabulary scaffolding landed on the touched execution boundary
+  - targeted legality tests are green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "exit_intent_scaffolding_vocabulary_is_explicit or build_exit_intent_carries_boundary_fields or execute_exit_accepts_prebuilt_exit_intent_in_paper_mode or execute_exit_rejects_mismatched_exit_intent or check_pending_exits_does_not_retry_bare_exit_intent_without_error or check_pending_exits_emits_void_semantics_for_rejected_sell or monitoring_skips_sell_pending_when_chain_already_missing"` -> `7 passed`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "negative_constraints_include_no_local_close"` -> `1 passed`
+- Decisions frozen:
+  - packet remains scaffolding-only
+  - no schema or migration work was pulled in
+  - no full cutover behavior was claimed
+- Open uncertainties:
+  - adversarial review has not yet attacked the packet at this stage
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 00:44 America/Chicago] P0.1 adversarial review resolved and architect approved
+- Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
+- Status delta:
+  - both required adversarial reviews completed
+  - in-scope contradictions were fixed
+  - architect verification returned `APPROVE`
+- Basis / evidence:
+  - internal attack review found:
+    - missing canonical event emission
+    - bad-caller validation gap for `ExitIntent`
+    - bare `exit_intent` retry ambiguity
+    - evidence weakness at rejected/voided branches
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p0-1-exit-semantics-split-attack-20260403T061651Z.md`
+  - architect verdict: `APPROVE`
+  - post-fix regression:
+    - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "exit_intent_scaffolding_vocabulary_is_explicit or build_exit_intent_carries_boundary_fields or execute_exit_accepts_prebuilt_exit_intent_in_paper_mode or execute_exit_rejects_mismatched_exit_intent or check_pending_exits_does_not_retry_bare_exit_intent_without_error or check_pending_exits_emits_void_semantics_for_rejected_sell or monitoring_skips_sell_pending_when_chain_already_missing"` -> `7 passed`
+    - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "negative_constraints_include_no_local_close"` -> `1 passed`
+- Decisions frozen:
+  - canonical exit vocabulary is now emitted on the touched path
+  - bad caller intents are rejected
+  - bare `exit_intent` states are no longer auto-retried without explicit error context
+  - packet remains bounded and scaffolding-first
+- Open uncertainties:
+  - broader live/runtime suites remain outside the targeted evidence set
+  - full cutover semantics remain intentionally deferred to later packets
+- Next required action:
+  - commit and push `P0.1-EXIT-SEMANTICS-SPLIT`
+- Owner:
+  - execution owner: Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
