@@ -55,21 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
-`SOLO_EXECUTE / NO_TEAM_DEFAULT`
+`SOLO_EXECUTE / BLOCKER_PACKET`
 
 ### Objective
-Retry the `cycle_runtime` entry-path caller migration so it emits canonical entry events/projection when canonical schema is present, while preserving existing legacy writes on legacy-schema runtimes and keeping all other callers untouched.
+Make the settlement telemetry helper in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the harvester dual-write packet can be attempted without raw legacy-helper crashes.
 
 ### Why this packet is next
-- `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT` is complete and pushed
-- the specific helper-compat blocker from the first caller-migration attempt is now removed
-- the cycle-runtime entry caller remains the narrowest bounded runtime migration slice
+- `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` is complete and pushed
+- the next remaining P1 dual-write family in spec order is harvester
+- repo truth shows `log_settlement_event()` still routes through the generic legacy event helper that fails on canonical-only DBs
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -88,8 +88,8 @@ Retry the `cycle_runtime` entry-path caller migration so it emits canonical entr
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE.md`
-- `src/engine/cycle_runtime.py`
+- `work_packets/P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT.md`
+- `src/state/db.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -99,12 +99,11 @@ Explicitly forbidden for edits in this packet:
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
-- `src/engine/lifecycle_events.py`
+- `src/engine/**`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
-- `src/state/db.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
 - `architecture/**`
@@ -116,42 +115,42 @@ Explicitly forbidden for edits in this packet:
 - `zeus_final_tribunal_overlay/**`
 
 ### Non-goals
-- no runtime writer/reader cutover
+- no harvester caller migration
+- no broader dual-write in caller code
 - no DB-first reads
-- no exit-path migration
-- no harvester/reconciliation migration
+- no exit/reconciliation changes
 - no Day0/K3 work
 - no team launch
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE landed — one caller emits canonical entry events/projection when canonical schema is present, legacy writes remain on legacy runtimes, and no other caller moves.`
+`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT landed — touched settlement telemetry helper degrades cleanly on canonical DBs, and no harvester migration is claimed.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT` is complete
-- [x] confirm the caller migration can now be retried honestly
-- [x] freeze `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- [x] confirm `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` is complete
+- [x] confirm the next remaining P1 dual-write family is harvester
+- [x] freeze `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] dual-write canonical entry batch in `cycle_runtime`
-- [x] keep legacy entry writes in place on legacy runtimes
-- [x] add targeted architecture-contract coverage for the retried caller migration
+- [ ] make settlement telemetry helper degrade cleanly on canonical DBs
+- [ ] preserve legacy-schema behavior for the touched helper
+- [ ] add targeted architecture-contract coverage for the compatibility change
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep the packet on one caller only
-- [x] keep team closed unless a new freeze explicitly justifies it
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
+- [ ] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -164,9 +163,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted caller-migration packet without mixing unrelated working-tree dirt.
-2. Freeze the next remaining P1 dual-write packet after push.
-3. Keep other callers, cutover, and broader state rewiring out of scope.
-4. Keep team closed by default until a later packet clearly justifies it.
+1. Fix only the settlement telemetry compatibility blocker.
+2. Keep harvester caller migration for a later successor packet.
+3. Keep cutover and broader state rewiring out of scope.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.

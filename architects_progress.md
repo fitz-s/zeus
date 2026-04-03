@@ -1836,6 +1836,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:12 America/Chicago] P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE committed and pushed
+- Packet: `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- Status delta:
+  - packet committed as `2e508a4`
+  - branch pushed to `origin/Architects`
+  - first runtime caller migration is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `cycle_runtime`, targeted tests, and control surfaces
+- Decisions frozen:
+  - one caller now emits canonical entry events/projection when canonical schema is present
+  - legacy writes remain on legacy-schema runtimes
+  - canonical-only execution telemetry parity remains staged
+- Open uncertainties:
+  - next remaining P1 dual-write family is harvester
+- Next required action:
+  - freeze the harvester compatibility blocker packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:12 America/Chicago] P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT frozen
+- Packet: `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- Status delta:
+  - next blocker packet frozen after P1.5B closeout
+- Basis / evidence:
+  - the next remaining P1 dual-write family in spec order is harvester
+  - `log_settlement_event()` still routes through the generic legacy event helper and can fail on canonical-only DBs
+- Decisions frozen:
+  - keep this slice on settlement telemetry helper compatibility only
+  - do not migrate harvester in this packet
+  - team remains closed by default
+- Open uncertainties:
+  - exact settlement-helper compatibility semantics still need implementation review
+- Next required action:
+  - land the compatibility change and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
