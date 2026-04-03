@@ -55,21 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+`P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
-`SOLO_EXECUTE`
+`SOLO_EXECUTE / NO_TEAM_DEFAULT`
 
 ### Objective
-Add pure lifecycle-event/projection builder helpers that translate runtime position/decision context into canonical payloads without wiring any runtime caller to the canonical ledger yet.
+Migrate the `cycle_runtime` entry path to dual-write canonical entry events/projection alongside existing legacy writes, while keeping all other callers untouched.
 
 ### Why this packet is next
-- `P1.3-CANONICAL-LEDGER-API` is complete and pushed
-- Stage 2 now has dedicated ledger/projection modules but still lacks the runtime-to-canonical builder layer named by the architecture spec
-- runtime caller migration is not safe to begin until canonical payload construction is isolated and testable
+- `P1.4-CANONICAL-LIFECYCLE-BUILDERS` is complete and pushed
+- Stage 2 now has the schema/API/builder prerequisites for the first bounded caller migration
+- `cycle_runtime` entry is the narrowest caller that already materializes positions and records entry-side writes
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -88,8 +88,8 @@ Add pure lifecycle-event/projection builder helpers that translate runtime posit
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.4-CANONICAL-LIFECYCLE-BUILDERS.md`
-- `src/engine/lifecycle_events.py`
+- `work_packets/P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE.md`
+- `src/engine/cycle_runtime.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -99,7 +99,7 @@ Explicitly forbidden for edits in this packet:
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
-- `src/engine/cycle_runtime.py`
+- `src/engine/lifecycle_events.py`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
@@ -117,45 +117,46 @@ Explicitly forbidden for edits in this packet:
 
 ### Non-goals
 - no runtime writer/reader cutover
-- no dual-write
 - no DB-first reads
-- no runtime caller migration
+- no exit-path migration
+- no harvester/reconciliation migration
 - no Day0/K3 work
 - no team launch
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.4-CANONICAL-LIFECYCLE-BUILDERS landed — pure builder helpers exist for canonical event/projection payloads, and no runtime caller migration is claimed.`
+`P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE landed — one caller dual-writes canonical entry events/projection while legacy writes remain in place and no other caller moves.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.3-CANONICAL-LEDGER-API` is complete
-- [x] confirm the builder layer is next before runtime caller migration
-- [x] freeze `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- [x] confirm `P1.4-CANONICAL-LIFECYCLE-BUILDERS` is complete
+- [x] confirm the first runtime-caller migration is next
+- [x] freeze `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] add pure canonical builder helpers in `src/engine/lifecycle_events.py`
-- [x] keep the builder layer detached from runtime caller wiring
-- [x] add targeted architecture-contract coverage for the builder surface
+- [ ] dual-write canonical entry batch in `cycle_runtime`
+- [ ] keep legacy entry writes in place
+- [ ] add targeted architecture-contract coverage for the caller migration
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep the packet builder-only and not dual-write
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep the packet on one caller only
+- [ ] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -163,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted builder packet without mixing unrelated working-tree dirt.
-2. Freeze the first runtime-caller migration packet separately after push.
-3. Keep dual-write, cutover, and runtime rewiring out of scope.
-4. Keep the builder layer pure until a later packet intentionally wires it in.
+1. Migrate only the cycle-runtime entry caller.
+2. Keep legacy writes in place alongside the new canonical write.
+3. Keep other callers, cutover, and team execution out of scope.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.

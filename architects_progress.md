@@ -1634,6 +1634,46 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 04:29 America/Chicago] P1.4-CANONICAL-LIFECYCLE-BUILDERS committed and pushed
+- Packet: `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- Status delta:
+  - packet committed as `e10e378`
+  - branch pushed to `origin/Architects`
+  - pure lifecycle builder layer is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to the builder module, targeted tests, and control surfaces
+- Decisions frozen:
+  - canonical payload construction is now isolated from runtime callers
+  - quarantine / quarantine_expired map to canonical `quarantined`
+  - runtime caller migration remains separate future work
+- Open uncertainties:
+  - the first caller migration is still ahead
+- Next required action:
+  - freeze the first runtime-caller migration packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 04:29 America/Chicago] P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE frozen
+- Packet: `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- Status delta:
+  - next Stage-2 packet frozen after P1.4 closeout
+  - packet narrowed to one caller: `cycle_runtime` entry path only
+- Basis / evidence:
+  - schema/API/builder prerequisites are now pushed
+  - `cycle_runtime` entry path is the narrowest caller already materializing positions and recording entry-side writes
+- Decisions frozen:
+  - no team by default for this packet
+  - keep the packet single-owner, one-caller, and dual-write-only
+  - keep exit/harvester/reconciliation callers untouched
+  - keep DB-first reads and cutover out of scope
+- Open uncertainties:
+  - exact dual-write proof shape still needs implementation review
+- Next required action:
+  - implement the one-caller migration and gather targeted evidence
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
