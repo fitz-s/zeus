@@ -874,6 +874,10 @@ def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
 
 def log_settlement_event(conn: sqlite3.Connection, pos, *, winning_bin: str, won: bool, outcome: int) -> None:
     """Append a durable settlement event for learning/risk consumers."""
+    if not _legacy_runtime_position_event_schema_available(conn):
+        if _canonical_position_surface_available(conn):
+            return
+        _assert_legacy_runtime_position_event_schema(conn)
     log_position_event(
         conn,
         "POSITION_SETTLED",

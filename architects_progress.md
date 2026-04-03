@@ -1874,6 +1874,50 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:12 America/Chicago] P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT landed locally with green targeted evidence
+- Packet: `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- Status delta:
+  - touched settlement telemetry helper now degrades cleanly on canonically bootstrapped DBs
+  - targeted compatibility evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema or harvester_settlement_path_remains_blocked_on_canonical_bootstrap_due_to_chronicle_gap or log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db or log_execution_report_degrades_cleanly_on_canonical_bootstrap_db or entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db or canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `16 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+- Decisions frozen:
+  - generic fail-loud legacy-helper guards remain for direct misuse paths
+  - touched settlement telemetry helper now no-ops cleanly on canonical-only DBs
+  - no harvester caller migration is claimed in this packet
+  - remaining chronicle-backed harvester blocker is explicit, not implied away
+- Open uncertainties:
+  - adversarial review has not yet attacked the narrowed settlement compatibility change
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:22 America/Chicago] P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT adversarial review resolved and architect approved
+- Packet: `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema or harvester_settlement_path_remains_blocked_on_canonical_bootstrap_due_to_chronicle_gap or log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db or log_execution_report_degrades_cleanly_on_canonical_bootstrap_db or entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db or canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `16 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+  - critic verdict after remaining-blocker note + harvester-path test: `APPROVE`
+- Decisions frozen:
+  - touched settlement telemetry helper now distinguishes canonical bootstrap from malformed legacy schema
+  - remaining chronicle-backed harvester blocker is explicit, not implied away
+  - no harvester migration is claimed in this packet
+- Open uncertainties:
+  - the next remaining harvester blocker is the chronicle write path
+- Next required action:
+  - commit and push `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions

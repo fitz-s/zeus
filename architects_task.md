@@ -58,13 +58,13 @@ Current completion ladder:
 `P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / BLOCKER_PACKET`
 
 ### Objective
-Make the settlement telemetry helper in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the harvester dual-write packet can be attempted without raw legacy-helper crashes.
+Make the settlement telemetry helper in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the remaining harvester compatibility inventory can proceed without this raw legacy-helper crash.
 
 ### Why this packet is next
 - `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` is complete and pushed
@@ -129,7 +129,7 @@ Explicitly forbidden for edits in this packet:
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT landed — touched settlement telemetry helper degrades cleanly on canonical DBs, and no harvester migration is claimed.`
+`P1.6A-HARVESTER-SETTLEMENT-TELEMETRY-COMPAT landed — touched settlement telemetry helper degrades cleanly on canonical DBs, remaining harvester blockers stay explicit, and no harvester migration is claimed.`
 
 ---
 
@@ -142,15 +142,15 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] make settlement telemetry helper degrade cleanly on canonical DBs
-- [ ] preserve legacy-schema behavior for the touched helper
-- [ ] add targeted architecture-contract coverage for the compatibility change
+- [x] make settlement telemetry helper degrade cleanly on canonical DBs
+- [x] preserve legacy-schema behavior for the touched helper
+- [x] add targeted architecture-contract coverage for the compatibility change
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
-- [ ] keep team closed unless a new freeze explicitly justifies it
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
+- [x] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -163,9 +163,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Fix only the settlement telemetry compatibility blocker.
-2. Keep harvester caller migration for a later successor packet.
+1. Commit and push this accepted settlement-telemetry blocker packet without mixing unrelated working-tree dirt.
+2. Freeze the next remaining harvester blocker packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep harvester caller migration separate from this helper-compat packet.
 
 If this cannot be done without a new packet, freeze that packet before acting.

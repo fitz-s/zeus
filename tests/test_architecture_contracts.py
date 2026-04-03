@@ -621,6 +621,81 @@ def test_entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
+def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.db import apply_architecture_kernel_schema, log_settlement_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="settled", chain_state="synced")
+    pos.last_exit_at = "2026-04-03T01:00:00Z"
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
+    from src.state.db import log_settlement_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL
+        );
+        """
+    )
+
+    pos = _runtime_position(state="settled", chain_state="synced")
+    pos.last_exit_at = "2026-04-03T01:00:00Z"
+
+    try:
+        log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    except RuntimeError as exc:
+        assert "legacy runtime position_events schema not installed" in str(exc)
+    else:
+        raise AssertionError("expected malformed legacy schema to fail loudly")
+
+    conn.close()
+
+
+def test_harvester_settlement_path_remains_blocked_on_canonical_bootstrap_due_to_chronicle_gap():
+    import sqlite3 as _sqlite3
+
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    portfolio = PortfolioState(positions=[pos])
+
+    try:
+        _settle_positions(
+            conn,
+            portfolio,
+            city="NYC",
+            target_date="2026-04-03",
+            winning_label="39-40°F",
+            settlement_records=[],
+            strategy_tracker=None,
+            paper_mode=True,
+        )
+    except _sqlite3.OperationalError as exc:
+        assert "chronicle" in str(exc).lower()
+    else:
+        raise AssertionError("expected canonical bootstrap harvester path to remain explicitly blocked")
+
+    conn.close()
+
+
 def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import init_schema
