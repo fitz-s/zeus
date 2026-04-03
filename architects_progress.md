@@ -932,6 +932,26 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 01:05 America/Chicago] P0.3 inventory completed
+- Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Status delta:
+  - packet moved from frozen-next into active inventory/design state
+  - first-slice shape is now narrowed to transaction-boundary design on the touched schema/write-path surfaces
+- Basis / evidence:
+  - foundation spec `P0.3` requires one authoritative single-transaction write path
+  - `src/state/db.py` already contains both legacy trade/state tables and a canonical `position_events` table shape
+  - `migrations/2026_04_02_architecture_kernel.sql` already encodes the target append/projection model and constrained vocabularies
+- Decisions frozen:
+  - first P0.3 slice should stay on boundary design/scaffolding rather than broad migration
+  - no P0.4/P0.5/P1/P2/P7 batching
+  - team remains disallowed
+- Open uncertainties:
+  - repo contains a pre-existing local `AGENTS.md` diff outside the active packet scope and an untracked `zeus_final_tribunal_overlay/` reference directory
+- Next required action:
+  - define and land the first P0.3 boundary-design slice
+- Owner:
+  - execution owner: Architects local lead
+
 ## [2026-04-03 00:38 America/Chicago] P0.1 scaffolding landed locally with green targeted evidence
 - Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
 - Status delta:
