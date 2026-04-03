@@ -11,25 +11,24 @@ Metadata:
 
 ## Current state
 
-- Stage: `Stage 3 / P2 execution-truth mainline repaired and re-closed`
-- Active packet: `none (P2 repaired and re-closed)`
-- Active packet state: `idle / run-horizon stop boundary reached`
+- Stage: `Governance methodology hardening`
+- Active packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P2R-EXECUTION-TRUTH-REPAIR`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - no team is active
+  - current packet is `NO_TEAM_DEFAULT`
 
 ## Current next action
 
-1. No active P2 work remains.
-2. If/when mainline resumes beyond this stop boundary, freeze `P3.1-STRATEGY-POLICY-TABLES` next.
-3. Keep out-of-scope dirt excluded from any future commit.
+1. Update AGENTS and the autonomous delivery constitution with the stricter closeout/reopen doctrine.
+2. Keep the packet on methodology surfaces only.
+3. Do not mix runtime/schema edits into this packet.
 
 ## Current out-of-scope dirt
 
-- `AGENTS.md` has unrelated local dirt outside the closed packet scope
 - `README.md` is untracked and out of scope
 - `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
 
@@ -39,4 +38,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. if resuming: freeze the first P3 packet before implementation
+5. `work_packets/GOV-01-CLOSEOUT-METHODOLOGY-HARDENING.md`
+6. current packet `required_reads`
