@@ -17,24 +17,25 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none (P1 closed)`
-- State: `IDLE / STOP BOUNDARY REACHED`
-- Execution mode: `SOLO_EXECUTE`
+- Packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- State: `FROZEN / READY FOR EXECUTION`
+- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No active packet. Current run horizon is satisfied because P1 is closed.
+Prove or reopen the current cycle-runtime exit-intent path without widening into pending-exit or settlement semantics.
 
 ## Allowed files
 
+- `work_packets/P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- all non-allowed files
 - `AGENTS.md`
 - `src/**`
 - `tests/**`
@@ -44,28 +45,30 @@ No active packet. Current run horizon is satisfied because P1 is closed.
 - `architecture/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
+- runtime cutover surfaces
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no P2 work without a new frozen packet
-- no law rewrite
-- no cutover
+- no pending-exit handling change
+- no economic-close vs settlement change
+- no new runtime implementation unless the evidence reopens the claim
+- no schema changes
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside P1; the current stop boundary is successful P1 closure
+- no blocker yet; the packet outcome depends on the evidence suite
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] Stage 2 / P1 closeout evidence suite is green
-- [x] adversarial review approved the closeout claim
-- [x] P1 is closed honestly
-- [ ] if resuming, freeze `P2.1-EXECUTOR-EXIT-PATH`
+- [ ] run the targeted cycle-runtime exit-intent evidence suite
+- [ ] adversarially review the closeout claim
+- [ ] accept or reopen strictly from the evidence
 
 ## Next required action
 
-1. Stop at the current user-request horizon (`P1 closed`).
-2. If continuing later, freeze the first Stage 3 packet before any implementation.
+1. Run the packet evidence suite.
+2. Decide closeout vs reopen strictly from the evidence.
+3. Keep out-of-scope dirt excluded from any commit.
