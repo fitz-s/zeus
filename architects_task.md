@@ -58,7 +58,7 @@ Current completion ladder:
 `FOUNDATION-TEAM-GATE`
 
 ### State
-`READY TO FREEZE`
+`FROZEN / DRIFT RECONCILED / READY TO EXECUTE`
 
 ### Execution mode verdict
 `RALPLAN_NEXT`
@@ -86,10 +86,24 @@ Freeze the future team-opening gate packet that will turn post-P0.5 packet-by-pa
 - execution owner: `Architects local lead (current Codex session)`
 
 ### Allowed edit surface
-Not frozen yet. Must be defined by the next planning packet.
+Only the following may be edited in this packet:
+- `work_packets/FOUNDATION-TEAM-GATE.md`
+- `architects_progress.md`
+- `architects_task.md`
 
 ### Forbidden edit surface
-Not frozen yet. Must be defined by the next planning packet.
+Explicitly forbidden for edits in this packet:
+- all non-allowed files
+- all Day0/K3 feature-family files and packets
+- `AGENTS.md`
+- `src/**`
+- `migrations/**`
+- `architecture/**`
+- `docs/governance/**`
+- `docs/architecture/**`
+- `.github/workflows/**`
+- `.claude/CLAUDE.md`
+- runtime state and cutover surfaces
 
 ### Non-goals
 - no immediate team launch
@@ -98,11 +112,13 @@ Not frozen yet. Must be defined by the next planning packet.
 
 ### Current blocker
 - no active hard blocker
-- the next blocker is procedural: `FOUNDATION-TEAM-GATE` is not frozen yet
+- active mainline packet drift acknowledged explicitly
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `FOUNDATION-TEAM-GATE`
+- `FOUNDATION-TEAM-GATE` is now frozen, but not yet executed/accepted
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 
 ### Ready-to-commit slice
-`No execution slice yet. Next action is to freeze FOUNDATION-TEAM-GATE from the now-completed P0.5 operating-system rules.`
+`FOUNDATION-TEAM-GATE is frozen cleanly from the completed P0.5 contract. Next execution slice is to define staffing, lane ownership, verification path, and cleanup/rollback path without mutating out-of-scope Day0/K3 files.`
 
 ---
 
@@ -110,8 +126,9 @@ Not frozen yet. Must be defined by the next planning packet.
 
 ### Phase A — session revalidation
 - [x] confirm `P0.5-IMPLEMENTATION-OS` is complete
-- [ ] freeze `FOUNDATION-TEAM-GATE`
-- [ ] define allowed / forbidden files for the team gate packet
+- [x] acknowledge active packet drift explicitly
+- [x] freeze `FOUNDATION-TEAM-GATE`
+- [x] define allowed / forbidden files for the team gate packet
 
 ### Phase B — planning intake
 - [ ] define staffing
@@ -124,7 +141,7 @@ Not frozen yet. Must be defined by the next planning packet.
 - [ ] keep destructive/cutover work human-gated
 
 ### Phase D — evidence bundle
-- [ ] append team-gate freeze result to `architects_progress.md`
+- [x] append team-gate freeze result to `architects_progress.md`
 - [ ] commit and push the team-gate freeze
 
 ---
@@ -132,9 +149,10 @@ Not frozen yet. Must be defined by the next planning packet.
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Freeze `FOUNDATION-TEAM-GATE`.
+1. Execute `FOUNDATION-TEAM-GATE`.
 2. Use the now-completed P0.5 rules as the base contract.
 3. Keep packet-by-packet team autonomy narrow and explicit.
-4. Keep destructive/cutover work human-gated.
+4. Do not mutate Day0/K3 files under this packet.
+5. Keep destructive/cutover work human-gated.
 
 If this cannot be done without a new packet, freeze that packet before acting.

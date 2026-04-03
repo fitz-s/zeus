@@ -1190,6 +1190,27 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead
 
+## [2026-04-03 01:15 America/Chicago] FOUNDATION-TEAM-GATE drift reconciled and frozen
+- Packet: `FOUNDATION-TEAM-GATE`
+- Status delta:
+  - active mainline packet drift acknowledged explicitly
+  - `FOUNDATION-TEAM-GATE` frozen cleanly from the completed P0.5 contract
+  - local Day0/K3 feature-family work is explicitly treated as out of scope for the active mainline packet
+- Basis / evidence:
+  - control surfaces already pointed to `FOUNDATION-TEAM-GATE`
+  - working-tree reality still contains out-of-scope local dirt / reference material
+  - this freeze keeps the active mainline packet on packet/control files only
+- Decisions frozen:
+  - do not mutate Day0/K3 files under `FOUNDATION-TEAM-GATE`
+  - do not treat local dirt as implied staffing or team-readiness work
+  - actual team opening remains blocked until `FOUNDATION-TEAM-GATE` is executed and accepted
+- Open uncertainties:
+  - local out-of-scope Day0/K3 dirt remains in the working tree and must be packetized separately later
+- Next required action:
+  - commit and push the clean team-gate freeze
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-03 01:05 America/Chicago] P0.3 inventory completed
 - Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 - Status delta:
