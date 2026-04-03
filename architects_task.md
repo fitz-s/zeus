@@ -33,7 +33,7 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
 `P-INSTR-01-SLICE-ROOT-AGENTS`
 
 ### State
-`ACTIVE / RALPH_NOW / ROOT AGENTS SYNC AUTHORIZED`
+`COMMITTED / PUSHED / READY FOR NEXT PACKET`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -92,9 +92,10 @@ Explicitly forbidden for edits in this packet:
 - no active hard blocker
 - user explicitly authorized pushing `AGENTS.md`
 - carry-forward note: the previously landed `P-GATE-01` workflow slice remains valid and already pushed in commit `eba4321`
+- current slice commit/push completed as `0431f55`
 
 ### Ready-to-commit slice
-`Slice 2 — commit the existing root AGENTS routing-policy update together with synchronized progress/task ledgers, then push so cloud review sees the same instruction truth as the local leader session.`
+`Slice 2 completed — root AGENTS routing-policy update committed and pushed together with synchronized progress/task ledgers so cloud review sees the same instruction truth as the local leader session.`
 
 ---
 
@@ -133,11 +134,14 @@ Slice 2 shape:
 - [x] write rollback note
 - [x] write unresolved uncertainty note
 - [x] append execution result to `architects_progress.md`
+- [x] commit and push the slice
 
 Evidence snapshot for Slice 2:
 - affected-surface note: root instruction surface only; no runtime/schema/workflow edits
 - rollback note: revert `AGENTS.md` plus the paired `architects_progress.md` / `architects_task.md` updates
 - unresolved uncertainty: none on scope; only carry-forward is that semgrep/replay-parity promotion still belongs to a later packet
+- commit: `0431f55`
+- push: `origin/Architects`
 
 Local verification completed:
 - root `AGENTS.md` diff manually reviewed against current repo routing contract
@@ -203,9 +207,9 @@ Recommended baton split:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this root `AGENTS.md` slice immediately.
-2. Verify GitHub now shows the pushed root instruction change alongside the updated Architects ledgers.
-3. Return the active packet to the next bounded follow-up after cloud confirmation.
+1. Verify GitHub now shows commit `0431f55` plus the updated `architects_progress.md` / `architects_task.md`.
+2. Freeze the next bounded packet instead of widening this completed slice.
+3. Preferred next packet: semgrep triage / severity-promotion decision for the advisory gate lane.
 4. Keep recording every new slice in `architects_progress.md`.
 
 If this cannot be done without leaving the allowed file boundary, stop and freeze a new packet rather than forcing progress.

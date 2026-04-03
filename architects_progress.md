@@ -285,6 +285,25 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 22:23 America/Chicago] Root AGENTS slice committed and pushed
+- Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
+- Status delta:
+  - root instruction sync committed as `0431f55`
+  - branch pushed to `origin/Architects`
+  - GitHub now has cloud-visible copies of the AGENTS change plus both Architects ledgers
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to `AGENTS.md`, `architects_progress.md`, and `architects_task.md`
+- Decisions frozen:
+  - the root `AGENTS.md` local/cloud drift is cleared
+  - this slice is complete and should not be widened retroactively
+- Open uncertainties:
+  - next packet still needs to decide how to handle semgrep findings before any severity promotion
+- Next required action:
+  - confirm cloud-visible state, then freeze the next bounded packet
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ---
 
 ## Active Open Questions
