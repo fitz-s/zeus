@@ -55,21 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+`P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
-`SOLO_EXECUTE / BLOCKER_PACKET`
+`SOLO_EXECUTE / NO_TEAM_DEFAULT`
 
 ### Objective
-Make the legacy entry telemetry helpers in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the first runtime-caller migration can be retried without raw legacy-helper crashes.
+Retry the `cycle_runtime` entry-path caller migration so it emits canonical entry events/projection when canonical schema is present, while preserving existing legacy writes on legacy-schema runtimes and keeping all other callers untouched.
 
 ### Why this packet is next
-- `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` was reopened by adversarial review
-- current runtime truth still routes entry telemetry through legacy helpers that can crash on canonically bootstrapped DBs
-- this narrow blocker packet is required before the first caller migration can be accepted honestly
+- `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT` is complete and pushed
+- the specific helper-compat blocker from the first caller-migration attempt is now removed
+- the cycle-runtime entry caller remains the narrowest bounded runtime migration slice
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -88,8 +88,8 @@ Make the legacy entry telemetry helpers in `src/state/db.py` degrade cleanly on 
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT.md`
-- `src/state/db.py`
+- `work_packets/P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE.md`
+- `src/engine/cycle_runtime.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -99,11 +99,12 @@ Explicitly forbidden for edits in this packet:
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
-- `src/engine/**`
+- `src/engine/lifecycle_events.py`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
+- `src/state/db.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
 - `architecture/**`
@@ -115,42 +116,42 @@ Explicitly forbidden for edits in this packet:
 - `zeus_final_tribunal_overlay/**`
 
 ### Non-goals
-- no runtime caller migration
-- no dual-write in caller code
+- no runtime writer/reader cutover
 - no DB-first reads
-- no exit/harvester/reconciliation changes
+- no exit-path migration
+- no harvester/reconciliation migration
 - no Day0/K3 work
 - no team launch
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT landed — touched legacy entry telemetry helpers now degrade cleanly on canonical DBs, and no caller migration is claimed.`
+`P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE landed — one caller emits canonical entry events/projection when canonical schema is present, legacy writes remain on legacy runtimes, and no other caller moves.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.5-CYCLE-RUNTIME-ENTRY-DUAL-WRITE` reopened
-- [x] confirm a narrower blocker packet is required first
-- [x] freeze `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- [x] confirm `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT` is complete
+- [x] confirm the caller migration can now be retried honestly
+- [x] freeze `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] make legacy entry telemetry helpers degrade cleanly on canonical DBs
-- [x] preserve legacy-schema behavior for the touched helpers
-- [x] add targeted architecture-contract coverage for the compatibility change
+- [ ] dual-write canonical entry batch in `cycle_runtime`
+- [ ] keep legacy entry writes in place on legacy runtimes
+- [ ] add targeted architecture-contract coverage for the retried caller migration
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
-- [x] keep team closed unless a new freeze explicitly justifies it
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep the packet on one caller only
+- [ ] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
@@ -163,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted blocker packet without mixing unrelated working-tree dirt.
-2. Freeze the retried caller-migration packet after push.
-3. Keep cutover and broader state rewiring out of scope.
-4. Keep runtime caller migration separate from this helper-compat packet.
+1. Migrate only the cycle-runtime entry caller.
+2. Keep other callers, cutover, and broader state rewiring out of scope.
+3. Keep team closed by default.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.

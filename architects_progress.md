@@ -1754,6 +1754,43 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 04:56 America/Chicago] P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT committed and pushed
+- Packet: `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- Status delta:
+  - packet committed as `5313bd5`
+  - branch pushed to `origin/Architects`
+  - helper-compat blocker removal is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `src/state/db.py`, targeted tests, and control surfaces
+- Decisions frozen:
+  - touched entry telemetry helpers now distinguish canonical bootstrap from malformed legacy schema
+  - no runtime caller migration is claimed in this packet
+- Open uncertainties:
+  - the caller migration still needs a fresh retry packet
+- Next required action:
+  - freeze the retried caller-migration packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 04:56 America/Chicago] P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE frozen
+- Packet: `P1.5B-CYCLE-RUNTIME-ENTRY-DUAL-WRITE`
+- Status delta:
+  - retried caller-migration packet frozen after P1.5A closeout
+- Basis / evidence:
+  - the specific helper-compat blocker from the first `P1.5` attempt is now removed
+  - `cycle_runtime` entry remains the narrowest runtime caller to migrate first
+- Decisions frozen:
+  - retry the migration under a new packet instead of silently reusing reopened `P1.5`
+  - keep the packet on one caller only
+  - team remains closed by default
+- Open uncertainties:
+  - exact caller-level dual-write proof still needs implementation review
+- Next required action:
+  - implement the retried caller migration and gather targeted evidence
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
