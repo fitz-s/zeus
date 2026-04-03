@@ -663,9 +663,66 @@ def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_ev
     conn.close()
 
 
-def test_harvester_settlement_path_remains_blocked_on_canonical_bootstrap_due_to_chronicle_gap():
-    import sqlite3 as _sqlite3
+def test_chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.chronicler import log_event
+    from src.state.db import apply_architecture_kernel_schema
 
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    log_event(conn, "SETTLEMENT", "trade-1", {"ok": True})
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_chronicler_log_event_still_fails_loudly_when_chronicle_missing_outside_canonical_bootstrap():
+    from src.state.chronicler import log_event
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    try:
+        log_event(conn, "SETTLEMENT", "trade-1", {"ok": True})
+    except sqlite3.OperationalError as exc:
+        assert "chronicle" in str(exc).lower()
+    else:
+        raise AssertionError("expected missing chronicle table to fail loudly")
+
+    conn.close()
+
+
+def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_chronicle():
+    from src.state.chronicler import log_event
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    conn.executescript(
+        """
+        ALTER TABLE position_events ADD COLUMN runtime_trade_id TEXT;
+        ALTER TABLE position_events ADD COLUMN position_state TEXT;
+        ALTER TABLE position_events ADD COLUMN strategy TEXT;
+        ALTER TABLE position_events ADD COLUMN source TEXT;
+        ALTER TABLE position_events ADD COLUMN details_json TEXT;
+        ALTER TABLE position_events ADD COLUMN timestamp TEXT;
+        ALTER TABLE position_events ADD COLUMN env TEXT;
+        """
+    )
+
+    try:
+        log_event(conn, "SETTLEMENT", "trade-1", {"ok": True})
+    except sqlite3.OperationalError as exc:
+        assert "chronicle" in str(exc).lower()
+    else:
+        raise AssertionError("expected hybrid drift schema without chronicle to fail loudly")
+
+    conn.close()
+
+
+def test_harvester_settlement_path_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat():
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -677,22 +734,48 @@ def test_harvester_settlement_path_remains_blocked_on_canonical_bootstrap_due_to
     pos = _runtime_position(state="entered", chain_state="synced")
     portfolio = PortfolioState(positions=[pos])
 
-    try:
-        _settle_positions(
-            conn,
-            portfolio,
-            city="NYC",
-            target_date="2026-04-03",
-            winning_label="39-40°F",
-            settlement_records=[],
-            strategy_tracker=None,
-            paper_mode=True,
-        )
-    except _sqlite3.OperationalError as exc:
-        assert "chronicle" in str(exc).lower()
-    else:
-        raise AssertionError("expected canonical bootstrap harvester path to remain explicitly blocked")
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
 
+    assert settled == 1
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat():
+    from src.execution.harvester import _log_snapshot_context_resolution
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    _log_snapshot_context_resolution(
+        conn,
+        city="NYC",
+        target_date="2026-04-03",
+        snapshot_contexts=[
+            {
+                "decision_snapshot_id": "snap-1",
+                "source": "position_events",
+                "authority_level": "durable_event",
+                "is_degraded": False,
+                "degraded_reason": "",
+                "learning_snapshot_ready": True,
+            }
+        ],
+        dropped_rows=[],
+    )
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
     conn.close()
 
 
