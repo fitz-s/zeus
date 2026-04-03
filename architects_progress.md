@@ -1229,3 +1229,71 @@ Archive policy:
   - stop at the current packet boundary or freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 17:55 America/Chicago] P3.2-POLICY-RESOLVER accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.2-POLICY-RESOLVER`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - standalone P3 policy resolution is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py` -> `27 passed`
+  - independent verifier review -> `PASS`
+  - explicit adversarial review -> `PASS`
+- Decisions frozen:
+  - `src/riskguard/policy.py` now defines `StrategyPolicy` and `resolve_strategy_policy(conn, strategy_key, now)`
+  - policy layering is explicit: hard safety controls, manual overrides, risk actions, then default policy
+  - no evaluator-consumption, cycle-runner, riskguard-emission, or control-plane-write behavior is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Open uncertainties:
+  - this packet still reads current hard-safety control state from `src.control.control_plane`; durable control-plane migration remains later work
+- Next required action:
+  - stop at the current packet boundary or freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 18:02 America/Chicago] P3.2 acceptance reopened by verifier-found contradiction
+- Author: `Architects mainline lead`
+- Packet: `P3.2-POLICY-RESOLVER`
+- Status delta:
+  - prior P3.2 acceptance claim is reopened for same-packet repair
+- Basis / evidence:
+  - adversarial review found that `resolve_strategy_policy()` refreshed control-plane state on every call, which was stronger behavior than the resolver-only packet had verified
+  - the same review also found that the required no-actuation and rollback evidence notes were not explicit in the packet artifact
+- Decisions frozen:
+  - repair stays inside the same P3.2 boundary
+  - do not widen into evaluator consumption or control-plane migration while repairing acceptance honesty
+- Open uncertainties:
+  - none beyond the targeted resolver-side-effect and evidence-note repairs
+- Next required action:
+  - remove the unverified control-plane refresh dependency, add the missing evidence notes, and rerun targeted review
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 18:08 America/Chicago] P3.2-POLICY-RESOLVER repaired and re-accepted
+- Author: `Architects mainline lead`
+- Packet: `P3.2-POLICY-RESOLVER`
+- Status delta:
+  - same-packet repair resolved the reopened acceptance contradiction
+  - packet is re-accepted with refreshed verifier and adversarial review evidence
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py` -> `27 passed`
+  - independent verifier re-check -> `PASS`
+  - explicit adversarial re-review -> `PASS`
+- Decisions frozen:
+  - `resolve_strategy_policy()` no longer refreshes control-plane state implicitly on each call
+  - packet evidence now explicitly records rollback and no-actuation notes inside the work packet
+  - no evaluator-consumption, cycle-runner, riskguard-emission, or control-plane-write behavior is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Open uncertainties:
+  - this packet still reads current hard-safety control state from `src.control.control_plane`; durable control-plane migration remains later work
+- Next required action:
+  - stop at the current packet boundary or freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues
+- Owner:
+  - Architects mainline lead
