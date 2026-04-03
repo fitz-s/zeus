@@ -1,0 +1,179 @@
+name: architecture-advisory-gates
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "architecture/**"
+      - "docs/architecture/**"
+      - "docs/governance/**"
+      - ".github/workflows/**"
+      - "migrations/2026_04_02_architecture_kernel.sql"
+      - "scripts/check_*"
+      - "scripts/replay_parity.py"
+      - "tests/test_architecture_contracts.py"
+      - "tests/test_cross_module_invariants.py"
+      - "work_packets/**"
+  push:
+    paths:
+      - "AGENTS.md"
+      - "architecture/**"
+      - "docs/architecture/**"
+      - "docs/governance/**"
+      - ".github/workflows/**"
+      - "migrations/2026_04_02_architecture_kernel.sql"
+      - "scripts/check_*"
+      - "scripts/replay_parity.py"
+      - "tests/test_architecture_contracts.py"
+      - "tests/test_cross_module_invariants.py"
+      - "work_packets/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architecture-advisory-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  architecture-manifests:
+    name: architecture-manifests (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Machine-checkable authority must stay mutually consistent before runtime work proceeds."
+      GATE_REVIEW_CONDITION: "Keep blocking while manifests remain the principal machine authority; review only if a lower-noise equivalent replaces this script."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+      - name: Install gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Check kernel manifests
+        run: python scripts/check_kernel_manifests.py
+
+  module-boundaries:
+    name: module-boundaries (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Immediate import-boundary checks prevent cross-zone erosion before runtime patches land."
+      GATE_REVIEW_CONDITION: "Keep blocking while the current zones.yaml immediate rules remain stable; review only if rule noise is proven."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+      - name: Install gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Check module boundaries
+        run: python scripts/check_module_boundaries.py
+
+  packet-grammar:
+    name: packet-grammar (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Work packet completeness is a hard prerequisite for authority-sensitive work."
+      GATE_REVIEW_CONDITION: "Keep blocking while packet grammar remains the repo delivery contract; review only if packet storage changes shape."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Check work packet grammar
+        run: python scripts/check_work_packets.py
+
+  kernel-invariants:
+    name: kernel-invariants (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Architecture contract tests provide the current blocking proof for manifest, invariant, and schema-smoke expectations without claiming runtime convergence."
+      GATE_REVIEW_CONDITION: "Keep blocking while these tests remain low-noise and spec-backed; split schema smoke into its own job later only if that reduces ambiguity."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run architecture contract tests
+        run: pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py
+
+  semgrep-zeus:
+    name: semgrep-zeus (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Semgrep surfaces obvious forbidden patterns early, but current repo findings still need packetized follow-up before promotion to blocking."
+      GATE_REVIEW_CONDITION: "Promote only after current findings are triaged and control-plane JSON-write exceptions, if any, are intentionally encoded."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install semgrep
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install semgrep
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run semgrep architecture rules
+        run: semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src
+
+  replay-parity:
+    name: replay-parity (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "P-GATE-01 gate owner (see architects_task.md)"
+      GATE_RATIONALE: "Replay parity must stay visible in CI, but it cannot block until dual-write plus position_current land."
+      GATE_REVIEW_CONDITION: "Promote only after dual-write and deterministic projection compare exist and current repo truth is no longer mixed."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run replay parity in advisory mode
+        run: python scripts/replay_parity.py --ci
