@@ -2077,6 +2077,43 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:43 America/Chicago] P1.6C-HARVESTER-SETTLEMENT-BUILDERS committed and pushed
+- Packet: `P1.6C-HARVESTER-SETTLEMENT-BUILDERS`
+- Status delta:
+  - packet committed as `dccea47`
+  - branch pushed to `origin/Architects`
+  - settlement-builder layer is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to `lifecycle_events.py`, targeted tests, and control surfaces
+- Decisions frozen:
+  - settlement payload construction is now isolated from harvester caller code
+  - no harvester migration, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - the actual harvester settlement dual-write packet is still ahead
+- Next required action:
+  - freeze the harvester settlement dual-write packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 05:43 America/Chicago] P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE frozen
+- Packet: `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
+- Status delta:
+  - next harvester caller-migration packet frozen after P1.6C closeout
+- Basis / evidence:
+  - helper-level canonical-schema crash paths are removed
+  - settlement builders now exist for canonical payload construction
+- Decisions frozen:
+  - keep this slice on harvester settlement only
+  - do not widen to other callers
+  - team remains closed by default
+- Open uncertainties:
+  - exact caller-level settlement dual-write proof still needs implementation review
+- Next required action:
+  - implement the harvester settlement caller migration and gather targeted evidence
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
