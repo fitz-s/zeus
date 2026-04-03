@@ -1465,6 +1465,47 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 03:30 America/Chicago] P1.2-CANONICAL-SCHEMA-BOOTSTRAP committed and pushed
+- Packet: `P1.2-CANONICAL-SCHEMA-BOOTSTRAP`
+- Status delta:
+  - packet committed as `fcc7399`
+  - branch pushed to `origin/Architects`
+  - Stage-2 schema-bootstrap/guard slice is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to packet/control/test surfaces
+- Decisions frozen:
+  - canonical schema bootstrap is explicit
+  - legacy collision and legacy-helper misuse now fail loudly
+  - this slice does not claim runtime cutover or schema convergence
+- Open uncertainties:
+  - broader runtime compatibility and dedicated canonical module boundaries remain later work
+- Next required action:
+  - freeze the next Stage-2 append/project API packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 03:30 America/Chicago] P1.3-CANONICAL-LEDGER-API frozen
+- Packet: `P1.3-CANONICAL-LEDGER-API`
+- Status delta:
+  - next Stage-2 packet frozen after P1.2 closeout
+  - packet narrowed to dedicated ledger/projection module extraction
+- Basis / evidence:
+  - `FOUNDATION-MAINLINE-PLAN` Stage 2 order continues from schema add into append/project API
+  - `docs/architecture/zeus_durable_architecture_spec.md` requires dedicated `src/state/ledger.py` and `src/state/projection.py` modules
+  - repo truth still keeps canonical append/project helpers in transitional `src/state/db.py`
+- Decisions frozen:
+  - keep this slice extraction-only
+  - preserve `db.py` compatibility wrappers
+  - do not introduce dual-write, DB-first reads, or runtime cutover
+  - team remains disallowed by default for this K0/K2 slice
+- Open uncertainties:
+  - exact wrapper shape inside `db.py` still needs implementation review
+- Next required action:
+  - land the dedicated module extraction and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
