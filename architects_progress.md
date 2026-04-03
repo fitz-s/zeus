@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.3 post-close review pass`
+- Last updated by: `Codex P3.4 closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 pre-freeze after evaluator policy consumption`
-- Last accepted packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Mainline stage: `P3 post-close review after riskguard policy emission`
+- Last accepted packet: `P3.4-RISKGUARD-POLICY-EMISSION`
 - Current active packet: `none`
-- Current packet status: `awaiting next freeze`
+- Current packet status: `awaiting post-close review gate`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
 - Current hard blockers:
-  - no active blocker inside the accepted P3.3 boundary
+  - run the user-required post-close third-party critic + verifier before freezing P3.5
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1415,5 +1415,31 @@ Archive policy:
   - exact emission/expiry mapping from current recommendation fields to durable `risk_actions` rows still needs implementation review
 - Next required action:
   - implement `P3.4-RISKGUARD-POLICY-EMISSION` and run targeted riskguard tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:10 America/Chicago] P3.4-RISKGUARD-POLICY-EMISSION accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.4-RISKGUARD-POLICY-EMISSION`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - riskguard durable strategy-action emission is now cloud-visible truth within the packet's stated boundary
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py` -> `31 passed`
+  - independent verifier review -> `ACCEPTED`
+  - explicit adversarial review -> `ACCEPTABLE FOR CLOSE`
+- Decisions frozen:
+  - RiskGuard now emits, refreshes, and expires durable per-strategy `risk_actions` when the canonical table exists
+  - RiskGuard now records an explicit advisory skip in `risk_state.details_json` when the durable table is missing
+  - no evaluator, control-plane-write, or manual-override-precedence behavior is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Open uncertainties:
+  - the full non-bootstrapped runtime durability path remains explicitly advisory via the missing-table skip branch
+- Next required action:
+  - run the user-required post-close third-party critic + verifier before freezing `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
 - Owner:
   - Architects mainline lead
