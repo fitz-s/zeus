@@ -15,6 +15,7 @@ from src.config import STATE_DIR, state_path, settings
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
 RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
+ARCHITECTURE_KERNEL_SQL_PATH = Path(__file__).resolve().parents[2] / "migrations/2026_04_02_architecture_kernel.sql"
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -595,6 +596,16 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "updated_at",
 )
 
+LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
+    "runtime_trade_id",
+    "position_state",
+    "strategy",
+    "source",
+    "details_json",
+    "timestamp",
+    "env",
+)
+
 
 def _ordered_values(payload: dict, columns: tuple[str, ...]) -> tuple:
     return tuple(payload.get(column) for column in columns)
@@ -603,6 +614,10 @@ def _ordered_values(payload: dict, columns: tuple[str, ...]) -> tuple:
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {row[1] for row in rows}
+
+
+def load_architecture_kernel_sql() -> str:
+    return ARCHITECTURE_KERNEL_SQL_PATH.read_text()
 
 
 def _require_payload_fields(payload: dict, columns: tuple[str, ...], *, label: str) -> None:
@@ -620,6 +635,37 @@ def _assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
         raise RuntimeError("canonical position_events schema not installed")
     if not set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns):
         raise RuntimeError("canonical position_current schema not installed")
+
+
+def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
+    event_columns = _table_columns(conn, "position_events")
+    if not event_columns:
+        raise RuntimeError("legacy runtime position_events schema not installed")
+    if set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
+        raise RuntimeError(
+            "legacy runtime position_events helpers do not support canonically bootstrapped databases; "
+            "this Stage-2 bootstrap path is not runtime-ready until a later migration/cutover packet lands"
+        )
+    if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
+        raise RuntimeError("legacy runtime position_events schema not installed")
+
+
+def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
+    """Apply the canonical architecture schema only when no legacy collision exists.
+
+    This is an explicit bootstrap path for Stage-2 schema work. It is intentionally
+    separate from `init_schema()`, which still reflects transitional runtime truth.
+    """
+
+    event_columns = _table_columns(conn, "position_events")
+    if event_columns and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
+        raise RuntimeError(
+            "legacy position_events table blocks canonical schema bootstrap; "
+            "freeze a dedicated migration packet before changing live/runtime schema"
+        )
+
+    conn.executescript(load_architecture_kernel_sql())
+    _assert_canonical_transaction_schema(conn)
 
 
 def _validate_event_projection_pair(event: dict, projection: dict) -> None:
@@ -1282,6 +1328,7 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
 
 def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
     """Load recent durable position events for one runtime trade."""
+    _assert_legacy_runtime_position_event_schema(conn)
     rows = conn.execute(
         """
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
@@ -1307,6 +1354,7 @@ def query_settlement_events(
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent canonical settlement stage events from the durable event spine."""
+    _assert_legacy_runtime_position_event_schema(conn)
     filters = ["event_type = 'POSITION_SETTLED'"]
     query_env = settings.mode if env is None else env
     params: list[object] = []
@@ -1390,6 +1438,7 @@ def query_execution_event_summary(
     limit: int | None = 500,
     not_before: str | None = None,
 ) -> dict:
+    _assert_legacy_runtime_position_event_schema(conn)
     query_env = settings.mode if env is None else env
     filters = [
         "env = ?",
@@ -1477,6 +1526,7 @@ def log_position_event(
     position_state: str | None = None,
 ) -> None:
     """Append a stage-level position event without changing open-position authority."""
+    _assert_legacy_runtime_position_event_schema(conn)
     runtime_trade_id = getattr(pos, "trade_id", "")
     if not runtime_trade_id:
         return
