@@ -502,6 +502,124 @@ def test_lifecycle_builder_module_exists():
     assert "def build_position_current_projection" in text
     assert "def build_entry_canonical_write" in text
 
+
+def test_log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.db import apply_architecture_kernel_schema, log_trade_entry
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    log_trade_entry(conn, _runtime_position(state="entered", chain_state="unknown"))
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    conn.close()
+
+
+def test_log_execution_report_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.db import apply_architecture_kernel_schema, log_execution_report
+
+    class _Result:
+        status = "filled"
+        reason = None
+        submitted_price = 0.5
+        fill_price = 0.5
+        shares = 20.0
+        timeout_seconds = None
+        filled_at = "2026-04-03T00:05:00Z"
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    log_execution_report(conn, _runtime_position(state="entered", chain_state="unknown"), _Result())
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_schema():
+    from src.state.db import log_trade_entry
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL
+        );
+        """
+    )
+
+    try:
+        log_trade_entry(conn, _runtime_position(state="entered", chain_state="unknown"))
+    except RuntimeError as exc:
+        assert "legacy runtime position_events schema not installed" in str(exc)
+    else:
+        raise AssertionError("expected malformed legacy schema to fail loudly")
+
+    conn.close()
+
+
+def test_log_execution_report_still_fails_loudly_on_malformed_legacy_position_events_schema():
+    from src.state.db import log_execution_report
+
+    class _Result:
+        status = "filled"
+        reason = None
+        submitted_price = 0.5
+        fill_price = 0.5
+        shares = 20.0
+        timeout_seconds = None
+        filled_at = "2026-04-03T00:05:00Z"
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL
+        );
+        """
+    )
+
+    try:
+        log_execution_report(conn, _runtime_position(state="entered", chain_state="unknown"), _Result())
+    except RuntimeError as exc:
+        assert "legacy runtime position_events schema not installed" in str(exc)
+    else:
+        raise AssertionError("expected malformed legacy schema to fail loudly")
+
+    conn.close()
+
+
+def test_entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db():
+    from src.state.db import apply_architecture_kernel_schema, log_execution_report, log_trade_entry
+
+    class _Result:
+        status = "filled"
+        reason = None
+        submitted_price = 0.5
+        fill_price = 0.5
+        shares = 20.0
+        timeout_seconds = None
+        filled_at = "2026-04-03T00:05:00Z"
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    log_trade_entry(conn, pos)
+    log_execution_report(conn, pos, _Result())
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    conn.close()
+
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
     jobs = workflow["jobs"]

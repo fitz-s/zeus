@@ -58,7 +58,7 @@ Current completion ladder:
 `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE / BLOCKER_PACKET`
@@ -142,20 +142,20 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] make legacy entry telemetry helpers degrade cleanly on canonical DBs
-- [ ] preserve legacy-schema behavior for the touched helpers
-- [ ] add targeted architecture-contract coverage for the compatibility change
+- [x] make legacy entry telemetry helpers degrade cleanly on canonical DBs
+- [x] preserve legacy-schema behavior for the touched helpers
+- [x] add targeted architecture-contract coverage for the compatibility change
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
-- [ ] keep team closed unless a new freeze explicitly justifies it
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep generic fail-loud legacy-helper guards unless explicitly narrowed here
+- [x] keep team closed unless a new freeze explicitly justifies it
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -163,9 +163,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Fix only the legacy entry telemetry compatibility blocker.
-2. Keep runtime caller migration for a later successor packet.
+1. Commit and push this accepted blocker packet without mixing unrelated working-tree dirt.
+2. Freeze the retried caller-migration packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep runtime caller migration separate from this helper-compat packet.
 
 If this cannot be done without a new packet, freeze that packet before acting.
