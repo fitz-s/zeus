@@ -1710,6 +1710,50 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 04:30 America/Chicago] P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT landed locally with green targeted evidence
+- Packet: `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- Status delta:
+  - touched legacy entry telemetry helpers now degrade cleanly on canonically bootstrapped DBs
+  - targeted compatibility evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db or log_execution_report_degrades_cleanly_on_canonical_bootstrap_db or entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db or log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_schema or log_execution_report_still_fails_loudly_on_malformed_legacy_position_events_schema or canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `15 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent or query_position_events or log_trade_entry_emits_position_event or log_execution_report_emits_fill_telemetry or log_execution_report_emits_rejected_entry_event or log_trade_entry_persists_pending_lifecycle_state'` -> `6 passed`
+- Decisions frozen:
+  - generic fail-loud legacy-helper guards remain for direct misuse paths
+  - touched entry telemetry helpers now no-op cleanly on canonical-only DBs
+  - no runtime caller migration is claimed in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the narrowed compatibility change
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 04:56 America/Chicago] P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT adversarial review resolved and architect approved
+- Packet: `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db or log_execution_report_degrades_cleanly_on_canonical_bootstrap_db or entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db or log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_schema or log_execution_report_still_fails_loudly_on_malformed_legacy_position_events_schema or canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `15 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent or query_position_events or log_trade_entry_emits_position_event or log_execution_report_emits_fill_telemetry or log_execution_report_emits_rejected_entry_event or log_trade_entry_persists_pending_lifecycle_state'` -> `6 passed`
+  - critic verdict after canonical-vs-malformed distinction fix: `APPROVE`
+- Decisions frozen:
+  - touched entry telemetry helpers now distinguish canonical bootstrap from malformed legacy schema
+  - canonical bootstrap degrades cleanly for touched entry telemetry helpers only
+  - generic fail-loud legacy-helper guard remains for direct misuse paths
+  - no runtime caller migration is claimed in this packet
+- Open uncertainties:
+  - the retried caller migration still needs its own packet/evidence
+- Next required action:
+  - commit and push `P1.5A-LEGACY-ENTRY-TELEMETRY-COMPAT`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions

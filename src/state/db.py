@@ -17,6 +17,7 @@ from src.state.ledger import (
     append_event_and_project,
     append_many_and_project,
 )
+from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
@@ -565,6 +566,34 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in rows}
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _canonical_position_surface_available(conn: sqlite3.Connection) -> bool:
+    event_columns = _table_columns(conn, "position_events")
+    current_columns = _table_columns(conn, "position_current")
+    return (
+        bool(event_columns)
+        and bool(current_columns)
+        and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        and set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns)
+    )
+
+
+def _legacy_runtime_position_event_schema_available(conn: sqlite3.Connection) -> bool:
+    event_columns = _table_columns(conn, "position_events")
+    return (
+        bool(event_columns)
+        and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
+    )
+
+
 def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
     event_columns = _table_columns(conn, "position_events")
     if not event_columns:
@@ -704,81 +733,105 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
     fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
-    try:
-        values = (
-            pos.market_id,
-            pos.bin_label,
-            pos.direction,
-            pos.size_usd,
-            pos.entry_price,
-            timestamp,
-            _coerce_snapshot_fk(getattr(pos, "decision_snapshot_id", None)),
-            getattr(pos, "calibration_version", "") or None,
-            pos.p_posterior,
-            pos.p_posterior,
-            pos.edge,
-            pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-            pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-            0.0,
-            status,
-            filled_at,
-            fill_price,
-            getattr(pos, "trade_id", ""),
-            getattr(pos, "order_id", ""),
-            getattr(pos, "order_status", ""),
-            getattr(pos, "order_posted_at", ""),
-            getattr(pos, "entered_at", ""),
-            getattr(pos, "chain_state", ""),
-            getattr(pos, "strategy", ""),
-            pos.edge_source,
-            _bin_type_for_label(pos.bin_label),
-            env,
-            getattr(pos, "discovery_mode", ""),
-            getattr(pos, "market_hours_open", 0.0),
-            getattr(pos, "fill_quality", 0.0),
-            getattr(pos, "entry_method", ""),
-            getattr(pos, "selected_method", ""),
-            json.dumps(getattr(pos, "applied_validations", []) or []),
-            getattr(pos, "settlement_semantics_json", None),
-            getattr(pos, "epistemic_context_json", None),
-            getattr(pos, "edge_context_json", None),
-        )
-        placeholders = ", ".join(["?"] * len(values))
-        conn.execute(f"""
-            INSERT INTO trade_decisions (
-                market_id, bin_label, direction, size_usd, price, timestamp,
-                forecast_snapshot_id, calibration_model_version,
-                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
-                strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
-                fill_quality, entry_method, selected_method, applied_validations_json,
-                settlement_semantics_json, epistemic_context_json, edge_context_json
+    if _table_exists(conn, "trade_decisions"):
+        try:
+            values = (
+                pos.market_id,
+                pos.bin_label,
+                pos.direction,
+                pos.size_usd,
+                pos.entry_price,
+                timestamp,
+                _coerce_snapshot_fk(getattr(pos, "decision_snapshot_id", None)),
+                getattr(pos, "calibration_version", "") or None,
+                pos.p_posterior,
+                pos.p_posterior,
+                pos.edge,
+                pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+                pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+                0.0,
+                status,
+                filled_at,
+                fill_price,
+                getattr(pos, "trade_id", ""),
+                getattr(pos, "order_id", ""),
+                getattr(pos, "order_status", ""),
+                getattr(pos, "order_posted_at", ""),
+                getattr(pos, "entered_at", ""),
+                getattr(pos, "chain_state", ""),
+                getattr(pos, "strategy", ""),
+                pos.edge_source,
+                _bin_type_for_label(pos.bin_label),
+                env,
+                getattr(pos, "discovery_mode", ""),
+                getattr(pos, "market_hours_open", 0.0),
+                getattr(pos, "fill_quality", 0.0),
+                getattr(pos, "entry_method", ""),
+                getattr(pos, "selected_method", ""),
+                json.dumps(getattr(pos, "applied_validations", []) or []),
+                getattr(pos, "settlement_semantics_json", None),
+                getattr(pos, "epistemic_context_json", None),
+                getattr(pos, "edge_context_json", None),
             )
-            VALUES ({placeholders})
-        """, values)
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
-    log_position_event(
-        conn,
-        "POSITION_ENTRY_RECORDED",
-        pos,
-        details={
-            "status": status,
-            "fill_price": fill_price,
-            "submitted_price": getattr(pos, "entry_price", None),
-            "shares": getattr(pos, "shares", 0.0),
-            "chain_state": getattr(pos, "chain_state", ""),
-            "entry_method": getattr(pos, "entry_method", ""),
-            "selected_method": getattr(pos, "selected_method", ""),
-        },
-        timestamp=timestamp or None,
-        source="trade_decisions",
-    )
+            placeholders = ", ".join(["?"] * len(values))
+            conn.execute(f"""
+                INSERT INTO trade_decisions (
+                    market_id, bin_label, direction, size_usd, price, timestamp,
+                    forecast_snapshot_id, calibration_model_version,
+                    p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                    status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
+                    strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
+                    fill_quality, entry_method, selected_method, applied_validations_json,
+                    settlement_semantics_json, epistemic_context_json, edge_context_json
+                )
+                VALUES ({placeholders})
+            """, values)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
+
+    if _legacy_runtime_position_event_schema_available(conn):
+        log_position_event(
+            conn,
+            "POSITION_ENTRY_RECORDED",
+            pos,
+            details={
+                "status": status,
+                "fill_price": fill_price,
+                "submitted_price": getattr(pos, "entry_price", None),
+                "shares": getattr(pos, "shares", 0.0),
+                "chain_state": getattr(pos, "chain_state", ""),
+                "entry_method": getattr(pos, "entry_method", ""),
+                "selected_method": getattr(pos, "selected_method", ""),
+            },
+            timestamp=timestamp or None,
+            source="trade_decisions",
+        )
+    elif not _canonical_position_surface_available(conn):
+        log_position_event(
+            conn,
+            "POSITION_ENTRY_RECORDED",
+            pos,
+            details={
+                "status": status,
+                "fill_price": fill_price,
+                "submitted_price": getattr(pos, "entry_price", None),
+                "shares": getattr(pos, "shares", 0.0),
+                "chain_state": getattr(pos, "chain_state", ""),
+                "entry_method": getattr(pos, "entry_method", ""),
+                "selected_method": getattr(pos, "selected_method", ""),
+            },
+            timestamp=timestamp or None,
+            source="trade_decisions",
+        )
 
 
 def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
+    if not _legacy_runtime_position_event_schema_available(conn):
+        if _canonical_position_surface_available(conn):
+            return
+        _assert_legacy_runtime_position_event_schema(conn)
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
