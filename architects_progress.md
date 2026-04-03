@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex mainline coordination pass`
+- Last updated by: `Codex GOV-01 closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,11 +30,11 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Governance methodology hardening`
-- Last accepted packet: `P2R-EXECUTION-TRUTH-REPAIR`
-- Current active packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
-- Current packet status: `frozen / ready for execution`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
+- Mainline stage: `P3 pre-freeze`
+- Last accepted packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Current active packet: `none`
+- Current packet status: `awaiting next freeze`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
@@ -1088,5 +1088,26 @@ Archive policy:
   - final wording still needs verification for scope and precision
 - Next required action:
   - land the methodology wording updates and push them
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 17:20 America/Chicago] GOV-01-CLOSEOUT-METHODOLOGY-HARDENING accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - slim control surfaces now match the already-landed methodology truth
+- Basis / evidence:
+  - commit `9db920c` landed `AGENTS.md`, `docs/governance/zeus_autonomous_delivery_constitution.md`, the GOV-01 packet, and the paired slim control surfaces
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - focused repo inspection confirmed the methodology doctrine is present in repo-law surfaces while the remaining mismatch was only stale control-state wording
+- Decisions frozen:
+  - GOV-01 remains a methodology-only governance packet with no runtime or schema claim
+  - the next operational step is to freeze the first real P3 packet rather than reopen GOV-01 scope
+- Open uncertainties:
+  - P3.1 packet scope still needs to be frozen explicitly before implementation begins
+- Next required action:
+  - freeze `P3.1-STRATEGY-POLICY-TABLES`
 - Owner:
   - Architects mainline lead
