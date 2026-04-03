@@ -463,6 +463,26 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:06 America/Chicago] P-BOUND-01 inventory completed
+- Packet: `P-BOUND-01`
+- Status delta:
+  - `P-BOUND-01` moved from frozen-next into active inventory/design state
+  - first-slice shape is now narrow enough to start from docs + audit-script consolidation
+- Basis / evidence:
+  - `docs/governance/zeus_openclaw_venus_delivery_boundary.md` is present and current-phase honest
+  - `scripts/audit_architecture_alignment.py` still leans on external workspace surfaces as if they were stronger-than-advisory checks
+  - `src/supervisor_api/contracts.py` appears mostly aligned with the typed-contract boundary posture
+- Decisions frozen:
+  - `RALPH_NOW` is the execution mode for `P-BOUND-01`
+  - first slice should prefer boundary-note + audit-script consolidation before touching typed supervisor contracts
+  - no widening into `src/control/**`, runtime truth, or schema work
+- Open uncertainties:
+  - contract-surface edits may still become necessary if a tighter review finds a typed-contract contradiction
+- Next required action:
+  - land the first bounded `P-BOUND-01` slice
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

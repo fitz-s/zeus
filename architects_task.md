@@ -118,10 +118,10 @@ After these four packets close:
 `P-BOUND-01`
 
 ### State
-`FROZEN / READY TO START`
+`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
 
 ### Execution mode verdict
-`PENDING ON START (default: RALPH_NOW unless execution widens materially)`
+`RALPH_NOW`
 
 ### Objective
 Freeze and then execute the repo-local Zeus ↔ Venus / OpenClaw boundary packet so current-phase external authority and control responsibilities become explicit before rollout, state-drift, or operator-surface work continues.
@@ -178,29 +178,41 @@ Explicitly forbidden for edits in the next packet:
 - carry-forward fact: `P-GATE-01-CONSOLIDATE-ADVISORY` is closed and pushed
 - queue fact: `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are frozen behind this packet
 - queue-freeze commit/push completed as `2e5a8c5`
+- inventory finding: `scripts/audit_architecture_alignment.py` still treats external workspace surfaces as stronger-than-advisory checks and is the most likely drift surface in this packet
 
 ### Ready-to-commit slice
-`Not started yet. First slice should be a read-only boundary inventory + contract-map assessment inside P-BOUND-01’s allowed file set.`
+`Slice 1 candidate — narrow boundary-consolidation patch that keeps the boundary note current-phase honest and demotes audit-script external workspace assumptions from implicit blockers to explicit advisory findings, without widening into runtime/control/schema work.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [ ] confirm the current session has re-read the required authority surfaces for `P-BOUND-01`
-- [ ] confirm no runtime/schema/cutover work is being mixed into the packet
-- [ ] confirm the user-directed queue order remains `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01`
+- [x] confirm the current session has re-read the required authority surfaces for `P-BOUND-01`
+- [x] confirm no runtime/schema/cutover work is being mixed into the packet
+- [x] confirm the user-directed queue order remains `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01`
 
 ### Phase B — allowed-surface inspection
-- [ ] inspect `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
-- [ ] inspect `scripts/audit_architecture_alignment.py`
-- [ ] inspect `src/supervisor_api/contracts.py`
-- [ ] classify each as `present`, `missing`, `partial`, or `drifted`
+- [x] inspect `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
+- [x] inspect `scripts/audit_architecture_alignment.py`
+- [x] inspect `src/supervisor_api/contracts.py`
+- [x] classify each as `present`, `missing`, `partial`, or `drifted`
+
+Inventory result:
+- `docs/governance/zeus_openclaw_venus_delivery_boundary.md` -> `present / current-phase honest`
+- `scripts/audit_architecture_alignment.py` -> `partial / drifted toward external workspace assumptions and hard blocking`
+- `src/supervisor_api/contracts.py` -> `present / mostly aligned with narrow typed-contract posture`
 
 ### Phase C — bounded packet design
-- [ ] identify the narrowest boundary delta needed
-- [ ] decide whether the packet is docs-only or includes narrow contract/audit edits
-- [ ] keep all non-boundary packet families out of scope
+- [x] identify the narrowest boundary delta needed
+- [x] decide whether the packet is docs-only or includes narrow contract/audit edits
+- [x] keep all non-boundary packet families out of scope
+
+Current slice shape:
+- keep `src/supervisor_api/contracts.py` read-only unless a typed-contract contradiction is proven
+- prefer a docs + audit-script patch first
+- make external workspace assumptions explicit and advisory instead of hidden blockers
+- keep `src/control/**`, runtime truth, and schema completely out of scope
 
 ### Phase D — evidence bundle
 - [ ] run `python3 scripts/check_work_packets.py`
@@ -224,7 +236,7 @@ The remaining `P-*` queue is closed only when:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Start `P-BOUND-01` and keep it bounded.
+1. Land the first bounded `P-BOUND-01` slice as docs + audit-script consolidation unless a typed-contract contradiction proves necessary.
 2. After `P-BOUND-01` closes, move to `P-ROLL-01`.
 3. Then close `P-STATE-01`.
 4. Then close `P-OPS-01`.
