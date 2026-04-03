@@ -14,7 +14,7 @@
 - `docs/strategy/`: strategy assumptions and data-utilization guidance.
 - `docs/reviews/`: retrospective and strategic review artifacts.
 - `docs/reports/`: generated or curated analysis reports.
-- `docs/reference/`: maps, glossary, and repository-level reference docs.
+- `docs/KEY_REFERENCE/`: maps, glossary, and repository-level reference docs.
 
 ## Runtime and Local State (not for Git tracking)
 - `state/*-paper.json`, `state/*-paper.db`: mode-specific live state.

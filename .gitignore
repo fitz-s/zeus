@@ -17,3 +17,18 @@ equity_curve.png
 __pycache__/
 *.pyc
 .venv/
+
+# Docs sync exclusions requested
+docs/architecture/zeus_blueprint_v2.md
+docs/specs/
+docs/plans/
+docs/reviews/
+docs/progress/
+docs/rollout/
+docs/reports/
+
+# Reference bundle now moved under KEY_REFERENCE
+docs/KEY_REFERENCE/*
+!docs/KEY_REFERENCE/quantitative_research.md
+!docs/KEY_REFERENCE/market_microstructure.md
+!docs/KEY_REFERENCE/statistical_methodology.md
