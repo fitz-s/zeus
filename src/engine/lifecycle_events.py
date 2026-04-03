@@ -285,3 +285,66 @@ def build_settlement_canonical_write(
         "payload_json": payload,
     }
     return [event], projection
+
+
+def build_reconciliation_rescue_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    projection = build_position_current_projection(position)
+    if projection["phase"] != "active":
+        raise ValueError("reconciliation rescue canonical builder requires an active position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "entered_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "status": "entered",
+            "source": "chain_reconciliation",
+            "reason": "pending_fill_rescued",
+            "from_state": "pending_tracked",
+            "to_state": "entered",
+            "entry_order_id": getattr(position, "entry_order_id", "") or getattr(position, "order_id", ""),
+            "entry_method": getattr(position, "entry_method", ""),
+            "selected_method": getattr(position, "selected_method", "") or getattr(position, "entry_method", ""),
+            "historical_entry_method": getattr(position, "entry_method", ""),
+            "historical_selected_method": getattr(position, "selected_method", "") or getattr(position, "entry_method", ""),
+            "applied_validations": list(getattr(position, "applied_validations", []) or []),
+            "entry_fill_verified": getattr(position, "entry_fill_verified", False),
+            "shares": getattr(position, "shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "rescue_condition_id": getattr(position, "condition_id", ""),
+            "order_status": getattr(position, "order_status", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_synced:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "CHAIN_SYNCED",
+        "occurred_at": occurred_at,
+        "phase_before": "pending_entry",
+        "phase_after": "active",
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "pending_fill_rescued",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_synced:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    return [event], projection

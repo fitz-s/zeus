@@ -556,12 +556,120 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
     conn.close()
 
 
+def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import (
+        build_entry_canonical_write,
+        build_reconciliation_rescue_canonical_write,
+    )
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pending_pos.entry_order_id = "ord-1"
+    pending_pos.order_id = "ord-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pending_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    rescued_pos = _runtime_position(state="entered", chain_state="synced")
+    rescued_pos.entry_order_id = "ord-1"
+    rescued_pos.order_id = "ord-1"
+    rescued_pos.condition_id = "cond-1"
+    rescued_pos.entry_fill_verified = True
+    rescued_pos.entered_at = "2026-04-03T00:10:00Z"
+
+    rescue_events, rescue_projection = build_reconciliation_rescue_canonical_write(
+        rescued_pos,
+        sequence_no=3,
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, rescue_events, rescue_projection)
+
+    event_row = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key, chain_state, order_status FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert event_row["event_type"] == "CHAIN_SYNCED"
+    assert event_row["sequence_no"] == 3
+    assert event_row["phase_before"] == "pending_entry"
+    assert event_row["phase_after"] == "active"
+    payload = json.loads(event_row["payload_json"])
+    assert payload["reason"] == "pending_fill_rescued"
+    assert payload["entry_fill_verified"] is True
+    assert payload["condition_id"] == "cond-1"
+    assert payload["from_state"] == "pending_tracked"
+    assert payload["to_state"] == "entered"
+    assert payload["rescue_condition_id"] == "cond-1"
+    assert payload["historical_entry_method"] == "ens_member_counting"
+    assert payload["historical_selected_method"] == "ens_member_counting"
+    assert payload["applied_validations"] == []
+    assert dict(projection_row) == {
+        "phase": "active",
+        "strategy_key": "center_buy",
+        "chain_state": "synced",
+        "order_status": "filled",
+    }
+    conn.close()
+
+
+def test_reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields():
+    from src.engine.lifecycle_events import build_reconciliation_rescue_canonical_write
+
+    rescued_pos = _runtime_position(state="entered", chain_state="synced")
+    rescued_pos.entry_order_id = "ord-1"
+    rescued_pos.order_id = "ord-1"
+    rescued_pos.condition_id = "cond-1"
+    rescued_pos.entry_fill_verified = True
+    rescued_pos.entered_at = "2026-04-03T00:10:00Z"
+    rescued_pos.applied_validations = ["spread_ok", "kelly_ok"]
+
+    events, projection = build_reconciliation_rescue_canonical_write(
+        rescued_pos,
+        sequence_no=3,
+        source_module="src.state.chain_reconciliation",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload == {
+        "status": "entered",
+        "source": "chain_reconciliation",
+        "reason": "pending_fill_rescued",
+        "from_state": "pending_tracked",
+        "to_state": "entered",
+        "entry_order_id": "ord-1",
+        "entry_method": "ens_member_counting",
+        "selected_method": "ens_member_counting",
+        "historical_entry_method": "ens_member_counting",
+        "historical_selected_method": "ens_member_counting",
+        "applied_validations": ["spread_ok", "kelly_ok"],
+        "entry_fill_verified": True,
+        "shares": 20.0,
+        "cost_basis_usd": 10.0,
+        "size_usd": 10.0,
+        "condition_id": "cond-1",
+        "rescue_condition_id": "cond-1",
+        "order_status": "filled",
+        "chain_state": "synced",
+    }
+    assert projection["phase"] == "active"
+
+
 def test_lifecycle_builder_module_exists():
     text = (ROOT / "src/engine/lifecycle_events.py").read_text()
     assert "def canonical_phase_for_position" in text
     assert "def build_position_current_projection" in text
     assert "def build_entry_canonical_write" in text
     assert "def build_settlement_canonical_write" in text
+    assert "def build_reconciliation_rescue_canonical_write" in text
 
 
 def test_log_trade_entry_degrades_cleanly_on_canonical_bootstrap_db():

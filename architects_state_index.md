@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `Stage 2 canonical-authority rollout`
 - Active packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
-- Active packet state: `frozen`
+- Active packet state: `landed locally / under review`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P1.7B-RECONCILIATION-QUERY-COMPAT` (`7707766`)
 - Execution mode default: `solo`
@@ -23,11 +23,10 @@ Metadata:
 
 ## Current next action
 
-1. Implement the reconciliation rescue builder layer in `src/engine/lifecycle_events.py`
-2. Add targeted architecture-contract coverage in `tests/test_architecture_contracts.py`
-3. Run adversarial review
-4. Accept, commit, push
-5. Freeze the successor packet only after `P1.7C` closes
+1. Run adversarial review on `P1.7C`
+2. Accept if the builder claim survives attack
+3. Commit and push `P1.7C`
+4. Freeze the successor packet only after `P1.7C` closes
 
 ## Current out-of-scope dirt
 
