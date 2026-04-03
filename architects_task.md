@@ -115,26 +115,26 @@ After these four packets close:
 ## Current Active Packet
 
 ### Packet
-`P-BOUND-01`
+`P-ROLL-01`
 
 ### State
-`VERIFIED / READY TO COMMIT`
+`ACTIVE / PATCH LANDED LOCALLY / VERIFYING`
 
 ### Execution mode verdict
 `RALPH_NOW`
 
 ### Objective
-Freeze and then execute the repo-local Zeus ↔ Venus / OpenClaw boundary packet so current-phase external authority and control responsibilities become explicit before rollout, state-drift, or operator-surface work continues.
+Record the rollout/cutover truth honestly by distinguishing resolved, narrowed, and still-open deltas and by keeping the archive/cutover plan explicit about what is complete vs still pending in current phase.
 
 ### Why this packet is next
 - user explicitly set the remaining queue order
-- boundary ambiguity is the most dangerous remaining cross-system drift
-- later packets should not inherit unclear repo-vs-host authority
+- `P-BOUND-01` is now closed
+- rollout truth must remain honest before `P-STATE-01` touches runtime drift
 
 ### Owner model
-- Required: one named execution owner for `P-BOUND-01`
+- Required: one named execution owner for `P-ROLL-01`
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent boundary/evidence reviewer
+- Verifier remains independent docs/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
@@ -148,41 +148,36 @@ Freeze and then execute the repo-local Zeus ↔ Venus / OpenClaw boundary packet
 
 ### Allowed edit surface
 Only the following may be edited in the next packet:
-- `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
-- `scripts/audit_architecture_alignment.py`
-- `src/supervisor_api/contracts.py`
+- `docs/rollout/**`
+- `docs/governance/zeus_runtime_delta_ledger.md`
 - `architects_progress.md`
 - `architects_task.md`
-- `work_packets/P-BOUND-01.md`
+- `work_packets/P-ROLL-01.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in the next packet:
 - all non-allowed files
 - `architecture/**`
 - `migrations/**`
-- `src/state/**`
-- `src/control/**`
+- `src/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no architecture-law rewrite
-- no schema changes
-- no live cutover work
-- no runtime truth reclassification outside the boundary packet
+- no runtime code edits
+- no live cutover claim
+- no authority-law rewrites
 - no team execution yet
 
 ### Current blocker
-- no active hard blocker at freeze time
-- carry-forward fact: `P-GATE-01-CONSOLIDATE-ADVISORY` is closed and pushed
-- queue fact: `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are frozen behind this packet
-- queue-freeze commit/push completed as `2e5a8c5`
-- inventory finding: `scripts/audit_architecture_alignment.py` still treats external workspace surfaces as stronger-than-advisory checks and is the most likely drift surface in this packet
-- no current hard blocker; packet verification is complete
+- no active hard blocker
+- carry-forward fact: `P-BOUND-01` is closed and pushed in `5778e8b`
+- queue fact: `P-STATE-01` and `P-OPS-01` remain frozen behind this packet
+- rollout drift now centers on documenting resolved vs open deltas honestly
 
 ### Ready-to-commit slice
-`P-BOUND-01 completed locally — boundary note now states external checks are advisory-only, and audit_architecture_alignment.py now separates repo-local blockers from external advisory assumptions without widening into runtime/control/schema work.`
+`P-ROLL-01 landed locally — delta ledger now distinguishes resolved / narrowed / open drift, and the cutover/archive plan now distinguishes completed current-phase setup from still-pending actions without claiming cutover readiness.`
 
 ---
 
@@ -200,9 +195,8 @@ Explicitly forbidden for edits in the next packet:
 - [x] classify each as `present`, `missing`, `partial`, or `drifted`
 
 Inventory result:
-- `docs/governance/zeus_openclaw_venus_delivery_boundary.md` -> `present / current-phase honest`
-- `scripts/audit_architecture_alignment.py` -> `partial / drifted toward external workspace assumptions and hard blocking`
-- `src/supervisor_api/contracts.py` -> `present / mostly aligned with narrow typed-contract posture`
+- `docs/rollout/zeus_authority_cutover_and_archive_plan.md` -> `present / needs completed-vs-pending split`
+- `docs/governance/zeus_runtime_delta_ledger.md` -> `present / needs resolved-vs-open status clarity`
 
 ### Phase C — bounded packet design
 - [x] identify the narrowest boundary delta needed
@@ -210,32 +204,26 @@ Inventory result:
 - [x] keep all non-boundary packet families out of scope
 
 Current slice shape:
-- keep `src/supervisor_api/contracts.py` read-only unless a typed-contract contradiction is proven
-- prefer a docs + audit-script patch first
-- make external workspace assumptions explicit and advisory instead of hidden blockers
-- keep `src/control/**`, runtime truth, and schema completely out of scope
+- keep the packet docs-only
+- distinguish resolved / narrowed / open deltas explicitly
+- distinguish completed current-phase setup from still-pending archive/demotion steps
+- keep runtime truth and cutover claims out of scope
 
 ### Phase D — evidence bundle
 - [x] run `python3 scripts/check_work_packets.py`
-- [x] collect contract-map evidence
-- [x] record external-surface assumptions note
+- [x] record resolved-vs-open delta note
 - [x] append execution result to `architects_progress.md`
-- [x] run `python3 scripts/audit_architecture_alignment.py`
+- [x] review docs-only diff
 - [ ] commit and push once the packet slice lands
 
 Evidence snapshot:
-- contract map:
-  - boundary note = current-phase law
-  - `scripts/audit_architecture_alignment.py` = audit/repo-host check
-  - `src/supervisor_api/contracts.py` = typed contract surface
-- external-surface assumptions note:
-  - external workspace/operator surfaces may be reported
-  - OpenClaw host config may be reported
-  - neither becomes repo-authority blocking by itself in current phase
-- audit output:
-  - `blocking: []`
-  - `repo_verdict: pass`
-  - `external_boundary_verdict: advisory-only`
+- resolved-vs-open delta note:
+  - `DELTA-02` to `DELTA-04` resolved
+  - `DELTA-10` narrowed
+  - `DELTA-05` to `DELTA-09` and `DELTA-11` remain open
+- rollout-plan note:
+  - immediate actions 1-4 completed
+  - demotion/archive and state-drift cleanup still pending
 
 ---
 
