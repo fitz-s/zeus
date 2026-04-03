@@ -6,26 +6,26 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 acceptance pass`
+- Last updated by: `Codex P3.1 closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 strategy-aware protective spine`
-- Active packet: `none (P3.1-STRATEGY-POLICY-TABLES accepted and pushed)`
+- Stage: `P3 pre-freeze after policy tables`
+- Active packet: `none`
 - Active packet state: `awaiting next freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - no team is active
+  - next packet still defaults to `NO_TEAM_DEFAULT`
 
 ## Current next action
 
-1. If P3 continues, freeze `P3.2-POLICY-RESOLVER` next.
+1. Freeze the next P3 policy-resolver packet before further implementation.
 2. Keep the next P3 slice on policy resolution only.
-3. Keep out-of-scope local dirt excluded from the next packet commit.
+3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
 
@@ -40,6 +40,6 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `docs/architecture/zeus_durable_architecture_spec.md` — P3 section
+5. `docs/architecture/zeus_durable_architecture_spec.md` (`P3` section)
 6. `work_packets/P3.1-STRATEGY-POLICY-TABLES.md`
-7. freeze the next packet before further implementation
+7. freeze the next P3 policy-resolver packet before implementation

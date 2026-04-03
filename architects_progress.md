@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 acceptance pass`
+- Last updated by: `Codex P3.1 closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 strategy-aware protective spine`
+- Mainline stage: `P3 pre-freeze after policy tables`
 - Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
-- Current active packet: `none (P3.1 accepted and pushed)`
+- Current active packet: `none`
 - Current packet status: `awaiting next freeze`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
 - Current hard blockers:
-  - no active technical blocker inside the current stop boundary
+  - no active technical blocker inside the post-P3.1 closeout slice
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline

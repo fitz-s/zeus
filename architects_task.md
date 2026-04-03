@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 acceptance pass`
+- Last updated by: `Codex P3.1 closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -19,12 +19,12 @@ Do not use this file for:
 
 - Packet: `none`
 - State: `AWAITING NEXT FREEZE`
-- Execution mode: `SOLO_EXECUTE`
+- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. Current run horizon is satisfied because `P3.1-STRATEGY-POLICY-TABLES` is accepted and pushed.
+Freeze the next P3 packet on policy resolution only before further implementation begins.
 
 ## Allowed files
 
@@ -35,7 +35,7 @@ No live packet. Current run horizon is satisfied because `P3.1-STRATEGY-POLICY-T
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- all non-allowed files until the next packet is frozen
 - `AGENTS.md`
 - `src/**`
 - `tests/**`
@@ -49,22 +49,23 @@ No live packet. Current run horizon is satisfied because `P3.1-STRATEGY-POLICY-T
 
 ## Non-goals
 
-- no P3.2 work without a new frozen packet
-- no cutover
+- no implementation before the next packet is frozen
+- no runtime/schema edits inside this control-only closeout slice
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside the completed P3.1 stop boundary
+- no blocker inside this closeout slice
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P3.1 landed with green schema/contract evidence
-- [x] P3.1 acceptance is recorded honestly
-- [ ] if resuming, freeze `P3.2-POLICY-RESOLVER`
+- [ ] read the P3 policy-resolver authority surfaces
+- [ ] freeze `P3.2-POLICY-RESOLVER`
+- [ ] keep out-of-scope dirt excluded from the next packet commit
 
 ## Next required action
 
-1. Stop at the current packet boundary (`P3.1-STRATEGY-POLICY-TABLES` accepted and pushed).
-2. If continuing later, freeze `P3.2-POLICY-RESOLVER` before any implementation.
+1. Freeze `P3.2-POLICY-RESOLVER`.
+2. Keep the next P3 slice on policy resolution only.
+3. Keep out-of-scope dirt excluded from any commit.
