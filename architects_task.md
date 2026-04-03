@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.4 closeout pass`
+- Last updated by: `Codex P3.5 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,56 +17,67 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `AWAITING POST-CLOSE REVIEW / NEXT FREEZE`
+- Packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Hold at the accepted P3.4 boundary until the required post-close third-party critic + verifier review finishes, then freeze the next packet.
+Prove final manual override precedence on the active evaluator/resolver path before declaring P3 complete.
 
 ## Allowed files
 
 - `work_packets/P3.5-MANUAL-OVERRIDE-PRECEDENCE.md`
+- `src/riskguard/policy.py`
+- `tests/test_pnl_flow_and_audit.py`
+- `tests/test_riskguard.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- all non-allowed files
 - `AGENTS.md`
-- `src/**`
-- `tests/**`
-- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
+- `migrations/**`
+- `src/control/**`
+- `src/riskguard/riskguard.py`
+- `src/engine/**`
+- `src/execution/**`
+- `src/state/**`
+- `src/supervisor_api/**`
+- `tests/test_architecture_contracts.py`
+- `tests/test_db.py`
+- `tests/test_runtime_guards.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no P3.5 work before post-close review finishes
-- no cutover
+- no riskguard emission changes in this packet
+- no control-plane-write changes in this packet
+- no post-P3 phase work in this packet
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside the completed P3.4 boundary
+- no blocker inside packet scope
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P3.4 landed with green riskguard emission evidence
-- [x] P3.4 acceptance is recorded honestly
-- [ ] run post-close third-party critic review
-- [ ] run post-close third-party verifier review
-- [ ] if both pass, freeze `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- [ ] read packet authority and precedence surfaces
+- [ ] implement/lock final precedence proof
+- [ ] verify targeted precedence evidence
+- [ ] keep out-of-scope local dirt excluded from the packet commit
 
 ## Next required action
 
-1. Run post-close third-party critic + verifier on the accepted P3.4 boundary.
-2. If both pass, freeze `P3.5-MANUAL-OVERRIDE-PRECEDENCE` before any more implementation.
+1. Implement the final manual-override-precedence slice.
+2. Keep `P3.5-MANUAL-OVERRIDE-PRECEDENCE` on precedence/test surfaces only.
+3. Keep out-of-scope local dirt excluded from any commit.
