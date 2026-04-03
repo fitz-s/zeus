@@ -113,7 +113,7 @@ Explicitly forbidden for edits in this planning packet:
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside this packet’s versioned scope
 
 ### Ready-to-commit slice
-`Planning freeze is pushed — the next execution slice is to extract the stage map, goals, automation path, and team-opening gate from the tribunal overlay and mature foundation package.`
+`Planning execution landed locally — FOUNDATION-MAINLINE-PLAN now contains the stage map, workstreams, automation path, verification path, explicit team-opening gate, and explicit successor packet requirement for staffing.`
 
 ---
 
@@ -125,21 +125,31 @@ Explicitly forbidden for edits in this planning packet:
 - [x] define allowed / forbidden files for the planning packet
 
 ### Phase B — planning intake
-- [ ] identify the planning surfaces that will define:
+- [x] identify the planning surfaces that will define:
   - foundation work order
   - automation strategy
   - verification path
   - team-opening gate
-- [ ] confirm which artifacts the next plan packet should create
+- [x] confirm which artifacts the next plan packet should create
 
 ### Phase C — bounded planning design
-- [ ] define the planning packet
-- [ ] define the post-plan team-opening gate
-- [ ] keep the completed current-phase queue closed
+- [x] define the planning packet
+- [x] define the post-plan team-opening gate
+- [x] keep the completed current-phase queue closed
 
 ### Phase D — evidence bundle
-- [x] append planning freeze result to `architects_progress.md`
-- [x] commit and push the planning freeze
+- [x] append planning execution result to `architects_progress.md`
+- [ ] commit and push the planning execution slice
+
+Planning deliverables now live in:
+- `work_packets/FOUNDATION-MAINLINE-PLAN.md`
+  - stage map
+  - source-package crosswalk
+  - mainline workstreams
+  - automation path
+  - verification path
+  - explicit team-opening gate
+  - explicit successor packet requirement: `FOUNDATION-TEAM-GATE`
 
 ---
 
@@ -156,9 +166,15 @@ Current-phase closure is achieved:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Freeze the foundation-mainline planning packet.
-2. Freeze the team-opening / staffing gate after the planning packet.
-3. Do not reopen the completed `P-*` queue unless a new contradiction appears.
-4. Begin the next phase from explicit planned authority, not from momentum alone.
+1. Execute `FOUNDATION-MAINLINE-PLAN`.
+2. Extract from `zeus_final_tribunal_overlay/` and `zeus_mature_project_foundation/`:
+   - stage map
+   - workstreams
+   - automation path
+   - verification path
+   - explicit team-opening gate
+3. If team staffing is to be a precondition for team opening, freeze it in this packet; otherwise explicitly declare the successor packet required for staffing.
+4. Do not open team until the planning packet is complete.
+5. If any stage, goal, or sequencing detail is unclear, return to the two source packages before deciding.
 
 If this cannot be done without a new packet, freeze that packet before acting.
