@@ -28,9 +28,7 @@ Freeze the unresolved chain-quarantine attribution contradiction and record the 
 
 ## Allowed files
 
-- `work_packets/P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE.md`
-- `src/**`
-- `tests/test_architecture_contracts.py`
+- `work_packets/P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -68,22 +66,20 @@ Freeze the unresolved chain-quarantine attribution contradiction and record the 
 
 ## Current blocker state
 
-- no active technical blocker inside packet scope
+- active human decision blocker:
+  - chain-only quarantined positions have no safe repo-authorized `strategy_key` source
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] implement reconciliation size-correction dual-write in `src/state/chain_reconciliation.py`
-- [x] keep legacy size-correction behavior in place on legacy-schema runtimes
-- [x] add targeted architecture-contract coverage
-- [x] append durable packet transition to `architects_progress.md` when implementation lands
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
-- [ ] commit and push the packet
+- [x] append durable contradiction and stop-boundary transition to `architects_progress.md`
+- [x] freeze the blocker packet
+- [x] commit and push the blocker packet
+- [ ] await human decision on chain-quarantine strategy attribution
 
 ## Next required action
 
-1. Commit and push this accepted size-correction packet without mixing unrelated working-tree dirt.
-2. Determine whether the unresolved chain-quarantine attribution problem can be packetized without new law.
-3. Keep team closed by default.
-4. Stop only if the next packet requires a new human decision.
+1. Stop autonomous execution here.
+2. Await human decision on chain-only quarantine attribution.
+3. After that decision, freeze a superseding packet.
+4. Keep out-of-scope dirt excluded from any future commit.

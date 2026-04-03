@@ -32,7 +32,7 @@ Archive policy:
 
 - Mainline stage: `Stage 2 canonical-authority rollout`
 - Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
-- Current active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Current active packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
 - Current packet status: `blocked / human decision required`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:

@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `Stage 2 canonical-authority rollout`
 - Active packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
-- Active packet state: `landed locally / under review`
+- Active packet state: `blocked / human decision required`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
 - Execution mode default: `solo`
@@ -23,10 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Commit and push `P1.7F`
-2. Determine whether the chain-quarantine branch can be packetized without inventing strategy attribution
-3. Freeze the successor packet only if repo law allows it
-4. Otherwise stop at the human-decision boundary
+1. Await human decision on chain-only quarantine attribution
+2. Freeze a superseding governance/migration packet only after that decision exists
+3. Do not continue autonomous P1 work past this boundary
 
 ## Current out-of-scope dirt
 
