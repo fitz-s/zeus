@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Active packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
 - Active packet state: `frozen`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT` (`5e2bce2`)
+- Last accepted packet: `P1.7B-RECONCILIATION-QUERY-COMPAT` (`7707766`)
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,11 +23,11 @@ Metadata:
 
 ## Current next action
 
-1. Implement the reconciliation query-path compatibility fix in `src/state/chain_reconciliation.py`
+1. Implement the reconciliation rescue builder layer in `src/engine/lifecycle_events.py`
 2. Add targeted architecture-contract coverage in `tests/test_architecture_contracts.py`
 3. Run adversarial review
 4. Accept, commit, push
-5. Freeze the successor packet only after `P1.7B` closes
+5. Freeze the successor packet only after `P1.7C` closes
 
 ## Current out-of-scope dirt
 
@@ -40,5 +40,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7B-RECONCILIATION-QUERY-COMPAT.md`
+5. `work_packets/P1.7C-RECONCILIATION-RESCUE-BUILDERS.md`
 6. current packet `required_reads`
