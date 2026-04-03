@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.4 closeout pass`
+- Last updated by: `Codex P3.5 freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 post-close review after riskguard policy emission`
+- Mainline stage: `P3 strategy-aware protective spine`
 - Last accepted packet: `P3.4-RISKGUARD-POLICY-EMISSION`
-- Current active packet: `none`
-- Current packet status: `awaiting post-close review gate`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
+- Current active packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Current packet status: `frozen / ready for execution`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
-  - run the user-required post-close third-party critic + verifier before freezing P3.5
+  - no blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1441,5 +1441,47 @@ Archive policy:
   - the full non-bootstrapped runtime durability path remains explicitly advisory via the missing-table skip branch
 - Next required action:
   - run the user-required post-close third-party critic + verifier before freezing `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:19 America/Chicago] P3.4 post-close third-party review gate passed
+- Author: `Architects mainline lead`
+- Packet: `P3.4-RISKGUARD-POLICY-EMISSION`
+- Status delta:
+  - user-required post-close third-party critic review passed
+  - user-required post-close third-party verifier review passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - post-close verifier rerun -> `PASS`
+  - post-close critic rerun -> `PASS`
+  - accepted P3.4 boundary no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - `P3.5-MANUAL-OVERRIDE-PRECEDENCE` may now be frozen as the next packet
+- Open uncertainties:
+  - the non-bootstrapped runtime path remains advisory-only via the explicit missing-table skip branch
+- Next required action:
+  - freeze `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:21 America/Chicago] P3.5-MANUAL-OVERRIDE-PRECEDENCE frozen
+- Author: `Architects mainline lead`
+- Packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P3.4 riskguard-emission boundary plus passed post-close review gate now permit the final P3 freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` still names manual override precedence as the last remaining P3 sequence item
+  - repo truth already contains resolver-level manual override precedence, but the final end-to-end precedence proof and P3-closeout readiness still need a packet-bounded claim
+- Decisions frozen:
+  - keep this packet on final precedence proof only
+  - do not widen into control-plane durability migration or post-P3 phase work
+  - keep team closed by default
+- Open uncertainties:
+  - whether any code change is still needed beyond targeted end-to-end precedence tests
+- Next required action:
+  - implement `P3.5-MANUAL-OVERRIDE-PRECEDENCE` and run targeted precedence tests
 - Owner:
   - Architects mainline lead
