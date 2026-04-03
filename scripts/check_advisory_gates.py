@@ -25,6 +25,7 @@ REQUIRED_ADVISORY_JOBS = {
 REQUIRED_TRIGGER_PATHS = {
     "AGENTS.md",
     ".github/workflows/**",
+    "scripts/_yaml_bootstrap.py",
     "scripts/check_*",
     "scripts/replay_parity.py",
     "tests/test_architecture_contracts.py",
@@ -95,15 +96,19 @@ def ensure_semgrep_and_replay_are_advisory(data: dict, errors: list[str]) -> Non
         for step in jobs.get("semgrep-zeus", {}).get("steps", [])
         if isinstance(step, dict)
     )
-    if "semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src" not in semgrep_steps:
+    if "semgrep --config architecture/ast_rules/semgrep_zeus.yml" not in semgrep_steps:
         errors.append("semgrep-zeus: expected advisory scan command missing")
+    if "--severity ERROR" not in semgrep_steps:
+        errors.append("semgrep-zeus: expected severity pin missing")
+    if " src" not in semgrep_steps and "\nsrc" not in semgrep_steps:
+        errors.append("semgrep-zeus: expected src target missing")
 
     replay_steps = "\n".join(
         step.get("run", "")
         for step in jobs.get("replay-parity", {}).get("steps", [])
         if isinstance(step, dict)
     )
-    if "python scripts/replay_parity.py --ci" not in replay_steps:
+    if "python scripts/replay_parity.py" not in replay_steps or "--ci" not in replay_steps:
         errors.append("replay-parity: expected advisory replay command missing")
 
     semgrep_review = jobs.get("semgrep-zeus", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
@@ -139,6 +144,7 @@ def main() -> int:
         return 1
 
     print("advisory gate policy ok")
+    print("policy verdict only; advisory jobs still require separate evidence review")
     print(f"blocking jobs={sorted(REQUIRED_BLOCKING_JOBS)}")
     print(f"advisory jobs={sorted(REQUIRED_ADVISORY_JOBS)}")
     return 0

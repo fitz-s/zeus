@@ -375,6 +375,34 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 23:46 America/Chicago] Follow-up delta prepared after attack-only review
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - a narrow follow-up delta was opened after the first pushed packet
+  - the delta stays inside the same packet boundary and only refines the advisory verdict machinery
+- Basis / evidence:
+  - Gemini attack-only review identified:
+    - trigger-surface gap for `scripts/_yaml_bootstrap.py`
+    - brittle command-string matching
+    - test/script authority drift
+    - advisory-signal overclaim risk
+  - internal attack-only review identified:
+    - self-referential gate risk
+    - shallow test-wrapper risk
+    - static-vs-runtime CI semantics gap
+- Decisions frozen:
+  - the follow-up delta adds `_yaml_bootstrap.py` to workflow triggers
+  - the policy script now explicitly says a green policy verdict is not a green advisory-lane result
+  - the architecture test now performs a small independent YAML-shape check plus runs the policy script
+  - the packet still does not widen into `architecture/ast_rules/**` or `src/**`
+- Open uncertainties:
+  - self-referential workflow-policy checking is still an unavoidable current-phase limitation
+  - static local checks still cannot prove live GitHub Actions runtime semantics
+- Next required action:
+  - commit and push the follow-up delta as a separate cloud-visible refinement
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

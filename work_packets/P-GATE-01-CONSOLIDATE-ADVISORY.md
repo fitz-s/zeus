@@ -55,6 +55,7 @@ replay_required: false
 rollback: Revert the workflow, advisory-gate policy script/test, packet file, and paired Architects ledger updates as one coherent slice.
 acceptance:
   - The advisory workflow has a machine-checkable verdict for blocking vs advisory jobs.
+  - The policy check explicitly states that a green workflow-shape verdict is not the same as a green semgrep or replay-parity signal.
   - Semgrep remains advisory with an explicit, testable promotion condition.
   - Replay parity remains advisory with an explicit, testable promotion condition.
   - No external-workspace-dependent audit is made blocking.

@@ -9,6 +9,7 @@ on:
       - "docs/governance/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
+      - "scripts/_yaml_bootstrap.py"
       - "scripts/check_*"
       - "scripts/replay_parity.py"
       - "tests/test_architecture_contracts.py"
@@ -22,6 +23,7 @@ on:
       - "docs/governance/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
+      - "scripts/_yaml_bootstrap.py"
       - "scripts/check_*"
       - "scripts/replay_parity.py"
       - "tests/test_architecture_contracts.py"
@@ -38,11 +40,11 @@ concurrency:
 
 jobs:
   advisory-gate-policy:
-    name: advisory-gate-policy (blocking)
+    name: advisory-gate-policy (blocking, policy-only)
     runs-on: ubuntu-latest
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
-      GATE_RATIONALE: "The current-phase blocking-vs-advisory split must stay explicit and machine-checkable so future slices do not silently promote or dilute gate severity."
+      GATE_OWNER: "P-GATE-01 advisory package owner"
+      GATE_RATIONALE: "The current-phase blocking-vs-advisory split must stay explicit and machine-checkable. This policy check validates workflow posture only, not the cleanliness of advisory lanes."
       GATE_REVIEW_CONDITION: "Keep this job blocking while it only validates verdict drift; any later packet that promotes or retires advisory gates must update this mapping explicitly."
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +68,7 @@ jobs:
     name: architecture-manifests (blocking)
     runs-on: ubuntu-latest
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Machine-checkable authority must stay mutually consistent before runtime work proceeds."
       GATE_REVIEW_CONDITION: "Keep blocking while manifests remain the principal machine authority; review only if a lower-noise equivalent replaces this script."
     steps:
@@ -91,7 +93,7 @@ jobs:
     name: module-boundaries (blocking)
     runs-on: ubuntu-latest
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Immediate import-boundary checks prevent cross-zone erosion before runtime patches land."
       GATE_REVIEW_CONDITION: "Keep blocking while the current zones.yaml immediate rules remain stable; review only if rule noise is proven."
     steps:
@@ -116,7 +118,7 @@ jobs:
     name: packet-grammar (blocking)
     runs-on: ubuntu-latest
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Work packet completeness is a hard prerequisite for authority-sensitive work."
       GATE_REVIEW_CONDITION: "Keep blocking while packet grammar remains the repo delivery contract; review only if packet storage changes shape."
     steps:
@@ -136,7 +138,7 @@ jobs:
     name: kernel-invariants (blocking)
     runs-on: ubuntu-latest
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Architecture contract tests provide the current blocking proof for manifest, invariant, and schema-smoke expectations without claiming runtime convergence."
       GATE_REVIEW_CONDITION: "Keep blocking while these tests remain low-noise and spec-backed; split schema smoke into its own job later only if that reduces ambiguity."
     steps:
@@ -162,7 +164,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Semgrep surfaces obvious forbidden patterns early, but current repo findings still need packetized follow-up before promotion to blocking."
       GATE_REVIEW_CONDITION: "Promote only after current findings are triaged and control-plane JSON-write exceptions, if any, are intentionally encoded."
     steps:
@@ -181,13 +183,22 @@ jobs:
           echo "review_condition=${GATE_REVIEW_CONDITION}"
       - name: Run semgrep architecture rules
         run: semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## semgrep-zeus advisory lane"
+            echo "- continue-on-error is intentional for current-phase P-GATE work"
+            echo "- current findings are advisory inputs, not authority verdicts"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   replay-parity:
     name: replay-parity (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
-      GATE_OWNER: "P-GATE-01 gate owner"
+      GATE_OWNER: "P-GATE-01 advisory package owner"
       GATE_RATIONALE: "Replay parity must stay visible in CI, but it cannot block until dual-write plus position_current land."
       GATE_REVIEW_CONDITION: "Promote only after dual-write and deterministic projection compare exist and current repo truth is no longer mixed."
     steps:
@@ -202,3 +213,12 @@ jobs:
           echo "review_condition=${GATE_REVIEW_CONDITION}"
       - name: Run replay parity in advisory mode
         run: python scripts/replay_parity.py --ci
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## replay-parity advisory lane"
+            echo "- continue-on-error is intentional for current-phase P-GATE work"
+            echo "- staged parity output is advisory until prerequisites exist"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"
