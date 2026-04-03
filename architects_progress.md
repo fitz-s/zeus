@@ -1397,3 +1397,23 @@ Archive policy:
   - freeze `P3.4-RISKGUARD-POLICY-EMISSION`
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 18:52 America/Chicago] P3.4-RISKGUARD-POLICY-EMISSION frozen
+- Author: `Architects mainline lead`
+- Packet: `P3.4-RISKGUARD-POLICY-EMISSION`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P3.3 evaluator policy-consumption boundary plus passed post-close review gate now permit the next freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` names riskguard policy emission as the next P3 slice after evaluator consumption
+  - repo inspection shows RiskGuard still records strategy degradation inside `risk_state.details_json` rather than durable `risk_actions`
+- Decisions frozen:
+  - keep this packet on riskguard emission/expiry only
+  - do not widen into manual-override precedence, evaluator changes, or control-plane writes
+  - keep team closed by default
+- Open uncertainties:
+  - exact emission/expiry mapping from current recommendation fields to durable `risk_actions` rows still needs implementation review
+- Next required action:
+  - implement `P3.4-RISKGUARD-POLICY-EMISSION` and run targeted riskguard tests
+- Owner:
+  - Architects mainline lead

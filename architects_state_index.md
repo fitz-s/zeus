@@ -6,25 +6,25 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.3 post-close review pass`
+- Last updated by: `Codex P3.4 freeze pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 pre-freeze after evaluator policy consumption`
-- Active packet: `none`
-- Active packet state: `awaiting next freeze`
+- Stage: `P3 strategy-aware protective spine`
+- Active packet: `P3.4-RISKGUARD-POLICY-EMISSION`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - next packet still defaults to `NO_TEAM_DEFAULT`
+  - current packet is `NO_TEAM_DEFAULT`
 
 ## Current next action
 
-1. Freeze `P3.4-RISKGUARD-POLICY-EMISSION` next.
-2. Keep the next P3 slice on riskguard policy emission only.
+1. Read the current packet `required_reads` before implementation.
+2. Keep `P3.4-RISKGUARD-POLICY-EMISSION` confined to riskguard emission only.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -42,6 +42,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `docs/architecture/zeus_durable_architecture_spec.md` (`P3` section)
-6. `work_packets/P3.3-EVALUATOR-POLICY-CONSUMPTION.md`
-7. freeze `P3.4-RISKGUARD-POLICY-EMISSION` before further implementation
+5. `work_packets/P3.4-RISKGUARD-POLICY-EMISSION.md`
+6. current packet `required_reads`
