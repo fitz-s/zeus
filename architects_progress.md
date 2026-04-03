@@ -1017,7 +1017,7 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
-## [2026-04-03 01:18 America/Chicago] P0.4 adversarial review resolved and architect approved
+## [2026-04-03 01:18 America/Chicago] P0.4 adversarial review resolved and architect approved [superseded by normalized closeout entry below]
 - Packet: `P0.4-DATA-AVAILABILITY-TRUTH`
 - Status delta:
   - both required adversarial reviews completed
@@ -1045,7 +1045,7 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead
 
-## [2026-04-03 01:24 America/Chicago] P0.5-IMPLEMENTATION-OS frozen
+## [2026-04-03 01:24 America/Chicago] P0.5-IMPLEMENTATION-OS frozen [superseded by normalized closeout entry below]
 - Packet: `P0.5-IMPLEMENTATION-OS`
 - Status delta:
   - final P0 packet frozen
@@ -1125,6 +1125,70 @@ Recommended entry schema:
   - execute `P0.5-IMPLEMENTATION-OS`
 - Owner:
   - principal architect / Architects local lead
+
+## [2026-04-03 01:30 America/Chicago] P0.5 patch landed locally
+- Packet: `P0.5-IMPLEMENTATION-OS`
+- Status delta:
+  - implementation-OS rule set landed in `AGENTS.md`
+  - post-P0.5 packet-by-packet team autonomy rule is now explicit
+  - destructive/cutover work remains explicitly human-gated even after P0.5
+- Basis / evidence:
+  - `AGENTS.md` now distinguishes:
+    - program vs packet vs execution slice
+    - before-P0.5 vs after-P0.5 team autonomy
+    - persistent human gate for destructive/cutover work
+- Decisions frozen:
+  - `P0.5` is using the pending AGENTS delta rather than leaving it as out-of-scope drift
+  - team remains blocked until this packet itself is accepted
+- Open uncertainties:
+  - adversarial review has not yet attacked the operating-system rule set
+- Next required action:
+  - run adversarial review before acceptance
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 01:36 America/Chicago] P0.5 adversarial review resolved and architect approved
+- Packet: `P0.5-IMPLEMENTATION-OS`
+- Status delta:
+  - explicit adversarial reviews completed
+  - in-scope contradictions were fixed
+  - architect verification returned `APPROVE`
+- Basis / evidence:
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p0-5-implementation-os-attack-20260403T071026Z.md`
+  - architect verdict: `APPROVE`
+  - in-scope fixes landed:
+    - `P0.5` no longer self-authorizes team autonomy while active
+    - post-P0.5 autonomy now requires later `FOUNDATION-TEAM-GATE`
+    - destructive work is defined concretely enough to stay human-gated
+    - high-sensitivity gate waivers can no longer hide behind convenience prose
+- Decisions frozen:
+  - post-P0.5 later packet-by-packet team autonomy is now explicit but still gated
+  - destructive/cutover work remains human-gated
+- Open uncertainties:
+  - team staffing and lane map are still deferred to `FOUNDATION-TEAM-GATE`
+- Next required action:
+  - commit and push `P0.5-IMPLEMENTATION-OS`
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 01:39 America/Chicago] P0.5 committed and pushed
+- Packet: `P0.5-IMPLEMENTATION-OS`
+- Status delta:
+  - packet committed and pushed
+  - the “done through P0.5” target is now complete
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - packet stayed confined to implementation-OS surfaces
+- Decisions frozen:
+  - post-P0.5 later packet-by-packet team autonomy is now allowed in principle for later phases
+  - actual team opening still requires a future accepted `FOUNDATION-TEAM-GATE`
+  - destructive/cutover work remains human-gated
+- Open uncertainties:
+  - `FOUNDATION-TEAM-GATE` is not frozen yet
+- Next required action:
+  - freeze `FOUNDATION-TEAM-GATE`
+- Owner:
+  - execution owner: Architects local lead
 
 ## [2026-04-03 01:05 America/Chicago] P0.3 inventory completed
 - Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`

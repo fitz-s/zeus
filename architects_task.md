@@ -36,9 +36,9 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
    - `P0.2` ✅
    - `P0.1` ✅
    - `P0.3` ✅
-   - `P0.4` ⏭ active closeout
-   - `P0.5` ⏭ frozen next
-5. Prepare and open durable team execution only after `P0.5` is complete and a later team gate allows it.
+   - `P0.4` ✅
+   - `P0.5` ✅
+5. Later phases may use packet-by-packet team autonomy only after a future `FOUNDATION-TEAM-GATE` is frozen and accepted.
 
 Current completion ladder:
 - `current-phase complete` = tribunal / `P-*` packet family closed ✅
@@ -46,34 +46,35 @@ Current completion ladder:
 - `P0.2 complete` = attribution freeze landed and pushed ✅
 - `P0.1 complete` = exit semantics split scaffolding landed and pushed ✅
 - `P0.3 complete` = canonical transaction-boundary scaffold landed and pushed ✅
-- `P0.5 complete` = implementation operating system strong enough for later packet-by-packet team autonomy
-- `team-ready` = later gate packet freezes staffing, lane ownership, and verification path
+- `P0.4 complete` = data-availability truth landed and pushed ✅
+- `P0.5 complete` = implementation operating system strong enough for later packet-by-packet team autonomy ✅
+- `team-ready` = future `FOUNDATION-TEAM-GATE` freezes staffing, lane ownership, and verification path
 
 ---
 
 ## Current Active Packet
 
 ### Packet
-`P0.4-DATA-AVAILABILITY-TRUTH`
+`FOUNDATION-TEAM-GATE`
 
 ### State
-`ACCEPTED LOCALLY / READY TO COMMIT`
+`READY TO FREEZE`
 
 ### Execution mode verdict
-`RALPH_NOW`
+`RALPLAN_NEXT`
 
 ### Objective
-Make upstream data availability explicit truth on the touched path so missing, stale, rate-limited, or chain-unavailable conditions are recorded as first-class outcomes rather than disappearing into logs.
+Freeze the future team-opening gate packet that will turn post-P0.5 packet-by-packet team autonomy from “eligible” into “allowed”.
 
-### Why this packet is active
-- `P0.3-CANONICAL-TRANSACTION-BOUNDARY` is complete and pushed
-- `P0.4` code/test changes are landed locally and verified
-- `P0.5` is frozen but remains queued until `P0.4` is actually committed and pushed
+### Why this packet is next
+- `P0.5-IMPLEMENTATION-OS` is complete
+- team autonomy is now eligible for later phases, but not yet allowed
+- staffing, lane ownership, verification path, and shutdown/rollback expectations still need an explicit gate packet
 
 ### Owner model
-- Required: one named execution owner for `P0.4-DATA-AVAILABILITY-TRUTH`
+- Required: one named planning owner for the team gate packet
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent runtime/evidence reviewer
+- Verifier remains independent planning/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
@@ -85,94 +86,55 @@ Make upstream data availability explicit truth on the touched path so missing, s
 - execution owner: `Architects local lead (current Codex session)`
 
 ### Allowed edit surface
-Only the following may be edited in this packet:
-- `src/engine/evaluator.py`
-- `src/engine/cycle_runtime.py`
-- `src/state/decision_chain.py`
-- `tests/test_runtime_guards.py`
-- `architects_progress.md`
-- `architects_task.md`
-- `work_packets/P0.4-DATA-AVAILABILITY-TRUTH.md`
+Not frozen yet. Must be defined by the next planning packet.
 
 ### Forbidden edit surface
-Explicitly forbidden for edits in this packet:
-- all non-allowed files
-- `migrations/**`
-- `architecture/**`
-- `docs/governance/**`
-- `docs/architecture/**`
-- `src/control/**`
-- `src/supervisor_api/**`
-- `.github/workflows/**`
-- `.claude/CLAUDE.md`
-- runtime state and cutover surfaces
+Not frozen yet. Must be defined by the next planning packet.
 
 ### Non-goals
-- no `P0.5` implementation-OS work
-- no `P1/P2/P3/P4` jump
-- no team execution
-- no schema or migration changes
-- no broader analytics/fact-table rollout beyond the touched path
+- no immediate team launch
+- no reopening of completed P0 packets
+- no claim that destructive/cutover work becomes autonomous
 
 ### Current blocker
 - no active hard blocker
-- adversarial review is complete
-- architect verification is complete
-- repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
-- repo also has a pre-existing local `AGENTS.md` diff outside the active packet scope; it is not part of this packet
+- the next blocker is procedural: `FOUNDATION-TEAM-GATE` is not frozen yet
+- repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 
 ### Ready-to-commit slice
-`P0.4 accepted locally — explicit availability truth now lands on the touched path, diagnostics separate availability-driven no-trades from no-edge cases, and post-attack fixes are in place. Next step is commit/push, then rotate to P0.5.`
+`No execution slice yet. Next action is to freeze FOUNDATION-TEAM-GATE from the now-completed P0.5 operating-system rules.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm the current-phase `P-*` queue is closed
-- [x] confirm `FOUNDATION-MAINLINE-PLAN` is executed and accepted
-- [x] confirm `P0.3-CANONICAL-TRANSACTION-BOUNDARY` is complete
-- [x] freeze `P0.4-DATA-AVAILABILITY-TRUTH`
-- [x] define allowed / forbidden files for the packet
+- [x] confirm `P0.5-IMPLEMENTATION-OS` is complete
+- [ ] freeze `FOUNDATION-TEAM-GATE`
+- [ ] define allowed / forbidden files for the team gate packet
 
-### Phase B — packet intake
-- [x] confirm exact runtime/diagnostic surfaces to touch
-- [x] confirm the smallest first-slice file set inside this packet
-- [x] confirm targeted tests for explicit availability outcomes and no-edge vs no-data separation
+### Phase B — planning intake
+- [ ] define staffing
+- [ ] define lane ownership
+- [ ] define verification path
+- [ ] define shutdown / rollback / cleanup path
 
-### Phase C — bounded packet design
-- [x] keep work inside `P0.4` only
-- [x] block `P1/P2/P3/P4` momentum
-- [x] keep team execution disallowed before `P0.5`
+### Phase C — bounded planning design
+- [ ] keep team autonomy packet-by-packet only
+- [ ] keep destructive/cutover work human-gated
 
 ### Phase D — evidence bundle
-- [x] append prior packet closure + next packet freeze to `architects_progress.md`
-- [x] run targeted availability-truth tests
-- [x] run architecture-contract verification
-- [x] run explicit adversarial review
-- [x] obtain architect verification
-- [ ] commit and push the packet execution slice
-
----
-
-## Queued Next Packet
-
-### Packet
-`P0.5-IMPLEMENTATION-OS`
-
-### Status
-`FROZEN / QUEUED AFTER P0.4 CLOSE`
-
-### Rule
-- Do not start `P0.5` execution until `P0.4` is committed and pushed.
+- [ ] append team-gate freeze result to `architects_progress.md`
+- [ ] commit and push the team-gate freeze
 
 ---
 
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push `P0.4-DATA-AVAILABILITY-TRUTH`.
-2. Rotate the active packet to `P0.5-IMPLEMENTATION-OS`.
-3. Continue the same packet-by-packet loop without opening team early.
+1. Freeze `FOUNDATION-TEAM-GATE`.
+2. Use the now-completed P0.5 rules as the base contract.
+3. Keep packet-by-packet team autonomy narrow and explicit.
+4. Keep destructive/cutover work human-gated.
 
 If this cannot be done without a new packet, freeze that packet before acting.

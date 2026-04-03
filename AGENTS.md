@@ -39,11 +39,47 @@ Imported source-package note:
 ## 2. Required working posture
 
 - Work packet first.
+- Distinguish program, packet, and execution slice.
 - Narrow scope first.
 - Evidence before claims.
 - No convenience rewrite of authority.
 - No broad repo edits.
 - No “while here” side migrations.
+
+Program / packet / slice rules:
+
+- A program phase is larger than a packet.
+  Examples: `FOUNDATION-MAINLINE`, `P0`, `P1`.
+- A packet is the atomic authority-bearing unit of execution.
+  Examples: `P0.2 attribution freeze`, `P0.1 exit semantics split`.
+- An execution slice is a commit-sized step inside one still-open packet.
+- Do not confuse “one slice completed” with “packet completed”.
+- If the active packet remains open, the next slice is clear, and no new authority/risk boundary is crossed, continue autonomously after commit/push instead of stopping for a human “continue”.
+- Stop only when:
+  - the packet is actually complete,
+  - the next slice would widen scope,
+  - the next slice would change phase/packet,
+  - the next slice would cross into a higher-risk zone,
+  - or a real blocker / contradiction appears.
+
+Post-P0.5 autonomy rule:
+
+- Before `P0.5` is complete and accepted:
+  - no broad autonomous multi-packet team execution
+  - no “open team from momentum”
+- `P0.5` does not self-authorize team autonomy while it is still the active packet being implemented.
+- After `P0.5` is complete, accepted, and pushed **and** after a later `FOUNDATION-TEAM-GATE` packet is frozen and accepted:
+  - later phases may use autonomous **packet-by-packet** team execution
+  - still only one frozen packet at a time
+  - owner, file boundary, acceptance gate, and blocker policy must still be frozen before team launch
+- Even after `P0.5`:
+  - final destructive/cutover work remains human-gated
+  - `P7` is never fully autonomous for final cutover/delete transitions
+  - “destructive” includes, at minimum:
+    - live cutover timing decisions
+    - data/archive/delete transitions
+    - irreversible migration/cutover switches
+    - authority-surface deletion/demotion that changes the active law stack
 
 ## 3. Planning lock is mandatory when
 
@@ -150,6 +186,11 @@ Use advisory lanes instead:
 - `/ccg`
 - read-only critique/review
 
+Additional phase gate:
+
+- Before `P0.5` is complete, do not use team mode as a broad execution default for the foundation mainline.
+- After `P0.5`, team mode becomes allowed for later phases only on one frozen packet at a time and only after `FOUNDATION-TEAM-GATE` is accepted.
+
 ## 8. Model routing and reasoning-effort policy
 
 If you are a Codex / GPT-family model, the routing policy below applies.
@@ -161,10 +202,24 @@ Current routing contract for this repo:
   `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`.
 - Do not recommend or auto-route to `gpt-5.3-codex`, `gpt-5-codex`, or `gpt-5-codex-mini` unless the user explicitly asks for compatibility testing or model-comparison work.
 
+Current observed Codex runtime ceilings on this machine:
+
+- `gpt-5.4`: about `272k` context window
+- `gpt-5.4-mini`: about `272k` context window
+- `gpt-5.3-codex-spark`: about `128k` context window
+
+Preferred working budgets:
+
+- `gpt-5.3-codex-spark`: prefer `<= 40k` input budget
+- `gpt-5.4-mini`: prefer `<= 140k` input budget
+- `gpt-5.4`: prefer `<= 220k` input budget
+
+Treat these as routing safety rails, not theoretical hard ceilings.
+
 - `gpt-5.4` is the leader model.
   Use it for architecture authority, contract freezing, cross-zone reasoning, packet judgment, final integration, and final acceptance.
 - `gpt-5.4-mini` is the verifier / writer / bounded-review model.
-  Use it for evidence collection, targeted review, bounded synthesis, documentation polish, and compact follow-up analysis.
+  Use it for evidence collection, targeted review, bounded synthesis, documentation polish, compact follow-up analysis, contradiction extraction, and scout-plus lanes when spark is too small.
 - `gpt-5.3-codex-spark` is the default scout subagent model.
   Prefer it for narrow read-only lookup, repo mapping, symbol search, relationship tracing, diff triage, and repeated fact gathering.
 
@@ -174,6 +229,11 @@ Child-agent default posture:
 - Prefer 2 to 4 parallel `gpt-5.3-codex-spark` scout lanes before broad implementation when the task spans multiple files or multiple independent questions.
 - Keep spark batons small, concrete, read-only, and evidence-returning.
 - When spark is too small but the task is still bounded and non-authoritative, escalate to `gpt-5.4-mini` instead of introducing a second codex-default lane.
+- Prefer `gpt-5.4-mini` immediately when the lane needs:
+  - more than one small cluster of files
+  - contradiction extraction across several docs
+  - bounded adversarial review
+  - read-only synthesis that would otherwise risk spark timeout
 - Keep final judgment, contract freezing, and acceptance on the leader `gpt-5.4`.
 - Do not use subagents as an excuse to skip main-thread reading of core law surfaces.
 
@@ -196,9 +256,16 @@ Invocation guidance:
   use `gpt-5.4-mini` with `medium` or `high`
 - verifier / writer / targeted reviewer:
   use `gpt-5.4-mini` with `medium` or `high`
+- critic / adversarial review:
+  use `gpt-5.4` with `high` or `xhigh` for final attack review; use `gpt-5.4-mini` with `high` for pre-critique evidence compression
 - architect / critic / final integrator:
   use `gpt-5.4` with `high` or `xhigh`
 - only escalate to `omx team` after owner, file boundary, acceptance gate, and blocker policy are frozen
+
+Scout escalation rule:
+
+- If a spark scout times out, returns ambiguous synthesis, or needs repeated retries because the baton is too broad, escalate the lane to `gpt-5.4-mini` instead of retrying spark indefinitely.
+- Spark is for narrow scouting, not for pretending medium-context synthesis is cheap.
 
 Do not:
 
@@ -227,6 +294,14 @@ Completion requires:
 - any waived gate explained
 - rollback note
 - unresolved uncertainty stated plainly
+
+Waiver rule:
+
+- A waived gate is acceptable only when:
+  - the gate is explicitly staged/advisory by current law, or
+  - the gate is unavailable for an external reason that is recorded as a blocker or limitation.
+- A waived gate is **not** acceptable when the real reason is convenience, impatience, or difficulty.
+- High-sensitivity architecture/governance/schema packets must not self-waive required gates by prose alone.
 
 ## 11. Write style for agents
 
