@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 freeze pass`
+- Last updated by: `Codex P3.1 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,37 +17,29 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P3.1-STRATEGY-POLICY-TABLES`
-- State: `FROZEN / READY FOR EXECUTION`
-- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
+- Packet: `none`
+- State: `AWAITING NEXT FREEZE`
+- Execution mode: `SOLO_EXECUTE`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Establish the durable strategy-policy table/bootstrap substrate that P3 needs before any resolver or actuation work begins.
+No live packet. Current run horizon is satisfied because `P3.1-STRATEGY-POLICY-TABLES` is accepted and pushed.
 
 ## Allowed files
 
-- `work_packets/P3.1-STRATEGY-POLICY-TABLES.md`
-- `migrations/2026_04_02_architecture_kernel.sql`
-- `src/state/db.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
+- `work_packets/P3.2-POLICY-RESOLVER.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
-- `src/riskguard/**`
-- `src/control/**`
-- `src/engine/**`
-- `src/supervisor_api/**`
-- `src/state/portfolio.py`
-- `tests/test_riskguard.py`
-- `tests/test_runtime_guards.py`
-- `tests/test_live_safety_invariants.py`
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- `AGENTS.md`
+- `src/**`
+- `tests/**`
+- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
@@ -57,23 +49,22 @@ Establish the durable strategy-policy table/bootstrap substrate that P3 needs be
 
 ## Non-goals
 
-- no resolver/evaluator/riskguard actuation work in this packet
-- no manual override precedence work in this packet
+- no P3.2 work without a new frozen packet
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside packet scope
+- no active blocker inside the completed P3.1 stop boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] implement durable strategy-policy table/bootstrap surfaces
-- [ ] verify targeted schema/db contract evidence
-- [ ] keep out-of-scope dirt excluded from the packet commit
+- [x] P3.1 landed with green schema/contract evidence
+- [x] P3.1 acceptance is recorded honestly
+- [ ] if resuming, freeze `P3.2-POLICY-RESOLVER`
 
 ## Next required action
 
-1. Implement the durable strategy-policy table/bootstrap slice.
-2. Keep `P3.1-STRATEGY-POLICY-TABLES` on migration/db helper surfaces only.
-3. Keep out-of-scope dirt excluded from any commit.
+1. Stop at the current packet boundary (`P3.1-STRATEGY-POLICY-TABLES` accepted and pushed).
+2. If continuing later, freeze `P3.2-POLICY-RESOLVER` before any implementation.

@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.1 freeze pass`
+- Last updated by: `Codex P3.1 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P3 strategy-aware protective spine`
-- Last accepted packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
-- Current active packet: `P3.1-STRATEGY-POLICY-TABLES`
-- Current packet status: `frozen / ready for execution`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
+- Last accepted packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Current active packet: `none (P3.1 accepted and pushed)`
+- Current packet status: `awaiting next freeze`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active technical blocker inside packet scope
+  - no active technical blocker inside the current stop boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1130,5 +1130,31 @@ Archive policy:
   - the minimum helper/bootstrap surface for `strategy_health` still needs implementation review
 - Next required action:
   - implement `P3.1-STRATEGY-POLICY-TABLES` and run targeted schema/db contract evidence
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 17:38 America/Chicago] P3.1-STRATEGY-POLICY-TABLES accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - first durable P3 strategy-policy table contract is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py` -> `74 passed`
+  - `.venv/bin/pytest -q tests/test_db.py` -> `31 passed`
+  - explicit adversarial scope review narrowed P3.1 to schema/test-only before acceptance; no blocker remained after `strategy_health` and canonical-bootstrap contract checks were added
+- Decisions frozen:
+  - the architecture-kernel schema now includes `strategy_health` alongside `risk_actions` and `control_overrides`
+  - targeted architecture-contract tests lock the durable strategy-policy table contract on canonical bootstrap surfaces
+  - no policy resolver, evaluator-consumption, riskguard-emission, or manual-override-precedence behavior is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.2-POLICY-RESOLVER`
+- Open uncertainties:
+  - this packet does not claim policy resolution or protective actuation behavior; those remain later P3 slices
+- Next required action:
+  - stop at the current packet boundary or freeze `P3.2-POLICY-RESOLVER` next if P3 continues
 - Owner:
   - Architects mainline lead
