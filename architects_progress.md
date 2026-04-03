@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex GOV-01 closeout pass`
+- Last updated by: `Codex P3.1 freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,11 +30,11 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 pre-freeze`
+- Mainline stage: `P3 strategy-aware protective spine`
 - Last accepted packet: `GOV-01-CLOSEOUT-METHODOLOGY-HARDENING`
-- Current active packet: `none`
-- Current packet status: `awaiting next freeze`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
+- Current active packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Current packet status: `frozen / ready for execution`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
   - out-of-scope local dirt must remain excluded from packet commits
@@ -1109,5 +1109,26 @@ Archive policy:
   - P3.1 packet scope still needs to be frozen explicitly before implementation begins
 - Next required action:
   - freeze `P3.1-STRATEGY-POLICY-TABLES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 17:23 America/Chicago] P3.1-STRATEGY-POLICY-TABLES frozen
+- Author: `Architects mainline lead`
+- Packet: `P3.1-STRATEGY-POLICY-TABLES`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - GOV-01 closeout is now pushed as `e64b187`, so P3 no longer sits on stale methodology control state
+  - `docs/architecture/zeus_durable_architecture_spec.md` names `strategy policy tables` as the first P3 slice
+  - repo inspection shows `migrations/2026_04_02_architecture_kernel.sql` already contains `risk_actions` / `control_overrides`, while `strategy_health` and the active DB/bootstrap helper layer remain unfinished for P3
+  - repo inspection also shows `src/control/control_plane.py` still uses `_control_state` and `src/riskguard/riskguard.py` still writes advisory `risk_state`, so resolver/actuation work remains a later slice
+- Decisions frozen:
+  - keep this packet on durable strategy-policy table/bootstrap surfaces only
+  - do not widen into resolver, evaluator consumption, riskguard emission, or manual override precedence
+  - keep team closed by default
+- Open uncertainties:
+  - the minimum helper/bootstrap surface for `strategy_health` still needs implementation review
+- Next required action:
+  - implement `P3.1-STRATEGY-POLICY-TABLES` and run targeted schema/db contract evidence
 - Owner:
   - Architects mainline lead
