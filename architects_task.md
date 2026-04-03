@@ -17,18 +17,20 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
-- State: `BLOCKED / HUMAN DECISION REQUIRED`
+- Packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Freeze the unresolved chain-quarantine attribution contradiction and record the exact human decision required before P1 can close honestly.
+Make the P1.7H exclusion explicit and non-silent by preserving the quarantined runtime object and emitting an explicit exclusion warning, without any canonical write, invented `strategy_key`, or widened governance/schema surface.
 
 ## Allowed files
 
-- `work_packets/P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION.md`
+- `work_packets/P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH.md`
+- `src/state/chain_reconciliation.py`
+- `tests/test_runtime_guards.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -38,6 +40,7 @@ Freeze the unresolved chain-quarantine attribution contradiction and record the 
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
+- `src/engine/**`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
@@ -46,10 +49,9 @@ Freeze the unresolved chain-quarantine attribution contradiction and record the 
 - `src/state/chronicler.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
-- `src/state/chain_reconciliation.py`
-- `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
+- `architecture/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime cutover surfaces
@@ -57,29 +59,28 @@ Freeze the unresolved chain-quarantine attribution contradiction and record the 
 
 ## Non-goals
 
-- no code changes
-- no schema changes
-- no caller migration
-- no DB-first reads
+- no canonical lifecycle write for chain-only quarantines
+- no invented, inferred, or borrowed `strategy_key`
+- no new attribution field / enum / schema surface / reader contract
+- no broader reconciliation migration
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- active human decision blocker:
-  - chain-only quarantined positions have no safe repo-authorized `strategy_key` source
+- no human-decision blocker remains for this packet
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] append durable contradiction and stop-boundary transition to `architects_progress.md`
-- [x] freeze the blocker packet
-- [x] commit and push the blocker packet
-- [ ] await human decision on chain-quarantine strategy attribution
+- [ ] define the exact exclusion boundary inside the touched runtime path
+- [ ] preserve the quarantined runtime object and emit an explicit exclusion warning
+- [ ] prove no canonical write or invented attribution is introduced
+- [ ] run adversarial review before acceptance
 
 ## Next required action
 
-1. Stop autonomous execution here.
-2. Await human decision on chain-only quarantine attribution.
-3. After that decision, freeze a superseding packet.
-4. Keep out-of-scope dirt excluded from any future commit.
+1. Read the packet-required runtime/test surfaces.
+2. Land the narrow exclusion-visibility behavior.
+3. Verify with targeted tests and explicit adversarial review.
+4. Keep out-of-scope dirt excluded from any commit.

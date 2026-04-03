@@ -667,3 +667,64 @@ Archive policy:
   - await human decision, then freeze a superseding packet
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 13:58 America/Chicago] P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION resolved by human decision
+- Author: `Architects mainline lead`
+- Packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
+- Status delta:
+  - true stop-boundary decision received from the human
+  - blocker no longer rests on unresolved strategy-attribution ambiguity
+- Basis / evidence:
+  - human decision: chain-only quarantines remain outside canonical lifecycle migration in the current phase
+  - no lawful strategy-key attribution source exists for chain-only quarantines in current repo truth
+- Decisions frozen:
+  - chain-only quarantines may not be written into canonical lifecycle truth under current phase law
+  - no packet may invent, infer, borrow, or backfill an existing `strategy_key` for these positions
+  - any future reconsideration requires a later approved governance-design packet
+- Open uncertainties:
+  - explicit exclusion visibility and downstream handling still need a narrow successor packet
+- Next required action:
+  - accept the exclusion-resolution packet and freeze the follow-through packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 13:58 America/Chicago] P1.7H-CHAIN-ONLY-QUARANTINE-EXCLUSION-RESOLUTION accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7H-CHAIN-ONLY-QUARANTINE-EXCLUSION-RESOLUTION`
+- Status delta:
+  - mainline packet/control-surface truth now installs the human decision to exclude chain-only quarantines from canonical lifecycle migration in the current phase
+  - control-only exclusion resolution is accepted and pushed as a narrow packet step
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - explicit adversarial review on the new resolution/follow-through wording returned `APPROVE` after narrowing the follow-through claim
+  - resolution packet freezes the exclusion decision without mixing code or schema changes
+- Decisions frozen:
+  - current-phase canonical lifecycle migration excludes chain-only quarantines
+  - no invented strategy attribution and no new attribution surface are allowed under this resolution
+  - observability blind spots must be addressed explicitly rather than by silent skip
+- Open uncertainties:
+  - the exact runtime visibility mechanism still needs landing in the successor packet
+- Next required action:
+  - execute `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 13:58 America/Chicago] P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `P1.7H` resolved the governance decision but explicitly left follow-through visibility/downstream handling to a narrow successor slice
+  - current runtime behavior risks an observability blind spot if exclusion remains only implicit
+- Decisions frozen:
+  - keep this slice on preserving the quarantined runtime object plus an explicit exclusion warning only
+  - keep chain-only quarantines outside canonical lifecycle truth
+  - keep team closed by default
+- Open uncertainties:
+  - the exact warning text and assertion surface still need implementation review
+- Next required action:
+  - land the explicit exclusion warning behavior and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead

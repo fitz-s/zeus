@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
-- Active packet state: `blocked / human decision required`
+- Active packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
+- Last accepted packet: `P1.7H-CHAIN-ONLY-QUARANTINE-EXCLUSION-RESOLUTION`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Await human decision on chain-only quarantine attribution
-2. Freeze a superseding governance/migration packet only after that decision exists
-3. Do not continue autonomous P1 work past this boundary
+1. Execute `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+2. Keep chain-only quarantines outside canonical lifecycle truth
+3. Make the exclusion explicit and visible without inventing attribution or widening schema/law
 
 ## Current out-of-scope dirt
 
@@ -38,5 +38,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION.md`
+5. `work_packets/P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH.md`
 6. current packet `required_reads`
