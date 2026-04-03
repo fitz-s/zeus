@@ -315,6 +315,45 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-03 11:35 America/Chicago] P1.7C-RECONCILIATION-RESCUE-BUILDERS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
+- Status delta:
+  - packet committed as `719b6b7`
+  - packet pushed to `origin/Architects`
+  - reconciliation rescue builder layer is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to `lifecycle_events.py`, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - rescue payload construction is now isolated from reconciliation caller code
+  - no reconciliation dual-write, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - the actual reconciliation pending-fill rescue migration is still ahead
+- Next required action:
+  - freeze the reconciliation pending-fill rescue migration packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 11:35 America/Chicago] P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - reconciliation rescue builder layer now exists
+  - pending-fill rescue is the narrowest reconciliation branch to migrate next
+- Decisions frozen:
+  - keep this slice on the pending-fill rescue branch only
+  - do not widen to other reconciliation branches
+  - keep team closed by default
+- Open uncertainties:
+  - exact caller-level rescue dual-write proof still needs implementation review
+- Next required action:
+  - land the pending-fill rescue migration and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-03 11:19 America/Chicago] P1.7B-RECONCILIATION-QUERY-COMPAT accepted and pushed
 - Author: `Architects mainline lead`
 - Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
