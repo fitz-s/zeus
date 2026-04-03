@@ -268,6 +268,94 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 23:18 America/Chicago] Program workflow consolidated from tribunal + foundation sources
+- Packet: `PROGRAM-WORKFLOW-CONSOLIDATION`
+- Status delta:
+  - Architects program ladder was consolidated into three completion bands
+  - tribunal / current-phase `P-*` packet closure is now treated as the first completion target
+  - foundation mainline work remains downstream of current-phase closure
+- Basis / evidence:
+  - tribunal overlay provides current-phase package families and operator/governance workflow
+  - foundation package provides P0–P8 architecture sequence and maturity-model promotion rules
+- Decisions frozen:
+  - current priority is still closing tribunal / current-phase `P-*` packets
+  - foundation automation planning starts only after that family is substantially closed
+- Open uncertainties:
+  - exact packet count remains elastic, but the work is a multi-packet program rather than a one-shot refactor
+- Next required action:
+  - freeze the next bounded `P-*` packet instead of widening older slices
+- Owner:
+  - principal architect / Architects local lead
+
+## [2026-04-02 23:20 America/Chicago] P-GATE-01-CONSOLIDATE-ADVISORY frozen under Ralph
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - new bounded advisory-consolidation packet frozen
+  - Ralph execution entered for the packet
+- Basis / evidence:
+  - advisory workflow exists but verdict drift remains spread across workflow text, local evidence, and operator memory
+  - semgrep and replay parity still need explicit advisory-only promotion conditions
+- Decisions frozen:
+  - allowed files are limited to the packet file, advisory workflow, advisory policy script, targeted architecture test, and the two Architects ledgers
+  - attack-only adversarial reviews are required before final verification
+- Open uncertainties:
+  - whether attack-only review will reveal an additional in-scope fix before commit
+- Next required action:
+  - land the advisory-gate policy script, targeted test, and workflow self-check
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-02 23:28 America/Chicago] Advisory verdict patch landed locally
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - packet file created
+  - advisory gate policy script added
+  - workflow now self-checks the advisory verdict
+  - targeted architecture test added for the current verdict posture
+- Basis / evidence:
+  - `work_packets/P-GATE-01-CONSOLIDATE-ADVISORY.md`
+  - `scripts/check_advisory_gates.py`
+  - workflow job `advisory-gate-policy`
+  - targeted assertion in `tests/test_architecture_contracts.py`
+- Decisions frozen:
+  - semgrep remains advisory
+  - replay parity remains advisory
+  - external-workspace-dependent checks remain non-blocking
+- Open uncertainties:
+  - attack-only review still needed before commit
+- Next required action:
+  - run full local evidence bundle and adversarial reviews
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-02 23:34 America/Chicago] Evidence bundle + attack-only reviews completed
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - blocking local checks passed
+  - advisory local checks remained advisory by design
+  - two attack-only reviews completed
+  - in-scope brittleness fixes were applied before final commit
+- Basis / evidence:
+  - `python3 scripts/check_advisory_gates.py` -> `advisory gate policy ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 scripts/check_module_boundaries.py` -> `module boundaries ok`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py` -> `10 passed, 3 skipped`
+  - `python3 scripts/replay_parity.py --ci` -> `canonical ledger tables not present yet; replay parity is staged`
+  - `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src` -> 2 findings + path warnings, kept advisory
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p-gate-01-consolidate-advisory-attack-20260403T042215Z.md`
+  - leader architect verification found no remaining in-scope contradiction after the attack-only fixes
+- Decisions frozen:
+  - the packet now has a machine-checkable verdict for blocking vs advisory jobs
+  - semgrep findings and path warnings remain packet-external carry-forward risks, not reasons to widen this packet
+  - replay parity remains explicitly staged until canonical prerequisites land
+- Open uncertainties:
+  - after push, the only remaining work for this packet should be ledger reconciliation if the cloud-visible state needs a final sync commit
+- Next required action:
+  - commit and push the packet
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

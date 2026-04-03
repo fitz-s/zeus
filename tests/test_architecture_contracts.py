@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,3 +67,35 @@ def test_semgrep_rules_cover_core_forbidden_moves():
         "zeus-no-strategy-default-fallback",
     ):
         assert rule_id in text
+
+def test_advisory_gate_workflow_freezes_verdict():
+    workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
+    jobs = workflow["jobs"]
+    triggers = workflow.get("on") or workflow.get(True) or {}
+
+    advisory = {"semgrep-zeus", "replay-parity"}
+
+    for job_name in advisory:
+        assert jobs[job_name].get("continue-on-error") is True
+        env = jobs[job_name]["env"]
+        assert env["GATE_OWNER"]
+        assert env["GATE_RATIONALE"]
+        assert "Promote only after" in env["GATE_REVIEW_CONDITION"]
+
+    policy_env = jobs["advisory-gate-policy"]["env"]
+    assert policy_env["GATE_OWNER"] == "P-GATE-01 gate owner"
+    assert policy_env["GATE_RATIONALE"]
+    assert "validates verdict drift" in policy_env["GATE_REVIEW_CONDITION"]
+
+    trigger_paths = set(triggers["pull_request"]["paths"])
+    assert "work_packets/**" in trigger_paths
+    assert "scripts/check_*" in trigger_paths
+    assert "tests/test_architecture_contracts.py" in trigger_paths
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/check_advisory_gates.py")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
