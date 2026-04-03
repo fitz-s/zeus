@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timezone
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
-from src.state.db import get_connection, init_schema, log_settlement_event
+from src.state.db import apply_architecture_kernel_schema, get_connection, init_schema, log_settlement_event
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.portfolio import (
     PortfolioState,
@@ -77,6 +78,81 @@ def _position(**kwargs) -> Position:
     )
     defaults.update(kwargs)
     return Position(**defaults)
+
+
+def _policy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    return conn
+
+
+def _insert_risk_action_row(
+    conn: sqlite3.Connection,
+    *,
+    action_id: str,
+    strategy_key: str,
+    action_type: str,
+    value: str,
+    issued_at: str,
+    effective_until: str | None,
+    precedence: int = 10,
+    status: str = "active",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO risk_actions (
+            action_id, strategy_key, action_type, value, issued_at,
+            effective_until, reason, source, precedence, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            action_id,
+            strategy_key,
+            action_type,
+            value,
+            issued_at,
+            effective_until,
+            "test",
+            "riskguard",
+            precedence,
+            status,
+        ),
+    )
+
+
+def _insert_control_override_row(
+    conn: sqlite3.Connection,
+    *,
+    override_id: str,
+    target_type: str,
+    target_key: str,
+    action_type: str,
+    value: str,
+    issued_at: str,
+    effective_until: str | None,
+    precedence: int = 100,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            override_id,
+            target_type,
+            target_key,
+            action_type,
+            value,
+            "test",
+            issued_at,
+            effective_until,
+            "test",
+            precedence,
+        ),
+    )
 
 
 def _recent_exit(pnl: float) -> dict:
@@ -1648,6 +1724,260 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     assert called["policy"] is True
     assert decisions[0].rejection_stage == "ANTI_CHURN"
     assert "strategy_policy" in decisions[0].applied_validations
+
+
+def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_path(monkeypatch):
+    conn = _policy_conn()
+    now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+    _insert_risk_action_row(
+        conn,
+        action_id="ra-gate-center",
+        strategy_key="center_buy",
+        action_type="gate",
+        value="true",
+        issued_at=(now - timedelta(minutes=5)).isoformat(),
+        effective_until=(now + timedelta(hours=1)).isoformat(),
+    )
+    _insert_control_override_row(
+        conn,
+        override_id="ov-ungate-center",
+        target_type="strategy",
+        target_key="center_buy",
+        action_type="gate",
+        value="false",
+        issued_at=(now - timedelta(minutes=1)).isoformat(),
+        effective_until=(now + timedelta(hours=1)).isoformat(),
+    )
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-03",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
+            {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
+            {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
+        ],
+        hours_since_open=10.0,
+        hours_to_resolution=30.0,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=5000):
+            return np.array([0.60, 0.25, 0.15])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            self.bins = kwargs["bins"]
+
+        def find_edges(self, n_bootstrap=500):
+            edge = BinEdge(
+                bin=self.bins[0],
+                direction="buy_yes",
+                edge=0.12,
+                ci_lower=0.05,
+                ci_upper=0.15,
+                p_model=0.60,
+                p_market=0.35,
+                p_posterior=0.47,
+                entry_price=0.35,
+                p_value=0.02,
+                vwmp=0.35,
+            )
+            edge.forward_edge = edge.p_posterior - edge.p_market
+            return [edge]
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=8, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
+            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
+            "issue_time": datetime.now(timezone.utc),
+            "fetch_time": now.isoformat(),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-override")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
+    monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
+    monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=conn,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(
+            max_single_position_pct=0.10,
+            max_portfolio_heat_pct=0.50,
+            max_correlated_pct=0.25,
+            max_city_pct=0.20,
+            max_region_pct=0.35,
+            min_order_usd=1.0,
+        ),
+        decision_time=now,
+    )
+
+    assert decisions[0].should_trade is True
+    assert decisions[0].rejection_stage == ""
+    assert "strategy_policy" in decisions[0].applied_validations
+    conn.close()
+
+
+def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_evaluator_path(monkeypatch):
+    conn = _policy_conn()
+    now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+    _insert_risk_action_row(
+        conn,
+        action_id="ra-gate-center",
+        strategy_key="center_buy",
+        action_type="gate",
+        value="true",
+        issued_at=(now - timedelta(minutes=5)).isoformat(),
+        effective_until=(now + timedelta(hours=1)).isoformat(),
+    )
+    _insert_control_override_row(
+        conn,
+        override_id="ov-ungate-expired",
+        target_type="strategy",
+        target_key="center_buy",
+        action_type="gate",
+        value="false",
+        issued_at=(now - timedelta(hours=2)).isoformat(),
+        effective_until=(now - timedelta(minutes=1)).isoformat(),
+    )
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-03",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
+            {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
+            {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
+        ],
+        hours_since_open=10.0,
+        hours_to_resolution=30.0,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=5000):
+            return np.array([0.60, 0.25, 0.15])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            self.bins = kwargs["bins"]
+
+        def find_edges(self, n_bootstrap=500):
+            edge = BinEdge(
+                bin=self.bins[0],
+                direction="buy_yes",
+                edge=0.12,
+                ci_lower=0.05,
+                ci_upper=0.15,
+                p_model=0.60,
+                p_market=0.35,
+                p_posterior=0.47,
+                entry_price=0.35,
+                p_value=0.02,
+                vwmp=0.35,
+            )
+            edge.forward_edge = edge.p_posterior - edge.p_market
+            return [edge]
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=8, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
+            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
+            "issue_time": datetime.now(timezone.utc),
+            "fetch_time": now.isoformat(),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-override-expired")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
+    monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
+    monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=conn,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(
+            max_single_position_pct=0.10,
+            max_portfolio_heat_pct=0.50,
+            max_correlated_pct=0.25,
+            max_city_pct=0.20,
+            max_region_pct=0.35,
+            min_order_usd=1.0,
+        ),
+        decision_time=now,
+    )
+
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "RISK_REJECTED"
+    assert decisions[0].rejection_reasons == ["POLICY_GATED(risk_action:gate)"]
+    conn.close()
 
 
 def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypatch, tmp_path):
