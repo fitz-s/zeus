@@ -936,8 +936,199 @@ def test_reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstra
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    assert stats["rescued_pending"] == 1
+    assert stats["rescued_pending"] == 0
+    assert stats["skipped_pending_missing_canonical_baseline"] == 1
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert portfolio.positions[0].state.value == "pending_tracked"
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_history_exists():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pending_pos.entry_order_id = "ord-1"
+    pending_pos.order_id = "ord-1"
+    pending_pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pending_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pending_pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["rescued_pending"] == 1
+    event_rows = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key, chain_state, order_status FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert [(row["event_type"], row["sequence_no"]) for row in event_rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("CHAIN_SYNCED", 3),
+    ]
+    assert event_rows[-1]["phase_before"] == "pending_entry"
+    assert event_rows[-1]["phase_after"] == "active"
+    assert dict(projection_row) == {
+        "phase": "active",
+        "strategy_key": "center_buy",
+        "chain_state": "synced",
+        "order_status": "filled",
+    }
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import init_schema, query_position_events
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    assert stats["rescued_pending"] == 1
+    events = query_position_events(conn, "rt-pos-1")
+    assert any(event["event_type"] == "POSITION_LIFECYCLE_UPDATED" for event in events)
+    conn.close()
+
+
+def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_explicit(monkeypatch):
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pending_pos.entry_order_id = "ord-1"
+    pending_pos.order_id = "ord-1"
+    pending_pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pending_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pending_pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("append-failed")
+
+    monkeypatch.setattr("src.state.db.append_many_and_project", _boom)
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "canonical reconciliation rescue dual-write failed" in str(exc)
+    else:
+        raise AssertionError("expected canonical reconciliation rescue failure to surface explicitly")
+
+    event_rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    assert [(row["event_type"], row["sequence_no"]) for row in event_rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+    ]
+    assert portfolio.positions[0].state.value == "pending_tracked"
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import init_schema, query_position_events
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("legacy-sync-failed")
+
+    monkeypatch.setattr("src.state.db.update_trade_lifecycle", _boom)
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "legacy reconciliation lifecycle sync failed" in str(exc)
+    else:
+        raise AssertionError("expected legacy sync failure to surface explicitly")
+
+    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert query_position_events(conn, "rt-pos-1") == []
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import init_schema, query_position_events
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    monkeypatch.setattr("src.state.db.update_trade_lifecycle", lambda *args, **kwargs: None)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("legacy-event-failed")
+
+    monkeypatch.setattr("src.state.db.log_reconciled_entry_event", _boom)
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "legacy-event-failed" in str(exc)
+    else:
+        raise AssertionError("expected legacy rescue event failure to surface explicitly")
+
+    assert portfolio.positions[0].state.value == "pending_tracked"
+    assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
 
@@ -975,6 +1166,146 @@ def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_sch
         assert "hybrid position_events schema" in str(exc)
     else:
         raise AssertionError("expected hybrid drift reconciliation path to fail loudly")
+
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pending_pos.entry_order_id = "ord-1"
+    pending_pos.order_id = "ord-1"
+    pending_pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pending_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.executescript(
+        """
+        ALTER TABLE position_events ADD COLUMN runtime_trade_id TEXT;
+        ALTER TABLE position_events ADD COLUMN position_state TEXT;
+        ALTER TABLE position_events ADD COLUMN strategy TEXT;
+        ALTER TABLE position_events ADD COLUMN source TEXT;
+        ALTER TABLE position_events ADD COLUMN details_json TEXT;
+        ALTER TABLE position_events ADD COLUMN timestamp TEXT;
+        ALTER TABLE position_events ADD COLUMN env TEXT;
+        """
+    )
+
+    portfolio = PortfolioState(positions=[pending_pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "hybrid position_events schema" in str(exc)
+    else:
+        raise AssertionError("expected hybrid drift reconciliation path to fail loudly")
+
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    assert [(row["event_type"], row["sequence_no"]) for row in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+    ]
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_missing():
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-missing-projection",
+            "rt-pos-1",
+            1,
+            1,
+            "POSITION_OPEN_INTENT",
+            "2026-04-03T00:00:00Z",
+            None,
+            "pending_entry",
+            "center_buy",
+            "dec-1",
+            "snap-1",
+            None,
+            None,
+            None,
+            "idem-missing-projection",
+            None,
+            "test",
+            "{}",
+        ),
+    )
+
+    pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pos.entry_order_id = "ord-1"
+    pos.order_id = "ord-1"
+    pos.token_id = "tok-1"
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "missing current projection" in str(exc)
+    else:
+        raise AssertionError("expected missing canonical projection baseline to fail loudly")
+
+    conn.close()
+
+
+def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_phase_mismatches():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
+    pending_pos.entry_order_id = "ord-1"
+    pending_pos.order_id = "ord-1"
+    pending_pos.token_id = "tok-1"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pending_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute("UPDATE position_current SET phase = 'day0_window' WHERE position_id = 'rt-pos-1'")
+
+    portfolio = PortfolioState(positions=[pending_pos])
+    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+
+    try:
+        reconcile(portfolio, chain_positions, conn=conn)
+    except RuntimeError as exc:
+        assert "phase mismatch" in str(exc)
+    else:
+        raise AssertionError("expected phase mismatch baseline to fail loudly")
 
     conn.close()
 

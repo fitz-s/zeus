@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
+- Active packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
 - Active packet state: `landed locally / under review`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7B-RECONCILIATION-QUERY-COMPAT` (`7707766`)
+- Last accepted packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS` (`719b6b7`)
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,10 +23,10 @@ Metadata:
 
 ## Current next action
 
-1. Run adversarial review on `P1.7C`
-2. Accept if the builder claim survives attack
-3. Commit and push `P1.7C`
-4. Freeze the successor packet only after `P1.7C` closes
+1. Freeze the next remaining reconciliation event-builder packet
+2. Continue the remaining P1 reconciliation family packet-by-packet
+3. Keep parity/cutover out of scope until the dual-write family is genuinely complete
+4. Keep team closed unless a later packet clearly justifies it
 
 ## Current out-of-scope dirt
 
@@ -39,5 +39,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7C-RECONCILIATION-RESCUE-BUILDERS.md`
+5. `work_packets/P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE.md`
 6. current packet `required_reads`

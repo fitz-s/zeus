@@ -13,7 +13,7 @@ Live mode: MANDATORY every cycle before any trading.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from src.state.portfolio import Position, PortfolioState, void_position
@@ -84,6 +84,82 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     if conn is not None:
         from src.state.db import log_reconciled_entry_event, update_trade_lifecycle
 
+    def _next_canonical_sequence_no(position_id: str) -> int:
+        if conn is None:
+            return 1
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return 1
+        return int(row[0] or 0) + 1
+
+    def _has_canonical_position_history(position_id: str) -> bool:
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None
+
+    def _canonical_rescue_baseline_available(position_id: str) -> bool:
+        if conn is None:
+            return False
+        try:
+            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
+        except Exception:
+            return False
+        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
+
+        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
+        if has_canonical and has_legacy:
+            raise RuntimeError("reconciliation rescue does not support hybrid position_events schema")
+        try:
+            row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return False
+        if row is None:
+            if _has_canonical_position_history(position_id):
+                raise RuntimeError("canonical rescue baseline missing current projection")
+            return False
+        phase = str(row[0] or "")
+        if phase != "pending_entry":
+            raise RuntimeError(f"canonical rescue baseline phase mismatch: expected pending_entry, got {phase!r}")
+        return True
+
+    def _append_canonical_rescue_if_available(position: Position) -> bool:
+        if conn is None:
+            return False
+        if not _canonical_rescue_baseline_available(getattr(position, "trade_id", "")):
+            return False
+
+        from src.engine.lifecycle_events import build_reconciliation_rescue_canonical_write
+        from src.state.db import append_many_and_project
+
+        try:
+            events, projection = build_reconciliation_rescue_canonical_write(
+                position,
+                sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                source_module="src.state.chain_reconciliation",
+            )
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            raise RuntimeError(
+                f"canonical reconciliation rescue dual-write failed for {position.trade_id}: {exc}"
+            ) from exc
+
+        return True
+
     def _legacy_rescue_query_available() -> bool:
         if conn is None:
             return False
@@ -143,9 +219,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if update_trade_lifecycle is None:
             return
         try:
+            if not _legacy_rescue_query_available():
+                return
             update_trade_lifecycle(conn, position)
         except Exception as exc:
-            logger.warning("Failed to update rescued pending lifecycle for %s: %s", position.trade_id, exc)
+            raise RuntimeError(
+                f"legacy reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
+            ) from exc
 
     chain_by_token = {cp.token_id: cp for cp in chain_positions}
     local_tokens = set()
@@ -192,26 +272,50 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
-            pos.entry_order_id = pos.entry_order_id or pos.order_id or ""
-            pos.order_id = pos.order_id or pos.entry_order_id or ""
-            pos.chain_state = "synced"
-            pos.chain_shares = chain.size
-            pos.chain_verified_at = now
-            pos.condition_id = pos.condition_id or chain.condition_id
+            legacy_rescue_query_available = _legacy_rescue_query_available()
+            canonical_rescue_baseline_available = _canonical_rescue_baseline_available(getattr(pos, "trade_id", ""))
+            if not legacy_rescue_query_available and not canonical_rescue_baseline_available:
+                stats["skipped_pending"] += 1
+                stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
+                continue
+            rescued = replace(pos)
+            rescued.entry_order_id = rescued.entry_order_id or rescued.order_id or ""
+            rescued.order_id = rescued.order_id or rescued.entry_order_id or ""
+            rescued.chain_state = "synced"
+            rescued.chain_shares = chain.size
+            rescued.chain_verified_at = now
+            rescued.condition_id = rescued.condition_id or chain.condition_id
             if chain.avg_price > 0:
-                pos.entry_price = chain.avg_price
+                rescued.entry_price = chain.avg_price
             if chain.cost > 0:
-                pos.cost_basis_usd = chain.cost
-                pos.size_usd = chain.cost
+                rescued.cost_basis_usd = chain.cost
+                rescued.size_usd = chain.cost
             if chain.size > 0:
-                pos.shares = chain.size
-            pos.entry_fill_verified = True
-            pos.order_status = "filled"
-            pos.state = "entered"
-            if not pos.entered_at:
-                pos.entered_at = now
-            _sync_reconciled_trade_lifecycle(pos)
-            _emit_rescue_event(pos, rescued_at=pos.entered_at or now)
+                rescued.shares = chain.size
+            rescued.entry_fill_verified = True
+            rescued.order_status = "filled"
+            rescued.state = "entered"
+            if not rescued.entered_at:
+                rescued.entered_at = now
+            if canonical_rescue_baseline_available:
+                _append_canonical_rescue_if_available(rescued)
+            if legacy_rescue_query_available:
+                _sync_reconciled_trade_lifecycle(rescued)
+                _emit_rescue_event(rescued, rescued_at=rescued.entered_at or now)
+            pos.entry_order_id = rescued.entry_order_id
+            pos.order_id = rescued.order_id
+            pos.chain_state = rescued.chain_state
+            pos.chain_shares = rescued.chain_shares
+            pos.chain_verified_at = rescued.chain_verified_at
+            pos.condition_id = rescued.condition_id
+            pos.entry_price = rescued.entry_price
+            pos.cost_basis_usd = rescued.cost_basis_usd
+            pos.size_usd = rescued.size_usd
+            pos.shares = rescued.shares
+            pos.entry_fill_verified = rescued.entry_fill_verified
+            pos.order_status = rescued.order_status
+            pos.state = rescued.state
+            pos.entered_at = rescued.entered_at
             stats["rescued_pending"] += 1
             stats["synced"] += 1
             continue

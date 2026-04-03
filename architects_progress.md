@@ -31,8 +31,8 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `Stage 2 canonical-authority rollout`
-- Last accepted packet: `P1.7B-RECONCILIATION-QUERY-COMPAT` (`7707766`)
-- Current active packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS`
+- Last accepted packet: `P1.7C-RECONCILIATION-RESCUE-BUILDERS` (`719b6b7`)
+- Current active packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
 - Current packet status: `landed locally / under review`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
@@ -351,6 +351,55 @@ Archive policy:
 - Next required action:
   - land the pending-fill rescue migration and targeted tests
   - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 11:35 America/Chicago] P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE landed locally with green targeted evidence
+- Author: `Architects mainline lead`
+- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
+- Status delta:
+  - reconciliation pending-fill rescue branch now appends canonical rescue/sync lifecycle facts when canonical schema is present, prior canonical position history exists, and the current canonical projection phase is `pending_entry`
+  - targeted rescue-branch caller-migration evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'reconciliation_pending_fill_path_writes_canonical_rows_when_prior_history_exists or reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db or reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_explicit or reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation or reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation or reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat or reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema or reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows or reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_missing or reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_phase_mismatches or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `24 passed`
+- Decisions frozen:
+  - canonical rescue writes only occur when prior canonical position history exists and the current canonical projection phase is `pending_entry`
+  - legacy rescue behavior remains on legacy-schema runtimes
+  - hybrid or invalid canonical rescue baselines fail loudly before new canonical rescue rows are appended
+  - legacy and canonical failure points surface explicitly before in-memory rescue mutation commits
+  - no broader reconciliation migration or cutover claim is made in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the pending-fill rescue migration claim
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 11:19 America/Chicago] P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE adversarial review resolved and architect approved
+- Author: `Architects mainline lead`
+- Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'reconciliation_pending_fill_path_writes_canonical_rows_when_prior_history_exists or reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db or reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_explicit or reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation or reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation or reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstrap_after_query_compat or reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema or reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows or reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_missing or reconciliation_pending_fill_path_fails_loudly_when_canonical_projection_phase_mismatches or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `24 passed`
+  - self adversarial review verified:
+    - hybrid/missing/phase-mismatch baselines fail before canonical append
+    - canonical-bootstrap/no-history branch no longer mutates in-memory rescue state
+    - legacy sync/event failures surface before in-memory mutation commits
+- Decisions frozen:
+  - canonical rescue writes only occur when prior canonical position history exists and the current canonical projection phase is `pending_entry`
+  - legacy rescue behavior remains on legacy-schema runtimes
+  - legacy and canonical failure points surface explicitly before in-memory rescue mutation commits
+  - no broader reconciliation migration or cutover claim is made in this packet
+- Open uncertainties:
+  - the remaining reconciliation event families are still ahead
+- Next required action:
+  - commit and push `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
 - Owner:
   - Architects mainline lead
 

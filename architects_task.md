@@ -18,13 +18,13 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`
-- State: `FROZEN / READY TO IMPLEMENT`
+- State: `APPROVED / READY TO COMMIT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Migrate the reconciliation pending-fill rescue path to append canonical rescue/sync lifecycle facts when canonical schema is present, while preserving existing legacy behavior on legacy-schema runtimes and keeping other reconciliation paths untouched.
+Migrate the reconciliation pending-fill rescue path to append canonical rescue/sync lifecycle facts when canonical schema is present, prior canonical position history exists, and the current canonical projection phase is `pending_entry`, while preserving existing legacy behavior on legacy-schema runtimes and keeping other reconciliation paths untouched.
 
 ## Allowed files
 
@@ -73,17 +73,17 @@ Migrate the reconciliation pending-fill rescue path to append canonical rescue/s
 
 ## Immediate checklist
 
-- [ ] implement reconciliation pending-fill rescue dual-write in `src/state/chain_reconciliation.py`
-- [ ] keep legacy rescue behavior in place on legacy-schema runtimes
-- [ ] add targeted architecture-contract coverage
-- [ ] append durable packet transition to `architects_progress.md` when implementation lands
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] implement reconciliation pending-fill rescue dual-write in `src/state/chain_reconciliation.py`
+- [x] keep legacy rescue behavior in place on legacy-schema runtimes
+- [x] add targeted architecture-contract coverage
+- [x] append durable packet transition to `architects_progress.md` when implementation lands
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Migrate only the reconciliation pending-fill rescue branch.
-2. Keep other reconciliation branches and broader state rewiring out of scope.
-3. Keep team closed by default.
-4. Keep unrelated working-tree dirt out of the packet commit.
+1. Commit and push this accepted reconciliation rescue packet without mixing unrelated working-tree dirt.
+2. Freeze the next remaining reconciliation event-builder packet after push.
+3. Keep other reconciliation branches and broader state rewiring out of scope.
+4. Keep team closed by default.
