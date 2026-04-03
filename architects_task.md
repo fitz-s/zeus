@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.4 freeze pass`
+- Last updated by: `Codex P3.4 closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,66 +17,56 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P3.4-RISKGUARD-POLICY-EMISSION`
-- State: `FROZEN / READY FOR EXECUTION`
+- Packet: `none`
+- State: `AWAITING POST-CLOSE REVIEW / NEXT FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Make RiskGuard emit durable per-strategy `risk_actions` before any manual-override precedence work begins.
+Hold at the accepted P3.4 boundary until the required post-close third-party critic + verifier review finishes, then freeze the next packet.
 
 ## Allowed files
 
-- `work_packets/P3.4-RISKGUARD-POLICY-EMISSION.md`
-- `src/riskguard/riskguard.py`
-- `tests/test_riskguard.py`
+- `work_packets/P3.5-MANUAL-OVERRIDE-PRECEDENCE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
+- `src/**`
+- `tests/**`
+- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `migrations/**`
-- `src/control/**`
-- `src/engine/**`
-- `src/execution/**`
-- `src/state/**`
-- `src/supervisor_api/**`
-- `src/riskguard/policy.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_runtime_guards.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no manual-override-precedence work in this packet
-- no evaluator or control-plane-write changes in this packet
+- no P3.5 work before post-close review finishes
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside packet scope
+- no active blocker inside the completed P3.4 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] read packet authority and scoped riskguard surfaces
-- [ ] implement durable riskguard emission/expiry behavior
-- [ ] verify targeted riskguard evidence
-- [ ] keep out-of-scope local dirt excluded from the packet commit
+- [x] P3.4 landed with green riskguard emission evidence
+- [x] P3.4 acceptance is recorded honestly
+- [ ] run post-close third-party critic review
+- [ ] run post-close third-party verifier review
+- [ ] if both pass, freeze `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
 
 ## Next required action
 
-1. Implement the riskguard policy-emission slice.
-2. Keep `P3.4-RISKGUARD-POLICY-EMISSION` on riskguard/test surfaces only.
-3. Keep out-of-scope local dirt excluded from any commit.
+1. Run post-close third-party critic + verifier on the accepted P3.4 boundary.
+2. If both pass, freeze `P3.5-MANUAL-OVERRIDE-PRECEDENCE` before any more implementation.
