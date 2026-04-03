@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-import yaml
+from _yaml_bootstrap import import_yaml
+yaml = import_yaml()
 
 ROOT = Path(__file__).resolve().parents[1]
 

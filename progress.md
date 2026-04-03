@@ -1761,6 +1761,23 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `python3 scripts/check_work_packets.py` → `work packet grammar ok`
   - `./.venv/bin/pytest -q tests/test_architecture_contracts.py` → `8 passed`
 
+## 2026-04-02 — architecture gate scripts bootstrap from repo venv
+- After adding `PyYAML` to the repo virtualenv, one more operator-facing gap remained: the documented `python3 scripts/check_*.py` path still failed because system Python could not see the repo-local YAML parser. This slice makes the architecture scripts bootstrap the repo venv dependency explicitly instead of requiring operators to remember a different interpreter.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/_yaml_bootstrap.py`
+    - new narrow helper that locates `.venv/lib/python*/site-packages` and imports `yaml` from the repo-local environment when system Python lacks it
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/check_kernel_manifests.py`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/check_module_boundaries.py`
+    - now import YAML through the bootstrap helper instead of assuming system-level availability
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-ARCH-002-script-yaml-bootstrap.md`
+    - records the narrow tooling packet for this operator/runtime fix
+- Why this matters:
+  - the new architecture gate scripts now run from the documented `python3 scripts/...` path, not only inside the repo venv
+  - the new authority stack is now operational both for pytest collection and for direct script execution
+- Verification evidence:
+  - `python3 scripts/check_kernel_manifests.py` → `kernel manifests ok`
+  - `python3 scripts/check_module_boundaries.py` → `module boundaries ok`
+
 ## 2026-04-02 — P2-H MAE-aware mean-offset attenuation
 - The bounded mean-offset seam no longer treats every sufficiently sampled historical bias row as equally trustworthy. High-error (`mae`) bias rows now attenuate the mean-side correction before it reaches the analysis/bootstrap path.
 - Implementation delta:
