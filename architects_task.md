@@ -47,7 +47,7 @@ Current completion ladder:
 `P-GATE-01-CONSOLIDATE-ADVISORY`
 
 ### State
-`ACTIVE / RALPH_NOW / VERIFIED / READY TO COMMIT`
+`COMMITTED / PUSHED / READY FOR NEXT PACKET`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -110,6 +110,7 @@ Explicitly forbidden for edits in this packet:
 - carry-forward fact: root AGENTS sync already landed in commits `0431f55` and `1866086`
 - known advisory issue: semgrep still reports two findings outside this packet boundary and therefore remains advisory
 - packet-external carry-forward: semgrep path-pattern warnings and the two current semgrep findings still require a later packet
+- current packet commit/push completed as `9151dc6`
 
 ### Ready-to-commit slice
 `Slice 1 — add a machine-checkable advisory gate policy script, bind it into the workflow as a blocking verdict check, freeze the packet in work_packets/, and add a targeted architecture test for the current advisory split.`
@@ -160,7 +161,7 @@ Slice 1 shape:
 - [x] run `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src`
 - [x] collect two attack-only adversarial reviews
 - [x] append execution result to `architects_progress.md`
-- [ ] commit and push the slice
+- [x] commit and push the slice
 
 Evidence snapshot for Slice 1:
 - affected-surface note: workflow/script/test/packet control surfaces only
@@ -192,6 +193,8 @@ Local verification completed:
 - current semgrep advisory rationale inspected
 - `git diff --check` will be run before commit
 - manual deslop pass completed on changed files; no further dead code or duplication removal was needed after the script/test simplification
+- commit: `9151dc6`
+- push: `origin/Architects`
 
 ---
 
@@ -253,9 +256,9 @@ Recommended baton split:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this packet.
-2. Reconcile the Architects ledgers to the pushed state if needed.
-3. Freeze the next bounded `P-*` packet instead of widening this one.
+1. Verify GitHub now shows commit `9151dc6` plus the updated Architects ledgers.
+2. Freeze the next bounded `P-*` packet instead of widening this one.
+3. Preferred next packet: semgrep remediation / promotion-decision packet that separates packet-external findings from rule-path drift.
 4. Only after the full `P-*` family closes, plan the foundation mainline automation program.
 
 If this cannot be done without leaving the allowed file boundary, stop and freeze a new packet rather than forcing progress.
