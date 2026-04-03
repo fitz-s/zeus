@@ -1297,3 +1297,23 @@ Archive policy:
   - stop at the current packet boundary or freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 17:58 America/Chicago] P3.3-EVALUATOR-POLICY-CONSUMPTION frozen
+- Author: `Architects mainline lead`
+- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `P3.2-POLICY-RESOLVER` is accepted and pushed as the resolver prerequisite
+  - `docs/architecture/zeus_durable_architecture_spec.md` names evaluator policy consumption as the next P3 slice after policy resolution
+  - repo inspection shows evaluator still relies on direct control-plane helpers instead of the new resolver object, so evaluator consumption is the next narrow seam
+- Decisions frozen:
+  - keep this packet on evaluator policy consumption only
+  - do not widen into riskguard emission, control-plane write-path changes, or cycle-runner behavior changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact sizing and rejection-surface touch points still need implementation review inside packet scope
+- Next required action:
+  - implement `P3.3-EVALUATOR-POLICY-CONSUMPTION` and run targeted evaluator policy tests
+- Owner:
+  - Architects mainline lead
