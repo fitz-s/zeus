@@ -46,7 +46,7 @@ def run_audit() -> dict:
         ]
     )
 
-    findings = {
+    external_surface_assumptions = {
         "operator_surfaces_present": {
             "workspace_HEARTBEAT.md": heartbeat.exists(),
             "workspace_OPERATOR_RUNBOOK.md": runbook.exists(),
@@ -56,6 +56,10 @@ def run_audit() -> dict:
         },
         "openclaw_acp_enabled": bool(openclaw_payload.get("acp", {}).get("enabled")),
         "openclaw_allowed_agents": openclaw_payload.get("acp", {}).get("allowedAgents", []),
+    }
+
+    findings = {
+        "external_surface_assumptions": external_surface_assumptions,
         "assumptions_valid": assumptions["valid"],
         "assumption_mismatches": assumptions["mismatches"],
         "cycle_runner_lines": cycle_lines,
@@ -67,12 +71,13 @@ def run_audit() -> dict:
     }
 
     blocking = []
-    if not all(findings["operator_surfaces_present"].values()):
-        blocking.append("operator_surfaces_missing")
+    advisory_external = []
+    if not all(external_surface_assumptions["operator_surfaces_present"].values()):
+        advisory_external.append("operator_surfaces_missing")
     if not findings["assumptions_valid"]:
         blocking.append("assumptions_invalid")
-    if not findings["openclaw_acp_enabled"]:
-        blocking.append("openclaw_acp_disabled")
+    if not external_surface_assumptions["openclaw_acp_enabled"]:
+        advisory_external.append("openclaw_acp_disabled")
     if not findings["replay_decision_time_guard_present"]:
         blocking.append("replay_future_data_guard_missing")
     if not findings["replay_uses_actual_trade_reference"]:
@@ -82,6 +87,9 @@ def run_audit() -> dict:
 
     return {
         "blocking": blocking,
+        "advisory_external": advisory_external,
+        "repo_verdict": "pass" if not blocking else "fail",
+        "external_boundary_verdict": "advisory-only",
         "findings": findings,
     }
 
