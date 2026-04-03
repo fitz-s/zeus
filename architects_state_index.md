@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.3 closeout pass`
+- Last updated by: `Codex P3.3 post-close review pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close third-party critic + verifier on the accepted P3.3 boundary.
-2. If post-close review passes, freeze the next P3 packet.
+1. Freeze `P3.4-RISKGUARD-POLICY-EMISSION` next.
+2. Keep the next P3 slice on riskguard policy emission only.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -42,5 +42,6 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. accepted packet `work_packets/P3.3-EVALUATOR-POLICY-CONSUMPTION.md`
-6. freeze the next P3 packet only after post-close review passes
+5. `docs/architecture/zeus_durable_architecture_spec.md` (`P3` section)
+6. `work_packets/P3.3-EVALUATOR-POLICY-CONSUMPTION.md`
+7. freeze `P3.4-RISKGUARD-POLICY-EMISSION` before further implementation

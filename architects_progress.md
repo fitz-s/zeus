@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.3 post-close repair pass`
+- Last updated by: `Codex P3.3 post-close review pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 post-close review after snapshot repair`
+- Mainline stage: `P3 pre-freeze after evaluator policy consumption`
 - Last accepted packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
 - Current active packet: `none`
-- Current packet status: `awaiting rerun of post-close review before next freeze`
+- Current packet status: `awaiting next freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but the next packet still defaults to `solo / no-team-default`
 - Current hard blockers:
-  - rerun the user-required post-close third-party critic + verifier after the snapshot repair before freezing P3.4
+  - no active blocker inside the accepted P3.3 boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1374,5 +1374,26 @@ Archive policy:
   - none beyond the refreshed post-close review outcome
 - Next required action:
   - rerun post-close third-party critic + verifier on the accepted P3.3 boundary
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 18:39 America/Chicago] P3.3 post-close third-party review gate passed
+- Author: `Architects mainline lead`
+- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Status delta:
+  - user-required post-close third-party critic review passed
+  - user-required post-close third-party verifier review passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - post-close verifier rerun -> `PASS`
+  - post-close critic rerun -> `PASS`
+  - accepted P3.3 boundary plus repaired durable snapshot no longer show blocker-level contradiction
+- Decisions frozen:
+  - `P3.4-RISKGUARD-POLICY-EMISSION` may now be frozen as the next packet
+- Open uncertainties:
+  - evaluator still retains a conn-less fallback policy path for non-runtime/test contexts; durable control-plane migration remains later work
+- Next required action:
+  - freeze `P3.4-RISKGUARD-POLICY-EMISSION`
 - Owner:
   - Architects mainline lead
