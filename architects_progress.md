@@ -932,6 +932,53 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:58 America/Chicago] P0.3 boundary scaffold landed locally with green evidence
+- Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Status delta:
+  - canonical append+project helper scaffold landed in `src/state/db.py`
+  - targeted architecture-contract tests are green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "canonical_transaction_boundary_helper_is_atomic or canonical_transaction_boundary_helper_rejects_mismatched_payloads or append_many_and_project_is_atomic or transaction_boundary_helper_rejects_legacy_init_schema or transaction_boundary_helper_rejects_incomplete_projection_payload or db_exposes_canonical_transaction_boundary_helpers or negative_constraints_include_no_local_close or strategy_key_manifest_is_frozen"` -> `8 passed`
+- Decisions frozen:
+  - packet remains a helper-level scaffold, not live migration/cutover
+  - legacy init-schema drift is explicitly rejected instead of hidden
+  - JSON projection/export demotion remains later work
+- Open uncertainties:
+  - adversarial review had not yet attacked the updated scaffold at first landing
+- Next required action:
+  - run adversarial review before acceptance
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 01:03 America/Chicago] P0.3 adversarial review resolved and architect approved
+- Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Status delta:
+  - both required adversarial reviews completed
+  - packet claim narrowed to helper-level scaffold
+  - architect verification returned `APPROVE`
+- Basis / evidence:
+  - internal attack review found:
+    - false completion risk from unwired helper
+    - semantic mismatch gaps
+    - legacy-schema contradiction
+    - weak batch evidence
+  - Gemini attack-only artifact: `.omx/artifacts/gemini-p0-3-transaction-boundary-attack-20260403T063215Z.md`
+  - architect verdict: `APPROVE`
+  - post-fix regression:
+    - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k "canonical_transaction_boundary_helper_is_atomic or canonical_transaction_boundary_helper_rejects_mismatched_payloads or append_many_and_project_is_atomic or transaction_boundary_helper_rejects_legacy_init_schema or transaction_boundary_helper_rejects_incomplete_projection_payload or db_exposes_canonical_transaction_boundary_helpers or negative_constraints_include_no_local_close or strategy_key_manifest_is_frozen"` -> `8 passed`
+- Decisions frozen:
+  - canonical boundary scaffold is now explicit and tested against the target migrated schema
+  - helper refuses legacy-schema and semantically mismatched payloads
+  - packet remains bounded and does not pretend live migration adoption
+- Open uncertainties:
+  - broader migration/cutover work remains explicitly deferred
+  - repo still carries a pre-existing local `AGENTS.md` diff outside this packet
+- Next required action:
+  - commit and push `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Owner:
+  - execution owner: Architects local lead
+
 ## [2026-04-03 01:05 America/Chicago] P0.3 inventory completed
 - Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 - Status delta:
