@@ -31,13 +31,13 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
 
 1. Close the tribunal / current-phase `P-*` governance and enforcement packets. ✅
 2. Confirm current-phase authority install is complete without claiming runtime convergence. ✅
-3. Write the foundation-mainline architecture plan. ⏭ next
-4. Prepare and open team execution after that plan is frozen. ⏭ after planning
+3. Write the foundation-mainline architecture plan. ✅
+4. Prepare and open team execution after that plan is frozen. ⏭ later, after `FOUNDATION-TEAM-GATE`
 5. Use the foundation mainline to move Zeus from `hardened_transition` -> `governed_runtime` -> `mature_project`.
 
 Current completion ladder:
 - `current-phase complete` = tribunal / `P-*` packet family closed ✅
-- `foundation-planned` = architecture mainline packet map and automation plan frozen
+- `foundation-planned` = architecture mainline packet map and automation plan frozen ✅
 - `team-ready` = team entry rules, staffing plan, and verification path frozen after current-phase closure
 - `governed_runtime complete` = canonical authority + machine gates + strategy-aware protection landed
 - `mature_project complete` = shadow persistence demoted/removed and replay/parity can block regressions
@@ -53,26 +53,26 @@ Closed current-phase queue:
 ## Current Active Packet
 
 ### Packet
-`FOUNDATION-MAINLINE-PLAN`
+`P0.2-ATTRIBUTION-FREEZE`
 
 ### State
-`FROZEN / PUSHED / READY TO EXECUTE`
+`FROZEN / READY TO EXECUTE`
 
 ### Execution mode verdict
-`RALPLAN_NEXT`
+`RALPH_NOW`
 
 ### Objective
-Freeze the post-current-phase architecture mainline plan that sequences foundation work, automation, verification, and team opening now that all remaining current-phase `P-*` packets are closed.
+Freeze attribution in the current runtime entry path by having the evaluator emit canonical `strategy_key` directly, preserve it through touched runtime records, and reject missing or malformed attribution instead of downstream invention.
 
 ### Why this packet is next
-- all four remaining current-phase `P-*` packets are closed and pushed
-- the next gated phase is planning, not more current-phase cleanup
-- team opening must now be prepared from an explicit plan rather than packet-memory
+- `FOUNDATION-MAINLINE-PLAN` is complete and accepted
+- foundation spec `P0 sequence` starts with `P0.2 attribution freeze`
+- bearing-capacity work must precede more exciting P1/P2/P3 work
 
 ### Owner model
-- Required: one named planning owner for the mainline plan packet
+- Required: one named execution owner for `P0.2-ATTRIBUTION-FREEZE`
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent planning/evidence reviewer
+- Verifier remains independent runtime/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
@@ -84,36 +84,45 @@ Freeze the post-current-phase architecture mainline plan that sequences foundati
 - execution owner: `Architects local lead (current Codex session)`
 
 ### Allowed edit surface
-Only the following may be edited in this planning packet:
-- `work_packets/FOUNDATION-MAINLINE-PLAN.md`
+Only the following may be edited in this packet:
+- `src/engine/evaluator.py`
+- `src/engine/cycle_runtime.py`
+- `src/state/portfolio.py`
+- `src/state/decision_chain.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
 
 ### Forbidden edit surface
-Explicitly forbidden for edits in this planning packet:
+Explicitly forbidden for edits in this packet:
 - all non-allowed files
-- `src/**`
 - `migrations/**`
 - `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
+- `src/control/**`
+- `src/supervisor_api/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no ad hoc team opening
-- no silent foundation-mainline start without plan approval
-- no reopening of the completed current-phase `P-*` queue without a new contradiction packet
+- no `P0.1` exit semantics work
+- no `P0.3` transaction boundary work
+- no `P0.4` data-availability fact work
+- no `P0.5` implementation-OS work
+- no team execution
+- no schema or migration changes
 
 ### Current blocker
 - no active hard blocker
-- the planning packet is now frozen and pushed in `7fff4d4`
-- the next blocker is executional: the stage-map/planning artifact itself is not yet written
+- `FOUNDATION-MAINLINE-PLAN` is complete and pushed
+- next blocker is executional: the first runtime attribution freeze slice is not yet landed
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside this packet’s versioned scope
 
 ### Ready-to-commit slice
-`Planning execution landed locally — FOUNDATION-MAINLINE-PLAN now contains the stage map, workstreams, automation path, verification path, explicit team-opening gate, and explicit successor packet requirement for staffing.`
+`P0.2-ATTRIBUTION-FREEZE is frozen — next execution slice is to make evaluator/cycle-runtime stop relying on downstream strategy invention and to add invalid/missing attribution rejection tests on the touched path.`
 
 ---
 
@@ -121,60 +130,47 @@ Explicitly forbidden for edits in this planning packet:
 
 ### Phase A — session revalidation
 - [x] confirm the current-phase `P-*` queue is closed
-- [x] freeze the foundation-mainline planning packet
-- [x] define allowed / forbidden files for the planning packet
+- [x] confirm `FOUNDATION-MAINLINE-PLAN` is executed and accepted
+- [x] freeze `P0.2-ATTRIBUTION-FREEZE`
+- [x] define allowed / forbidden files for the packet
 
-### Phase B — planning intake
-- [x] identify the planning surfaces that will define:
-  - foundation work order
-  - automation strategy
-  - verification path
-  - team-opening gate
-- [x] confirm which artifacts the next plan packet should create
+### Phase B — packet intake
+- [ ] confirm exact evaluator / runtime / record surfaces to touch
+- [ ] confirm the smallest first-slice file set inside this packet
+- [ ] confirm targeted tests for invalid/missing attribution rejection
 
-### Phase C — bounded planning design
-- [x] define the planning packet
-- [x] define the post-plan team-opening gate
-- [x] keep the completed current-phase queue closed
+### Phase C — bounded packet design
+- [x] keep work inside `P0.2` only
+- [x] block `P1/P2/P3` momentum
+- [x] keep team execution disallowed before `P0.5`
 
 ### Phase D — evidence bundle
-- [x] append planning execution result to `architects_progress.md`
-- [ ] commit and push the planning execution slice
-
-Planning deliverables now live in:
-- `work_packets/FOUNDATION-MAINLINE-PLAN.md`
-  - stage map
-  - source-package crosswalk
-  - mainline workstreams
-  - automation path
-  - verification path
-  - explicit team-opening gate
-  - explicit successor packet requirement: `FOUNDATION-TEAM-GATE`
+- [x] append planning completion + packet freeze result to `architects_progress.md`
+- [ ] commit and push the packet freeze
 
 ---
 
-## Definition of Done For Current-Phase Closure
+## Definition of Done For Planning Completion
 
-Current-phase closure is achieved:
-- `P-BOUND-01`, `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are all executed, verified, committed, and pushed ✅
-- no packet silently widened into schema/cutover/foundation-mainline work ✅
-- current-phase authority install is complete without falsely claiming runtime convergence ✅
-- `architects_progress.md` and `architects_task.md` reflect the cloud-visible truth ✅
+Planning completion is achieved:
+- `FOUNDATION-MAINLINE-PLAN` is executed and accepted ✅
+- stage map, workstream order, automation path, verification path, and explicit team-opening gate exist in versioned packet/control surfaces ✅
+- staffing is explicitly deferred to `FOUNDATION-TEAM-GATE` ✅
+- no team opening is allowed yet ✅
 
 ---
 
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Execute `FOUNDATION-MAINLINE-PLAN`.
-2. Extract from `zeus_final_tribunal_overlay/` and `zeus_mature_project_foundation/`:
-   - stage map
-   - workstreams
-   - automation path
-   - verification path
-   - explicit team-opening gate
-3. If team staffing is to be a precondition for team opening, freeze it in this packet; otherwise explicitly declare the successor packet required for staffing.
-4. Do not open team until the planning packet is complete.
-5. If any stage, goal, or sequencing detail is unclear, return to the two source packages before deciding.
+1. Execute `P0.2-ATTRIBUTION-FREEZE`.
+2. Preserve the foundation-spec rules:
+   - P0 is bearing-capacity work, not feature work
+   - do not jump to P1/P2/P3
+   - do not open team from momentum
+3. If any stage, goal, or sequencing detail is unclear, return to:
+   - `zeus_final_tribunal_overlay/`
+   - `zeus_mature_project_foundation/`
+4. After `P0.2` closes, freeze `P0.1`.
 
 If this cannot be done without a new packet, freeze that packet before acting.

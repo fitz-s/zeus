@@ -737,6 +737,52 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:58 America/Chicago] FOUNDATION-MAINLINE-PLAN completed and accepted
+- Packet: `FOUNDATION-MAINLINE-PLAN`
+- Status delta:
+  - planning packet is now executed, versioned, and accepted as the stage authority for work through P0.5
+  - the next packet is `P0.2-ATTRIBUTION-FREEZE`
+- Basis / evidence:
+  - `work_packets/FOUNDATION-MAINLINE-PLAN.md` now contains:
+    - stage map
+    - workstream order
+    - automation path
+    - verification path
+    - explicit team-opening gate
+    - explicit staffing successor packet requirement
+- Decisions frozen:
+  - `foundation-planned` is now achieved
+  - team remains blocked until a later `FOUNDATION-TEAM-GATE` packet is frozen and completed
+  - work may advance only through P0.2 -> P0.1 -> P0.3 -> P0.4 -> P0.5
+- Open uncertainties:
+  - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
+- Next required action:
+  - freeze the first real P0 packet: `P0.2-ATTRIBUTION-FREEZE`
+- Owner:
+  - principal architect / Architects local lead
+
+## [2026-04-03 00:59 America/Chicago] P0.2-ATTRIBUTION-FREEZE frozen
+- Packet: `P0.2-ATTRIBUTION-FREEZE`
+- Status delta:
+  - first real P0 packet frozen
+  - active execution focus moved from planning to bearing-capacity implementation
+- Basis / evidence:
+  - foundation spec `P0 sequence` starts with `P0.2 attribution freeze`
+  - foundation spec `P0.2` and `Packet A — P0 attribution freeze` require:
+    - evaluator emits strategy_key directly
+    - downstream stops inventing strategy
+    - invalid/missing attribution rejection tests
+- Decisions frozen:
+  - this first P0 packet stays single-owner
+  - this packet does not batch `P0.1`, `P0.3`, `P0.4`, or `P0.5`
+  - team execution remains disallowed at this point
+- Open uncertainties:
+  - execution may reveal whether portfolio and decision-chain surfaces are sufficient for the first runtime attribution freeze, or whether a narrower successor packet is needed
+- Next required action:
+  - execute `P0.2-ATTRIBUTION-FREEZE`
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
