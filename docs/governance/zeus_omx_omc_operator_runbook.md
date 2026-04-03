@@ -11,6 +11,20 @@ Current-phase or long-lived: Long-lived.
 
 Use **OMX** unless one of the specific OMC conditions below applies.
 
+## 0.1 Current-phase queue gate
+
+Before foundation-mainline planning or any team opening, close the remaining current-phase packet queue in this order:
+
+1. `P-BOUND-01`
+2. `P-ROLL-01`
+3. `P-STATE-01`
+4. `P-OPS-01`
+
+Until those four packets are closed:
+- stay single-owner by default
+- do not open team execution for foundation-mainline work
+- do not treat the current-phase queue as optional backlog
+
 ## 1. Bootstrap checklist
 
 ### Repo bootstrap
@@ -84,6 +98,7 @@ Dual-stack is not allowed when:
 3. `$ralplan` to produce or confirm the packet
 4. assign owner
 5. only then use `$team` or OMC review lanes if needed
+6. if the repo is still in the current-phase queue, finish that queue before opening foundation-mainline planning
 
 ### Example
 ```text
@@ -95,12 +110,12 @@ $ralplan "Create the approved packet and review blast radius, rollback, and evid
 
 ### Single-owner execution
 ```text
-$ralph "Execute approved Zeus packet WP-BOUND-01 only. Do not widen scope."
+$ralph "Execute approved Zeus packet P-BOUND-01 only. Do not widen scope."
 ```
 
 ### OMX parallel lane
 ```text
-$team 2:executor "Execute approved Zeus packet WP-MATH-01 only."
+$team 2:executor "Execute approved Zeus packet P-MATH-01 only."
 ```
 
 ### OMC review lane

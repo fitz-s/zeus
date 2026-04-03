@@ -87,6 +87,19 @@ Acceptance:
 - daily Zeus work can proceed under the new delivery constitution
 - remaining open items are documented rather than hidden
 
+## Current-phase packet queue before foundation-mainline planning
+
+Close the remaining current-phase packets in this order:
+
+1. `P-BOUND-01`
+2. `P-ROLL-01`
+3. `P-STATE-01`
+4. `P-OPS-01`
+
+Only after that queue closes:
+- write the foundation-mainline architecture plan
+- prepare team execution
+
 ## Non-goals for first phase
 - full `position_current` rollout
 - full historical state migration
