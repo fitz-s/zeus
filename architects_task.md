@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.3 freeze pass`
+- Last updated by: `Codex P3.3 closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,66 +17,56 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
-- State: `FROZEN / READY FOR EXECUTION`
+- Packet: `none`
+- State: `AWAITING POST-CLOSE REVIEW / NEXT FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Wire strategy policy consumption into evaluator decisioning before any later riskguard-emission packet begins.
+Hold at the accepted P3.3 boundary until the required post-close third-party critic + verifier review finishes, then freeze the next packet.
 
 ## Allowed files
 
-- `work_packets/P3.3-EVALUATOR-POLICY-CONSUMPTION.md`
-- `src/engine/evaluator.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_runtime_guards.py`
+- `work_packets/P3.4-RISKGUARD-POLICY-EMISSION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
+- `src/**`
+- `tests/**`
+- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `migrations/**`
-- `src/control/**`
-- `src/execution/**`
-- `src/state/**`
-- `src/supervisor_api/**`
-- `src/riskguard/**`
-- `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
-- `tests/test_riskguard.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no riskguard-emission work in this packet
-- no control-plane-write changes in this packet
-- no cycle-runner behavior changes in this packet
+- no P3.4 work before post-close review finishes
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside packet scope
+- no active blocker inside the completed P3.3 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] read packet authority and scoped evaluator surfaces
-- [ ] implement evaluator policy consumption
-- [ ] verify targeted evaluator evidence
-- [ ] keep out-of-scope local dirt excluded from the packet commit
+- [x] P3.3 landed with green evaluator policy evidence
+- [x] P3.3 acceptance is recorded honestly
+- [ ] run post-close third-party critic review
+- [ ] run post-close third-party verifier review
+- [ ] if both pass, freeze `P3.4-RISKGUARD-POLICY-EMISSION`
 
 ## Next required action
 
-1. Implement the evaluator policy-consumption slice.
-2. Keep `P3.3-EVALUATOR-POLICY-CONSUMPTION` on evaluator/test surfaces only.
-3. Keep out-of-scope local dirt excluded from any commit.
+1. Run post-close third-party critic + verifier on the accepted P3.3 boundary.
+2. If both pass, freeze `P3.4-RISKGUARD-POLICY-EMISSION` before any more implementation.

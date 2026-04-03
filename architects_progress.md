@@ -1317,3 +1317,28 @@ Archive policy:
   - implement `P3.3-EVALUATOR-POLICY-CONSUMPTION` and run targeted evaluator policy tests
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 18:24 America/Chicago] P3.3-EVALUATOR-POLICY-CONSUMPTION accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - evaluator policy consumption is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py tests/test_runtime_guards.py` -> `105 passed`
+  - independent verifier review -> `PASS`
+  - explicit adversarial review -> `PASS`
+- Decisions frozen:
+  - evaluator now resolves `StrategyPolicy` before anti-churn, sizing, and final decision emission paths
+  - policy gating yields `RISK_REJECTED`, threshold multipliers adjust Kelly sizing, and allocation multipliers adjust final size
+  - no riskguard-emission, control-plane-write, or cycle-runner behavior change is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.4-RISKGUARD-POLICY-EMISSION`
+- Open uncertainties:
+  - evaluator still retains a conn-less fallback policy path for non-runtime/test contexts; durable control-plane migration remains later work
+- Next required action:
+  - run the user-required post-close third-party critic + verifier before freezing `P3.4-RISKGUARD-POLICY-EMISSION`
+- Owner:
+  - Architects mainline lead
