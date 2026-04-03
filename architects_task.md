@@ -32,45 +32,46 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
 1. Close the tribunal / current-phase `P-*` governance and enforcement packets. ✅
 2. Confirm current-phase authority install is complete without claiming runtime convergence. ✅
 3. Write the foundation-mainline architecture plan. ✅
-4. Prepare and open team execution after that plan is frozen. ⏭ later, after `FOUNDATION-TEAM-GATE`
-5. Use the foundation mainline to move Zeus from `hardened_transition` -> `governed_runtime` -> `mature_project`.
+4. Advance only through the ordered P0 bearing-capacity packets:
+   - `P0.2`
+   - `P0.1`
+   - `P0.3`
+   - `P0.4`
+   - `P0.5`
+5. Prepare and open durable team execution only after `P0.5` is complete and a later team gate allows it.
 
 Current completion ladder:
 - `current-phase complete` = tribunal / `P-*` packet family closed ✅
 - `foundation-planned` = architecture mainline packet map and automation plan frozen ✅
-- `team-ready` = team entry rules, staffing plan, and verification path frozen after current-phase closure
+- `P0.2 complete` = attribution freeze landed and pushed ✅
+- `P0.5 complete` = implementation operating system strong enough for later packet-by-packet team autonomy
+- `team-ready` = later gate packet freezes staffing, lane ownership, and verification path
 - `governed_runtime complete` = canonical authority + machine gates + strategy-aware protection landed
 - `mature_project complete` = shadow persistence demoted/removed and replay/parity can block regressions
-
-Closed current-phase queue:
-1. `P-BOUND-01` ✅
-2. `P-ROLL-01` ✅
-3. `P-STATE-01` ✅
-4. `P-OPS-01` ✅
 
 ---
 
 ## Current Active Packet
 
 ### Packet
-`P0.2-ATTRIBUTION-FREEZE`
+`P0.1-EXIT-SEMANTICS-SPLIT`
 
 ### State
-`ACCEPTED LOCALLY / READY TO COMMIT`
+`FROZEN / READY TO EXECUTE`
 
 ### Execution mode verdict
 `RALPH_NOW`
 
 ### Objective
-Freeze attribution in the current runtime entry path by having the evaluator emit canonical `strategy_key` directly, preserve it through touched runtime records, and reject missing or malformed attribution instead of downstream invention.
+Introduce explicit exit-intent semantics and exit event vocabulary scaffolding before any broader lifecycle or ledger work, without batching full cutover behavior.
 
 ### Why this packet is next
-- `FOUNDATION-MAINLINE-PLAN` is complete and accepted
-- foundation spec `P0 sequence` starts with `P0.2 attribution freeze`
-- bearing-capacity work must precede more exciting P1/P2/P3 work
+- `P0.2-ATTRIBUTION-FREEZE` is complete and pushed
+- foundation spec `P0 sequence` requires `P0.1` next
+- local-close semantics remain the deepest pre-ledger corruption risk
 
 ### Owner model
-- Required: one named execution owner for `P0.2-ATTRIBUTION-FREEZE`
+- Required: one named execution owner for `P0.1-EXIT-SEMANTICS-SPLIT`
 - Tribunal/principal architect remains the scope-freezing authority
 - Verifier remains independent runtime/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
@@ -85,14 +86,13 @@ Freeze attribution in the current runtime entry path by having the evaluator emi
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `src/engine/evaluator.py`
+- `src/execution/executor.py`
+- `src/execution/exit_lifecycle.py`
 - `src/engine/cycle_runtime.py`
-- `src/state/portfolio.py`
-- `src/state/decision_chain.py`
 - `tests/test_runtime_guards.py`
-- `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
+- `work_packets/P0.1-EXIT-SEMANTICS-SPLIT.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in this packet:
@@ -108,21 +108,22 @@ Explicitly forbidden for edits in this packet:
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no `P0.1` exit semantics work
+- no full runtime cutover yet
 - no `P0.3` transaction boundary work
 - no `P0.4` data-availability fact work
 - no `P0.5` implementation-OS work
+- no `P1/P2/P3` jump
 - no team execution
 - no schema or migration changes
 
 ### Current blocker
 - no active hard blocker
-- `FOUNDATION-MAINLINE-PLAN` is complete and pushed
-- explicit adversarial review is complete
-- repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside this packet’s versioned scope
+- `P0.2-ATTRIBUTION-FREEZE` is complete and pushed in `a1ac706`
+- the next blocker is executional: the first exit-semantics scaffolding slice is not yet landed
+- repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
 
 ### Ready-to-commit slice
-`P0.2 accepted locally — evaluator emits canonical strategy_key on the touched path, downstream touched runtime surfaces stop inventing strategy, invalid/missing attribution is rejected on materialization, and post-attack fixes are in place. Next step is commit/push.`
+`P0.1 is frozen — next execution slice is to add ExitIntent / exit-event vocabulary scaffolding on the touched execution path without doing the full behavioral cutover yet.`
 
 ---
 
@@ -131,25 +132,26 @@ Explicitly forbidden for edits in this packet:
 ### Phase A — session revalidation
 - [x] confirm the current-phase `P-*` queue is closed
 - [x] confirm `FOUNDATION-MAINLINE-PLAN` is executed and accepted
-- [x] freeze `P0.2-ATTRIBUTION-FREEZE`
+- [x] confirm `P0.2-ATTRIBUTION-FREEZE` is complete
+- [x] freeze `P0.1-EXIT-SEMANTICS-SPLIT`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — packet intake
-- [x] confirm exact evaluator / runtime / record surfaces to touch
-- [x] confirm the smallest first-slice file set inside this packet
-- [x] confirm targeted tests for invalid/missing attribution rejection
+- [ ] confirm exact execution / runtime surfaces to touch
+- [ ] confirm the smallest first-slice file set inside this packet
+- [ ] confirm targeted tests for exit-event legality and scaffolding behavior
 
 ### Phase C — bounded packet design
-- [x] keep work inside `P0.2` only
+- [x] keep work inside `P0.1` only
 - [x] block `P1/P2/P3` momentum
 - [x] keep team execution disallowed before `P0.5`
 
 ### Phase D — evidence bundle
-- [x] append planning completion + packet freeze result to `architects_progress.md`
-- [x] run targeted runtime-guard tests
-- [x] run architecture-contract verification
-- [x] run explicit adversarial review
-- [x] obtain architect verification
+- [x] append prior packet closure + next packet freeze to `architects_progress.md`
+- [ ] run targeted exit-semantics tests
+- [ ] run architecture-contract verification
+- [ ] run explicit adversarial review
+- [ ] obtain architect verification
 - [ ] commit and push the packet execution slice
 
 ---
@@ -167,7 +169,7 @@ Planning completion is achieved:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Execute `P0.2-ATTRIBUTION-FREEZE`.
+1. Execute `P0.1-EXIT-SEMANTICS-SPLIT`.
 2. Preserve the foundation-spec rules:
    - P0 is bearing-capacity work, not feature work
    - do not jump to P1/P2/P3
@@ -175,6 +177,6 @@ The next owner should do exactly this:
 3. If any stage, goal, or sequencing detail is unclear, return to:
    - `zeus_final_tribunal_overlay/`
    - `zeus_mature_project_foundation/`
-4. After `P0.2` closes, freeze `P0.1`.
+4. After `P0.1` closes, freeze `P0.3`.
 
 If this cannot be done without a new packet, freeze that packet before acting.

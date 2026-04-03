@@ -835,6 +835,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead
 
+## [2026-04-03 00:25 America/Chicago] P0.2 committed and pushed
+- Packet: `P0.2-ATTRIBUTION-FREEZE`
+- Status delta:
+  - packet committed as `a1ac706`
+  - branch pushed to `origin/Architects`
+  - next packet advances to `P0.1-EXIT-SEMANTICS-SPLIT`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - packet stayed inside the touched attribution runtime path and targeted tests
+- Decisions frozen:
+  - first real P0 packet is complete
+  - team remains blocked
+- Open uncertainties:
+  - broader runtime suites remain outside the targeted evidence set
+- Next required action:
+  - freeze `P0.1-EXIT-SEMANTICS-SPLIT`
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 00:27 America/Chicago] P0.1-EXIT-SEMANTICS-SPLIT frozen
+- Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
+- Status delta:
+  - next P0 packet frozen
+  - progression continues in the required order: `P0.2 -> P0.1 -> P0.3 -> P0.4 -> P0.5`
+- Basis / evidence:
+  - foundation spec `P0.1` requires explicit exit intent semantics before ledger work
+  - foundation `Packet B` requires an RFC/scaffolding patch before broader behavioral cutover
+- Decisions frozen:
+  - this packet is scaffolding-first, not the full cutover
+  - team remains disallowed
+  - no P0.3/P0.4/P0.5/P1/P2 batching
+- Open uncertainties:
+  - the smallest first execution slice still needs a final code-surface inventory
+- Next required action:
+  - execute `P0.1-EXIT-SEMANTICS-SPLIT`
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
