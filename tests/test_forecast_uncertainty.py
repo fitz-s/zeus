@@ -218,6 +218,9 @@ def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior(
         ens_dominance=0.2,
         pre_sunrise=True,
         post_sunset=False,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:30:00+00:00",
     ) <= 0.05
     assert day0_observation_weight(
         hours_remaining=3.0,
@@ -226,7 +229,32 @@ def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior(
         ens_dominance=0.9,
         pre_sunrise=False,
         post_sunset=True,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:30:00+00:00",
     ) == 1.0
+
+
+def test_day0_observation_weight_does_not_force_full_finality_for_stale_post_sunset_observation():
+    base = day0_temporal_closure_weight(
+        hours_remaining=3.0,
+        peak_confidence=0.8,
+        daylight_progress=1.0,
+        ens_dominance=0.9,
+    )
+    weight = day0_observation_weight(
+        hours_remaining=3.0,
+        peak_confidence=0.8,
+        daylight_progress=1.0,
+        ens_dominance=0.9,
+        pre_sunrise=False,
+        post_sunset=True,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T04:00:00+00:00",
+    )
+    assert weight == base
+    assert weight < 1.0
 
 
 def test_day0_blended_highs_preserves_hard_floor_and_weight_endpoints():
@@ -352,6 +380,8 @@ def test_day0_nowcast_context_exposes_age_and_freshness():
     assert ctx["observation_source"] == "wu_api"
     assert ctx["age_hours"] == 1.0
     assert 0.0 < ctx["freshness_factor"] < 1.0
+    assert ctx["trusted_source"] is True
+    assert ctx["fresh_observation"] is True
     assert ctx["blend_weight"] == day0_nowcast_blend_weight(
         hours_remaining=1.0,
         observation_source="wu_api",
