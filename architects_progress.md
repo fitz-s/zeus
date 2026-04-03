@@ -422,6 +422,28 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 23:58 America/Chicago] Remaining current-phase `P-*` queue frozen
+- Packet: `CURRENT-P-QUEUE-FREEZE`
+- Status delta:
+  - the remaining current-phase queue was frozen in user-directed order
+  - `architects_task.md` was rotated so `P-BOUND-01` is now the next active packet
+  - packet artifacts were created for `P-BOUND-01`, `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01`
+- Basis / evidence:
+  - user-directed order: `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01`
+  - each packet now has a repo-local work packet file under `work_packets/`
+  - current-phase completion is now explicitly defined as closing this four-packet family before foundation-mainline planning
+- Decisions frozen:
+  - no foundation-mainline architecture planning starts before these four packets close
+  - no team opening starts before these four packets close and the mainline plan is written
+  - `P-BOUND-01` is the next bounded packet
+- Open uncertainties:
+  - execution mode for `P-BOUND-01` will be chosen at packet start based on actual slice shape
+- Next required action:
+  - validate packet grammar
+  - commit and push the queue freeze
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:

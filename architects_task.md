@@ -31,41 +31,111 @@ It is **not** the durable historical ledger. Historical state belongs in `archit
 
 1. Close the tribunal / current-phase `P-*` governance and enforcement packets.
 2. Confirm current-phase authority install is complete without claiming runtime convergence.
-3. Only then plan the foundation mainline automation program.
-4. Use the foundation mainline to move Zeus from `hardened_transition` -> `governed_runtime` -> `mature_project`.
+3. Only then write the foundation-mainline architecture plan.
+4. Only after that prepare and open team execution.
+5. Use the foundation mainline to move Zeus from `hardened_transition` -> `governed_runtime` -> `mature_project`.
 
 Current completion ladder:
 - `current-phase complete` = tribunal / `P-*` packet family closed
+- `foundation-planned` = architecture mainline packet map and automation plan frozen
+- `team-ready` = team entry rules, staffing plan, and verification path frozen after current-phase closure
 - `governed_runtime complete` = canonical authority + machine gates + strategy-aware protection landed
 - `mature_project complete` = shadow persistence demoted/removed and replay/parity can block regressions
+
+Current user-directed queue:
+1. `P-BOUND-01`
+2. `P-ROLL-01`
+3. `P-STATE-01`
+4. `P-OPS-01`
+
+After these four packets close:
+- write the architecture mainline plan
+- prepare the team launch path
+
+---
+
+## Frozen Current-Phase Queue
+
+### 1. `P-BOUND-01`
+- Status: `FROZEN / NEXT`
+- Objective: repo-local Zeus ↔ Venus / OpenClaw boundary clarification
+- Allowed files:
+  - `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
+  - `scripts/audit_architecture_alignment.py`
+  - `src/supervisor_api/contracts.py`
+  - `architects_progress.md`
+  - `architects_task.md`
+- Non-goals:
+  - no architecture-law rewrite
+  - no schema/runtime/cutover work
+  - no outer-host authority expansion
+
+### 2. `P-ROLL-01`
+- Status: `FROZEN / QUEUED AFTER P-BOUND-01`
+- Objective: migration delta + archive/cutover truth surfaces
+- Allowed files:
+  - `docs/rollout/**`
+  - `docs/governance/zeus_runtime_delta_ledger.md`
+  - `architects_progress.md`
+  - `architects_task.md`
+- Non-goals:
+  - no runtime code edits
+  - no cutover claim
+  - no hidden drift
+
+### 3. `P-STATE-01`
+- Status: `FROZEN / QUEUED AFTER P-ROLL-01`
+- Objective: patch highest-risk state drift
+- Allowed files:
+  - `src/state/strategy_tracker.py`
+  - `src/data/observation_client.py`
+  - targeted tests/docs
+  - `architects_progress.md`
+  - `architects_task.md`
+- Non-goals:
+  - no schema widening
+  - no control-plane widening
+  - no governance-law edits
+
+### 4. `P-OPS-01`
+- Status: `FROZEN / QUEUED AFTER P-STATE-01`
+- Objective: operator cookbook / runbook / first-phase operating guidance
+- Allowed files:
+  - `docs/governance/zeus_omx_omc_*`
+  - `docs/governance/zeus_first_phase_execution_plan.md`
+  - `architects_progress.md`
+  - `architects_task.md`
+- Non-goals:
+  - no manifest/schema/runtime truth edits
+  - no authority overclaim
+  - no team opening before packet discipline is explicit
 
 ---
 
 ## Current Active Packet
 
 ### Packet
-`P-GATE-01-CONSOLIDATE-ADVISORY`
+`P-BOUND-01`
 
 ### State
-`COMMITTED / PUSHED / READY FOR NEXT PACKET`
+`FROZEN / READY TO START`
 
 ### Execution mode verdict
-`RALPH_NOW`
+`PENDING ON START (default: RALPH_NOW unless execution widens materially)`
 
 ### Objective
-Consolidate the current advisory gate posture by freezing a machine-checkable workflow verdict for blocking-vs-advisory jobs, semgrep stance, and replay-parity stance before any later severity-promotion packet.
+Freeze and then execute the repo-local Zeus ↔ Venus / OpenClaw boundary packet so current-phase external authority and control responsibilities become explicit before rollout, state-drift, or operator-surface work continues.
 
-### Why this packet is active first
-- the first advisory workflow is already landed but the verdict still depends on scattered workflow text and operator memory
-- semgrep is currently advisory because of packet-external findings and path-pattern warnings
-- replay parity is currently advisory because `position_current` and dual-write prerequisites do not yet exist
-- this is a narrow, bounded, single-owner enforcement-consolidation slice and does not yet need team execution
+### Why this packet is next
+- user explicitly set the remaining queue order
+- boundary ambiguity is the most dangerous remaining cross-system drift
+- later packets should not inherit unclear repo-vs-host authority
 
 ### Owner model
-- Required: one named execution owner for this advisory-consolidation slice
+- Required: one named execution owner for `P-BOUND-01`
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent gate/evidence review
-- Critic remains contradiction / blast-radius review
+- Verifier remains independent boundary/evidence reviewer
+- Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
 - leader: `gpt-5.4 xhigh`
@@ -74,195 +144,89 @@ Consolidate the current advisory gate posture by freezing a machine-checkable wo
 
 ### Current execution owner
 - execution owner: `Architects local lead (current Codex session)`
-- verifier/critic support will be used as attack-only review lanes before final verification
+- verifier/critic support will be used when execution starts
 
 ### Allowed edit surface
-Only the following may be edited in this packet:
-- `work_packets/P-GATE-01-CONSOLIDATE-ADVISORY.md`
-- `.github/workflows/architecture_advisory_gates.yml`
-- `scripts/check_advisory_gates.py`
-- `tests/test_architecture_contracts.py`
+Only the following may be edited in the next packet:
+- `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
+- `scripts/audit_architecture_alignment.py`
+- `src/supervisor_api/contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
+- `work_packets/P-BOUND-01.md`
 
 ### Forbidden edit surface
-Explicitly forbidden for edits in this packet:
+Explicitly forbidden for edits in the next packet:
 - all non-allowed files
-- all `architecture/**` files including `architecture/ast_rules/**`
-- all scoped `AGENTS.md`
-- `src/**`
+- `architecture/**`
 - `migrations/**`
-- `docs/**`
-- all other workflow/script/test files outside the allowed list
+- `src/state/**`
+- `src/control/**`
+- `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no promotion of semgrep to blocking
-- no promotion of replay parity to blocking
-- no edits to semgrep rules under `architecture/ast_rules/**`
-- no runtime/schema/cutover work
-- no authority-doc rewrites
+- no architecture-law rewrite
+- no schema changes
+- no live cutover work
+- no runtime truth reclassification outside the boundary packet
+- no team execution yet
 
 ### Current blocker
 - no active hard blocker at freeze time
-- carry-forward fact: advisory workflow already landed in commit `eba4321`
-- carry-forward fact: root AGENTS sync already landed in commits `0431f55` and `1866086`
-- known advisory issue: semgrep still reports two findings outside this packet boundary and therefore remains advisory
-- packet-external carry-forward: semgrep path-pattern warnings and the two current semgrep findings still require a later packet
-- first packet commit/push completed as `9151dc6`
-- follow-up delta commit/push completed as `56ce691`
+- carry-forward fact: `P-GATE-01-CONSOLIDATE-ADVISORY` is closed and pushed
+- queue fact: `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are frozen behind this packet
 
 ### Ready-to-commit slice
-`Follow-up delta completed — `_yaml_bootstrap.py` trigger coverage, reduced policy/test authority drift, softer command matching, and explicit “policy-green is not advisory-green” language are now pushed in commit 56ce691.`
+`Not started yet. First slice should be a read-only boundary inventory + contract-map assessment inside P-BOUND-01’s allowed file set.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm the current session has read the required authority surfaces
-- [x] confirm `P-BOUND-01` prerequisite is satisfied in the live repo state
-- [x] confirm no one is attempting runtime/schema/cutover work under this packet
-- [x] confirm the tribunal workflow now points to closing `P-*` packets before the foundation mainline
+- [ ] confirm the current session has re-read the required authority surfaces for `P-BOUND-01`
+- [ ] confirm no runtime/schema/cutover work is being mixed into the packet
+- [ ] confirm the user-directed queue order remains `P-BOUND-01 -> P-ROLL-01 -> P-STATE-01 -> P-OPS-01`
 
 ### Phase B — allowed-surface inspection
-- [x] inspect current advisory workflow
-- [x] inspect targetable scripts/tests in the allowed set
-- [x] confirm semgrep and replay parity still require advisory posture
+- [ ] inspect `docs/governance/zeus_openclaw_venus_delivery_boundary.md`
+- [ ] inspect `scripts/audit_architecture_alignment.py`
+- [ ] inspect `src/supervisor_api/contracts.py`
+- [ ] classify each as `present`, `missing`, `partial`, or `drifted`
 
-Inventory result:
-- `.github/workflows/architecture_advisory_gates.yml` -> `present / advisory split exists but not yet machine-checked`
-- `scripts/check_advisory_gates.py` -> `missing`
-- `tests/test_architecture_contracts.py` -> `present / no workflow-verdict assertion yet`
-- `work_packets/P-GATE-01-CONSOLIDATE-ADVISORY.md` -> `missing`
-- `architects_progress.md` -> `present / active ledger`
-- `architects_task.md` -> `present / active control surface`
-
-### Phase C — bounded enforcement design
-- [x] keep this slice narrow and single-owner
-- [x] keep semgrep and replay parity advisory in this packet
-- [x] encode the current workflow verdict in a repo-local script/test instead of operator memory only
-- [x] keep all other packet families out of scope
-
-Slice 1 shape:
-- freeze the packet in `work_packets/`
-- add `scripts/check_advisory_gates.py`
-- update the advisory workflow to run the new policy check
-- add a targeted workflow-verdict test
-- keep progress/task synchronized with current execution truth
+### Phase C — bounded packet design
+- [ ] identify the narrowest boundary delta needed
+- [ ] decide whether the packet is docs-only or includes narrow contract/audit edits
+- [ ] keep all non-boundary packet families out of scope
 
 ### Phase D — evidence bundle
-- [x] run `python3 scripts/check_advisory_gates.py`
-- [x] run `python3 scripts/check_kernel_manifests.py`
-- [x] run `python3 scripts/check_module_boundaries.py`
-- [x] run `python3 scripts/check_work_packets.py`
-- [x] run `.venv/bin/pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py`
-- [x] run `python3 scripts/replay_parity.py --ci`
-- [x] run `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src`
-- [x] collect two attack-only adversarial reviews
-- [x] append execution result to `architects_progress.md`
-- [x] first packet commit/push (`9151dc6`)
-- [x] commit and push the follow-up delta (`56ce691`)
-
-Evidence snapshot for Slice 1:
-- affected-surface note: workflow/script/test/packet control surfaces only
-- rollback note: revert the work packet, advisory policy script, workflow update, targeted test, and paired Architects ledger updates together
-- unresolved uncertainty: semgrep findings remain attack inputs only until a later packet decides whether to fix code or adjust rule scope
-- advisory gate policy: `python3 scripts/check_advisory_gates.py` -> `advisory gate policy ok`
-- workflow yaml parse: `.venv/bin/python ... yaml.safe_load(...)` -> `workflow yaml ok`
-- blocking checks:
-  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
-  - `python3 scripts/check_module_boundaries.py` -> `module boundaries ok`
-  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
-  - `.venv/bin/pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py` -> `10 passed, 3 skipped`
-- advisory checks:
-  - `python3 scripts/replay_parity.py --ci` -> `canonical ledger tables not present yet; replay parity is staged`
-  - `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src` -> 2 findings + path warnings, remains advisory
-- attack-only reviews:
-- internal adversarial review -> no additional in-scope contradiction beyond verdict brittleness already fixed
-- Gemini artifact -> `.omx/artifacts/gemini-p-gate-01-consolidate-advisory-attack-20260403T042215Z.md`
-- architect verification:
-  - leader architect pass on the follow-up delta -> no remaining in-scope contradiction after the attack-only fixes
-- in-scope fixes taken after attack review:
-  - normalized workflow YAML `on` parsing in script/test
-  - reduced test/script duplication while keeping a small independent YAML-shape check
-  - added `_yaml_bootstrap.py` to workflow trigger coverage
-  - removed stale `architects_task.md` owner indirection from workflow metadata
-  - made the policy script explicitly print that advisory jobs still require separate evidence review
-
-Local verification completed:
-- current advisory workflow inspected
-- current semgrep advisory rationale inspected
-- `git diff --check` will be run before commit
-- manual deslop pass completed on changed files; no further dead code or duplication removal was needed after the script/test simplification
-- first packet commit: `9151dc6`
-- first packet push: `origin/Architects`
+- [ ] run `python3 scripts/check_work_packets.py`
+- [ ] collect contract-map evidence
+- [ ] record external-surface assumptions note
+- [ ] append execution result to `architects_progress.md`
+- [ ] commit and push once the packet slice lands
 
 ---
 
-## Stop Conditions
+## Definition of Done For The Remaining Current-Phase Queue
 
-Hard stop immediately if any of the following appears:
-- required reads are unmet
-- `P-BOUND-01` prerequisite is not satisfied
-- scope exceeds the allowed edit surface
-- authority disagreement changes file selection
-- CI fails manifests, boundaries, or architecture tests
-- runtime/schema/control-plane spillover appears
-- any gate attempts to block on external workspace artifacts
-
-Escalate to human for:
-- live cutover timing
-- schema cutover
-- control-plane expansion
-- destructive archive/delete
-- permanent `.claude` retirement
-
----
-
-## Subagent Policy For This Packet
-
-Allowed use of subagents:
-- read-only inventory of allowed gate surfaces
-- bounded verification
-- bounded test drafting
-- contradiction / blast-radius review
-
-Not allowed for subagents under this packet:
-- workflow authorship without owner approval
-- any runtime/codepath edits outside the frozen file set
-- authority-surface rewrites
-- silent scope expansion
-
-Recommended baton split:
-- Scout lane: inventory and classify allowed surfaces only
-- Verifier lane: compress findings into acceptance / evidence / risks
-- Critic lane: review false-positive risk, maintenance burden, and blast radius
-
----
-
-## Definition of Done For `P-GATE-01`
-
-`P-GATE-01-CONSOLIDATE-ADVISORY` is done only when all of the following are true:
-- work stayed entirely inside the allowed edit set
-- the advisory workflow has a machine-checkable verdict for blocking vs advisory jobs
-- semgrep remains advisory with explicit promotion conditions
-- replay parity remains advisory with explicit promotion conditions
-- external-workspace-dependent checks remain advisory
-- two attack-only adversarial reviews have been captured
-- the evidence bundle is complete
-- the result is appended to `architects_progress.md` with any remaining uncertainty clearly stated
+The remaining `P-*` queue is closed only when:
+- `P-BOUND-01`, `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are each frozen, executed, verified, committed, and pushed
+- no packet silently widens into schema/cutover/foundation-mainline work
+- current-phase authority install is complete without falsely claiming runtime convergence
+- `architects_progress.md` and `architects_task.md` reflect the cloud-visible truth
 
 ---
 
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Verify GitHub now shows both `9151dc6` and `56ce691` plus the updated Architects ledgers.
-2. Freeze the next bounded `P-*` packet instead of widening this one.
-3. Preferred next packet: semgrep triage / severity-promotion decision for the advisory lane.
-3. Preferred next packet: semgrep remediation / promotion-decision packet that separates packet-external findings from rule-path drift.
-4. Only after the full `P-*` family closes, plan the foundation mainline automation program.
+1. Start `P-BOUND-01` and keep it bounded.
+2. After `P-BOUND-01` closes, move to `P-ROLL-01`.
+3. Then close `P-STATE-01`.
+4. Then close `P-OPS-01`.
+5. Only after those four packets close, write the architecture mainline plan and prepare team execution.
 
-If this cannot be done without leaving the allowed file boundary, stop and freeze a new packet rather than forcing progress.
+If this cannot be done without leaving the active packet boundary, stop and freeze a new packet rather than forcing progress.
