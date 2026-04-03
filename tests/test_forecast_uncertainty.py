@@ -513,3 +513,27 @@ def test_day0_nowcast_context_exposes_age_and_freshness():
         observation_time="2026-04-02T00:00:00+00:00",
         current_utc_timestamp="2026-04-02T01:00:00+00:00",
     )
+
+
+def test_day0_nowcast_context_zeroes_untrusted_source_weight():
+    ctx = day0_nowcast_context(
+        hours_remaining=1.0,
+        observation_source="personal_weather_station",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:30:00+00:00",
+    )
+    assert ctx["trusted_source"] is False
+    assert ctx["source_factor"] == 0.0
+    assert ctx["blend_weight"] == 0.0
+
+
+def test_day0_nowcast_context_keeps_trusted_source_positive_weight():
+    ctx = day0_nowcast_context(
+        hours_remaining=1.0,
+        observation_source="asos_station",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T00:30:00+00:00",
+    )
+    assert ctx["trusted_source"] is True
+    assert ctx["source_factor"] == 1.0
+    assert ctx["blend_weight"] > 0.0
