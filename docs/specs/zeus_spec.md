@@ -1,5 +1,9 @@
 # Zeus: Polymarket Weather Trading System
 
+> Status: Historical rationale and reference spec, not principal authority.
+> Current authority order is defined in `architecture/self_check/authority_index.md`.
+> Current delivery law is defined in `docs/governance/zeus_autonomous_delivery_constitution.md`.
+
 **Date:** 2026-03-30 (revised 2026-03-31)
 **Status:** SPEC v2 — Position-Centric Architecture
 **Predecessor:** Rainstorm (retired — operational wisdom and data inherited, signal code discarded)
@@ -10,14 +14,17 @@
 
 | # | Document | Domain | Precedence |
 |---|----------|--------|-----------|
-| **6** | **`zeus_blueprint_v2.md`** | **Architecture: Position lifecycle, CycleRunner, Decision Chain, Truth Hierarchy, Exit = Entry rigor** | **HIGHEST — architectural authority. Supersedes all prior architecture sections.** |
-| 5 | `zeus_first_principles_rethink.md` | Why position management > signal precision. The reasoning behind Document 6. | High — design philosophy |
+| A | `docs/architecture/zeus_durable_architecture_spec.md` | Current-phase principal architecture authority | Highest |
+| B | `docs/governance/zeus_change_control_constitution.md` | Current-phase change-control authority | High |
+| C | `architecture/self_check/authority_index.md` | Authority routing order | High |
+| **6** | **`docs/architecture/zeus_blueprint_v2.md`** | **Architecture rationale: Position lifecycle, CycleRunner, Decision Chain, Truth Hierarchy, Exit = Entry rigor** | **Historical rationale only.** |
+| 5 | `docs/reference/zeus_first_principles_rethink.md` | Why position management > signal precision. The reasoning behind blueprint v2. | Historical rationale |
 | 1 | `rainstorm_quantitative_research.md` | Calibration math, Kelly, sample sizes, overfitting | Domain reference |
 | 2 | `rainstorm_architecture_blueprint.md` | **SUPERSEDED by Document 6.** Historical reference only — its signal-centric data flow (`observe → analyze → decide → execute`) is the root cause of both Rainstorm's death and Zeus v1's 10 P0 bugs. | Historical |
 | 3 | `rainstorm_market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
 | 4 | `rainstorm_statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |
 
-**If code contradicts Document 6, STOP and restructure. Do not patch.**
+**If code contradicts current active authority, follow `architecture/self_check/authority_index.md` rather than inferring precedence from this historical table alone.**
 
 ---
 

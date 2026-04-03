@@ -1,6 +1,10 @@
 # Zeus 设计哲学 v3：从脚本跑步机到有意识的 Agent
 
-**地位：Zeus-Venus 系统的最高权威文档。所有其他设计文档服从本文档的原则。**
+> Status: Historical rationale and system-philosophy reference, not principal authority.
+> Current authority order is defined in `architecture/self_check/authority_index.md`.
+> Principal current-phase architecture spec is `docs/architecture/zeus_durable_architecture_spec.md`.
+
+**地位（历史）：曾经作为 Zeus-Venus 系统的最高权威文档；当前已降级为历史解释面。**
 
 ---
 

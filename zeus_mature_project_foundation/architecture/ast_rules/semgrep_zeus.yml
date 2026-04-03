@@ -1,0 +1,102 @@
+rules:
+  - id: zeus-no-direct-close-from-engine
+    message: "Engine/orchestration code may not directly terminalize lifecycle via close_position(); emit exit intent and execution lifecycle instead."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/engine/**/*.py
+    pattern-either:
+      - pattern: close_position(...)
+      - pattern: void_position(...)
+
+  - id: zeus-no-memory-only-control-state
+    message: "Durable control/policy may not live only in process memory outside control-plane internals."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - src/control/control_plane.py
+        - tests/**/*.py
+    pattern: _control_state[...]
+
+  - id: zeus-no-json-authority-write
+    message: "positions.json and status_summary.json are derived exports only; do not introduce new write paths outside their dedicated export modules."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - src/state/portfolio.py
+        - src/observability/status_summary.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: open(..., "w")
+      - pattern: Path(...).write_text(...)
+
+  - id: zeus-no-ad-hoc-probability-complement
+    message: "Do not use ad hoc probability complements across architecture boundaries; use semantic contracts/helpers or explicit math-isolated modules."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/engine/**/*.py
+        - src/state/**/*.py
+        - src/execution/**/*.py
+      exclude:
+        - tests/**/*.py
+        - src/contracts/**/*.py
+    pattern-either:
+      - pattern: 1 - $P
+      - pattern: 1.0 - $P
+
+  - id: zeus-no-direct-phase-assignment
+    message: "Raw phase/state assignment outside lifecycle kernel is forbidden. Use lifecycle fold/manager/projection."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - src/state/lifecycle_manager.py
+        - src/state/projection.py
+        - src/state/ledger.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: $OBJ.phase = "..."
+      - pattern: $OBJ.state = "..."
+
+  - id: zeus-no-strategy-default-fallback
+    message: "Default strategy fallback masks attribution contamination; use canonical strategy_key or reject/quarantine."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern-either:
+      - pattern: |
+          if $X not in $Y:
+              $X = "opening_inertia"
+      - pattern: |
+          if not $X:
+              $X = "opening_inertia"
+
+  - id: zeus-no-default-unit-fallback
+    message: "Do not inject default unit semantics into core logic; units must be explicit or type-carried."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern-either:
+      - pattern: unit="F"
+      - pattern: unit = "F"
+      - pattern: unit="C"
+      - pattern: unit = "C"

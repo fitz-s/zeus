@@ -1,0 +1,120 @@
+schema_version: 1
+project: zeus
+
+principal_authority:
+  architecture_spec: docs/architecture/zeus_durable_architecture_spec.md
+  change_control_constitution: docs/governance/zeus_change_control_constitution.md
+  operator_brief: .claude/CLAUDE.md
+  historical_references:
+    - docs/architecture/zeus_blueprint_v2.md
+    - docs/reference/zeus_first_principles_rethink.md
+    - ZEUS_PROGRESS.md
+
+semantic_atoms:
+  unit:
+    frozen: true
+    allowed: [F, C]
+    rationale: Temperature semantics must never silently collapse to bare floats with implicit unit assumptions.
+  direction:
+    frozen: true
+    allowed: [buy_yes, buy_no, unknown]
+    rationale: Direction is lifecycle-bearing state, not display metadata.
+  probability_space:
+    frozen: true
+    allowed: [yes_side, no_side, held_side, native_side]
+    rationale: Probability-space semantics must be explicit across module boundaries.
+  strategy_key:
+    frozen: true
+    allowed:
+      - settlement_capture
+      - shoulder_sell
+      - center_buy
+      - opening_inertia
+    rationale: Sole governance key for risk, allocation, and performance policy.
+  phase:
+    frozen: true
+    allowed:
+      - pending_entry
+      - active
+      - day0_window
+      - pending_exit
+      - economically_closed
+      - settled
+      - voided
+      - quarantined
+      - admin_closed
+    rationale: Authoritative lifecycle grammar.
+  truth_surface_kind:
+    frozen: true
+    allowed:
+      - canonical_event
+      - canonical_projection
+      - derived_export
+      - ingress_command
+      - experimental
+  event_type:
+    frozen: true
+    allowed:
+      - POSITION_OPEN_INTENT
+      - ENTRY_ORDER_POSTED
+      - ENTRY_ORDER_FILLED
+      - ENTRY_ORDER_VOIDED
+      - ENTRY_ORDER_REJECTED
+      - CHAIN_SYNCED
+      - CHAIN_SIZE_CORRECTED
+      - CHAIN_QUARANTINED
+      - MONITOR_REFRESHED
+      - EXIT_INTENT
+      - EXIT_ORDER_POSTED
+      - EXIT_ORDER_FILLED
+      - EXIT_ORDER_VOIDED
+      - EXIT_ORDER_REJECTED
+      - SETTLED
+      - ADMIN_VOIDED
+      - MANUAL_OVERRIDE_APPLIED
+
+truth_surfaces:
+  canonical:
+    events_table: position_events
+    projection_table: position_current
+    authority_kind: canonical_event_plus_projection
+  derived:
+    - state/positions.json
+    - state/status_summary.json
+  ingress_only:
+    - state/control_plane.json
+  deprecated_shadow_surfaces:
+    - state/strategy_tracker.json
+
+write_authority:
+  canonical_append_modules:
+    - src.state.ledger
+  canonical_projection_modules:
+    - src.state.projection
+    - src.state.lifecycle_manager
+  canonical_policy_emitters:
+    - src.riskguard.riskguard
+    - src.riskguard.policy
+  canonical_policy_consumers:
+    - src.engine.evaluator
+    - src.engine.cycle_runner
+
+machine_gate_inputs:
+  manifests:
+    - architecture/kernel_manifest.yaml
+    - architecture/invariants.yaml
+    - architecture/zones.yaml
+    - architecture/negative_constraints.yaml
+    - architecture/maturity_model.yaml
+  schema:
+    - migrations/2026_04_02_architecture_kernel.sql
+  ast_rules:
+    - architecture/ast_rules/semgrep_zeus.yml
+  scripts:
+    - scripts/check_kernel_manifests.py
+    - scripts/check_module_boundaries.py
+    - scripts/check_work_packets.py
+    - scripts/replay_parity.py
+  tests:
+    - tests/test_cross_module_invariants.py
+    - tests/test_architecture_contracts.py

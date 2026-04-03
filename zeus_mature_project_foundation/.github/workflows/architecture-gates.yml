@@ -1,0 +1,84 @@
+name: architecture-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  architecture-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pyyaml
+      - run: python scripts/check_kernel_manifests.py
+
+  semgrep-zeus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: architecture/ast_rules/semgrep_zeus.yml
+        env:
+          SEMGREP_APP_TOKEN: ""
+    continue-on-error: false
+
+  module-boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pyyaml
+      - run: python scripts/check_module_boundaries.py
+
+  kernel-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pytest pyyaml
+      - run: pytest -q tests/test_cross_module_invariants.py tests/test_architecture_contracts.py
+
+  packet-grammar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/check_work_packets.py
+
+  schema-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python - <<'PY'
+from pathlib import Path
+sql = Path("migrations/2026_04_02_architecture_kernel.sql").read_text()
+required = ["CREATE TABLE IF NOT EXISTS position_events", "CREATE TABLE IF NOT EXISTS position_current", "CHECK (strategy_key IN", "CHECK (phase IN"]
+missing = [item for item in required if item not in sql]
+if missing:
+    raise SystemExit(f"missing schema markers: {missing}")
+print("schema smoke ok")
+PY
+
+  replay-parity:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # tighten to false once P1 dual-write lands
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/replay_parity.py --ci

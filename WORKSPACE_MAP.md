@@ -1,5 +1,9 @@
 # Zeus Workspace Map
 
+> Status: Orientation-only map, not principal authority.
+> Current authority order is defined in `architecture/self_check/authority_index.md`.
+> Current delivery law is defined in `docs/governance/zeus_autonomous_delivery_constitution.md`.
+
 ## Root
 
 | Item | Purpose |
@@ -7,7 +11,8 @@
 | `.claude/CLAUDE.md` | Zeus coding rules, design principles, Rainstorm reuse policy |
 | `WORKSPACE_MAP.md` | This file — directory contract |
 | `docs/progress/zeus_progress.md` | Session-level progress tracking and status |
-| `docs/plans/zeus_live_plan.md` | Current active implementation plan |
+| `docs/plans/zeus_live_plan.md` | Historical live-readiness plan, not principal authority |
+| `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
@@ -33,8 +38,11 @@
 
 | Path | Purpose | Authority |
 |------|---------|-----------|
-| `docs/architecture/zeus_design_philosophy.md` | **HIGHEST.** Why recognition ≠ prevention. Cross-module invariants. | Active |
-| `docs/architecture/zeus_blueprint_v2.md` | **Architectural.** Position-centric lifecycle, CycleRunner, Decision Chain. | Active |
+| `docs/architecture/zeus_durable_architecture_spec.md` | Principal architecture authority for current phase. | Active |
+| `docs/governance/zeus_change_control_constitution.md` | Change-control authority. | Active |
+| `docs/governance/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority. | Active |
+| `docs/architecture/zeus_design_philosophy.md` | Historical rationale about system center and translation-loss failure mode. | Historical |
+| `docs/architecture/zeus_blueprint_v2.md` | Historical architectural rationale for position-centric design. | Historical |
 | `docs/strategy/data_strategy.md` | Data utilization and strategy planning. | Active |
 | `docs/reviews/zeus_review_phase2_strategic.md` | Strategic review and gap diagnosis (phase 2). | Historical |
 | `docs/reference/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |

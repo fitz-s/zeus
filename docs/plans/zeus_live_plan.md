@@ -1,8 +1,13 @@
 # Zeus Master Plan For Final Live-Ready Audit
+
+> Status: Historical execution plan, not principal authority.
+> Current authority order is defined in `architecture/self_check/authority_index.md`.
+> Current delivery law is defined in `docs/governance/zeus_autonomous_delivery_constitution.md`.
+
 > Updated: 2026-04-01 | Status: IN PROGRESS
 
 ## Execution Contract
-- `PLAN.md` is the authoritative control surface for the live-ready push.
+- `docs/plans/zeus_live_plan.md` is a historical execution artifact for the live-ready push, not the principal control surface.
 - Work continues phase-to-phase without pausing for ticket-style handoff.
 - Every meaningful finding is classified as `Verified fact`, `Strong inference`, or `Plausible but unverified`.
 - Every stabilized fix must land as code, contract, test, linter, preflight, runbook, or audit script.

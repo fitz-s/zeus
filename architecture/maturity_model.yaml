@@ -1,0 +1,48 @@
+schema_version: 1
+current_state:
+  stage: hardened_transition
+  description: Repo has a real system center and strong cross-module invariants, but authority, learning, and protection are not yet fully machine-governed.
+target_state:
+  stage: governed_runtime
+  description: Canonical authority, strategy-aware protection, and machine-enforced change control exist and are CI-gated.
+
+stages:
+  - name: aware
+    criteria:
+      - human docs identify correct system center
+      - runtime may still be patch-centric
+  - name: hardened
+    criteria:
+      - semantic type boundaries exist
+      - cross-module invariants are tested
+      - runtime center is visible
+  - name: governed_runtime
+    criteria:
+      - canonical event/projection authority exists
+      - strategy-aware protective policy exists
+      - zero-context routing and manifests are in place
+      - architecture gates run in CI
+  - name: mature_project
+    criteria:
+      - shadow persistence removed or demoted
+      - replay/parity gates block regressions
+      - broad LLM coding cannot silently break kernel rules
+  - name: durable_system
+    criteria:
+      - future math/features arrive as extensions without perturbing kernel law
+      - operator/learning/protection surfaces all derive from canonical authority
+
+promotion_rules:
+  - from: hardened_transition
+    to: governed_runtime
+    requires:
+      - P0 attribution freeze
+      - canonical transaction boundary
+      - authority manifests in CI
+  - from: governed_runtime
+    to: mature_project
+    requires:
+      - dual-write parity
+      - DB-first reads
+      - replay/parity harness active
+      - control plane durability

@@ -1,5 +1,9 @@
 # Zeus Architecture Blueprint v2: Position-Centric Design
 
+> Status: Historical architectural rationale, not principal authority.
+> Current authority order is defined in `architecture/self_check/authority_index.md`.
+> Principal current-phase architecture spec is `docs/architecture/zeus_durable_architecture_spec.md`.
+
 **Supersedes:** `rainstorm_architecture_blueprint.md` (v1, signal-centric)
 **Informed by:** Rainstorm 14-month autopsy, Zeus Sessions 1-6, two independent code reviews (2/10 and 4/10 Phase D readiness), 10 P0 bugs all in lifecycle layer
 

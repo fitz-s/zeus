@@ -1,0 +1,64 @@
+schema_version: 1
+constraints:
+  - id: NC-01
+    statement: No broad prompt may edit K0 and K3 in the same patch without explicit packet justification.
+    enforced_by:
+      scripts:
+        - scripts/check_work_packets.py
+  - id: NC-02
+    statement: JSON exports may not be promoted back to authority.
+    forbidden_surfaces:
+      - state/positions.json
+      - state/status_summary.json
+      - state/strategy_tracker.json
+    enforced_by:
+      docs:
+        - architecture/ast_rules/forbidden_patterns.md
+      semgrep_rule_ids:
+        - zeus-no-json-authority-write
+  - id: NC-03
+    statement: No downstream strategy fallback or re-inference when strategy_key is already available.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-strategy-default-fallback
+      tests:
+        - tests/test_architecture_contracts.py::test_negative_constraints_cover_strategy_fallback
+  - id: NC-04
+    statement: No direct lifecycle terminalization from orchestration code.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-direct-close-from-engine
+  - id: NC-05
+    statement: No silent fallback from missing decision snapshot to latest snapshot for learning truth.
+    enforced_by:
+      docs:
+        - architecture/ast_rules/forbidden_patterns.md
+      tests:
+        - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
+  - id: NC-06
+    statement: No memory-only durable governance.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-memory-only-control-state
+  - id: NC-07
+    statement: No raw phase/state string assignment outside lifecycle kernel.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-direct-phase-assignment
+  - id: NC-08
+    statement: No bare implicit unit assumptions in semantic code paths.
+    enforced_by:
+      tests:
+        - tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src
+      semgrep_rule_ids:
+        - zeus-no-default-unit-fallback
+  - id: NC-09
+    statement: No ad hoc probability complements across architecture boundaries when semantic contracts exist.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-ad-hoc-probability-complement
+  - id: NC-10
+    statement: No new shadow persistence surface without deletion or demotion plan.
+    enforced_by:
+      scripts:
+        - scripts/check_work_packets.py

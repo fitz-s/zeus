@@ -1,0 +1,119 @@
+schema_version: 1
+zones:
+  K0_frozen_kernel:
+    description: Semantic atoms, lifecycle law, canonical truth model.
+    directories:
+      - src/contracts
+      - src/types
+      - src/state/ledger.py
+      - src/state/projection.py
+      - src/state/lifecycle_manager.py
+      - architecture/kernel_manifest.yaml
+      - architecture/invariants.yaml
+      - architecture/negative_constraints.yaml
+      - migrations/2026_04_02_architecture_kernel.sql
+    default_packet: schema_packet
+    evidence_required:
+      - spec_reference
+      - invariant_reference
+      - schema_diff
+      - tests
+      - parity_or_waiver
+    reviewers:
+      - principal_architect
+      - integration_reviewer
+  K1_governance:
+    description: Policy, risk actions, overrides, strategy governance.
+    directories:
+      - src/riskguard
+      - src/control
+    default_packet: feature_packet
+    evidence_required:
+      - policy_resolution_example
+      - behavior_change_example
+      - tests
+  K2_runtime:
+    description: Orchestration, execution, reconciliation, projections, operator read models.
+    directories:
+      - src/engine
+      - src/execution
+      - src/state
+      - src/observability
+      - src/data
+    default_packet: refactor_packet
+    evidence_required:
+      - runtime_trace
+      - tests
+  K3_extension:
+    description: Math, signal, calibration, analysis, optional feature modules.
+    directories:
+      - src/signal
+      - src/strategy
+      - src/calibration
+    default_packet: feature_packet
+    evidence_required:
+      - no_authority_diff_statement
+      - tests
+      - replay_or_waiver
+  K4_experimental:
+    description: Disposable experiments, notebooks, ad hoc diagnostics.
+    directories:
+      - notebooks
+      - exploratory
+      - scripts/ad_hoc
+    default_packet: feature_packet
+    evidence_required:
+      - isolation_statement
+
+forbidden_imports:
+  - id: BI-01
+    stage: immediate
+    source_modules:
+      - src.observability
+    forbidden_modules:
+      - src.execution.executor
+      - src.data.polymarket_client
+    rationale: Operator surfaces must be read-only and must not couple directly to execution internals.
+  - id: BI-02
+    stage: immediate
+    source_modules:
+      - src.control
+    forbidden_modules:
+      - src.signal
+      - src.strategy
+      - src.calibration
+    rationale: Control surfaces must not depend on math/strategy implementation details.
+  - id: BI-03
+    stage: immediate
+    source_modules:
+      - src.signal
+      - src.strategy
+      - src.calibration
+    forbidden_modules:
+      - src.riskguard
+      - src.control
+    rationale: Extension logic may not depend on governance/control surfaces.
+  - id: BI-04
+    stage: strict_after_P1
+    source_modules:
+      - src.signal
+      - src.strategy
+      - src.calibration
+    forbidden_modules:
+      - src.state.ledger
+      - src.state.projection
+      - src.state.lifecycle_manager
+    rationale: Math/extension code may consume contracts/types but must not couple to lifecycle-authority internals.
+  - id: BI-05
+    stage: strict_after_P1
+    source_modules:
+      - src.engine
+      - src.execution
+    forbidden_modules:
+      - src.state.portfolio
+    rationale: Runtime should move from JSON/state-object authority to canonical ledger/projection reads.
+
+zone_touch_policy:
+  cross_zone_edit_forbidden_without_packet: true
+  max_default_files_per_packet: 4
+  max_authority_files_per_packet: 2
