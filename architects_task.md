@@ -57,7 +57,7 @@ Current completion ladder:
 `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 
 ### State
-`FROZEN / READY TO EXECUTE`
+`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -119,9 +119,10 @@ Explicitly forbidden for edits in this packet:
 - `P0.1-EXIT-SEMANTICS-SPLIT` is complete and pushed in `3bc6b30`
 - next blocker is executional: the transaction-boundary slice is not yet landed
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
+- repo also has a pre-existing local `AGENTS.md` diff outside the active packet scope; it is not part of this packet
 
 ### Ready-to-commit slice
-`P0.3 is frozen — next execution slice is to define the touched authoritative transaction boundary in schema/write-path surfaces without widening into migration or cutover work.`
+`P0.3 inventory is complete — next execution slice is to define the touched authoritative transaction boundary in schema/write-path surfaces without widening into migration or cutover work.`
 
 ---
 
@@ -135,9 +136,14 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — packet intake
-- [ ] confirm exact schema/write-path surfaces to touch
-- [ ] confirm the smallest first-slice file set inside this packet
-- [ ] confirm targeted tests for transaction-boundary legality and staged waiver handling
+- [x] confirm exact schema/write-path surfaces to touch
+- [x] confirm the smallest first-slice file set inside this packet
+- [x] confirm targeted tests for transaction-boundary legality and staged waiver handling
+
+Inventory result:
+- `src/state/db.py` -> `present / legacy and target write-path surfaces both visible`
+- `migrations/2026_04_02_architecture_kernel.sql` -> `present / target append-plus-projection transaction model already encoded`
+- `tests/test_architecture_contracts.py` -> `present / best initial target for transaction-boundary legality checks`
 
 Inventory result:
 - `src/execution/exit_lifecycle.py` -> `present / already has explicit exit lifecycle state machine`
