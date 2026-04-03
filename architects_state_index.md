@@ -11,25 +11,25 @@ Metadata:
 
 ## Current state
 
-- Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
-- Active packet state: `frozen / ready for execution`
+- Stage: `Stage 2 canonical-authority rollout closed`
+- Active packet: `none (P1 closed)`
+- Active packet state: `idle / stop boundary reached for current run horizon`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Last accepted packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - no team is active
 
 ## Current next action
 
-1. Execute `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
-2. Run the targeted Stage 2 / P1 evidence suite
-3. Close P1 honestly only if the evidence stays green
+1. No active P1 work remains.
+2. If/when mainline resumes beyond this stop boundary, freeze `P2.1-EXECUTOR-EXIT-PATH` next.
+3. Keep out-of-scope dirt excluded from any future commit.
 
 ## Current out-of-scope dirt
 
-- `AGENTS.md` has unrelated local dirt outside the active packet scope
+- `AGENTS.md` has unrelated local dirt outside the closed packet scope
 - `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
 
 ## Fresh-session read order
@@ -38,5 +38,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.8-CANONICAL-AUTHORITY-CLOSEOUT.md`
-6. current packet `required_reads`
+5. if resuming: freeze the next Stage 3 packet before implementation
