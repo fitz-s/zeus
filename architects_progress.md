@@ -356,6 +356,25 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-02 23:38 America/Chicago] P-GATE-01-CONSOLIDATE-ADVISORY committed and pushed
+- Packet: `P-GATE-01-CONSOLIDATE-ADVISORY`
+- Status delta:
+  - packet committed as `9151dc6`
+  - branch pushed to `origin/Architects`
+  - advisory-consolidation slice is now cloud-visible
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - scope remained confined to the packet/workflow/script/test/Architects ledgers listed in the frozen packet
+- Decisions frozen:
+  - current advisory gate verdict is now machine-checkable in the repo
+  - semgrep and replay parity remain advisory until later packets intentionally promote them
+- Open uncertainties:
+  - the next packet must decide how to separate semgrep rule-path cleanup from packet-external source findings
+- Next required action:
+  - verify cloud-visible state, then freeze the next bounded `P-*` packet
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
