@@ -12,11 +12,11 @@
     {
       "task_id": "P2-H",
       "owner": "Main",
-      "goal": "Continue P2-H on Architects after authority-stack adoption, with the forecast mean seam now sample-aware, MAE-aware, and invalid-provenance-safe"
+      "goal": "Continue P2-H on Architects after the full Day0 external review, with mean provenance hardened and weak observation sources now excluded from Day0 nowcast weight"
     }
   ],
   "blocked": [],
   "waiting": [],
-  "last_decision": "CLOSE the invalid-bias-provenance slice, keep architecture gates executable locally, and continue P2-H inside K3-only packet discipline",
+  "last_decision": "CLOSE the trusted-source Day0 nowcast gate and the runtime-test sync, then continue P2-H from the externally flagged temporal-closure and observation-vs-ensemble questions",
   "backlog_source": "task.md"
 }

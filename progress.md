@@ -1817,3 +1817,62 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
   - `python3 scripts/check_work_packets.py` → `work packet grammar ok`
   - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py` → `34 passed`
   - `./.venv/bin/pytest -q` → `521 passed, 3 skipped`
+
+## 2026-04-03 — external Day0 math review captured
+- Ran a full external Day0 math review through local Gemini CLI and stored the artifact at:
+  - `.omx/artifacts/gemini-day0-full-math-review-2026-04-03T06-25-56Z.md`
+- External verdict:
+  - **acceptable with caution**
+  - observed floor / freshness decay / post-peak sigma direction were judged broadly defensible
+  - weakest surfaces called out explicitly:
+    - correlated-factor multiplication in `day0_temporal_closure_weight(...)`
+    - half-trust (`source_factor = 0.5`) for untrusted observation sources
+    - arbitrary 50% sigma floor
+    - linear 12h closure shape
+    - likely-wrong interpretation/directionality around the observation-vs-ensemble dominance signal
+- Required next-step implication:
+  - Day0 can keep moving in bounded K3 slices, but it should not be treated as mathematically “signed off” yet
+  - external review now explicitly requires:
+    - bin hit-rate / calibration validation
+    - sunset sanity check
+    - stale trusted observation stress test
+
+## 2026-04-03 — P2-H trusted-only nowcast source gate
+- The next Day0 slice directly addressed one of the external Day0 review's cleanest objections: untrusted observation sources should not receive a half-strength nowcast blend by default.
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/src/signal/forecast_uncertainty.py`
+    - `day0_nowcast_context(...)` now gives untrusted sources `source_factor = 0.0` instead of `0.5`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-P2H-007-trusted-source-nowcast.md`
+    - records the narrow K3 packet for this slice
+- Why this matters:
+  - Day0 no longer encodes “half confidence” in arbitrary weak observation sources
+  - trusted sources still retain the existing positive nowcast path
+  - the change stays inside the Day0 forecast seam without widening lifecycle/control semantics
+- Touched tests:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_forecast_uncertainty.py`
+    - now locks zero blend weight for untrusted sources and positive blend for trusted ones
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_day0_signal.py`
+    - now proves an untrusted observation source does not activate nowcast blend in Day0 forecast context
+- Verification evidence:
+  - `python3 scripts/check_work_packets.py` → `work packet grammar ok`
+  - `./.venv/bin/pytest -q tests/test_forecast_uncertainty.py tests/test_day0_signal.py` → `50 passed`
+  - `./.venv/bin/pytest -q` → `539 passed, 3 skipped`
+
+## 2026-04-03 — runtime verification drift corrected after contract freezes
+- Full-suite verification uncovered that several tests still encoded pre-freeze semantics rather than current Architects-branch law:
+  - bare `exit_intent` retry assumptions
+  - missing `strategy_key` on mocked decisions
+  - incomplete live exit telemetry expectations (missing `EXIT_INTENT` / `EXIT_ORDER_POSTED`)
+- Implementation delta:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/work_packets/FEAT-TEST-001-sync-tests-to-frozen-runtime-contracts.md`
+    - records the narrow test-sync packet
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_live_safety_invariants.py`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_pnl_flow_and_audit.py`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/tests/test_runtime_guards.py`
+    - now reflect the frozen runtime contracts instead of stale assumptions
+- Why this matters:
+  - the verification layer is back to signaling real regressions instead of historical expectation drift
+  - later P2-H and architecture work can now trust the suite again
+- Verification evidence:
+  - `./.venv/bin/pytest -q tests/test_live_safety_invariants.py::test_stranded_exit_intent_recovered tests/test_pnl_flow_and_audit.py::test_inv_strategy_tracker_receives_trades tests/test_runtime_guards.py -k 'trade_and_no_trade_artifacts_carry_replay_reference_fields or execute_discovery_phase_logs_rejected_live_entry_telemetry or strategy_gate_blocks_trade_execution or monitoring_phase_persists_live_exit_telemetry_chain or materialize_position_carries_semantic_snapshot_jsons'` → `5 passed`
+  - `./.venv/bin/pytest -q` → `539 passed, 3 skipped`
