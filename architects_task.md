@@ -54,24 +54,24 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P0.1-EXIT-SEMANTICS-SPLIT`
+`P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 
 ### State
-`ACCEPTED LOCALLY / READY TO COMMIT`
+`FROZEN / READY TO EXECUTE`
 
 ### Execution mode verdict
 `RALPH_NOW`
 
 ### Objective
-Introduce explicit exit-intent semantics and exit event vocabulary scaffolding before any broader lifecycle or ledger work, without batching full cutover behavior.
+Define the canonical transaction boundary so event append and current projection update become one synchronous authoritative write path, without batching broader migration or cutover work.
 
 ### Why this packet is next
-- `P0.2-ATTRIBUTION-FREEZE` is complete and pushed
-- foundation spec `P0 sequence` requires `P0.1` next
-- local-close semantics remain the deepest pre-ledger corruption risk
+- `P0.1-EXIT-SEMANTICS-SPLIT` is complete and pushed
+- foundation spec `P0 sequence` requires `P0.3` next
+- canonical authority still cannot land safely while write paths remain split
 
 ### Owner model
-- Required: one named execution owner for `P0.1-EXIT-SEMANTICS-SPLIT`
+- Required: one named execution owner for `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 - Tribunal/principal architect remains the scope-freezing authority
 - Verifier remains independent runtime/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
@@ -86,13 +86,12 @@ Introduce explicit exit-intent semantics and exit event vocabulary scaffolding b
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `src/execution/executor.py`
-- `src/execution/exit_lifecycle.py`
-- `src/engine/cycle_runtime.py`
-- `tests/test_runtime_guards.py`
+- `migrations/2026_04_02_architecture_kernel.sql`
+- `src/state/db.py`
+- `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
-- `work_packets/P0.1-EXIT-SEMANTICS-SPLIT.md`
+- `work_packets/P0.3-CANONICAL-TRANSACTION-BOUNDARY.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in this packet:
@@ -108,22 +107,21 @@ Explicitly forbidden for edits in this packet:
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no full runtime cutover yet
-- no `P0.3` transaction boundary work
 - no `P0.4` data-availability fact work
 - no `P0.5` implementation-OS work
 - no `P1/P2/P3` jump
+- no `P7` cutover or deletion work
 - no team execution
-- no schema or migration changes
+- no broad migration or cutover changes beyond the touched transaction-boundary design
 
 ### Current blocker
 - no active hard blocker
-- `P0.2-ATTRIBUTION-FREEZE` is complete and pushed in `a1ac706`
-- explicit adversarial review is complete
+- `P0.1-EXIT-SEMANTICS-SPLIT` is complete and pushed in `3bc6b30`
+- next blocker is executional: the transaction-boundary slice is not yet landed
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
 
 ### Ready-to-commit slice
-`P0.1 accepted locally — ExitIntent and canonical exit-event vocabulary scaffolding now exist on the touched execution path, bad-caller and bare-intent edge cases are guarded, and post-attack fixes are in place. Next step is commit/push.`
+`P0.3 is frozen — next execution slice is to define the touched authoritative transaction boundary in schema/write-path surfaces without widening into migration or cutover work.`
 
 ---
 
@@ -132,14 +130,14 @@ Explicitly forbidden for edits in this packet:
 ### Phase A — session revalidation
 - [x] confirm the current-phase `P-*` queue is closed
 - [x] confirm `FOUNDATION-MAINLINE-PLAN` is executed and accepted
-- [x] confirm `P0.2-ATTRIBUTION-FREEZE` is complete
-- [x] freeze `P0.1-EXIT-SEMANTICS-SPLIT`
+- [x] confirm `P0.1-EXIT-SEMANTICS-SPLIT` is complete
+- [x] freeze `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — packet intake
-- [x] confirm exact execution / runtime surfaces to touch
-- [x] confirm the smallest first-slice file set inside this packet
-- [x] confirm targeted tests for exit-event legality and scaffolding behavior
+- [ ] confirm exact schema/write-path surfaces to touch
+- [ ] confirm the smallest first-slice file set inside this packet
+- [ ] confirm targeted tests for transaction-boundary legality and staged waiver handling
 
 Inventory result:
 - `src/execution/exit_lifecycle.py` -> `present / already has explicit exit lifecycle state machine`
@@ -148,16 +146,16 @@ Inventory result:
 - `tests/test_runtime_guards.py` -> `present / best target for event-model legality tests`
 
 ### Phase C — bounded packet design
-- [x] keep work inside `P0.1` only
+- [x] keep work inside `P0.3` only
 - [x] block `P1/P2/P3` momentum
 - [x] keep team execution disallowed before `P0.5`
 
 ### Phase D — evidence bundle
 - [x] append prior packet closure + next packet freeze to `architects_progress.md`
-- [x] run targeted exit-semantics tests
-- [x] run architecture-contract verification
-- [x] run explicit adversarial review
-- [x] obtain architect verification
+- [ ] run targeted transaction-boundary tests
+- [ ] run architecture-contract verification
+- [ ] run explicit adversarial review
+- [ ] obtain architect verification
 - [ ] commit and push the packet execution slice
 
 ---
@@ -175,7 +173,7 @@ Planning completion is achieved:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Execute `P0.1-EXIT-SEMANTICS-SPLIT`.
+1. Execute `P0.3-CANONICAL-TRANSACTION-BOUNDARY`.
 2. Preserve the foundation-spec rules:
    - P0 is bearing-capacity work, not feature work
    - do not jump to P1/P2/P3
@@ -183,6 +181,6 @@ The next owner should do exactly this:
 3. If any stage, goal, or sequencing detail is unclear, return to:
    - `zeus_final_tribunal_overlay/`
    - `zeus_mature_project_foundation/`
-4. After `P0.1` closes, freeze `P0.3`.
+4. After `P0.3` closes, freeze `P0.4`.
 
 If this cannot be done without a new packet, freeze that packet before acting.

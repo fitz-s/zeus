@@ -894,6 +894,44 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead
 
+## [2026-04-03 00:49 America/Chicago] P0.1 committed and pushed
+- Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
+- Status delta:
+  - packet committed as `3bc6b30`
+  - branch pushed to `origin/Architects`
+  - next packet advances to `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - packet stayed inside the touched execution path and targeted tests
+- Decisions frozen:
+  - second real P0 packet is complete
+  - team remains blocked
+- Open uncertainties:
+  - broader runtime suites remain outside the targeted evidence set
+- Next required action:
+  - freeze `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Owner:
+  - execution owner: Architects local lead
+
+## [2026-04-03 00:52 America/Chicago] P0.3-CANONICAL-TRANSACTION-BOUNDARY frozen
+- Packet: `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Status delta:
+  - next P0 packet frozen
+  - progression continues in the required order: `P0.2 -> P0.1 -> P0.3 -> P0.4 -> P0.5`
+- Basis / evidence:
+  - foundation spec `P0.3` requires one authoritative single-transaction write path
+  - foundation `P0 sequence` explicitly places `P0.3` after `P0.1`
+- Decisions frozen:
+  - this packet stays on transaction-boundary design/scaffolding
+  - team remains disallowed
+  - no P0.4/P0.5/P1/P2/P7 batching
+- Open uncertainties:
+  - smallest execution slice still needs direct repo touchpoint inventory
+- Next required action:
+  - execute `P0.3-CANONICAL-TRANSACTION-BOUNDARY`
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-03 00:38 America/Chicago] P0.1 scaffolding landed locally with green targeted evidence
 - Packet: `P0.1-EXIT-SEMANTICS-SPLIT`
 - Status delta:
