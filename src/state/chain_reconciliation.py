@@ -453,8 +453,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if tid in ignored:
             continue  # Token was explicitly acknowledged/resolved or redeemed/expired — don't resurrect
         if tid not in local_tokens:
-            logger.warning("QUARANTINE: chain token %s...%s not in portfolio",
-                           tid[:8], tid[-4:])
+            logger.warning(
+                "QUARANTINE EXCLUDED FROM CANONICAL MIGRATION: chain token %s...%s not in portfolio; pending future governance design",
+                tid[:8],
+                tid[-4:],
+            )
             quarantine_pos = Position(
                 trade_id=f"quarantine_{tid[:8]}",
                 market_id=chain.condition_id,

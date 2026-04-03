@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `Stage 2 canonical-authority rollout`
-- Active packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
+- Active packet: `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
 - Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P1.7H-CHAIN-ONLY-QUARANTINE-EXCLUSION-RESOLUTION`
+- Last accepted packet: `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Execute `P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH`
-2. Keep chain-only quarantines outside canonical lifecycle truth
-3. Make the exclusion explicit and visible without inventing attribution or widening schema/law
+1. Execute `P1.8-CANONICAL-AUTHORITY-CLOSEOUT`
+2. Run the targeted Stage 2 / P1 evidence suite
+3. Close P1 honestly only if the evidence stays green
 
 ## Current out-of-scope dirt
 
@@ -38,5 +38,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P1.7I-CHAIN-ONLY-QUARANTINE-EXCLUSION-FOLLOW-THROUGH.md`
+5. `work_packets/P1.8-CANONICAL-AUTHORITY-CLOSEOUT.md`
 6. current packet `required_reads`
