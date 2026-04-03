@@ -30,10 +30,10 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Stage 2 canonical-authority rollout`
-- Last accepted packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE` (`eead3bc`)
-- Current active packet: `P1.7G-CHAIN-QUARANTINE-STRATEGY-RESOLUTION`
-- Current packet status: `blocked / human decision required`
+- Mainline stage: `Stage 3 / P2 execution-truth mainline`
+- Last accepted packet: `P2.1-EXECUTOR-EXIT-PATH`
+- Current active packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
   - no active technical blocker inside packet scope
@@ -791,5 +791,69 @@ Archive policy:
   - no remaining uncertainty blocks P1 closure
 - Next required action:
   - stop at the current user-request horizon (`P1 closed`)
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:25 America/Chicago] P2.1-EXECUTOR-EXIT-PATH frozen
+- Author: `Architects mainline lead`
+- Packet: `P2.1-EXECUTOR-EXIT-PATH`
+- Status delta:
+  - Stage 3 / P2 mainline opened
+  - current active packet frozen
+- Basis / evidence:
+  - repo truth shows P1 / Stage 2 is closed and no active packet remains open
+  - durable spec names `executor exit path` as the first P2 sequence item
+  - current runtime still routes live sell execution through a standalone dict-returning helper while `executor.py` remains effectively buy-only
+- Decisions frozen:
+  - keep this slice on executor + exit-lifecycle wiring only
+  - do not widen into cycle-runtime orchestration, pending-exit recovery policy, or settlement semantics
+  - keep team closed by default
+- Open uncertainties:
+  - the narrowest exit-executor surface still needs implementation review
+- Next required action:
+  - land the executor exit path and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:41 America/Chicago] P2.1-EXECUTOR-EXIT-PATH accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P2.1-EXECUTOR-EXIT-PATH`
+- Status delta:
+  - explicit executor-level exit-order path now exists
+  - `exit_lifecycle.py` now consumes the executor exit path through a thin adapter
+  - packet is ready for commit/push in this step
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/pytest -q tests/test_executor.py tests/test_runtime_guards.py -k 'create_exit_order_intent_carries_boundary_fields or execute_exit_order_places_sell_and_rounds_down or execute_exit_order_rejects_missing_token or execute_exit_routes_live_sell_through_executor_exit_path or execute_exit_rejected_orderresult_preserves_retry_semantics or build_exit_intent_carries_boundary_fields or execute_exit_accepts_prebuilt_exit_intent_in_paper_mode or execute_exit_rejects_mismatched_exit_intent or check_pending_exits_does_not_retry_bare_exit_intent_without_error or check_pending_exits_emits_void_semantics_for_rejected_sell or monitoring_phase_persists_live_exit_telemetry_chain'` -> `11 passed`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py -k 'live_exit_never_closes_without_fill or paper_exit_does_not_use_sell_order or stranded_exit_intent_recovered'` -> `3 passed`
+  - explicit adversarial review of the narrowed packet claim returned `APPROVE`
+- Decisions frozen:
+  - executor now has an explicit sell/exit order surface returning `OrderResult`
+  - `exit_lifecycle.py` uses the executor exit path without widening cycle-runtime or settlement semantics
+  - compatibility with legacy dict-style sell-result patches remains transitional, not authoritative
+- Open uncertainties:
+  - cycle-runtime exit-intent orchestration still needs an explicit closeout evidence gate
+- Next required action:
+  - freeze `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 14:41 America/Chicago] P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT frozen
+- Author: `Architects mainline lead`
+- Packet: `P2.2-CYCLE-RUNTIME-EXIT-INTENT-CLOSEOUT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - repo truth already appears to route monitoring-phase exits through explicit exit intent and exit-lifecycle
+  - the next narrow step is to accept or reopen that path from evidence rather than by narrative momentum
+- Decisions frozen:
+  - keep this slice verification-only unless evidence reveals a real gap
+  - do not widen into pending-exit or settlement semantics
+  - keep team closed by default
+- Open uncertainties:
+  - whether the current cycle-runtime exit-intent evidence is sufficient for honest acceptance
+- Next required action:
+  - run the closeout evidence suite and adversarial review
 - Owner:
   - Architects mainline lead

@@ -1,12 +1,13 @@
 """Tests for executor and portfolio."""
 
-import json
-import tempfile
-from pathlib import Path
-
 import pytest
 
-from src.execution.executor import create_execution_intent, execute_intent, OrderResult
+from src.execution.executor import (
+    create_execution_intent,
+    create_exit_order_intent,
+    execute_exit_order,
+    execute_intent,
+)
 from src.contracts import EdgeContext, EntryMethod
 import numpy as np
 from src.state.portfolio import (
@@ -124,3 +125,70 @@ class TestExecutor:
         assert result.fill_price is not None
         assert 0.01 <= result.fill_price <= 0.99
         assert result.trade_id is not None
+
+    def test_create_exit_order_intent_carries_boundary_fields(self):
+        intent = create_exit_order_intent(
+            trade_id="trade-1",
+            token_id="yes-token",
+            shares=12.345,
+            current_price=0.46,
+            best_bid=0.45,
+        )
+
+        assert intent.trade_id == "trade-1"
+        assert intent.token_id == "yes-token"
+        assert intent.shares == pytest.approx(12.345)
+        assert intent.current_price == pytest.approx(0.46)
+        assert intent.best_bid == pytest.approx(0.45)
+        assert intent.intent_id == "trade-1:exit"
+
+    def test_execute_exit_order_places_sell_and_rounds_down(self, monkeypatch):
+        captured = {}
+
+        class DummyClient:
+            def __init__(self, paper_mode):
+                assert paper_mode is False
+
+            def place_limit_order(self, *, token_id, price, size, side):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                )
+                return {"orderID": "sell-1", "status": "OPEN"}
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-1",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+            )
+        )
+
+        assert result.status == "pending"
+        assert result.order_role == "exit"
+        assert result.order_id == "sell-1"
+        assert captured == {
+            "token_id": "yes-token",
+            "price": pytest.approx(0.49),
+            "size": pytest.approx(12.34),
+            "side": "SELL",
+        }
+
+    def test_execute_exit_order_rejects_missing_token(self):
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-1",
+                token_id="",
+                shares=12.0,
+                current_price=0.50,
+            )
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "no_token_id"

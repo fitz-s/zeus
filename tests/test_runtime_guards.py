@@ -2162,8 +2162,17 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
 
     monkeypatch.setattr(Position, "evaluate_exit", _evaluate_exit)
     monkeypatch.setattr(
-        "src.execution.exit_lifecycle.place_sell_order",
-        lambda **kwargs: {"orderID": "sell-order-1", "avgPrice": 0.46},
+        "src.execution.exit_lifecycle.execute_exit_order",
+        lambda intent: OrderResult(
+            trade_id=intent.trade_id,
+            status="pending",
+            order_id="sell-order-1",
+            external_order_id="sell-order-1",
+            submitted_price=0.46,
+            shares=intent.shares,
+            order_role="exit",
+            venue_status="OPEN",
+        ),
     )
 
     p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
@@ -2349,6 +2358,108 @@ def test_build_exit_intent_carries_boundary_fields():
     assert intent.current_market_price == pytest.approx(0.46)
     assert intent.best_bid == pytest.approx(0.45)
     assert intent.paper_mode is True
+
+
+def test_execute_exit_routes_live_sell_through_executor_exit_path(monkeypatch):
+    pos = _position(state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+    calls = {}
+
+    class LiveClob:
+        def get_balance(self):
+            return 100.0
+
+        def get_order_status(self, order_id):
+            calls["checked_order_id"] = order_id
+            return {"status": "OPEN"}
+
+    def _execute_exit_order(intent):
+        calls["intent"] = intent
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="pending",
+            order_id="sell-order-1",
+            external_order_id="sell-order-1",
+            submitted_price=0.44,
+            shares=intent.shares,
+            order_role="exit",
+            venue_status="OPEN",
+        )
+
+    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit_order", _execute_exit_order)
+
+    outcome = exit_lifecycle_module.execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ctx,
+        paper_mode=False,
+        clob=LiveClob(),
+    )
+
+    assert outcome == "sell_pending: order=sell-order-1, status=OPEN"
+    assert calls["intent"].trade_id == pos.trade_id
+    assert calls["intent"].token_id == pos.token_id
+    assert calls["intent"].shares == pytest.approx(pos.effective_shares)
+    assert calls["intent"].current_price == pytest.approx(0.46)
+    assert pos.exit_state == "sell_pending"
+
+
+def test_execute_exit_rejected_orderresult_preserves_retry_semantics(monkeypatch):
+    pos = _position(state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+
+    class LiveClob:
+        def get_balance(self):
+            return 100.0
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit_order",
+        lambda intent: OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason="sell_api_down",
+            order_role="exit",
+        ),
+    )
+
+    outcome = exit_lifecycle_module.execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ctx,
+        paper_mode=False,
+        clob=LiveClob(),
+    )
+
+    assert outcome == "sell_error: sell_api_down"
+    assert pos in portfolio.positions
+    assert pos.exit_state == "retry_pending"
+    assert pos.last_exit_error == "sell_api_down"
 
 
 def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():

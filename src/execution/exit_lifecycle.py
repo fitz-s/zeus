@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
-from src.execution.executor import place_sell_order
+from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.portfolio import (
     ExitContext,
     Position,
@@ -53,6 +53,27 @@ class ExitIntent:
     current_market_price: float
     best_bid: float | None
     paper_mode: bool
+
+
+def place_sell_order(
+    *,
+    trade_id: str,
+    token_id: str,
+    shares: float,
+    current_price: float,
+    best_bid: float | None = None,
+) -> OrderResult:
+    """Thin compatibility adapter over the executor-level exit-order path."""
+
+    return execute_exit_order(
+        create_exit_order_intent(
+            trade_id=trade_id,
+            token_id=token_id,
+            shares=shares,
+            current_price=current_price,
+            best_bid=best_bid,
+        )
+    )
 
 
 # CLOB statuses that indicate a fill
@@ -234,19 +255,22 @@ def _execute_live_exit(
     position.exit_state = "exit_intent"
 
     try:
-        sell_result = place_sell_order(
+        raw_sell_result = place_sell_order(
+            trade_id=position.trade_id,
             token_id=token_id,
             shares=position.effective_shares,
             current_price=current_market_price,
             best_bid=best_bid,
         )
+        sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
 
-        if sell_result.get("error"):
-            retry_reason = f"{exit_context.exit_reason} [SELL_ERROR: {sell_result['error']}]"
+        if sell_result.status == "rejected":
+            sell_error = sell_result.reason or "sell_rejected"
+            retry_reason = f"{exit_context.exit_reason} [SELL_ERROR: {sell_error}]"
             _mark_exit_retry(
                 position,
                 reason=retry_reason,
-                error=sell_result["error"],
+                error=sell_error,
             )
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -254,17 +278,12 @@ def _execute_live_exit(
                     position,
                     event_type="EXIT_ORDER_REJECTED",
                     reason=retry_reason,
-                    error=sell_result["error"],
+                    error=sell_error,
                 )
-                log_exit_retry_event(conn, position, reason=retry_reason, error=sell_result["error"])
-            return f"sell_error: {sell_result['error']}"
+                log_exit_retry_event(conn, position, reason=retry_reason, error=sell_error)
+            return f"sell_error: {sell_error}"
 
-        order_id = (
-            sell_result.get("orderID")
-            or sell_result.get("orderId")
-            or sell_result.get("id")
-            or ""
-        )
+        order_id = sell_result.external_order_id or sell_result.order_id or ""
         position.last_exit_order_id = order_id
         position.exit_state = "sell_placed"
         if conn is not None:
@@ -286,7 +305,7 @@ def _execute_live_exit(
                     details={
                         "token_id": token_id,
                         "semantic_event": "EXIT_ORDER_POSTED",
-                        "sell_result": sell_result,
+                        "sell_result": _serialize_sell_result(sell_result),
                     },
                 )
 
@@ -512,14 +531,69 @@ def _check_order_fill(clob, order_id: str) -> str:
         return ""
 
 
+def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> OrderResult:
+    if isinstance(sell_result, OrderResult):
+        return sell_result
+    if isinstance(sell_result, dict):
+        if sell_result.get("error"):
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=str(sell_result["error"]),
+            )
+        order_id = (
+            sell_result.get("orderID")
+            or sell_result.get("orderId")
+            or sell_result.get("id")
+            or trade_id
+        )
+        return OrderResult(
+            trade_id=trade_id,
+            status="pending",
+            order_id=order_id,
+            external_order_id=order_id,
+            submitted_price=sell_result.get("price"),
+            shares=sell_result.get("shares"),
+            venue_status=str(sell_result.get("status") or "placed"),
+            fill_price=sell_result.get("avgPrice") or sell_result.get("avg_price") or sell_result.get("price"),
+            reason="sell order posted",
+            order_role="exit",
+        )
+    raise TypeError(f"unsupported sell result type: {type(sell_result)!r}")
+
+
+def _serialize_sell_result(sell_result: OrderResult | dict) -> dict:
+    if isinstance(sell_result, OrderResult):
+        return {
+            "trade_id": sell_result.trade_id,
+            "status": sell_result.status,
+            "reason": sell_result.reason,
+            "order_id": sell_result.order_id,
+            "external_order_id": sell_result.external_order_id,
+            "submitted_price": sell_result.submitted_price,
+            "shares": sell_result.shares,
+            "venue_status": sell_result.venue_status,
+            "fill_price": sell_result.fill_price,
+            "order_role": sell_result.order_role,
+            "intent_id": sell_result.intent_id,
+            "idempotency_key": sell_result.idempotency_key,
+        }
+    return dict(sell_result)
+
+
 def _extract_fill_price(
-    sell_result: dict,
+    sell_result: OrderResult | dict,
     current_market_price: float,
     best_bid: Optional[float] = None,
 ) -> float:
     """Extract actual fill price from sell result. Fall back to best_bid or market."""
+    if isinstance(sell_result, OrderResult) and sell_result.fill_price not in (None, ""):
+        try:
+            return float(sell_result.fill_price)
+        except (TypeError, ValueError):
+            pass
     for key in ("avgPrice", "avg_price", "price"):
-        if key in sell_result and sell_result[key] not in (None, ""):
+        if isinstance(sell_result, dict) and key in sell_result and sell_result[key] not in (None, ""):
             try:
                 return float(sell_result[key])
             except (TypeError, ValueError):

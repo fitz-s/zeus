@@ -53,6 +53,24 @@ class OrderResult:
     timeout_seconds: Optional[int] = None
     submitted_price: Optional[float] = None
     shares: Optional[float] = None
+    order_role: Optional[str] = None
+    intent_id: Optional[str] = None
+    external_order_id: Optional[str] = None
+    venue_status: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ExitOrderIntent:
+    """Executor-level contract for live sell/exit order placement."""
+
+    trade_id: str
+    token_id: str
+    shares: float
+    current_price: float
+    best_bid: Optional[float] = None
+    intent_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 def create_execution_intent(
@@ -141,6 +159,27 @@ def execute_intent(
         )
 
 
+def create_exit_order_intent(
+    *,
+    trade_id: str,
+    token_id: str,
+    shares: float,
+    current_price: float,
+    best_bid: Optional[float] = None,
+) -> ExitOrderIntent:
+    """Build the explicit executor contract for a live sell/exit order."""
+
+    return ExitOrderIntent(
+        trade_id=trade_id,
+        token_id=token_id,
+        shares=shares,
+        current_price=current_price,
+        best_bid=best_bid,
+        intent_id=f"{trade_id}:exit",
+        idempotency_key=f"{trade_id}:exit:{token_id}",
+    )
+
+
 def _paper_fill(
     trade_id: str,
     intent: ExecutionIntent,
@@ -178,16 +217,36 @@ def place_sell_order(
     current_price: float,
     best_bid: Optional[float] = None,
 ) -> dict:
-    """Place a limit sell order for live exit. Returns order receipt (NOT fill confirmation).
+    """Legacy compatibility wrapper for the executor-level exit-order path."""
 
-    Dynamic limit pricing adapted from Rainstorm:
-    - Base price: 1 cent below mid for passive fill
-    - If best_bid within 3% slippage: match best bid for faster fill
-    - Beyond 3% slippage: stay passive (better unfilled than fire-sale)
-    - Share quantization: SELL rounds DOWN (0.01 increments)
-    """
+    result = execute_exit_order(
+        create_exit_order_intent(
+            trade_id=f"exit-{token_id[:8]}",
+            token_id=token_id,
+            shares=shares,
+            current_price=current_price,
+            best_bid=best_bid,
+        )
+    )
+    if result.status == "rejected":
+        return {"error": result.reason or "rejected"}
+    payload = {
+        "orderID": result.external_order_id or result.order_id or "",
+        "price": result.submitted_price,
+        "shares": result.shares,
+    }
+    if result.venue_status:
+        payload["status"] = result.venue_status
+    return payload
+
+
+def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
+    """Place a live sell order via the executor and return a normalized OrderResult."""
+
     from src.data.polymarket_client import PolymarketClient
 
+    current_price = intent.current_price
+    best_bid = intent.best_bid
     base_price = current_price - 0.01
     limit_price = base_price
 
@@ -195,29 +254,85 @@ def place_sell_order(
         slippage = current_price - best_bid
         if current_price > 0 and slippage / current_price <= 0.03:
             limit_price = best_bid
-        # else: stay passive, better unfilled than fire-sale
 
     limit_price = max(0.01, min(0.99, limit_price))
 
-    # SELL rounds DOWN (opposite of BUY rounding UP)
-    shares = math.floor(shares * 100 + 1e-9) / 100.0
+    shares = math.floor(intent.shares * 100 + 1e-9) / 100.0
     if shares <= 0:
-        return {"error": "shares_rounded_to_zero"}
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason="shares_rounded_to_zero",
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
+    if not intent.token_id:
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason="no_token_id",
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
 
     logger.info(
         "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
-        token_id[:8], token_id[-4:], limit_price, shares,
+        intent.token_id[:8], intent.token_id[-4:], limit_price, shares,
         current_price, f"{best_bid:.3f}" if best_bid else "N/A",
     )
 
-    client = PolymarketClient(paper_mode=False)
-    result = client.place_limit_order(
-        token_id=token_id,
-        price=limit_price,
-        size=shares,
-        side="SELL",
-    )
-    return result or {"error": "clob_returned_none"}
+    try:
+        client = PolymarketClient(paper_mode=False)
+        result = client.place_limit_order(
+            token_id=intent.token_id,
+            price=limit_price,
+            size=shares,
+            side="SELL",
+        )
+        if result is None:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason="clob_returned_none",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+            )
+        order_id = (
+            result.get("orderID")
+            or result.get("orderId")
+            or result.get("id")
+            or intent.trade_id
+        )
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="pending",
+            reason="sell order posted",
+            order_id=order_id,
+            submitted_price=limit_price,
+            shares=shares,
+            order_role="exit",
+            intent_id=intent.intent_id,
+            external_order_id=order_id,
+            venue_status=str(result.get("status") or "placed"),
+            idempotency_key=intent.idempotency_key,
+        )
+    except Exception as e:
+        logger.error("Live exit order failed: %s", e)
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=str(e),
+            submitted_price=limit_price,
+            shares=shares,
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
 
 
 def _live_order(
