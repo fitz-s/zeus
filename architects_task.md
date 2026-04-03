@@ -17,18 +17,18 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
 - State: `LANDED LOCALLY / UNDER REVIEW`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Extend `src/engine/lifecycle_events.py` with pure reconciliation chain-event builders for chain size correction and quarantine facts so later reconciliation packets can append those canonical lifecycle facts without inventing payloads inline.
+Migrate the reconciliation size-correction branch to append canonical `CHAIN_SIZE_CORRECTED` lifecycle facts when canonical schema is present and prior canonical position history exists, while preserving existing legacy behavior on legacy-schema runtimes.
 
 ## Allowed files
 
-- `work_packets/P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS.md`
+- `work_packets/P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE.md`
 - `src/engine/lifecycle_events.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
@@ -59,7 +59,7 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation chain-event bui
 
 ## Non-goals
 
-- no reconciliation caller migration
+- no reconciliation caller migration beyond size correction
 - no broader dual-write in caller code
 - no DB-first reads
 - no exit-path migration
@@ -73,17 +73,17 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation chain-event bui
 
 ## Immediate checklist
 
-- [x] implement reconciliation chain-event builders in `src/engine/lifecycle_events.py`
-- [x] keep the builder layer detached from reconciliation caller wiring
-- [x] add targeted architecture-contract coverage
-- [x] append durable packet transition to `architects_progress.md` when implementation lands
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] implement reconciliation size-correction dual-write in `src/state/chain_reconciliation.py`
+- [ ] keep legacy size-correction behavior in place on legacy-schema runtimes
+- [ ] add targeted architecture-contract coverage
+- [ ] append durable packet transition to `architects_progress.md` when implementation lands
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Commit and push this accepted reconciliation chain-event builder packet without mixing unrelated working-tree dirt.
-2. Freeze the successor reconciliation chain-event migration packet after push.
-3. Keep cutover and broader state rewiring out of scope.
-4. Keep caller migration separate from this builder packet.
+1. Migrate only the reconciliation size-correction branch.
+2. Keep quarantine and other reconciliation branches out of scope.
+3. Keep team closed by default.
+4. Keep unrelated working-tree dirt out of the packet commit.

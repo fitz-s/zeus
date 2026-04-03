@@ -31,8 +31,8 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `Stage 2 canonical-authority rollout`
-- Last accepted packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE` (`b1abe44`)
-- Current active packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Last accepted packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS` (`df0844c`)
+- Current active packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
 - Current packet status: `frozen`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
@@ -540,5 +540,45 @@ Archive policy:
   - adversarial review has not yet attacked the builder-surface claim
 - Next required action:
   - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 12:38 America/Chicago] P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Status delta:
+  - packet committed as `df0844c`
+  - packet pushed to `origin/Architects`
+  - reconciliation chain-event builder layer is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to `lifecycle_events.py`, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - chain size correction and quarantine payload construction is now isolated from reconciliation caller code
+  - no reconciliation migration, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - the size-correction branch is the next actionable reconciliation migration
+- Next required action:
+  - freeze the size-correction dual-write packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:38 America/Chicago] P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7F-RECONCILIATION-SIZE-CORRECTION-DUAL-WRITE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - pending-fill rescue branch is already migrated
+  - size correction is the next reconciliation event branch that can be migrated without unresolved strategy-key ambiguity
+- Decisions frozen:
+  - keep this slice on the size-correction branch only
+  - quarantine remains out of scope pending explicit strategy-key resolution
+  - keep team closed by default
+- Open uncertainties:
+  - exact size-correction caller-migration proof still needs implementation review
+- Next required action:
+  - land the size-correction migration and targeted tests
+  - then run adversarial review
 - Owner:
   - Architects mainline lead
