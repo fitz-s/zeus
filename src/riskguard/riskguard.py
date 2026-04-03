@@ -1,7 +1,8 @@
 """RiskGuard: independent monitoring process. Spec §7.
 
 Runs as a SEPARATE process with its own 60-second tick.
-Reads authoritative settlement records from zeus.db, writes to risk_state.db.
+Reads authoritative settlement records from zeus.db, writes to risk_state.db,
+and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 """
 
@@ -102,6 +103,94 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int =
     for bucket in by_strategy.values():
         _finalize(bucket)
     return {"overall": overall, "by_strategy": by_strategy}
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _sync_riskguard_strategy_gate_actions(
+    conn: sqlite3.Connection,
+    recommended_strategy_gate_reasons: dict[str, list[str]],
+    *,
+    issued_at: str,
+) -> dict[str, int | str]:
+    if not _table_exists(conn, "risk_actions"):
+        logger.info("RiskGuard durable risk_actions table unavailable; skipping action emission")
+        return {
+            "status": "skipped_missing_table",
+            "emitted_count": 0,
+            "expired_count": 0,
+        }
+
+    recommended = {
+        strategy: "|".join(sorted(reasons))
+        for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
+    }
+
+    existing_rows = conn.execute(
+        """
+        SELECT action_id, strategy_key
+        FROM risk_actions
+        WHERE source = 'riskguard'
+          AND action_type = 'gate'
+          AND status = 'active'
+        """
+    ).fetchall()
+    existing_by_strategy = {str(row["strategy_key"]): str(row["action_id"]) for row in existing_rows}
+    expired_count = 0
+
+    for strategy, reason in recommended.items():
+        action_id = existing_by_strategy.get(strategy, f"riskguard:gate:{strategy}")
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id,
+                strategy_key,
+                action_type,
+                value,
+                issued_at,
+                effective_until,
+                reason,
+                source,
+                precedence,
+                status
+            ) VALUES (?, ?, 'gate', 'true', ?, NULL, ?, 'riskguard', 50, 'active')
+            ON CONFLICT(action_id) DO UPDATE SET
+                strategy_key = excluded.strategy_key,
+                value = excluded.value,
+                issued_at = excluded.issued_at,
+                effective_until = NULL,
+                reason = excluded.reason,
+                precedence = excluded.precedence,
+                status = 'active'
+            """,
+            (action_id, strategy, issued_at, reason),
+        )
+
+    for strategy, action_id in existing_by_strategy.items():
+        if strategy in recommended:
+            continue
+        conn.execute(
+            """
+            UPDATE risk_actions
+            SET effective_until = ?,
+                status = 'expired'
+            WHERE action_id = ?
+            """,
+            (issued_at, action_id),
+        )
+        expired_count += 1
+
+    return {
+        "status": "emitted",
+        "emitted_count": len(recommended),
+        "expired_count": expired_count,
+    }
 
 
 def init_risk_db(conn: sqlite3.Connection) -> None:
@@ -245,6 +334,11 @@ def tick() -> RiskLevel:
 
     # Record
     now = datetime.now(timezone.utc).isoformat()
+    durable_action_status = _sync_riskguard_strategy_gate_actions(
+        zeus_conn,
+        recommended_strategy_gate_reasons,
+        issued_at=now,
+    )
     risk_conn.execute("""
         INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -288,9 +382,13 @@ def tick() -> RiskLevel:
                 control: list(reasons)
                 for control, reasons in sorted(recommended_control_reasons.items())
             },
+            "durable_risk_action_emission_status": durable_action_status["status"],
+            "durable_risk_action_emitted_count": durable_action_status["emitted_count"],
+            "durable_risk_action_expired_count": durable_action_status["expired_count"],
         }),
         now,
     ))
+    zeus_conn.commit()
     risk_conn.commit()
 
     zeus_conn.close()

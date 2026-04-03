@@ -29,6 +29,12 @@ def _policy_conn() -> sqlite3.Connection:
     return conn
 
 
+def _bootstrap_policy_tables(conn: sqlite3.Connection) -> None:
+    from src.state.db import apply_architecture_kernel_schema
+
+    apply_architecture_kernel_schema(conn)
+
+
 def _insert_risk_action(
     conn: sqlite3.Connection,
     *,
@@ -582,6 +588,197 @@ class TestStrategyPolicyResolver:
         assert details["recommended_control_reasons"]["review_strategy_gates"] == [
             "center_buy:edge_compression"
         ]
+
+    def test_tick_emits_durable_risk_action_for_recommended_strategy_gate(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = strategy_tracker_module.StrategyTracker()
+        tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
+
+        conn = get_connection(zeus_db)
+        _bootstrap_policy_tables(conn)
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+
+        row = get_connection(zeus_db).execute(
+            """
+            SELECT strategy_key, action_type, value, source, precedence, status, reason
+            FROM risk_actions
+            WHERE action_id = 'riskguard:gate:center_buy'
+            """
+        ).fetchone()
+
+        assert dict(row) == {
+            "strategy_key": "center_buy",
+            "action_type": "gate",
+            "value": "true",
+            "source": "riskguard",
+            "precedence": 50,
+            "status": "active",
+            "reason": "edge_compression",
+        }
+        risk_state_row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_state_row["details_json"])
+        assert details["durable_risk_action_emission_status"] == "emitted"
+        assert details["durable_risk_action_emitted_count"] == 1
+        assert details["durable_risk_action_expired_count"] == 0
+
+    def test_tick_refreshes_existing_durable_risk_action_without_duplication(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = strategy_tracker_module.StrategyTracker()
+        tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
+
+        conn = get_connection(zeus_db)
+        _bootstrap_policy_tables(conn)
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:gate:center_buy",
+            strategy_key="center_buy",
+            action_type="gate",
+            value="true",
+            issued_at="2026-04-03T16:00:00+00:00",
+            effective_until=None,
+            precedence=50,
+            status="active",
+        )
+        conn.execute(
+            "UPDATE risk_actions SET reason = ? WHERE action_id = ?",
+            ("stale_reason", "riskguard:gate:center_buy"),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+
+        conn = get_connection(zeus_db)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM risk_actions WHERE action_id = 'riskguard:gate:center_buy'"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT status, reason FROM risk_actions WHERE action_id = 'riskguard:gate:center_buy'"
+        ).fetchone()
+        conn.close()
+
+        assert count == 1
+        assert dict(row) == {"status": "active", "reason": "edge_compression"}
+
+    def test_tick_expires_emitted_risk_action_when_strategy_gate_clears(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        conn = get_connection(zeus_db)
+        _bootstrap_policy_tables(conn)
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:gate:center_buy",
+            strategy_key="center_buy",
+            action_type="gate",
+            value="true",
+            issued_at="2026-04-03T16:00:00+00:00",
+            effective_until=None,
+            precedence=50,
+            status="active",
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+
+        row = get_connection(zeus_db).execute(
+            "SELECT status, effective_until FROM risk_actions WHERE action_id = 'riskguard:gate:center_buy'"
+        ).fetchone()
+
+        assert row["status"] == "expired"
+        assert row["effective_until"] is not None
+        risk_state_row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_state_row["details_json"])
+        assert details["durable_risk_action_emission_status"] == "emitted"
+        assert details["durable_risk_action_emitted_count"] == 0
+        assert details["durable_risk_action_expired_count"] == 1
+
+    def test_tick_records_explicit_skip_when_durable_risk_actions_table_is_missing(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = strategy_tracker_module.StrategyTracker()
+        tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+
+        risk_state_row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_state_row["details_json"])
+
+        assert details["recommended_strategy_gates"] == ["center_buy"]
+        assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
+        assert details["durable_risk_action_emitted_count"] == 0
+        assert details["durable_risk_action_expired_count"] == 0
 
     def test_tick_turns_yellow_when_strategy_tracker_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
