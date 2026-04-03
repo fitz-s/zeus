@@ -84,10 +84,22 @@ Freeze the post-current-phase architecture mainline plan that sequences foundati
 - execution owner: `Architects local lead (current Codex session)`
 
 ### Allowed edit surface
-Not frozen yet. Must be defined by the next planning packet.
+Only the following may be edited in this planning packet:
+- `work_packets/FOUNDATION-MAINLINE-PLAN.md`
+- `architects_progress.md`
+- `architects_task.md`
 
 ### Forbidden edit surface
-Not frozen yet. Must be defined by the next planning packet.
+Explicitly forbidden for edits in this planning packet:
+- all non-allowed files
+- `src/**`
+- `migrations/**`
+- `architecture/**`
+- `docs/governance/**`
+- `docs/architecture/**`
+- `.github/workflows/**`
+- `.claude/CLAUDE.md`
+- runtime state and cutover surfaces
 
 ### Non-goals
 - no ad hoc team opening
@@ -96,10 +108,11 @@ Not frozen yet. Must be defined by the next planning packet.
 
 ### Current blocker
 - no active hard blocker
-- the only blocker is procedural: the foundation-mainline planning packet is not frozen yet
+- the planning packet is now frozen
+- the next blocker is executional: the stage-map/planning artifact itself is not yet written
 
 ### Ready-to-commit slice
-`No execution slice yet. Next action is to freeze the foundation-mainline planning packet.`
+`Planning freeze landed locally — the next execution slice is to extract the stage map, goals, automation path, and team-opening gate from the tribunal overlay and mature foundation package.`
 
 ---
 
@@ -107,8 +120,8 @@ Not frozen yet. Must be defined by the next planning packet.
 
 ### Phase A — session revalidation
 - [x] confirm the current-phase `P-*` queue is closed
-- [ ] freeze the foundation-mainline planning packet
-- [ ] define allowed / forbidden files for the planning packet
+- [x] freeze the foundation-mainline planning packet
+- [x] define allowed / forbidden files for the planning packet
 
 ### Phase B — planning intake
 - [ ] identify the planning surfaces that will define:

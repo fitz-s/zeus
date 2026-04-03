@@ -678,6 +678,25 @@ Recommended entry schema:
 - Owner:
   - principal architect / Architects local lead
 
+## [2026-04-03 00:58 America/Chicago] FOUNDATION-MAINLINE-PLAN frozen
+- Packet: `FOUNDATION-MAINLINE-PLAN`
+- Status delta:
+  - planning packet frozen
+  - source-package fallback rule made explicit for the next stage
+- Basis / evidence:
+  - repo-local tribunal source package exists at `zeus_final_tribunal_overlay/`
+  - repo-local mature foundation source package exists at `zeus_mature_project_foundation/`
+  - the packet now names both as the primary refinement sources for stage/goal extraction
+- Decisions frozen:
+  - if anything in the next stage is unclear, return to the two source packages rather than improvising
+  - team opening remains blocked until the planning packet itself is completed
+- Open uncertainties:
+  - stage-map artifact is not yet written; only the planning packet is frozen
+- Next required action:
+  - commit and push the planning freeze, then execute the planning packet
+- Owner:
+  - principal architect / Architects local lead
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
