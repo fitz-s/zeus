@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT`
-- State: `APPROVED / READY TO COMMIT`
+- Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- State: `FROZEN / READY TO IMPLEMENT`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Make the reconciliation lifecycle-event helper in `src/state/db.py` degrade cleanly on canonically bootstrapped databases so the remaining reconciliation blocker inventory can proceed without the current raw legacy-event-helper crash.
+Make the reconciliation pending-fill query path tolerate canonically bootstrapped databases so the later reconciliation migration packet can proceed without the current raw legacy-column failure.
 
 ## Allowed files
 
-- `work_packets/P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT.md`
-- `src/state/db.py`
+- `work_packets/P1.7B-RECONCILIATION-QUERY-COMPAT.md`
+- `src/state/chain_reconciliation.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -45,6 +45,7 @@ Make the reconciliation lifecycle-event helper in `src/state/db.py` degrade clea
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
+- `src/state/db.py`
 - `src/state/chronicler.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
@@ -72,17 +73,17 @@ Make the reconciliation lifecycle-event helper in `src/state/db.py` degrade clea
 
 ## Immediate checklist
 
-- [x] implement reconciliation lifecycle-event compatibility in `src/state/db.py`
-- [x] preserve legacy-schema behavior for the touched helper
-- [x] add targeted architecture-contract coverage
-- [x] append durable packet transition to `architects_progress.md` when implementation lands
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] implement reconciliation query-path compatibility in `src/state/chain_reconciliation.py`
+- [ ] preserve fail-loud behavior for malformed/non-canonical unexpected states
+- [ ] add targeted architecture-contract coverage
+- [ ] append durable packet transition to `architects_progress.md` when implementation lands
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Commit and push this accepted reconciliation lifecycle-event blocker packet without mixing unrelated working-tree dirt.
-2. Freeze the successor reconciliation query-path blocker packet after push.
+1. Fix only the reconciliation query-path compatibility blocker.
+2. Keep reconciliation caller migration for a later successor packet.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep reconciliation caller migration separate from this helper-compat packet.
+4. Keep unrelated working-tree dirt out of the packet commit.

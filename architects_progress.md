@@ -147,3 +147,43 @@ Archive policy:
   - commit and push `P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT`
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 10:57 America/Chicago] P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P1.7A-RECONCILIATION-LIFECYCLE-EVENT-COMPAT`
+- Status delta:
+  - packet committed as `5e2bce2`
+  - packet pushed to `origin/Architects`
+  - reconciliation lifecycle-event helper compatibility is now cloud-visible truth
+- Basis / evidence:
+  - packet stayed confined to `src/state/db.py`, targeted tests, and slim control surfaces
+- Decisions frozen:
+  - touched reconciliation lifecycle-event helper now distinguishes canonical bootstrap from malformed legacy and hybrid drift states
+  - reconciliation pending-fill path remains explicitly blocked by separate query assumptions
+  - no reconciliation caller migration is claimed in this packet
+- Open uncertainties:
+  - the reconciliation query-path blocker is still ahead
+- Next required action:
+  - freeze the reconciliation query-path compatibility packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 10:57 America/Chicago] P1.7B-RECONCILIATION-QUERY-COMPAT frozen
+- Author: `Architects mainline lead`
+- Packet: `P1.7B-RECONCILIATION-QUERY-COMPAT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - reconciliation pending-fill rescue still queries legacy `position_events` columns and can fail on canonical-only DBs
+  - this is the next remaining P1 blocker after P1.7A closeout
+- Decisions frozen:
+  - keep this slice on reconciliation query compatibility only
+  - do not migrate reconciliation caller code in this packet
+  - keep team closed by default
+- Open uncertainties:
+  - exact query-compat semantics still need implementation review
+- Next required action:
+  - land the compatibility change and targeted tests
+  - then run adversarial review
+- Owner:
+  - Architects mainline lead
