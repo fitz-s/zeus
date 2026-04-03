@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.2 freeze pass`
+- Last updated by: `Codex P3.2 closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,67 +17,55 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P3.2-POLICY-RESOLVER`
-- State: `FROZEN / READY FOR EXECUTION`
+- Packet: `none`
+- State: `AWAITING NEXT FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Create the standalone strategy policy resolver before any P3 evaluator or riskguard behavior wiring begins.
+No live packet. Current run horizon is satisfied because `P3.2-POLICY-RESOLVER` is accepted and pushed.
 
 ## Allowed files
 
-- `work_packets/P3.2-POLICY-RESOLVER.md`
-- `src/riskguard/policy.py`
-- `tests/test_riskguard.py`
+- `work_packets/P3.3-EVALUATOR-POLICY-CONSUMPTION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all non-allowed files
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
+- `src/**`
+- `tests/**`
+- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `migrations/**`
-- `src/control/**`
-- `src/engine/**`
-- `src/execution/**`
-- `src/state/**`
-- `src/supervisor_api/**`
-- `src/riskguard/riskguard.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
-- `tests/test_runtime_guards.py`
-- `tests/test_live_safety_invariants.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no evaluator-consumption work in this packet
-- no cycle-runner or control-plane behavior changes in this packet
-- no riskguard emission work in this packet
+- no P3.3 work without a new frozen packet
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside packet scope
+- no active blocker inside the completed P3.2 stop boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [ ] read packet authority and scoped runtime surfaces
-- [ ] implement the standalone policy resolver
-- [ ] verify targeted resolver evidence
-- [ ] keep out-of-scope dirt excluded from the packet commit
+- [x] P3.2 landed with green resolver evidence
+- [x] verifier and adversarial review returned no blocker
+- [x] P3.2 acceptance is recorded honestly
+- [ ] if resuming, freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION`
 
 ## Next required action
 
-1. Implement the standalone policy resolver slice.
-2. Keep `P3.2-POLICY-RESOLVER` on resolver/test surfaces only.
-3. Keep out-of-scope local dirt excluded from any commit.
+1. Stop at the current packet boundary (`P3.2-POLICY-RESOLVER` accepted and pushed).
+2. If continuing later, freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` before any implementation.

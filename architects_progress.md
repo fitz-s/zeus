@@ -1178,3 +1178,28 @@ Archive policy:
   - implement `P3.2-POLICY-RESOLVER` and run targeted resolver tests
 - Owner:
   - Architects mainline lead
+
+## [2026-04-03 17:53 America/Chicago] P3.2-POLICY-RESOLVER accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.2-POLICY-RESOLVER`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - standalone policy resolution is now cloud-visible truth ahead of evaluator consumption
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py` -> `27 passed`
+  - independent verifier review returned `PASS`
+  - adversarial review found no blocker after resolver layering and packet-boundary claims were checked
+- Decisions frozen:
+  - `src/riskguard/policy.py` now defines `StrategyPolicy` and `resolve_strategy_policy(conn, strategy_key, now)`
+  - resolution order is explicit: hard safety controls, manual overrides, risk actions, then default policy
+  - no evaluator-consumption, cycle-runner, riskguard-emission, or control-plane-write behavior is claimed in this packet
+  - the next eligible mainline packet, if work resumes beyond this horizon, is `P3.3-EVALUATOR-POLICY-CONSUMPTION`
+- Open uncertainties:
+  - the resolver still reads current hard-safety control state; durable control-plane migration remains a later packet family
+- Next required action:
+  - stop at the current packet boundary or freeze `P3.3-EVALUATOR-POLICY-CONSUMPTION` next if P3 continues
+- Owner:
+  - Architects mainline lead

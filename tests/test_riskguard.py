@@ -1,9 +1,12 @@
-"""Tests for RiskGuard metrics and risk levels."""
+"""Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import src.riskguard.policy as policy_module
 import src.riskguard.riskguard as riskguard_module
 import src.state.strategy_tracker as strategy_tracker_module
 from src.riskguard.risk_level import RiskLevel, overall_level
@@ -15,6 +18,89 @@ from src.riskguard.metrics import (
 from src.state.db import get_connection
 from src.state.portfolio import Position
 from src.state.portfolio import PortfolioState
+
+
+def _policy_conn() -> sqlite3.Connection:
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    return conn
+
+
+def _insert_risk_action(
+    conn: sqlite3.Connection,
+    *,
+    action_id: str,
+    strategy_key: str,
+    action_type: str,
+    value: str,
+    issued_at: str,
+    effective_until: str | None,
+    precedence: int = 10,
+    status: str = "active",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO risk_actions (
+            action_id, strategy_key, action_type, value, issued_at,
+            effective_until, reason, source, precedence, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            action_id,
+            strategy_key,
+            action_type,
+            value,
+            issued_at,
+            effective_until,
+            "test",
+            "riskguard",
+            precedence,
+            status,
+        ),
+    )
+
+
+def _insert_control_override(
+    conn: sqlite3.Connection,
+    *,
+    override_id: str,
+    target_type: str,
+    target_key: str,
+    action_type: str,
+    value: str,
+    issued_at: str,
+    effective_until: str | None,
+    precedence: int = 100,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            override_id,
+            target_type,
+            target_key,
+            action_type,
+            value,
+            "test",
+            issued_at,
+            effective_until,
+            "test",
+            precedence,
+        ),
+    )
+
+
+def _neutralize_hard_safety(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(policy_module, "refresh_control_state", lambda: None)
+    monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
 
 
 class TestRiskLevel:
@@ -258,6 +344,153 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
         assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
         assert details["recommended_strategy_gates"] == []
+
+
+class TestStrategyPolicyResolver:
+    def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.strategy_key == "center_buy"
+        assert policy.gated is False
+        assert policy.allocation_multiplier == pytest.approx(1.0)
+        assert policy.threshold_multiplier == pytest.approx(1.0)
+        assert policy.exit_only is False
+        assert policy.sources == []
+        conn.close()
+
+    def test_resolve_strategy_policy_gates_only_one_strategy(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="ra-gate-center",
+            strategy_key="center_buy",
+            action_type="gate",
+            value="true",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+
+        center_buy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+        opening_inertia = policy_module.resolve_strategy_policy(conn, "opening_inertia", now)
+
+        assert center_buy.gated is True
+        assert "risk_action:gate" in center_buy.sources
+        assert opening_inertia.gated is False
+        conn.close()
+
+    def test_resolve_strategy_policy_shrinks_only_one_strategy_allocation(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="ra-alloc-center",
+            strategy_key="center_buy",
+            action_type="allocation_multiplier",
+            value="0.4",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+
+        center_buy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+        opening_inertia = policy_module.resolve_strategy_policy(conn, "opening_inertia", now)
+
+        assert center_buy.allocation_multiplier == pytest.approx(0.4)
+        assert "risk_action:allocation_multiplier" in center_buy.sources
+        assert opening_inertia.allocation_multiplier == pytest.approx(1.0)
+        conn.close()
+
+    def test_resolve_strategy_policy_manual_override_wins_over_risk_action(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="ra-threshold-center",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.8",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        _insert_control_override(
+            conn,
+            override_id="ov-threshold-center",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.1",
+            issued_at=(now - timedelta(minutes=1)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.threshold_multiplier == pytest.approx(1.1)
+        assert "manual_override:threshold_multiplier" in policy.sources
+        conn.close()
+
+    def test_resolve_strategy_policy_expired_override_restores_automatic_policy(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="ra-threshold-center",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.6",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        _insert_control_override(
+            conn,
+            override_id="ov-threshold-expired",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.1",
+            issued_at=(now - timedelta(hours=2)).isoformat(),
+            effective_until=(now - timedelta(minutes=1)).isoformat(),
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.threshold_multiplier == pytest.approx(1.6)
+        assert "risk_action:threshold_multiplier" in policy.sources
+        conn.close()
+
+    def test_resolve_strategy_policy_hard_safety_wins_first(self, monkeypatch):
+        monkeypatch.setattr(policy_module, "refresh_control_state", lambda: None)
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: True)
+        monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 2.0)
+
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        _insert_control_override(
+            conn,
+            override_id="ov-threshold-center",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.1",
+            issued_at=(now - timedelta(minutes=1)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.gated is True
+        assert policy.threshold_multiplier == pytest.approx(2.0)
+        assert "hard_safety:pause_entries" in policy.sources
+        assert "hard_safety:tighten_risk:2" in policy.sources
+        conn.close()
 
     def test_tick_turns_yellow_on_execution_decay(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
