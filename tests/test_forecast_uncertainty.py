@@ -525,6 +525,18 @@ def test_day0_nowcast_context_exposes_age_and_freshness():
     )
 
 
+def test_day0_nowcast_context_marks_observation_older_than_one_hour_as_not_fresh():
+    ctx = day0_nowcast_context(
+        hours_remaining=1.0,
+        observation_source="wu_api",
+        observation_time="2026-04-02T00:00:00+00:00",
+        current_utc_timestamp="2026-04-02T01:30:00+00:00",
+    )
+    assert ctx["age_hours"] == 1.5
+    assert ctx["freshness_factor"] > 0.0
+    assert ctx["fresh_observation"] is False
+
+
 def test_day0_nowcast_context_zeroes_untrusted_source_weight():
     ctx = day0_nowcast_context(
         hours_remaining=1.0,
