@@ -1553,6 +1553,45 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 03:41 America/Chicago] P1.3-CANONICAL-LEDGER-API committed and pushed
+- Packet: `P1.3-CANONICAL-LEDGER-API`
+- Status delta:
+  - packet committed as `20de645`
+  - branch pushed to `origin/Architects`
+  - dedicated ledger/projection extraction is now cloud-visible truth
+- Basis / evidence:
+  - `git push origin Architects` completed successfully
+  - commit scope stayed confined to packet/control/test surfaces plus the new canonical modules
+- Decisions frozen:
+  - canonical helpers now live in dedicated modules
+  - db.py remains compatibility-only for those helpers
+  - runtime caller migration remains separate future work
+- Open uncertainties:
+  - the builder layer and first runtime-caller migration are still ahead
+- Next required action:
+  - freeze the canonical lifecycle-builder packet
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 03:41 America/Chicago] P1.4-CANONICAL-LIFECYCLE-BUILDERS frozen
+- Packet: `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- Status delta:
+  - next Stage-2 packet frozen after P1.3 closeout
+  - packet narrowed to pure canonical builder helpers with no runtime caller migration
+- Basis / evidence:
+  - `docs/architecture/zeus_durable_architecture_spec.md` names `src/engine/lifecycle_events.py` (or co-located event builder) as part of the P1 module set
+  - dedicated ledger/projection modules now exist, but payload construction from runtime objects remains missing
+- Decisions frozen:
+  - keep this slice builder-only
+  - do not touch runtime callers, dual-write, or cutover behavior
+  - team remains disallowed by default for this K0/K2 bridge packet
+- Open uncertainties:
+  - exact builder signatures still need implementation review against runtime object shapes
+- Next required action:
+  - land the pure builder layer and targeted tests, then run adversarial review
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions

@@ -55,22 +55,21 @@ Current completion ladder:
 ## Current Active Packet
 
 ### Packet
-`P1.3-CANONICAL-LEDGER-API`
+`P1.4-CANONICAL-LIFECYCLE-BUILDERS`
 
 ### State
-`APPROVED / READY TO COMMIT`
+`FROZEN / IN EXECUTION`
 
 ### Execution mode verdict
 `SOLO_EXECUTE`
 
 ### Objective
-Extract the canonical append/project API from `src/state/db.py` into dedicated `src/state/ledger.py` and `src/state/projection.py` modules while preserving current helper behavior and keeping runtime wiring/cutover out of scope.
+Add pure lifecycle-event/projection builder helpers that translate runtime position/decision context into canonical payloads without wiring any runtime caller to the canonical ledger yet.
 
 ### Why this packet is next
-- `P1.2-CANONICAL-SCHEMA-BOOTSTRAP` is complete and pushed
-- `FOUNDATION-MAINLINE-PLAN` Stage 2 continues from schema add into append/project API
-- repo truth still keeps the canonical API inside transitional `src/state/db.py`
-- the architecture spec requires dedicated ledger/projection modules before later dual-write work
+- `P1.3-CANONICAL-LEDGER-API` is complete and pushed
+- Stage 2 now has dedicated ledger/projection modules but still lacks the runtime-to-canonical builder layer named by the architecture spec
+- runtime caller migration is not safe to begin until canonical payload construction is isolated and testable
 
 ### Owner model
 - Required: one named planning owner for the team gate packet
@@ -89,10 +88,8 @@ Extract the canonical append/project API from `src/state/db.py` into dedicated `
 
 ### Allowed edit surface
 Only the following may be edited in this packet:
-- `work_packets/P1.3-CANONICAL-LEDGER-API.md`
-- `src/state/db.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
+- `work_packets/P1.4-CANONICAL-LIFECYCLE-BUILDERS.md`
+- `src/engine/lifecycle_events.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -102,11 +99,14 @@ Explicitly forbidden for edits in this packet:
 - all non-allowed files
 - `AGENTS.md`
 - `migrations/**`
-- `src/engine/**`
+- `src/engine/cycle_runtime.py`
 - `src/execution/**`
 - `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
+- `src/state/db.py`
+- `src/state/ledger.py`
+- `src/state/projection.py`
 - `architecture/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -119,44 +119,43 @@ Explicitly forbidden for edits in this packet:
 - no runtime writer/reader cutover
 - no dual-write
 - no DB-first reads
-- no schema rename/repurpose
+- no runtime caller migration
 - no Day0/K3 work
 - no team launch
 
 ### Current blocker
 - no active hard blocker
-- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.3-CANONICAL-LEDGER-API`
+- local working tree contains out-of-scope non-mainline dirt and reference material; it must not be silently mixed into `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
 - repo-local `zeus_final_tribunal_overlay/` remains an untracked reference directory outside versioned packet scope
 - root `AGENTS.md` has unrelated local dirt outside this packet scope
 
 ### Ready-to-commit slice
-`P1.3-CANONICAL-LEDGER-API landed — canonical append/project helpers now live in dedicated ledger/projection modules, db.py preserves compatibility wrappers, and no runtime cutover is claimed.`
+`P1.4-CANONICAL-LIFECYCLE-BUILDERS landed — pure builder helpers exist for canonical event/projection payloads, and no runtime caller migration is claimed.`
 
 ---
 
 ## Immediate Execution Checklist
 
 ### Phase A — session revalidation
-- [x] confirm `P1.2-CANONICAL-SCHEMA-BOOTSTRAP` is complete
-- [x] confirm Stage 2 append/project API is next in the foundation mainline
-- [x] freeze `P1.3-CANONICAL-LEDGER-API`
+- [x] confirm `P1.3-CANONICAL-LEDGER-API` is complete
+- [x] confirm the builder layer is next before runtime caller migration
+- [x] freeze `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [x] extract canonical append helper into `src/state/ledger.py`
-- [x] extract canonical projection helper into `src/state/projection.py`
-- [x] keep `src/state/db.py` compatibility wrappers explicit
-- [x] add targeted architecture-contract coverage for the extracted module surface
+- [ ] add pure canonical builder helpers in `src/engine/lifecycle_events.py`
+- [ ] keep the builder layer detached from runtime caller wiring
+- [ ] add targeted architecture-contract coverage for the builder surface
 
 ### Phase C — bounded design discipline
-- [x] keep live/runtime cutover out of scope
-- [x] keep replay/parity staged-advisory
-- [x] keep the packet extraction-only and not dual-write
+- [ ] keep live/runtime cutover out of scope
+- [ ] keep replay/parity staged-advisory
+- [ ] keep the packet builder-only and not dual-write
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [x] run explicit adversarial review
-- [x] obtain final architect verification
+- [ ] run explicit adversarial review
+- [ ] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -164,9 +163,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Commit and push this accepted extraction packet without mixing unrelated working-tree dirt.
-2. Freeze the first runtime-caller migration packet separately after push.
-3. Keep cutover, dual-write, and runtime rewiring for later packets.
-4. Keep db.py compatibility-only until a later packet intentionally changes it.
+1. Add the pure lifecycle builder layer.
+2. Keep runtime caller migration frozen for a later packet.
+3. Keep dual-write, cutover, and runtime rewiring out of scope.
+4. Keep unrelated working-tree dirt out of the packet commit.
 
 If this cannot be done without a new packet, freeze that packet before acting.
