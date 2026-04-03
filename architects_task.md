@@ -58,7 +58,7 @@ Current completion ladder:
 `P1.3-CANONICAL-LEDGER-API`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE`
@@ -143,20 +143,20 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] extract canonical append helper into `src/state/ledger.py`
-- [ ] extract canonical projection helper into `src/state/projection.py`
-- [ ] keep `src/state/db.py` compatibility wrappers explicit
-- [ ] add targeted architecture-contract coverage for the extracted module surface
+- [x] extract canonical append helper into `src/state/ledger.py`
+- [x] extract canonical projection helper into `src/state/projection.py`
+- [x] keep `src/state/db.py` compatibility wrappers explicit
+- [x] add targeted architecture-contract coverage for the extracted module surface
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep the packet extraction-only and not dual-write
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep the packet extraction-only and not dual-write
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -164,9 +164,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Extract the helper-level canonical API into dedicated modules.
-2. Keep db.py wrappers compatibility-only.
+1. Commit and push this accepted extraction packet without mixing unrelated working-tree dirt.
+2. Freeze the first runtime-caller migration packet separately after push.
 3. Keep cutover, dual-write, and runtime rewiring for later packets.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep db.py compatibility-only until a later packet intentionally changes it.
 
 If this cannot be done without a new packet, freeze that packet before acting.

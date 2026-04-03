@@ -11,11 +11,16 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import STATE_DIR, state_path, settings
+from src.state.ledger import (
+    CANONICAL_POSITION_EVENT_COLUMNS,
+    apply_architecture_kernel_schema,
+    append_event_and_project,
+    append_many_and_project,
+)
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
 RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
-ARCHITECTURE_KERNEL_SQL_PATH = Path(__file__).resolve().parents[2] / "migrations/2026_04_02_architecture_kernel.sql"
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -544,58 +549,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         conn.commit()
         conn.close()
 
-
-CANONICAL_POSITION_EVENT_COLUMNS = (
-    "event_id",
-    "position_id",
-    "event_version",
-    "sequence_no",
-    "event_type",
-    "occurred_at",
-    "phase_before",
-    "phase_after",
-    "strategy_key",
-    "decision_id",
-    "snapshot_id",
-    "order_id",
-    "command_id",
-    "caused_by",
-    "idempotency_key",
-    "venue_status",
-    "source_module",
-    "payload_json",
-)
-
-CANONICAL_POSITION_CURRENT_COLUMNS = (
-    "position_id",
-    "phase",
-    "trade_id",
-    "market_id",
-    "city",
-    "cluster",
-    "target_date",
-    "bin_label",
-    "direction",
-    "unit",
-    "size_usd",
-    "shares",
-    "cost_basis_usd",
-    "entry_price",
-    "p_posterior",
-    "last_monitor_prob",
-    "last_monitor_edge",
-    "last_monitor_market_price",
-    "decision_snapshot_id",
-    "entry_method",
-    "strategy_key",
-    "edge_source",
-    "discovery_mode",
-    "chain_state",
-    "order_id",
-    "order_status",
-    "updated_at",
-)
-
 LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
     "runtime_trade_id",
     "position_state",
@@ -607,34 +560,9 @@ LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
 )
 
 
-def _ordered_values(payload: dict, columns: tuple[str, ...]) -> tuple:
-    return tuple(payload.get(column) for column in columns)
-
-
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {row[1] for row in rows}
-
-
-def load_architecture_kernel_sql() -> str:
-    return ARCHITECTURE_KERNEL_SQL_PATH.read_text()
-
-
-def _require_payload_fields(payload: dict, columns: tuple[str, ...], *, label: str) -> None:
-    missing = [column for column in columns if column not in payload]
-    if missing:
-        raise ValueError(f"{label} missing fields: {missing}")
-
-
-def _assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
-    event_columns = _table_columns(conn, "position_events")
-    current_columns = _table_columns(conn, "position_current")
-    if not event_columns or not current_columns:
-        raise RuntimeError("canonical transaction boundary requires migrated position_events and position_current tables")
-    if not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
-        raise RuntimeError("canonical position_events schema not installed")
-    if not set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns):
-        raise RuntimeError("canonical position_current schema not installed")
 
 
 def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
@@ -648,162 +576,6 @@ def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> No
         )
     if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
         raise RuntimeError("legacy runtime position_events schema not installed")
-
-
-def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
-    """Apply the canonical architecture schema only when no legacy collision exists.
-
-    This is an explicit bootstrap path for Stage-2 schema work. It is intentionally
-    separate from `init_schema()`, which still reflects transitional runtime truth.
-    """
-
-    event_columns = _table_columns(conn, "position_events")
-    if event_columns and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
-        raise RuntimeError(
-            "legacy position_events table blocks canonical schema bootstrap; "
-            "freeze a dedicated migration packet before changing live/runtime schema"
-        )
-
-    conn.executescript(load_architecture_kernel_sql())
-    _assert_canonical_transaction_schema(conn)
-
-
-def _validate_event_projection_pair(event: dict, projection: dict) -> None:
-    if event.get("position_id") != projection.get("position_id"):
-        raise ValueError("event/projection position_id mismatch")
-    if event.get("strategy_key") != projection.get("strategy_key"):
-        raise ValueError("event/projection strategy_key mismatch")
-    phase_after = event.get("phase_after")
-    if phase_after and projection.get("phase") and phase_after != projection.get("phase"):
-        raise ValueError("event/projection phase mismatch")
-    snapshot_id = event.get("snapshot_id")
-    decision_snapshot_id = projection.get("decision_snapshot_id")
-    if snapshot_id and decision_snapshot_id and snapshot_id != decision_snapshot_id:
-        raise ValueError("event/projection snapshot mismatch")
-    order_id = event.get("order_id")
-    projection_order_id = projection.get("order_id")
-    if order_id and projection_order_id and order_id != projection_order_id:
-        raise ValueError("event/projection order_id mismatch")
-
-
-def _validate_event_projection_batch(events: list[dict], projection: dict) -> None:
-    if not events:
-        raise ValueError("event batch must not be empty")
-    for event in events:
-        if event.get("position_id") != projection.get("position_id"):
-            raise ValueError("event/projection position_id mismatch")
-        if event.get("strategy_key") != projection.get("strategy_key"):
-            raise ValueError("event/projection strategy_key mismatch")
-    final_phase = events[-1].get("phase_after")
-    if final_phase and projection.get("phase") and final_phase != projection.get("phase"):
-        raise ValueError("event/projection phase mismatch")
-
-
-def append_event_and_project(conn: sqlite3.Connection, event: dict, projection: dict) -> None:
-    """Canonical transaction-boundary helper for target event + projection writes.
-
-    This helper is intentionally narrow and target-schema-specific. It is not
-    yet wired into broader runtime execution paths; that comes in later packets.
-    """
-
-    _assert_canonical_transaction_schema(conn)
-    _require_payload_fields(event, CANONICAL_POSITION_EVENT_COLUMNS, label="event")
-    _require_payload_fields(projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection")
-    _validate_event_projection_pair(event, projection)
-    with conn:
-        conn.execute(
-            f"""
-            INSERT INTO position_events ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})
-            VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_EVENT_COLUMNS))})
-            """,
-            _ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
-        )
-        conn.execute(
-            f"""
-            INSERT INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
-            VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})
-            ON CONFLICT(position_id) DO UPDATE SET
-                phase=excluded.phase,
-                trade_id=excluded.trade_id,
-                market_id=excluded.market_id,
-                city=excluded.city,
-                cluster=excluded.cluster,
-                target_date=excluded.target_date,
-                bin_label=excluded.bin_label,
-                direction=excluded.direction,
-                unit=excluded.unit,
-                size_usd=excluded.size_usd,
-                shares=excluded.shares,
-                cost_basis_usd=excluded.cost_basis_usd,
-                entry_price=excluded.entry_price,
-                p_posterior=excluded.p_posterior,
-                last_monitor_prob=excluded.last_monitor_prob,
-                last_monitor_edge=excluded.last_monitor_edge,
-                last_monitor_market_price=excluded.last_monitor_market_price,
-                decision_snapshot_id=excluded.decision_snapshot_id,
-                entry_method=excluded.entry_method,
-                strategy_key=excluded.strategy_key,
-                edge_source=excluded.edge_source,
-                discovery_mode=excluded.discovery_mode,
-                chain_state=excluded.chain_state,
-                order_id=excluded.order_id,
-                order_status=excluded.order_status,
-                updated_at=excluded.updated_at
-            """,
-            _ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
-        )
-
-
-def append_many_and_project(conn: sqlite3.Connection, events: list[dict], projection: dict) -> None:
-    """Batch canonical event append with a single final projection update."""
-    _assert_canonical_transaction_schema(conn)
-    _require_payload_fields(projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection")
-    for idx, event in enumerate(events, 1):
-        _require_payload_fields(event, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]")
-    _validate_event_projection_batch(events, projection)
-    with conn:
-        for event in events:
-            conn.execute(
-                f"""
-                INSERT INTO position_events ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})
-                VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_EVENT_COLUMNS))})
-                """,
-                _ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
-            )
-        conn.execute(
-            f"""
-            INSERT INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
-            VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})
-            ON CONFLICT(position_id) DO UPDATE SET
-                phase=excluded.phase,
-                trade_id=excluded.trade_id,
-                market_id=excluded.market_id,
-                city=excluded.city,
-                cluster=excluded.cluster,
-                target_date=excluded.target_date,
-                bin_label=excluded.bin_label,
-                direction=excluded.direction,
-                unit=excluded.unit,
-                size_usd=excluded.size_usd,
-                shares=excluded.shares,
-                cost_basis_usd=excluded.cost_basis_usd,
-                entry_price=excluded.entry_price,
-                p_posterior=excluded.p_posterior,
-                last_monitor_prob=excluded.last_monitor_prob,
-                last_monitor_edge=excluded.last_monitor_edge,
-                last_monitor_market_price=excluded.last_monitor_market_price,
-                decision_snapshot_id=excluded.decision_snapshot_id,
-                entry_method=excluded.entry_method,
-                strategy_key=excluded.strategy_key,
-                edge_source=excluded.edge_source,
-                discovery_mode=excluded.discovery_mode,
-                chain_state=excluded.chain_state,
-                order_id=excluded.order_id,
-                order_status=excluded.order_status,
-                updated_at=excluded.updated_at
-            """,
-            _ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
-        )
 
 def record_shadow_attribution_trade(
     conn: sqlite3.Connection,
