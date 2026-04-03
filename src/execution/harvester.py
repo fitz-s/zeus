@@ -10,6 +10,7 @@ Spec §8.1: Hourly cycle:
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -37,6 +38,69 @@ from src.state.portfolio import (
 from src.state.strategy_tracker import get_tracker, save_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def _next_canonical_sequence_no(conn, position_id: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 1
+    return int(row[0] or 0) + 1
+
+
+def _has_canonical_position_history(conn, position_id: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
+def _canonical_phase_before_for_settlement(pos) -> str:
+    return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
+
+
+def _dual_write_canonical_settlement_if_available(
+    conn,
+    pos,
+    *,
+    winning_bin: str,
+    won: bool,
+    outcome: int,
+) -> bool:
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project
+
+    if not _has_canonical_position_history(conn, getattr(pos, "trade_id", "")):
+        logger.debug(
+            "Canonical settlement dual-write skipped for %s: no prior canonical position history",
+            getattr(pos, "trade_id", ""),
+        )
+        return False
+
+    try:
+        events, projection = build_settlement_canonical_write(
+            pos,
+            winning_bin=winning_bin,
+            won=won,
+            outcome=outcome,
+            sequence_no=_next_canonical_sequence_no(conn, getattr(pos, "trade_id", "")),
+            phase_before=_canonical_phase_before_for_settlement(pos),
+            source_module="src.execution.harvester",
+        )
+        append_many_and_project(conn, events, projection)
+    except Exception as exc:
+        raise RuntimeError(
+            f"canonical settlement dual-write failed for {getattr(pos, 'trade_id', '')}: {exc}"
+        ) from exc
+
+    return True
 
 
 def run_harvester() -> dict:
@@ -583,6 +647,13 @@ def _settle_positions(
         log_settlement_event(
             conn,
             pos,
+            winning_bin=winning_label,
+            won=won,
+            outcome=outcome,
+        )
+        _dual_write_canonical_settlement_if_available(
+            conn,
+            closed or pos,
             winning_bin=winning_label,
             won=won,
             outcome=outcome,

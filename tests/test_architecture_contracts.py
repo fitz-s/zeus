@@ -783,7 +783,59 @@ def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_
     conn.close()
 
 
-def test_harvester_settlement_path_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat():
+def test_harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 1
+    event_rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert [(row["event_type"], row["sequence_no"]) for row in event_rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+        ("SETTLED", 4),
+    ]
+    assert dict(projection_row) == {
+        "phase": "settled",
+        "strategy_key": "center_buy",
+    }
+    conn.close()
+
+
+def test_harvester_settlement_path_skips_canonical_write_without_prior_canonical_history():
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -808,6 +860,131 @@ def test_harvester_settlement_path_degrades_cleanly_on_canonical_bootstrap_after
 
     assert settled == 1
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    conn.close()
+
+
+def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
+    from src.execution.harvester import _settle_positions
+    from src.state.db import init_schema, query_position_events
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 1
+    events = query_position_events(conn, "rt-pos-1")
+    assert any(event["event_type"] == "POSITION_SETTLED" for event in events)
+    conn.close()
+
+
+def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(monkeypatch):
+    from src.execution.harvester import _settle_positions
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("append-failed")
+
+    monkeypatch.setattr("src.state.db.append_many_and_project", _boom)
+
+    try:
+        _settle_positions(
+            conn,
+            portfolio,
+            city="NYC",
+            target_date="2026-04-03",
+            winning_label="39-40°F",
+            settlement_records=[],
+            strategy_tracker=None,
+            paper_mode=True,
+        )
+    except RuntimeError as exc:
+        assert "canonical settlement dual-write failed" in str(exc)
+    else:
+        raise AssertionError("expected canonical settlement dual-write failure to surface explicitly")
+
+    event_rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    assert [(row["event_type"], row["sequence_no"]) for row in event_rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+    ]
+    conn.close()
+
+
+def test_harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="day0_window", chain_state="synced")
+    pos.day0_entered_at = "2026-04-03T00:06:00Z"
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40°F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    assert settled == 1
+    event_row = conn.execute(
+        "SELECT phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    assert dict(event_row) == {
+        "phase_before": "day0_window",
+        "phase_after": "settled",
+    }
     conn.close()
 
 

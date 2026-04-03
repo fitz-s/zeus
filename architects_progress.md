@@ -2114,6 +2114,52 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 05:43 America/Chicago] P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE landed locally with green targeted evidence
+- Packet: `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
+- Status delta:
+  - harvester settlement path now emits canonical settlement events/projection when canonical schema is present and prior canonical position history exists
+  - targeted harvester caller-migration evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_skips_canonical_write_without_prior_canonical_history or harvester_settlement_path_preserves_legacy_behavior_on_legacy_db or harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit or harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable or harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat or settlement_builder or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `18 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+- Decisions frozen:
+  - caller migration stayed confined to the harvester settlement path
+  - canonical settlement writes only occur when prior canonical position history exists
+  - legacy settlement writes remain on legacy-schema runtimes
+  - failure after legacy steps is explicit and does not silently create orphan canonical rows
+  - day0 settlement paths record `phase_before=day0_window`
+- Open uncertainties:
+  - adversarial review has not yet attacked the harvester settlement migration claim
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 06:00 America/Chicago] P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE adversarial review resolved and architect approved
+- Packet: `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_after_p1_6d or harvester_settlement_path_skips_canonical_write_without_prior_canonical_history or harvester_settlement_path_preserves_legacy_behavior_on_legacy_db or harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit or harvester_settlement_path_uses_day0_window_as_phase_before_when_applicable or harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstrap_after_chronicle_compat or settlement_builder or chronicler_log_event_degrades_cleanly_on_canonical_bootstrap_db or log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `18 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'log_settlement_event_emits_durable_record or query_authoritative_settlement_rows_prefers_position_events or query_authoritative_settlement_rows_filters_by_env or init_schema_creates_all_tables or init_schema_idempotent'` -> `5 passed`
+  - critic verdict after narrowed claim + updated durable evidence: `APPROVE`
+- Decisions frozen:
+  - canonical settlement writes only occur when prior canonical position history exists
+  - legacy settlement writes remain on legacy-schema runtimes
+  - failure after legacy steps is explicit and does not silently create orphan canonical rows
+  - no cutover, DB-first reads, or non-harvester caller migration is claimed
+- Open uncertainties:
+  - remaining P1 reconciliation-family work is still pending
+- Next required action:
+  - commit and push `P1.6D-HARVESTER-SETTLEMENT-DUAL-WRITE`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions
