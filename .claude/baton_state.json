@@ -18,5 +18,5 @@
   "blocked": [],
   "waiting": [],
   "last_decision": "CLOSE the trusted-source Day0 nowcast gate and the runtime-test sync, then continue P2-H from the externally flagged temporal-closure and observation-vs-ensemble questions",
-  "backlog_source": "task.md"
+  "backlog_source": "zeus_task.md"
 }
