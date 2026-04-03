@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `Stage 3 / P2 execution-truth mainline closed`
-- Last accepted packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT`
-- Current active packet: `none (P2 closed)`
-- Current packet status: `idle / run-horizon stop boundary reached`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
+- Mainline stage: `Stage 3 / P2 execution-truth mainline reopened for repair`
+- Last accepted packet: `P2.4-ECONOMIC-CLOSE-SETTLEMENT-SPLIT` (reopened by contradiction)
+- Current active packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- Current packet status: `frozen / repair in progress`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
 - Current hard blockers:
-  - no active technical blocker inside packet scope
+  - active semantic contradiction between prior P2-closed control claims and current runtime truth
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1004,5 +1004,45 @@ Archive policy:
   - no remaining uncertainty blocks P2 closure
 - Next required action:
   - stop at the current user-request horizon (`P2 closed`)
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 15:45 America/Chicago] P2 closure reopened by confirmed execution-truth contradiction
+- Author: `Architects mainline lead`
+- Packet: `P2.4-CLOSEOUT-CLAIM` (superseded by repair)
+- Status delta:
+  - prior `P2 closed` control claim is no longer accepted as repo truth
+  - Stage 3 / P2 is reopened for repair
+- Basis / evidence:
+  - user-provided findings identified real bottom-layer execution-truth contradictions
+  - critic review found additional low-level issues beyond the user's list, including admin_closed leakage, deferred-fill price fallback, exit-chain-missing void semantics, and generic settlement terminalizer leakage
+  - direct repo inspection still shows `pending_exit` absent from `LifecycleState`, reconciliation flattening to `holding`, and `has_same_city_range_open()` treating inactive positions as open
+- Decisions frozen:
+  - do not preserve a false-complete P2 closure claim for convenience
+  - fold the coupled defects into one user-directed repair packet
+- Open uncertainties:
+  - the full repair diff and final residual issue set still need implementation/verification
+- Next required action:
+  - freeze and execute `P2R-EXECUTION-TRUTH-REPAIR`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 15:45 America/Chicago] P2R-EXECUTION-TRUTH-REPAIR frozen
+- Author: `Architects mainline lead`
+- Packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- Status delta:
+  - current active repair packet frozen
+- Basis / evidence:
+  - the user explicitly directed that these coupled issues land as one repair package
+  - the known findings plus critic-found low-level defects all sit on the same bottom-layer execution-truth boundary
+- Decisions frozen:
+  - keep this packet on bottom-layer execution-truth repair only
+  - do not widen into P3 strategy-policy work or migration/cutover claims
+  - keep team closed by default while read-only subagents investigate in parallel
+- Open uncertainties:
+  - additional low-level issues may still be uncovered during the concurrent investigation lanes
+- Next required action:
+  - land the repair and targeted tests
+  - then run adversarial review
 - Owner:
   - Architects mainline lead

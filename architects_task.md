@@ -17,27 +17,41 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none (P2 closed)`
-- State: `IDLE / RUN-HORIZON STOP BOUNDARY REACHED`
-- Execution mode: `SOLO_EXECUTE`
+- Packet: `P2R-EXECUTION-TRUTH-REPAIR`
+- State: `FROZEN / REPAIR IN PROGRESS`
+- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No active packet. Current run horizon is satisfied because P2 is closed.
+Repair the bottom-layer execution-truth contradictions that invalidate the prior P2 closure claim.
 
 ## Allowed files
 
+- `work_packets/P2R-EXECUTION-TRUTH-REPAIR.md`
+- `src/contracts/semantic_types.py`
+- `src/state/portfolio.py`
+- `src/engine/cycle_runtime.py`
+- `src/state/chain_reconciliation.py`
+- `src/engine/lifecycle_events.py`
+- `src/execution/exit_lifecycle.py`
+- `src/execution/harvester.py`
+- `src/state/db.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_live_safety_invariants.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_db.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- all non-allowed files
 - `AGENTS.md`
-- `src/**`
-- `tests/**`
+- `src/riskguard/**`
+- `src/control/**`
+- `src/supervisor_api/**`
 - `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -48,24 +62,26 @@ No active packet. Current run horizon is satisfied because P2 is closed.
 
 ## Non-goals
 
-- no P3 work without a new frozen packet
-- no law rewrite
-- no cutover
+- no P3 work
+- no cutover or migration claims
+- no schema migration
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside P2; the current stop boundary is successful P2 closure
+- the active blocker is semantic contradiction between prior P2-closed control claims and current runtime truth
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P2 packet chain is complete and accepted
-- [x] adversarial review approved the final P2 packet claim
-- [x] P2 is closed honestly
-- [ ] if resuming, freeze `P3.1-STRATEGY-POLICY-TABLES`
+- [ ] make `pending_exit` bottom-layer authoritative lifecycle truth
+- [ ] remove reconciliation flattening / holding-like lifecycle inventions
+- [ ] seal economically_closed/admin_closed/quarantined open/exposure/runtime leaks
+- [ ] disposition additional low-level critic findings that belong in the same repair packet
+- [ ] run adversarial review before acceptance
 
 ## Next required action
 
-1. Stop at the current user-request horizon (`P2 closed`).
-2. If continuing later, freeze the first P3 packet before any implementation.
+1. Land the repair in the allowed files only.
+2. Verify with targeted tests and explicit adversarial review.
+3. Keep out-of-scope dirt excluded from any commit.
