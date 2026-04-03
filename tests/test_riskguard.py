@@ -98,7 +98,6 @@ def _insert_control_override(
 
 
 def _neutralize_hard_safety(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(policy_module, "refresh_control_state", lambda: None)
     monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
     monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
 
@@ -467,7 +466,6 @@ class TestStrategyPolicyResolver:
         conn.close()
 
     def test_resolve_strategy_policy_hard_safety_wins_first(self, monkeypatch):
-        monkeypatch.setattr(policy_module, "refresh_control_state", lambda: None)
         monkeypatch.setattr(policy_module, "is_entries_paused", lambda: True)
         monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 2.0)
 

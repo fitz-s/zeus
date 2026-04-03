@@ -9,7 +9,6 @@ from typing import Any
 from src.control.control_plane import (
     get_edge_threshold_multiplier,
     is_entries_paused,
-    refresh_control_state,
 )
 
 
@@ -38,8 +37,6 @@ def resolve_strategy_policy(
     exit_only = False
     sources: list[str] = []
     locked_fields: set[str] = set()
-
-    refresh_control_state()
 
     if is_entries_paused():
         gated = True
