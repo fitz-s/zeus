@@ -348,3 +348,237 @@ def build_reconciliation_rescue_canonical_write(
         "payload_json": payload,
     }
     return [event], projection
+
+
+def build_chain_size_corrected_canonical_write(
+    position: Any,
+    *,
+    local_shares_before: float,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    projection = build_position_current_projection(position)
+    phase = projection["phase"]
+    occurred_at = _non_empty(
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": "chain_size_corrected",
+            "local_shares_before": local_shares_before,
+            "chain_shares_after": getattr(position, "chain_shares", None),
+            "shares_after": getattr(position, "shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "CHAIN_SIZE_CORRECTED",
+        "occurred_at": occurred_at,
+        "phase_before": phase,
+        "phase_after": phase,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "chain_size_corrected",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
+def build_chain_quarantined_canonical_write(
+    position: Any,
+    *,
+    strategy_key: str,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    if not strategy_key:
+        raise ValueError("chain quarantine canonical builder requires explicit strategy_key")
+
+    original_strategy_key = getattr(position, "strategy_key", "")
+    original_strategy = getattr(position, "strategy", "")
+    setattr(position, "strategy_key", strategy_key)
+    setattr(position, "strategy", strategy_key)
+    try:
+        projection = build_position_current_projection(position)
+    finally:
+        setattr(position, "strategy_key", original_strategy_key)
+        setattr(position, "strategy", original_strategy)
+
+    if projection["phase"] != "quarantined":
+        raise ValueError("chain quarantine canonical builder requires a quarantined position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "quarantined_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": "chain_only_quarantined",
+            "condition_id": getattr(position, "condition_id", ""),
+            "token_id": getattr(position, "token_id", ""),
+            "chain_shares": getattr(position, "chain_shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "CHAIN_QUARANTINED",
+        "occurred_at": occurred_at,
+        "phase_before": None,
+        "phase_after": "quarantined",
+        "strategy_key": strategy_key,
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "chain_only_quarantined",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    projection["strategy_key"] = strategy_key
+    return [event], projection
+
+
+def build_chain_size_corrected_canonical_write(
+    position: Any,
+    *,
+    local_shares_before: float,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    projection = build_position_current_projection(position)
+    phase = projection["phase"]
+    occurred_at = _non_empty(
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": "chain_size_corrected",
+            "local_shares_before": local_shares_before,
+            "chain_shares_after": getattr(position, "chain_shares", None),
+            "shares_after": getattr(position, "shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "CHAIN_SIZE_CORRECTED",
+        "occurred_at": occurred_at,
+        "phase_before": phase,
+        "phase_after": phase,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "chain_size_corrected",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
+def build_chain_quarantined_canonical_write(
+    position: Any,
+    *,
+    strategy_key: str,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    if not strategy_key:
+        raise ValueError("chain quarantine canonical builder requires explicit strategy_key")
+
+    original_strategy_key = getattr(position, "strategy_key", "")
+    original_strategy = getattr(position, "strategy", "")
+    setattr(position, "strategy_key", strategy_key)
+    setattr(position, "strategy", strategy_key)
+    try:
+        projection = build_position_current_projection(position)
+    finally:
+        setattr(position, "strategy_key", original_strategy_key)
+        setattr(position, "strategy", original_strategy)
+
+    if projection["phase"] != "quarantined":
+        raise ValueError("chain quarantine canonical builder requires a quarantined position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "quarantined_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": "chain_only_quarantined",
+            "condition_id": getattr(position, "condition_id", ""),
+            "token_id": getattr(position, "token_id", ""),
+            "chain_shares": getattr(position, "chain_shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "CHAIN_QUARANTINED",
+        "occurred_at": occurred_at,
+        "phase_before": None,
+        "phase_after": "quarantined",
+        "strategy_key": strategy_key,
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "chain_only_quarantined",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "payload_json": payload,
+    }
+    projection["strategy_key"] = strategy_key
+    return [event], projection

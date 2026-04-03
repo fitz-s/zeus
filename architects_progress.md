@@ -417,6 +417,47 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-03 12:21 America/Chicago] P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS landed locally with green targeted evidence
+- Author: `Architects mainline lead`
+- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Status delta:
+  - pure reconciliation chain-event builders landed locally
+  - targeted builder evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'chain_size_corrected_builder or chain_quarantined_builder or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `16 passed`
+- Decisions frozen:
+  - chain size correction and quarantine payload construction is now isolated from reconciliation caller code
+  - no reconciliation migration, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - adversarial review has not yet attacked the chain-event builder claim
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-03 12:22 America/Chicago] P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS adversarial review resolved and architect approved
+- Author: `Architects mainline lead`
+- Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Status delta:
+  - explicit adversarial review completed
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - attack review found no blocker-level issue in the builder-only claim
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'chain_size_corrected_builder or chain_quarantined_builder or reconciliation_rescue_builder or reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields or settlement_builder or lifecycle_builder_module_exists or apply_architecture_kernel_schema or transaction_boundary_helper or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `16 passed`
+- Decisions frozen:
+  - chain size correction and quarantine payload construction is now isolated from reconciliation caller code
+  - no reconciliation migration, parity, or cutover claim is made in this packet
+- Open uncertainties:
+  - the chain-event migration packet is still ahead
+- Next required action:
+  - commit and push `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-03 11:19 America/Chicago] P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE adversarial review resolved and architect approved
 - Author: `Architects mainline lead`
 - Packet: `P1.7D-RECONCILIATION-PENDING-FILL-DUAL-WRITE`

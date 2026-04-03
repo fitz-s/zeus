@@ -663,6 +663,246 @@ def test_reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields
     assert projection["phase"] == "active"
 
 
+def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_entry_canonical_write,
+    )
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    pos.chain_verified_at = "2026-04-03T00:20:00Z"
+    pos.chain_shares = 22.0
+    pos.shares = 22.0
+    pos.cost_basis_usd = 11.0
+    pos.size_usd = 11.0
+    pos.condition_id = "cond-1"
+
+    events, projection = build_chain_size_corrected_canonical_write(
+        pos,
+        local_shares_before=20.0,
+        sequence_no=4,
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, events, projection)
+
+    event_row = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    payload = json.loads(event_row["payload_json"])
+    projection_row = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, size_usd FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert event_row["event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert event_row["sequence_no"] == 4
+    assert event_row["phase_before"] == "active"
+    assert event_row["phase_after"] == "active"
+    assert payload["reason"] == "chain_size_corrected"
+    assert payload["local_shares_before"] == 20.0
+    assert payload["chain_shares_after"] == 22.0
+    assert dict(projection_row) == {
+        "phase": "active",
+        "shares": 22.0,
+        "cost_basis_usd": 11.0,
+        "size_usd": 11.0,
+    }
+    conn.close()
+
+
+def test_chain_quarantined_builder_requires_explicit_strategy_key():
+    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
+
+    pos = _runtime_position(state="holding", chain_state="quarantined")
+    pos.trade_id = "quarantine_tok_1"
+    pos.direction = "unknown"
+    pos.strategy_key = ""
+    pos.strategy = ""
+    pos.quarantined_at = "2026-04-03T00:30:00Z"
+    pos.chain_verified_at = "2026-04-03T00:30:00Z"
+    pos.token_id = "tok-1"
+    pos.condition_id = "cond-1"
+
+    try:
+        build_chain_quarantined_canonical_write(
+            pos,
+            strategy_key="",
+            sequence_no=1,
+            source_module="src.state.chain_reconciliation",
+        )
+    except ValueError as exc:
+        assert "requires explicit strategy_key" in str(exc)
+    else:
+        raise AssertionError("expected missing strategy_key to fail loudly")
+
+
+def test_chain_quarantined_builder_emits_quarantined_event_and_projection():
+    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
+
+    pos = _runtime_position(state="holding", chain_state="quarantined")
+    pos.trade_id = "quarantine_tok_1"
+    pos.direction = "unknown"
+    pos.strategy_key = ""
+    pos.strategy = ""
+    pos.quarantined_at = "2026-04-03T00:30:00Z"
+    pos.chain_verified_at = "2026-04-03T00:30:00Z"
+    pos.token_id = "tok-1"
+    pos.condition_id = "cond-1"
+    pos.size_usd = 11.0
+    pos.cost_basis_usd = 11.0
+    pos.chain_shares = 22.0
+    pos.shares = 22.0
+
+    events, projection = build_chain_quarantined_canonical_write(
+        pos,
+        strategy_key="center_buy",
+        sequence_no=1,
+        source_module="src.state.chain_reconciliation",
+    )
+
+    event = events[0]
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "CHAIN_QUARANTINED"
+    assert event["phase_before"] is None
+    assert event["phase_after"] == "quarantined"
+    assert event["strategy_key"] == "center_buy"
+    assert payload["reason"] == "chain_only_quarantined"
+    assert payload["token_id"] == "tok-1"
+    assert projection["phase"] == "quarantined"
+    assert projection["strategy_key"] == "center_buy"
+
+
+def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_entry_canonical_write,
+    )
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="synced")
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    pos.chain_verified_at = "2026-04-03T00:20:00Z"
+    pos.chain_shares = 22.0
+    pos.shares = 22.0
+    pos.cost_basis_usd = 11.0
+    pos.size_usd = 11.0
+    pos.condition_id = "cond-1"
+
+    events, projection = build_chain_size_corrected_canonical_write(
+        pos,
+        local_shares_before=20.0,
+        sequence_no=4,
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, events, projection)
+
+    event_row = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    payload = json.loads(event_row["payload_json"])
+    projection_row = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, size_usd FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert event_row["event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert event_row["sequence_no"] == 4
+    assert event_row["phase_before"] == "active"
+    assert event_row["phase_after"] == "active"
+    assert payload["reason"] == "chain_size_corrected"
+    assert payload["local_shares_before"] == 20.0
+    assert payload["chain_shares_after"] == 22.0
+    assert dict(projection_row) == {
+        "phase": "active",
+        "shares": 22.0,
+        "cost_basis_usd": 11.0,
+        "size_usd": 11.0,
+    }
+    conn.close()
+
+
+def test_chain_quarantined_builder_requires_explicit_strategy_key():
+    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
+
+    pos = _runtime_position(state="holding", chain_state="quarantined")
+    pos.trade_id = "quarantine_tok_1"
+    pos.direction = "unknown"
+    pos.strategy_key = ""
+    pos.strategy = ""
+    pos.quarantined_at = "2026-04-03T00:30:00Z"
+    pos.chain_verified_at = "2026-04-03T00:30:00Z"
+    pos.token_id = "tok-1"
+    pos.condition_id = "cond-1"
+
+    try:
+        build_chain_quarantined_canonical_write(
+            pos,
+            strategy_key="",
+            sequence_no=1,
+            source_module="src.state.chain_reconciliation",
+        )
+    except ValueError as exc:
+        assert "requires explicit strategy_key" in str(exc)
+    else:
+        raise AssertionError("expected missing strategy_key to fail loudly")
+
+
+def test_chain_quarantined_builder_emits_quarantined_event_and_projection():
+    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
+
+    pos = _runtime_position(state="holding", chain_state="quarantined")
+    pos.trade_id = "quarantine_tok_1"
+    pos.direction = "unknown"
+    pos.strategy_key = ""
+    pos.strategy = ""
+    pos.quarantined_at = "2026-04-03T00:30:00Z"
+    pos.chain_verified_at = "2026-04-03T00:30:00Z"
+    pos.token_id = "tok-1"
+    pos.condition_id = "cond-1"
+    pos.size_usd = 11.0
+    pos.cost_basis_usd = 11.0
+    pos.chain_shares = 22.0
+    pos.shares = 22.0
+
+    events, projection = build_chain_quarantined_canonical_write(
+        pos,
+        strategy_key="center_buy",
+        sequence_no=1,
+        source_module="src.state.chain_reconciliation",
+    )
+
+    event = events[0]
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "CHAIN_QUARANTINED"
+    assert event["phase_before"] is None
+    assert event["phase_after"] == "quarantined"
+    assert event["strategy_key"] == "center_buy"
+    assert payload["reason"] == "chain_only_quarantined"
+    assert payload["token_id"] == "tok-1"
+    assert projection["phase"] == "quarantined"
+    assert projection["strategy_key"] == "center_buy"
+
+
 def test_lifecycle_builder_module_exists():
     text = (ROOT / "src/engine/lifecycle_events.py").read_text()
     assert "def canonical_phase_for_position" in text

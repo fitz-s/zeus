@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P1.7E-RECONCILIATION-CHAIN-EVENT-BUILDERS`
-- State: `FROZEN / READY TO IMPLEMENT`
+- State: `LANDED LOCALLY / UNDER REVIEW`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -73,17 +73,17 @@ Extend `src/engine/lifecycle_events.py` with pure reconciliation chain-event bui
 
 ## Immediate checklist
 
-- [ ] implement reconciliation chain-event builders in `src/engine/lifecycle_events.py`
-- [ ] keep the builder layer detached from reconciliation caller wiring
-- [ ] add targeted architecture-contract coverage
-- [ ] append durable packet transition to `architects_progress.md` when implementation lands
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] implement reconciliation chain-event builders in `src/engine/lifecycle_events.py`
+- [x] keep the builder layer detached from reconciliation caller wiring
+- [x] add targeted architecture-contract coverage
+- [x] append durable packet transition to `architects_progress.md` when implementation lands
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the packet
 
 ## Next required action
 
-1. Add the pure reconciliation chain-event builder layer.
-2. Keep caller migration for a later packet.
+1. Commit and push this accepted reconciliation chain-event builder packet without mixing unrelated working-tree dirt.
+2. Freeze the successor reconciliation chain-event migration packet after push.
 3. Keep cutover and broader state rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep caller migration separate from this builder packet.
