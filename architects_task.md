@@ -47,7 +47,7 @@ Current completion ladder:
 `P-GATE-01-CONSOLIDATE-ADVISORY`
 
 ### State
-`COMMITTED / PUSHED / READY FOR NEXT PACKET`
+`FOLLOW-UP DELTA VERIFIED / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -110,10 +110,11 @@ Explicitly forbidden for edits in this packet:
 - carry-forward fact: root AGENTS sync already landed in commits `0431f55` and `1866086`
 - known advisory issue: semgrep still reports two findings outside this packet boundary and therefore remains advisory
 - packet-external carry-forward: semgrep path-pattern warnings and the two current semgrep findings still require a later packet
-- current packet commit/push completed as `9151dc6`
+- first packet commit/push completed as `9151dc6`
+- current follow-up delta is uncommitted but locally verified
 
 ### Ready-to-commit slice
-`Slice 1 — add a machine-checkable advisory gate policy script, bind it into the workflow as a blocking verdict check, freeze the packet in work_packets/, and add a targeted architecture test for the current advisory split.`
+`Follow-up delta — add `_yaml_bootstrap.py` trigger coverage, reduce policy/test authority drift, soften brittle command pinning, and make the advisory-policy script explicitly state that workflow-shape green is not advisory-lane green.`
 
 ---
 
@@ -161,7 +162,8 @@ Slice 1 shape:
 - [x] run `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src`
 - [x] collect two attack-only adversarial reviews
 - [x] append execution result to `architects_progress.md`
-- [x] commit and push the slice
+- [x] first packet commit/push (`9151dc6`)
+- [ ] commit and push the follow-up delta
 
 Evidence snapshot for Slice 1:
 - affected-surface note: workflow/script/test/packet control surfaces only
@@ -178,23 +180,24 @@ Evidence snapshot for Slice 1:
   - `python3 scripts/replay_parity.py --ci` -> `canonical ledger tables not present yet; replay parity is staged`
   - `.venv/bin/semgrep --config architecture/ast_rules/semgrep_zeus.yml --severity ERROR src` -> 2 findings + path warnings, remains advisory
 - attack-only reviews:
-  - internal adversarial review -> no additional in-scope contradiction beyond verdict brittleness already fixed
-  - Gemini artifact -> `.omx/artifacts/gemini-p-gate-01-consolidate-advisory-attack-20260403T042215Z.md`
+- internal adversarial review -> no additional in-scope contradiction beyond verdict brittleness already fixed
+- Gemini artifact -> `.omx/artifacts/gemini-p-gate-01-consolidate-advisory-attack-20260403T042215Z.md`
 - architect verification:
-  - leader architect pass -> no remaining in-scope contradiction after the attack-only fixes
+  - leader architect pass on the follow-up delta -> no remaining in-scope contradiction after the attack-only fixes
 - in-scope fixes taken after attack review:
   - normalized workflow YAML `on` parsing in script/test
-  - reduced test/script duplication by making the test execute the policy script
+  - reduced test/script duplication while keeping a small independent YAML-shape check
+  - added `_yaml_bootstrap.py` to workflow trigger coverage
   - removed stale `architects_task.md` owner indirection from workflow metadata
-  - lowered workflow Python version target from `3.14` to `3.13` to reduce CI brittleness
+  - made the policy script explicitly print that advisory jobs still require separate evidence review
 
 Local verification completed:
 - current advisory workflow inspected
 - current semgrep advisory rationale inspected
 - `git diff --check` will be run before commit
 - manual deslop pass completed on changed files; no further dead code or duplication removal was needed after the script/test simplification
-- commit: `9151dc6`
-- push: `origin/Architects`
+- first packet commit: `9151dc6`
+- first packet push: `origin/Architects`
 
 ---
 
@@ -256,8 +259,9 @@ Recommended baton split:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Verify GitHub now shows commit `9151dc6` plus the updated Architects ledgers.
-2. Freeze the next bounded `P-*` packet instead of widening this one.
+1. Commit and push this narrow follow-up delta.
+2. Verify GitHub now shows both the original packet commit and the follow-up refinement.
+3. Freeze the next bounded `P-*` packet instead of widening this one.
 3. Preferred next packet: semgrep remediation / promotion-decision packet that separates packet-external findings from rule-path drift.
 4. Only after the full `P-*` family closes, plan the foundation mainline automation program.
 

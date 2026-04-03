@@ -73,24 +73,13 @@ def test_advisory_gate_workflow_freezes_verdict():
     jobs = workflow["jobs"]
     triggers = workflow.get("on") or workflow.get(True) or {}
 
-    advisory = {"semgrep-zeus", "replay-parity"}
-
-    for job_name in advisory:
-        assert jobs[job_name].get("continue-on-error") is True
-        env = jobs[job_name]["env"]
-        assert env["GATE_OWNER"]
-        assert env["GATE_RATIONALE"]
-        assert "Promote only after" in env["GATE_REVIEW_CONDITION"]
-
-    policy_env = jobs["advisory-gate-policy"]["env"]
-    assert policy_env["GATE_OWNER"] == "P-GATE-01 gate owner"
-    assert policy_env["GATE_RATIONALE"]
-    assert "validates verdict drift" in policy_env["GATE_REVIEW_CONDITION"]
+    assert "advisory-gate-policy" in jobs
+    assert jobs["semgrep-zeus"].get("continue-on-error") is True
+    assert jobs["replay-parity"].get("continue-on-error") is True
 
     trigger_paths = set(triggers["pull_request"]["paths"])
+    assert "scripts/_yaml_bootstrap.py" in trigger_paths
     assert "work_packets/**" in trigger_paths
-    assert "scripts/check_*" in trigger_paths
-    assert "tests/test_architecture_contracts.py" in trigger_paths
 
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/check_advisory_gates.py")],
@@ -99,3 +88,4 @@ def test_advisory_gate_workflow_freezes_verdict():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "policy verdict only; advisory jobs still require separate evidence review" in result.stdout
