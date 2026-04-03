@@ -17,6 +17,7 @@ import src.data.ensemble_client as ensemble_client
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
+import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.config import City
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
@@ -2270,3 +2271,143 @@ def test_materialize_position_carries_semantic_snapshot_jsons():
     assert pos.settlement_semantics_json == '{"measurement_unit":"F"}'
     assert pos.epistemic_context_json == '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
     assert pos.edge_context_json == '{"forward_edge":0.12}'
+
+
+def test_exit_intent_scaffolding_vocabulary_is_explicit():
+    assert exit_lifecycle_module.EXIT_EVENT_VOCABULARY == (
+        "EXIT_INTENT",
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_FILLED",
+        "EXIT_ORDER_VOIDED",
+        "EXIT_ORDER_REJECTED",
+    )
+
+
+def test_build_exit_intent_carries_boundary_fields():
+    pos = _position()
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+
+    intent = exit_lifecycle_module.build_exit_intent(pos, ctx, paper_mode=True)
+
+    assert intent.trade_id == pos.trade_id
+    assert intent.reason == "forward edge failed"
+    assert intent.token_id == pos.token_id
+    assert intent.shares == pytest.approx(pos.effective_shares)
+    assert intent.current_market_price == pytest.approx(0.46)
+    assert intent.best_bid == pytest.approx(0.45)
+    assert intent.paper_mode is True
+
+
+def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
+    pos = _position(state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+    intent = exit_lifecycle_module.build_exit_intent(pos, ctx, paper_mode=True)
+
+    outcome = exit_lifecycle_module.execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ctx,
+        paper_mode=True,
+        exit_intent=intent,
+    )
+
+    assert outcome == "paper_exit: forward edge failed"
+    assert pos.exit_state == "sell_filled"
+
+
+def test_execute_exit_rejects_mismatched_exit_intent():
+    pos = _position(state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+    intent = exit_lifecycle_module.ExitIntent(
+        trade_id="other-trade",
+        reason="forward edge failed",
+        token_id=pos.token_id,
+        shares=pos.effective_shares,
+        current_market_price=0.46,
+        best_bid=0.45,
+        paper_mode=True,
+    )
+
+    with pytest.raises(ValueError, match="trade_id mismatch"):
+        exit_lifecycle_module.execute_exit(
+            portfolio=portfolio,
+            position=pos,
+            exit_context=ctx,
+            paper_mode=True,
+            exit_intent=intent,
+        )
+
+
+def test_check_pending_exits_does_not_retry_bare_exit_intent_without_error():
+    pos = _position()
+    pos.exit_state = "exit_intent"
+    pos.last_exit_error = ""
+    portfolio = PortfolioState(positions=[pos])
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=None, conn=None)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos.exit_state == "exit_intent"
+
+
+def test_check_pending_exits_emits_void_semantics_for_rejected_sell(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    pos = _position(state="day0_window")
+    pos.exit_state = "sell_pending"
+    pos.last_exit_order_id = "sell-order-1"
+    pos.exit_reason = "forward edge failed"
+    pos.last_monitor_market_price = 0.46
+    portfolio = PortfolioState(positions=[pos])
+
+    class LiveClob:
+        def get_order_status(self, order_id):
+            assert order_id == "sell-order-1"
+            return {"status": "REJECTED"}
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=LiveClob(), conn=conn)
+    events = query_position_events(conn, "t1")
+    conn.close()
+
+    assert stats["retried"] == 1
+    assert any(event["event_type"] == "EXIT_ORDER_VOIDED" for event in events)

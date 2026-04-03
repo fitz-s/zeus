@@ -15,6 +15,7 @@ CycleRunner does not contain exit business logic.
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -32,8 +33,31 @@ logger = logging.getLogger(__name__)
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
 
+EXIT_EVENT_VOCABULARY = (
+    "EXIT_INTENT",
+    "EXIT_ORDER_POSTED",
+    "EXIT_ORDER_FILLED",
+    "EXIT_ORDER_VOIDED",
+    "EXIT_ORDER_REJECTED",
+)
+
+
+@dataclass(frozen=True)
+class ExitIntent:
+    """Scaffolding contract for explicit exit intent at the engine/execution boundary."""
+
+    trade_id: str
+    reason: str
+    token_id: str
+    shares: float
+    current_market_price: float
+    best_bid: float | None
+    paper_mode: bool
+
+
 # CLOB statuses that indicate a fill
 FILL_STATUSES = frozenset({"MATCHED", "FILLED"})
+VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -47,6 +71,34 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mode: bool) -> ExitIntent:
+    """Build the explicit exit-intent contract before any execution behavior happens."""
+    token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
+    return ExitIntent(
+        trade_id=position.trade_id,
+        reason=exit_context.exit_reason,
+        token_id=token_id,
+        shares=position.effective_shares,
+        current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
+        best_bid=exit_context.best_bid,
+        paper_mode=paper_mode,
+    )
+
+
+def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_intent: ExitIntent, *, paper_mode: bool) -> None:
+    if exit_intent.trade_id != position.trade_id:
+        raise ValueError("exit_intent trade_id mismatch")
+    expected_token = position.token_id if position.direction == "buy_yes" else position.no_token_id
+    if exit_intent.token_id != expected_token:
+        raise ValueError("exit_intent token_id mismatch")
+    if abs(exit_intent.shares - position.effective_shares) > 1e-9:
+        raise ValueError("exit_intent shares mismatch")
+    if exit_context.current_market_price is not None and abs(exit_intent.current_market_price - float(exit_context.current_market_price)) > 1e-9:
+        raise ValueError("exit_intent current_market_price mismatch")
+    if exit_intent.paper_mode is not paper_mode:
+        raise ValueError("exit_intent paper_mode mismatch")
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -66,6 +118,7 @@ def execute_exit(
     paper_mode: bool,
     clob=None,
     conn: sqlite3.Connection | None = None,
+    exit_intent: ExitIntent | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
@@ -80,16 +133,20 @@ def execute_exit(
             return "exit_blocked: incomplete_context"
         return "paper_exit_failed: incomplete_context"
 
+    exit_intent = exit_intent or build_exit_intent(position, exit_context, paper_mode=paper_mode)
+    _validate_exit_intent(position, exit_context, exit_intent, paper_mode=paper_mode)
+
     if paper_mode:
+        position.exit_state = "exit_intent"
         closed = close_position(
             portfolio,
             position.trade_id,
-            float(exit_context.current_market_price),
-            exit_context.exit_reason,
+            exit_intent.current_market_price,
+            exit_intent.reason,
         )
         if closed is not None:
             closed.exit_state = "sell_filled"
-            return f"paper_exit: {exit_context.exit_reason}"
+            return f"paper_exit: {exit_intent.reason}"
         return "paper_exit_failed: position_not_found"
 
     # Live mode: sell order lifecycle
@@ -97,6 +154,7 @@ def execute_exit(
         portfolio,
         position,
         exit_context,
+        exit_intent,
         clob,
         conn=conn,
     )
@@ -106,6 +164,7 @@ def _execute_live_exit(
     portfolio: PortfolioState,
     position: Position,
     exit_context: ExitContext,
+    exit_intent: ExitIntent,
     clob,
     *,
     conn: sqlite3.Connection | None,
@@ -113,6 +172,15 @@ def _execute_live_exit(
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
         from src.state.db import log_exit_attempt_event, log_exit_fill_event, log_exit_retry_event
+        from src.state.db import log_pending_exit_recovery_event
+
+        log_pending_exit_recovery_event(
+            conn,
+            position,
+            event_type="EXIT_INTENT",
+            reason=exit_intent.reason,
+            error="",
+        )
 
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
@@ -126,11 +194,18 @@ def _execute_live_exit(
             error=collateral_reason or "",
         )
         if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=retry_reason,
+                error=collateral_reason or "",
+            )
             log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason or "")
         return f"collateral_blocked: {collateral_reason}"
 
-    current_market_price = float(exit_context.current_market_price)
-    best_bid = exit_context.best_bid
+    current_market_price = exit_intent.current_market_price
+    best_bid = exit_intent.best_bid
 
     # Cancel stale sell order before retry
     if position.last_exit_order_id and position.exit_retry_count > 0:
@@ -141,11 +216,18 @@ def _execute_live_exit(
                            position.trade_id, exc)
 
     # Determine the token to sell
-    token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
+    token_id = exit_intent.token_id
     if not token_id:
-        retry_reason = f"{exit_context.exit_reason} [NO_TOKEN_ID]"
+        retry_reason = f"{exit_intent.reason} [NO_TOKEN_ID]"
         _mark_exit_retry(position, reason=retry_reason, error="no_token_id")
         if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=retry_reason,
+                error="no_token_id",
+            )
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
@@ -167,6 +249,13 @@ def _execute_live_exit(
                 error=sell_result["error"],
             )
             if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error=sell_result["error"],
+                )
                 log_exit_retry_event(conn, position, reason=retry_reason, error=sell_result["error"])
             return f"sell_error: {sell_result['error']}"
 
@@ -179,19 +268,27 @@ def _execute_live_exit(
         position.last_exit_order_id = order_id
         position.exit_state = "sell_placed"
         if conn is not None:
-            log_exit_attempt_event(
-                conn,
-                position,
-                order_id=order_id,
-                status="placed",
-                current_market_price=current_market_price,
-                best_bid=best_bid,
-                shares=position.effective_shares,
-                details={
-                    "token_id": token_id,
-                    "sell_result": sell_result,
-                },
-            )
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_POSTED",
+                    reason=exit_intent.reason,
+                    error="",
+                )
+                log_exit_attempt_event(
+                    conn,
+                    position,
+                    order_id=order_id,
+                    status="placed",
+                    current_market_price=current_market_price,
+                    best_bid=best_bid,
+                    shares=exit_intent.shares,
+                    details={
+                        "token_id": token_id,
+                        "semantic_event": "EXIT_ORDER_POSTED",
+                        "sell_result": sell_result,
+                    },
+                )
 
         # Quick fill check (non-blocking — next cycle does full check)
         if order_id and clob:
@@ -223,7 +320,8 @@ def _execute_live_exit(
                         status=status or "pending",
                         current_market_price=current_market_price,
                         best_bid=best_bid,
-                        shares=position.effective_shares,
+                        shares=exit_intent.shares,
+                        details={"semantic_event": "EXIT_ORDER_POSTED"},
                     )
                 return f"sell_pending: order={order_id}, status={status}"
 
@@ -236,7 +334,8 @@ def _execute_live_exit(
                 status="pending",
                 current_market_price=current_market_price,
                 best_bid=best_bid,
-                shares=position.effective_shares,
+                shares=exit_intent.shares,
+                details={"semantic_event": "EXIT_ORDER_POSTED"},
             )
         return f"sell_placed: order={order_id}"
 
@@ -250,6 +349,13 @@ def _execute_live_exit(
             error=retry_error,
         )
         if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=retry_reason,
+                error=retry_error,
+            )
             log_exit_retry_event(conn, position, reason=retry_reason, error=retry_error)
         return f"sell_exception: {exc}"
 
@@ -281,6 +387,9 @@ def check_pending_exits(
 
         # exit_intent with no order ID = stranded from exception during place_sell_order
         if pos.exit_state == "exit_intent":
+            if not pos.last_exit_error:
+                stats["unchanged"] += 1
+                continue
             _mark_exit_retry(pos, reason="STRANDED_EXIT_INTENT", error="exception_during_sell")
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -334,9 +443,16 @@ def check_pending_exits(
                         timestamp=getattr(closed, "last_exit_at", None),
                     )
             stats["filled"] += 1
-        elif status in ("CANCELLED", "CANCELED", "EXPIRED", "REJECTED"):
+        elif status in VOID_STATUSES:
             _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)
             if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    pos,
+                    event_type="EXIT_ORDER_VOIDED",
+                    reason=f"SELL_{status}",
+                    error=status,
+                )
                 log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
             stats["retried"] += 1
         elif status == "":

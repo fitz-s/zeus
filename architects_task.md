@@ -57,7 +57,7 @@ Current completion ladder:
 `P0.1-EXIT-SEMANTICS-SPLIT`
 
 ### State
-`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
+`ACCEPTED LOCALLY / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -119,11 +119,11 @@ Explicitly forbidden for edits in this packet:
 ### Current blocker
 - no active hard blocker
 - `P0.2-ATTRIBUTION-FREEZE` is complete and pushed in `a1ac706`
-- the next blocker is executional: the first exit-semantics scaffolding slice is not yet landed
+- explicit adversarial review is complete
 - repo-local `zeus_final_tribunal_overlay/` is currently an untracked reference directory and remains outside versioned packet scope
 
 ### Ready-to-commit slice
-`P0.1 inventory is complete — next execution slice is to add or normalize ExitIntent / exit-event vocabulary scaffolding on the touched execution path without doing the full behavioral cutover yet.`
+`P0.1 accepted locally — ExitIntent and canonical exit-event vocabulary scaffolding now exist on the touched execution path, bad-caller and bare-intent edge cases are guarded, and post-attack fixes are in place. Next step is commit/push.`
 
 ---
 
@@ -154,10 +154,10 @@ Inventory result:
 
 ### Phase D — evidence bundle
 - [x] append prior packet closure + next packet freeze to `architects_progress.md`
-- [ ] run targeted exit-semantics tests
-- [ ] run architecture-contract verification
-- [ ] run explicit adversarial review
-- [ ] obtain architect verification
+- [x] run targeted exit-semantics tests
+- [x] run architecture-contract verification
+- [x] run explicit adversarial review
+- [x] obtain architect verification
 - [ ] commit and push the packet execution slice
 
 ---
