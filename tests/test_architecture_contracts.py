@@ -382,6 +382,126 @@ def test_db_no_longer_owns_canonical_append_project_bodies():
     assert "def append_many_and_project(" not in text
     assert "def apply_architecture_kernel_schema(" not in text
 
+
+def _runtime_position(*, state: str = "pending_tracked", exit_state: str = "", chain_state: str = "local_only"):
+    from src.state.portfolio import Position
+
+    return Position(
+        trade_id="rt-pos-1",
+        market_id="mkt-1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-03",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.5,
+        p_posterior=0.6,
+        edge=0.1,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        entered_at="2026-04-03T00:05:00Z" if state != "pending_tracked" else "",
+        day0_entered_at="2026-04-03T00:06:00Z" if state == "day0_window" else "",
+        decision_snapshot_id="snap-1",
+        entry_method="ens_member_counting",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        discovery_mode="update_reaction",
+        state=state,
+        order_id="ord-1",
+        order_status="filled" if state != "pending_tracked" else "pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        chain_state=chain_state,
+        exit_state=exit_state,
+    )
+
+
+def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
+    from src.engine.lifecycle_events import canonical_phase_for_position
+
+    assert canonical_phase_for_position(_runtime_position(state="pending_tracked")) == "pending_entry"
+    assert canonical_phase_for_position(_runtime_position(state="entered", chain_state="unknown")) == "active"
+    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="synced")) == "active"
+    assert canonical_phase_for_position(_runtime_position(state="day0_window", chain_state="synced")) == "day0_window"
+    assert canonical_phase_for_position(_runtime_position(state="holding", exit_state="sell_pending", chain_state="exit_pending_missing")) == "pending_exit"
+    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantined")) == "quarantined"
+    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantine_expired")) == "quarantined"
+    assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
+    assert canonical_phase_for_position(_runtime_position(state="settled")) == "settled"
+    assert canonical_phase_for_position(_runtime_position(state="admin_closed")) == "admin_closed"
+
+
+def test_entry_builder_emits_pending_entry_batch_and_projection():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+
+    events, projection = build_entry_canonical_write(
+        _runtime_position(state="pending_tracked"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "POSITION_OPEN_INTENT",
+        "ENTRY_ORDER_POSTED",
+    ]
+    assert events[0]["phase_after"] == "pending_entry"
+    assert events[1]["phase_before"] == "pending_entry"
+    assert events[1]["order_id"] == "ord-1"
+    assert projection["phase"] == "pending_entry"
+    assert projection["order_status"] == "pending"
+
+
+def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    events, projection = build_entry_canonical_write(
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "POSITION_OPEN_INTENT",
+        "ENTRY_ORDER_POSTED",
+        "ENTRY_ORDER_FILLED",
+    ]
+    assert events[-1]["phase_after"] == "active"
+    assert projection["phase"] == "active"
+
+    append_many_and_project(conn, events, projection)
+    row = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key, order_status FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert [(r["event_type"], r["sequence_no"]) for r in row] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+    ]
+    assert dict(projection_row) == {
+        "phase": "active",
+        "strategy_key": "center_buy",
+        "order_status": "filled",
+    }
+    conn.close()
+
+
+def test_lifecycle_builder_module_exists():
+    text = (ROOT / "src/engine/lifecycle_events.py").read_text()
+    assert "def canonical_phase_for_position" in text
+    assert "def build_position_current_projection" in text
+    assert "def build_entry_canonical_write" in text
+
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
     jobs = workflow["jobs"]

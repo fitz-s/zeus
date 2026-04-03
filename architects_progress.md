@@ -1592,6 +1592,48 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects mainline lead
 
+## [2026-04-03 03:41 America/Chicago] P1.4-CANONICAL-LIFECYCLE-BUILDERS landed locally with green targeted evidence
+- Packet: `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- Status delta:
+  - pure canonical lifecycle builder module landed locally
+  - targeted architecture-contract evidence is green
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'lifecycle_builder or apply_architecture_kernel_schema or transaction_boundary_helper or runtime_ready or callers or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `12 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent'` -> `2 passed`
+- Decisions frozen:
+  - builder layer stayed pure and detached from runtime caller migration
+  - dual-write and cutover remain deferred
+- Open uncertainties:
+  - adversarial review has not yet attacked the builder signatures/scope
+- Next required action:
+  - run explicit adversarial review before acceptance
+- Owner:
+  - execution owner: Architects mainline lead
+
+## [2026-04-03 04:28 America/Chicago] P1.4-CANONICAL-LIFECYCLE-BUILDERS adversarial review resolved and architect approved
+- Packet: `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- Status delta:
+  - adversarial findings reconciled
+  - final architect verification returned `APPROVE`
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'lifecycle_builder or apply_architecture_kernel_schema or transaction_boundary_helper or runtime_ready or callers or exposes_canonical_transaction_boundary_helpers or db_no_longer_owns_canonical_append_project_bodies'` -> `12 passed`
+  - `.venv/bin/pytest -q tests/test_db.py -k 'init_schema_creates_all_tables or init_schema_idempotent'` -> `2 passed`
+  - critic verdict after quarantine/admin-close coverage fix: `APPROVE`
+- Decisions frozen:
+  - builder layer remains pure and has no runtime callers
+  - quarantine / quarantine_expired now map to canonical `quarantined`
+  - dual-write, cutover, and runtime caller migration remain deferred
+- Open uncertainties:
+  - first runtime-caller migration remains a separate future packet
+- Next required action:
+  - commit and push `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
+- Owner:
+  - execution owner: Architects mainline lead
+
 ---
 
 ## Active Open Questions

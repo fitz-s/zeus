@@ -58,7 +58,7 @@ Current completion ladder:
 `P1.4-CANONICAL-LIFECYCLE-BUILDERS`
 
 ### State
-`FROZEN / IN EXECUTION`
+`APPROVED / READY TO COMMIT`
 
 ### Execution mode verdict
 `SOLO_EXECUTE`
@@ -143,19 +143,19 @@ Explicitly forbidden for edits in this packet:
 - [x] define allowed / forbidden files for the packet
 
 ### Phase B — implementation
-- [ ] add pure canonical builder helpers in `src/engine/lifecycle_events.py`
-- [ ] keep the builder layer detached from runtime caller wiring
-- [ ] add targeted architecture-contract coverage for the builder surface
+- [x] add pure canonical builder helpers in `src/engine/lifecycle_events.py`
+- [x] keep the builder layer detached from runtime caller wiring
+- [x] add targeted architecture-contract coverage for the builder surface
 
 ### Phase C — bounded design discipline
-- [ ] keep live/runtime cutover out of scope
-- [ ] keep replay/parity staged-advisory
-- [ ] keep the packet builder-only and not dual-write
+- [x] keep live/runtime cutover out of scope
+- [x] keep replay/parity staged-advisory
+- [x] keep the packet builder-only and not dual-write
 
 ### Phase D — evidence bundle
 - [ ] append packet transitions to `architects_progress.md`
-- [ ] run explicit adversarial review
-- [ ] obtain final architect verification
+- [x] run explicit adversarial review
+- [x] obtain final architect verification
 - [ ] commit and push the accepted packet
 
 ---
@@ -163,9 +163,9 @@ Explicitly forbidden for edits in this packet:
 ## Next Required Action
 
 The next owner should do exactly this:
-1. Add the pure lifecycle builder layer.
-2. Keep runtime caller migration frozen for a later packet.
+1. Commit and push this accepted builder packet without mixing unrelated working-tree dirt.
+2. Freeze the first runtime-caller migration packet separately after push.
 3. Keep dual-write, cutover, and runtime rewiring out of scope.
-4. Keep unrelated working-tree dirt out of the packet commit.
+4. Keep the builder layer pure until a later packet intentionally wires it in.
 
 If this cannot be done without a new packet, freeze that packet before acting.
