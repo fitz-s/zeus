@@ -21,6 +21,8 @@ Current-phase or long-lived: Long-lived.
 - Command ingress: `src/control/control_plane.py`
 - Operator health/observation export: `src/observability/status_summary.py` and `scripts/healthcheck.py`
 - Audit/repo-host alignment check: `scripts/audit_architecture_alignment.py`
+  - repo-local architecture drift may be reported as blocking
+  - external workspace / host-surface assumptions must remain advisory in the current phase
 
 ### End state
 - Typed contract definitions remain repo-local
@@ -40,6 +42,7 @@ Current phase limitations:
 - status surfaces are derived from mixed runtime truth
 - canonical `position_current` projection does not yet exist
 - repo audit still assumes external workspace surfaces that were not supplied in this session
+- external host/workspace checks may inform operator confidence, but they do not outrank repo-local authority or become merge/cutover blockers by themselves
 
 ### End state
 Venus should:
@@ -144,3 +147,22 @@ It may not:
 
 This boundary note is actionable for repo design now.
 It is not complete verification of the user’s actual workspace host setup because the external workspace files referenced by the repo were not provided in this session.
+
+## 11. Audit interpretation rule
+
+`scripts/audit_architecture_alignment.py` must distinguish:
+
+- **repo-local blocking drift**
+  - replay guard loss
+  - decision-reference loss
+  - clear repo-runtime architecture regressions
+
+- **external advisory assumptions**
+  - workspace operator surfaces
+  - OpenClaw host configuration
+  - host/runtime enablement outside repo control
+
+Current-phase rule:
+- external host/workspace checks may be reported
+- they may not silently become repo-authority blockers
+- a green audit-policy result does not claim full external-environment verification

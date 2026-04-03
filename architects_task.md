@@ -118,7 +118,7 @@ After these four packets close:
 `P-BOUND-01`
 
 ### State
-`ACTIVE / INVENTORY COMPLETE / READY FOR FIRST SLICE`
+`VERIFIED / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
@@ -179,9 +179,10 @@ Explicitly forbidden for edits in the next packet:
 - queue fact: `P-ROLL-01`, `P-STATE-01`, and `P-OPS-01` are frozen behind this packet
 - queue-freeze commit/push completed as `2e5a8c5`
 - inventory finding: `scripts/audit_architecture_alignment.py` still treats external workspace surfaces as stronger-than-advisory checks and is the most likely drift surface in this packet
+- no current hard blocker; packet verification is complete
 
 ### Ready-to-commit slice
-`Slice 1 candidate — narrow boundary-consolidation patch that keeps the boundary note current-phase honest and demotes audit-script external workspace assumptions from implicit blockers to explicit advisory findings, without widening into runtime/control/schema work.`
+`P-BOUND-01 completed locally — boundary note now states external checks are advisory-only, and audit_architecture_alignment.py now separates repo-local blockers from external advisory assumptions without widening into runtime/control/schema work.`
 
 ---
 
@@ -215,11 +216,26 @@ Current slice shape:
 - keep `src/control/**`, runtime truth, and schema completely out of scope
 
 ### Phase D — evidence bundle
-- [ ] run `python3 scripts/check_work_packets.py`
-- [ ] collect contract-map evidence
-- [ ] record external-surface assumptions note
-- [ ] append execution result to `architects_progress.md`
+- [x] run `python3 scripts/check_work_packets.py`
+- [x] collect contract-map evidence
+- [x] record external-surface assumptions note
+- [x] append execution result to `architects_progress.md`
+- [x] run `python3 scripts/audit_architecture_alignment.py`
 - [ ] commit and push once the packet slice lands
+
+Evidence snapshot:
+- contract map:
+  - boundary note = current-phase law
+  - `scripts/audit_architecture_alignment.py` = audit/repo-host check
+  - `src/supervisor_api/contracts.py` = typed contract surface
+- external-surface assumptions note:
+  - external workspace/operator surfaces may be reported
+  - OpenClaw host config may be reported
+  - neither becomes repo-authority blocking by itself in current phase
+- audit output:
+  - `blocking: []`
+  - `repo_verdict: pass`
+  - `external_boundary_verdict: advisory-only`
 
 ---
 

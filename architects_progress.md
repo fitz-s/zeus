@@ -483,6 +483,45 @@ Recommended entry schema:
 - Owner:
   - execution owner: Architects local lead (current Codex session)
 
+## [2026-04-03 00:18 America/Chicago] P-BOUND-01 patch landed locally
+- Packet: `P-BOUND-01`
+- Status delta:
+  - boundary note updated to make audit interpretation current-phase honest
+  - audit script updated to separate repo-local blockers from external advisory assumptions
+  - typed supervisor contracts intentionally left unchanged after review
+- Basis / evidence:
+  - boundary note now states that external workspace/host checks stay advisory
+  - audit script now returns `blocking` for repo-local drift and `advisory_external` for host/workspace assumptions
+  - `src/supervisor_api/contracts.py` remained read-only because no typed-contract contradiction was proven
+- Decisions frozen:
+  - `P-BOUND-01` first slice is docs + audit-script only
+  - repo authority no longer depends on external host checks being treated as blocking
+- Open uncertainties:
+  - later operator-facing docs may need to explain the new audit output shape once `P-OPS-01` starts
+- Next required action:
+  - run verification, append evidence, then commit and push `P-BOUND-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
+## [2026-04-03 00:22 America/Chicago] P-BOUND-01 evidence completed
+- Packet: `P-BOUND-01`
+- Status delta:
+  - packet verification completed successfully
+  - packet is ready to commit and push
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/audit_architecture_alignment.py` -> repo-local `blocking: []`, `repo_verdict: pass`, `external_boundary_verdict: advisory-only`
+  - `git diff --check` -> clean
+- Decisions frozen:
+  - boundary note and audit script are now aligned on the current-phase rule that external host/workspace checks remain advisory
+  - `src/supervisor_api/contracts.py` stays unchanged in this packet because no contract contradiction was proven
+- Open uncertainties:
+  - `P-OPS-01` may later need to explain the revised audit output shape for operators
+- Next required action:
+  - commit and push `P-BOUND-01`, then rotate the active task surface to `P-ROLL-01`
+- Owner:
+  - execution owner: Architects local lead (current Codex session)
+
 ## [2026-04-02 22:21 America/Chicago] Root AGENTS slice prepared for commit
 - Packet: `P-INSTR-01-SLICE-ROOT-AGENTS`
 - Status delta:
