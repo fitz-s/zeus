@@ -115,26 +115,26 @@ After these four packets close:
 ## Current Active Packet
 
 ### Packet
-`P-ROLL-01`
+`P-STATE-01`
 
 ### State
-`ACTIVE / PATCH LANDED LOCALLY / VERIFYING`
+`VERIFIED / READY TO COMMIT`
 
 ### Execution mode verdict
 `RALPH_NOW`
 
 ### Objective
-Record the rollout/cutover truth honestly by distinguishing resolved, narrowed, and still-open deltas and by keeping the archive/cutover plan explicit about what is complete vs still pending in current phase.
+Remove the highest-risk current-phase state drift by eliminating strategy fallback and authority-sensitive date fallback without widening into schema, control-plane, or authority-law edits.
 
 ### Why this packet is next
 - user explicitly set the remaining queue order
-- `P-BOUND-01` is now closed
-- rollout truth must remain honest before `P-STATE-01` touches runtime drift
+- `P-BOUND-01` and `P-ROLL-01` are now closed
+- `P-STATE-01` is the first remaining packet that touches runtime behavior directly
 
 ### Owner model
-- Required: one named execution owner for `P-ROLL-01`
+- Required: one named execution owner for `P-STATE-01`
 - Tribunal/principal architect remains the scope-freezing authority
-- Verifier remains independent docs/evidence reviewer
+- Verifier remains independent runtime/evidence reviewer
 - Critic remains contradiction / blast-radius reviewer
 
 ### Planning lane baseline
@@ -148,36 +148,41 @@ Record the rollout/cutover truth honestly by distinguishing resolved, narrowed, 
 
 ### Allowed edit surface
 Only the following may be edited in the next packet:
-- `docs/rollout/**`
-- `docs/governance/zeus_runtime_delta_ledger.md`
+- `src/state/strategy_tracker.py`
+- `src/data/observation_client.py`
+- targeted tests/docs only
 - `architects_progress.md`
 - `architects_task.md`
-- `work_packets/P-ROLL-01.md`
+- `work_packets/P-STATE-01.md`
 
 ### Forbidden edit surface
 Explicitly forbidden for edits in the next packet:
 - all non-allowed files
 - `architecture/**`
 - `migrations/**`
-- `src/**`
+- `docs/governance/**`
+- `docs/rollout/**`
+- `src/control/**`
+- `src/supervisor_api/**`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - runtime state and cutover surfaces
 
 ### Non-goals
-- no runtime code edits
-- no live cutover claim
+- no schema widening
+- no control-plane widening
 - no authority-law rewrites
 - no team execution yet
 
 ### Current blocker
 - no active hard blocker
 - carry-forward fact: `P-BOUND-01` is closed and pushed in `5778e8b`
-- queue fact: `P-STATE-01` and `P-OPS-01` remain frozen behind this packet
-- rollout drift now centers on documenting resolved vs open deltas honestly
+- carry-forward fact: `P-ROLL-01` is closed and pushed in `9fa9c7a`
+- queue fact: `P-OPS-01` remains frozen behind this packet
+- no current hard blocker; targeted runtime evidence is complete
 
 ### Ready-to-commit slice
-`P-ROLL-01 landed locally — delta ledger now distinguishes resolved / narrowed / open drift, and the cutover/archive plan now distinguishes completed current-phase setup from still-pending actions without claiming cutover readiness.`
+`P-STATE-01 landed locally — strategy_tracker no longer defaults unknown strategy to opening_inertia, observation_client no longer uses implicit date.today() fallback for ASOS→WU offset lookup, and targeted regression tests now lock both behaviors.`
 
 ---
 
@@ -195,8 +200,9 @@ Explicitly forbidden for edits in the next packet:
 - [x] classify each as `present`, `missing`, `partial`, or `drifted`
 
 Inventory result:
-- `docs/rollout/zeus_authority_cutover_and_archive_plan.md` -> `present / needs completed-vs-pending split`
-- `docs/governance/zeus_runtime_delta_ledger.md` -> `present / needs resolved-vs-open status clarity`
+- `src/state/strategy_tracker.py` -> `drifted / unknown strategy falls back to opening_inertia`
+- `src/data/observation_client.py` -> `drifted / _get_asos_wu_offset uses implicit date.today() fallback`
+- targeted regression tests were added in `tests/test_truth_layer.py` and `tests/test_observation_contract.py`
 
 ### Phase C — bounded packet design
 - [x] identify the narrowest boundary delta needed
@@ -204,26 +210,24 @@ Inventory result:
 - [x] keep all non-boundary packet families out of scope
 
 Current slice shape:
-- keep the packet docs-only
-- distinguish resolved / narrowed / open deltas explicitly
-- distinguish completed current-phase setup from still-pending archive/demotion steps
-- keep runtime truth and cutover claims out of scope
+- keep the packet limited to the two drift files plus targeted tests
+- reject unknown strategy attribution instead of inventing a governance bucket
+- require explicit target_date for authority-sensitive offset lookup
+- keep schema/control/governance surfaces out of scope
 
 ### Phase D — evidence bundle
 - [x] run `python3 scripts/check_work_packets.py`
-- [x] record resolved-vs-open delta note
+- [x] record targeted drift-removal note
 - [x] append execution result to `architects_progress.md`
-- [x] review docs-only diff
+- [x] run `.venv/bin/pytest -q tests/test_truth_layer.py tests/test_observation_contract.py`
 - [ ] commit and push once the packet slice lands
 
 Evidence snapshot:
-- resolved-vs-open delta note:
-  - `DELTA-02` to `DELTA-04` resolved
-  - `DELTA-10` narrowed
-  - `DELTA-05` to `DELTA-09` and `DELTA-11` remain open
-- rollout-plan note:
-  - immediate actions 1-4 completed
-  - demotion/archive and state-drift cleanup still pending
+- drift-removal note:
+  - `strategy_tracker.py` no longer invents a governance bucket for unknown strategy
+  - `observation_client.py` no longer uses implicit local-today fallback in `_get_asos_wu_offset`
+- targeted test output:
+  - `.venv/bin/pytest -q tests/test_truth_layer.py tests/test_observation_contract.py` -> `10 passed`
 
 ---
 

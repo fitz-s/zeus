@@ -329,7 +329,9 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
     try:
         from src.state.db import get_connection
 
-        target_day = _coerce_target_date(target_date) if target_date is not None else date.today()
+        if target_date is None:
+            raise ValueError("target_date must be explicit for ASOS→WU offset lookup")
+        target_day = _coerce_target_date(target_date)
         month = target_day.month
         if month in (12, 1, 2):
             season = "DJF"

@@ -140,7 +140,8 @@ class StrategyTracker:
         if not strategy:
             return
         if strategy not in self.strategies:
-            strategy = "opening_inertia"  # Default bucket
+            logger.warning("Rejecting tracker trade with unknown strategy attribution: %s", strategy)
+            return
         self.strategies[strategy].record(trade)
         self._refresh_current_regime_started_at()
 
