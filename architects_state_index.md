@@ -15,7 +15,7 @@ Metadata:
 - Active packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
 - Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Last accepted packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`

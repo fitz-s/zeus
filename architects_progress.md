@@ -31,7 +31,7 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Last accepted packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
 - Current active packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
 - Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
