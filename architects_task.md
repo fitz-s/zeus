@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3B acceptance pass`
+- Last updated by: `Codex P5.3C freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,20 +17,20 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Remove the direct `day0_window` lifecycle mutation hot spot in `src/engine/cycle_runtime.py` by routing the touched day0 transition through lifecycle-kernel helpers, without widening into reconciliation cleanup, entry-fill cleanup, or broader engine refactors.
+Remove the direct lifecycle mutation hot spots on the touched reconciliation seam by routing the pending-fill rescue and chain-only quarantine transitions through lifecycle-kernel helpers, without widening into portfolio cleanup or broader reconciliation redesign.
 
 ## Allowed files
 
-- work_packets/P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT.md
+- work_packets/P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT.md
 - src/state/lifecycle_manager.py
-- src/engine/cycle_runtime.py
+- src/state/chain_reconciliation.py
 - tests/test_live_safety_invariants.py
 - architects_progress.md
 - architects_task.md
@@ -44,12 +44,13 @@ Remove the direct `day0_window` lifecycle mutation hot spot in `src/engine/cycle
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
+- `src/engine/**`
 - `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/state/db.py`
-- `src/state/portfolio.py`
 - `src/state/chain_reconciliation.py`
+- `src/state/portfolio.py`
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
@@ -70,8 +71,7 @@ Remove the direct `day0_window` lifecycle mutation hot spot in `src/engine/cycle
 
 ## Current blocker state
 
-- no blocker on the accepted P5.3B boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.3C boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -106,8 +106,16 @@ Remove the direct `day0_window` lifecycle mutation hot spot in `src/engine/cycle
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.3B accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.3C packet frozen
+- [ ] touched reconciliation hotspot routed through lifecycle kernel
+- [ ] targeted reconciliation hotspot tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.3C accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

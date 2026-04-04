@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3B acceptance pass`
+- Last updated by: `Codex P5.3C freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -32,12 +32,11 @@ Archive policy:
 
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
-- Current active packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.3B boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the frozen P5.3C boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -215,6 +214,46 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:32 America/Chicago] P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - independent post-close critic lane -> `PASS`
+  - accepted P5.3B control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT` may now be frozen as the next P5 packet
+- Open uncertainties:
+  - none on the accepted P5.3B boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:35 America/Chicago] P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P5.3B boundary plus passed post-close gate now permit the next P5 freeze
+  - direct lifecycle-bearing state mutation still remains on the touched reconciliation rescue/quarantine seam
+  - the current packet stays on reconciliation hotspot cleanup only and does not mix in portfolio cleanup
+- Decisions frozen:
+  - keep this packet on the touched reconciliation hotspot seam only
+  - do not widen into portfolio cleanup, schema work, or control/observability changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact helper shape for the touched reconciliation rescue/quarantine transitions still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT` and run targeted runtime tests
 - Owner:
   - Architects mainline lead
 
