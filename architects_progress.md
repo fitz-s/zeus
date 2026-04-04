@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.5 acceptance pass`
+- Last updated by: `Codex P4 family closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,14 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P4 in progress`
+- Mainline stage: `P4 family complete`
 - Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
 - Current active packet: `none`
-- Current packet status: `P4.5 accepted and pushed / post-close gate pending`
+- Current packet status: `P4 family closeout recorded / awaiting next phase freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P4.4 boundary itself
-  - post-close verifier is now passed, but critic must rerun after the control-surface repair before P4.5 can freeze
+  - no active blocker inside the completed P4 family boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -2056,5 +2055,49 @@ Archive policy:
   - the accepted P4.5 boundary still requires the user-required post-close third-party critic + verifier gate before P4 family closeout may be recorded
 - Next required action:
   - run the post-close third-party critic + verifier on accepted P4.5
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 14:20 America/Chicago] P4.5 post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - P4 family closeout became allowed
+- Basis / evidence:
+  - verifier subagent -> `PASS`
+  - critic subagent rerun -> `PASS`
+  - accepted P4.5 boundary no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - P4 family closeout may now be recorded honestly
+- Open uncertainties:
+  - none beyond preserving the explicit P4 scope boundary in the closeout language
+- Next required action:
+  - record P4 family closeout truth
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 14:22 America/Chicago] P4 family closeout recorded
+- Author: `Architects mainline lead`
+- Packet family: `P4`
+- Status delta:
+  - P4 family completion is now recorded under current repo truth
+  - no further P4 implementation packet is required under current repo law
+- Basis / evidence:
+  - `P4.1-OPPORTUNITY-FACTS` accepted and passed post-close review
+  - `P4.2-AVAILABILITY-FACTS` accepted, repaired where needed, and passed renewed post-close review
+  - `P4.3-EXECUTION-FACTS` accepted and passed post-close review after amendment-based reapproval
+  - `P4.4-OUTCOME-FACTS` accepted and passed post-close review
+  - `P4.5-ANALYTICS-SMOKE-QUERIES` accepted and passed post-close review
+- Decisions frozen:
+  - P4 now covers durable opportunity, availability, execution, and outcome fact layers plus a query-only smoke proof across them
+  - this closeout does not claim later product dashboards, broader analytics, or non-P4 phase work
+- Open uncertainties:
+  - none inside the completed P4 family boundary
+- Next required action:
+  - stop at the P4 family boundary until a new non-P4 packet is frozen
 - Owner:
   - Architects mainline lead

@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.5 acceptance pass`
+- Last updated by: `Codex P4 family closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P4 in progress`
+- Stage: `P4 family complete`
 - Active packet: `none`
-- Active packet state: `P4.5 accepted and pushed / post-close gate pending`
+- Active packet state: `P4 family closeout recorded / awaiting next phase freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted P4.5.
-2. Record honest P4 family closeout only after that gate passes.
+1. Stop at the completed P4 family boundary.
+2. If work continues, freeze the next non-P4 packet explicitly before implementation.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -49,4 +49,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P4.5-ANALYTICS-SMOKE-QUERIES.md`
+5. the next frozen non-P4 packet, if work resumes
