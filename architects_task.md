@@ -53,6 +53,7 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
+- `tests/test_live_safety_invariants.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
