@@ -16,6 +16,10 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
+from src.state.lifecycle_manager import (
+    enter_chain_quarantined_runtime_state,
+    rescue_pending_runtime_state,
+)
 from src.state.portfolio import INACTIVE_RUNTIME_STATES, Position, PortfolioState, void_position
 
 logger = logging.getLogger(__name__)
@@ -371,7 +375,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 rescued.shares = chain.size
             rescued.entry_fill_verified = True
             rescued.order_status = "filled"
-            rescued.state = "entered"
+            rescued.state = rescue_pending_runtime_state(
+                rescued.state,
+                exit_state=getattr(rescued, "exit_state", ""),
+                chain_state=getattr(rescued, "chain_state", ""),
+            )
             if not rescued.entered_at:
                 rescued.entered_at = now
             if canonical_rescue_baseline_available:
@@ -482,7 +490,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 edge=0.0,
                 entered_at=datetime.now(timezone.utc).isoformat(),
                 token_id=tid,
-                state="quarantined",
+                state=enter_chain_quarantined_runtime_state(),
                 strategy="",
                 edge_source="",
                 cost_basis_usd=chain.cost or (chain.size * chain.avg_price),

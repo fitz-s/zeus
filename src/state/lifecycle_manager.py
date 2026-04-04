@@ -178,6 +178,30 @@ def enter_day0_window_runtime_state(
     return LifecyclePhase.DAY0_WINDOW.value
 
 
+def rescue_pending_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.PENDING_ENTRY:
+        raise ValueError(
+            f"pending rescue requires pending_entry runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.ACTIVE)
+    return "entered"
+
+
+def enter_chain_quarantined_runtime_state() -> str:
+    fold_lifecycle_phase(None, LifecyclePhase.QUARANTINED)
+    return LifecyclePhase.QUARANTINED.value
+
+
 def release_pending_exit_runtime_state(
     previous_state: object,
     *,

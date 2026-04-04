@@ -244,6 +244,25 @@ def test_chain_reconciliation_rescues_pending_tracked_fill():
     assert portfolio.positions == [pos]
 
 
+def test_lifecycle_kernel_rescues_pending_runtime_state_to_entered():
+    from src.state.lifecycle_manager import rescue_pending_runtime_state
+
+    assert rescue_pending_runtime_state("pending_tracked") == "entered"
+
+
+def test_lifecycle_kernel_rejects_rescue_from_non_pending_runtime_state():
+    from src.state.lifecycle_manager import rescue_pending_runtime_state
+
+    with pytest.raises(ValueError, match="pending rescue requires pending_entry runtime phase"):
+        rescue_pending_runtime_state("entered")
+
+
+def test_lifecycle_kernel_enters_chain_quarantined_runtime_state():
+    from src.state.lifecycle_manager import enter_chain_quarantined_runtime_state
+
+    assert enter_chain_quarantined_runtime_state() == "quarantined"
+
+
 def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
