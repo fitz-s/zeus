@@ -39,6 +39,7 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
     LifecyclePhase.ACTIVE: frozenset(
         {
             LifecyclePhase.ACTIVE,
+            LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.SETTLED,
         }
@@ -156,6 +157,25 @@ def enter_pending_exit_runtime_state(
     )
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value
+
+
+def enter_day0_window_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.ACTIVE:
+        raise ValueError(
+            f"day0 transition requires active runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.DAY0_WINDOW)
+    return LifecyclePhase.DAY0_WINDOW.value
 
 
 def release_pending_exit_runtime_state(

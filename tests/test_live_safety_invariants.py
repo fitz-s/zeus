@@ -831,6 +831,24 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
     assert summary["monitors"] == 1
 
 
+def test_lifecycle_kernel_enters_day0_window_from_active_states():
+    from src.state.lifecycle_manager import enter_day0_window_runtime_state
+
+    assert enter_day0_window_runtime_state("entered") == "day0_window"
+    assert enter_day0_window_runtime_state("holding") == "day0_window"
+
+
+def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
+    from src.state.lifecycle_manager import enter_day0_window_runtime_state
+
+    with pytest.raises(ValueError, match="day0 transition requires active runtime phase"):
+        enter_day0_window_runtime_state(
+            "pending_exit",
+            exit_state="sell_pending",
+            chain_state="exit_pending_missing",
+        )
+
+
 def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod

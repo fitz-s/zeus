@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3B freeze pass`
+- Last updated by: `Codex P5.3B acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,11 @@ Archive policy:
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
 - Current active packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.3B boundary
+  - no blocker on the accepted P5.3B boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -254,6 +255,31 @@ Archive policy:
   - exact helper shape for the touched day0 transition still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT` and run targeted runtime tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:32 America/Chicago] P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py::test_monitoring_transitions_holding_position_into_day0_window tests/test_live_safety_invariants.py::test_lifecycle_kernel_enters_day0_window_from_active_states tests/test_live_safety_invariants.py::test_lifecycle_kernel_rejects_day0_window_from_pending_exit tests/test_live_safety_invariants.py::test_day0_transition_emits_durable_lifecycle_event` -> `4 passed`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py` -> `51 passed`
+  - lsp diagnostics on `src/state/lifecycle_manager.py`, `src/engine/cycle_runtime.py`, and `tests/test_live_safety_invariants.py` -> `0 errors`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - the touched `day0_window` transition now routes through a lifecycle-kernel helper instead of direct local string mutation
+  - non-active paths like `pending_exit` are explicitly rejected for the touched day0 transition helper
+  - no reconciliation cleanup, schema change, or control/observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT`
 - Owner:
   - Architects mainline lead
 

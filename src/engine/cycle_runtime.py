@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.engine.time_context import lead_hours_to_target
+from src.state.lifecycle_manager import enter_day0_window_runtime_state
 
 
 CANONICAL_STRATEGY_KEYS = {
@@ -483,7 +484,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     deps._utcnow(),
                 )
                 if hours_to_settlement <= 6.0 and pos.state in {"entered", "holding"}:
-                    pos.state = "day0_window"
+                    pos.state = enter_day0_window_runtime_state(
+                        pos.state,
+                        exit_state=getattr(pos, "exit_state", ""),
+                        chain_state=getattr(pos, "chain_state", ""),
+                    )
                     if not pos.day0_entered_at:
                         pos.day0_entered_at = deps._utcnow().isoformat()
                     portfolio_dirty = True
