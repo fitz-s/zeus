@@ -2638,6 +2638,24 @@ def test_quarantine_expired_positions_do_not_count_as_same_city_range_open():
     assert has_same_city_range_open(portfolio, "NYC", "39-40°F") is False
 
 
+def test_quarantine_expired_positions_do_not_count_as_open_exposure():
+    portfolio = PortfolioState(
+        bankroll=100.0,
+        positions=[
+            _position(
+                trade_id="quarantine-expired-1",
+                state="quarantined",
+                chain_state="quarantine_expired",
+                size_usd=10.0,
+            ),
+            _position(trade_id="open-1", state="holding", size_usd=5.0),
+        ],
+    )
+
+    assert total_exposure_usd(portfolio) == pytest.approx(5.0)
+    assert portfolio_heat(portfolio) == pytest.approx(0.05)
+
+
 def test_materialize_position_carries_semantic_snapshot_jsons():
     candidate = type("Candidate", (), {"target_date": "2026-04-01", "hours_since_open": 2.0})()
     edge = _edge()

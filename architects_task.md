@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5 family closeout pass`
+- Last updated by: `Codex P5.4 repair pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,18 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `P5 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- State: `ACCEPTED / PUSHED / RENEWED POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. The P5 family is complete under current repo truth.
+Reopened P5.4 to repair the missing explicit proof that `quarantine_expired` positions stay outside open/exposure semantics before honest P5 family closeout.
 
 ## Allowed files
 
-- future packet surfaces only after a new non-P5 freeze
+- work_packets/P5.4-QUARANTINE-SEMANTICS-HARDENING.md
+- tests/test_runtime_guards.py
+- architects_progress.md
+- architects_task.md
+- architects_state_index.md
 
 ## Forbidden files
 
@@ -37,7 +41,6 @@ No live packet. The P5 family is complete under current repo truth.
 - `docs/architecture/**`
 - `architecture/**`
 - `migrations/**`
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -56,7 +59,7 @@ No live packet. The P5 family is complete under current repo truth.
 
 ## Non-goals
 
-- no next-phase work without a new frozen packet
+- no next-phase work until renewed P5.4 post-close gate passes
 - no schema changes
 - no dashboard/observability/control-plane widening
 - no cutover
@@ -64,7 +67,7 @@ No live packet. The P5 family is complete under current repo truth.
 
 ## Current blocker state
 
-- no active blocker inside the completed P5 family boundary
+- renewed post-close gate is pending because `quarantine_expired` exposure exclusion proof was missing from the accepted P5.4 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -131,10 +134,15 @@ No live packet. The P5 family is complete under current repo truth.
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.4 accepted and pushed
+- [x] renewed missing-proof blocker identified
+- [ ] `quarantine_expired` exposure exclusion proof added
+- [ ] renewed post-close critic review passed
+- [ ] renewed post-close verifier review passed
 - [x] post-close third-party critic review passed
 - [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Stop at the completed P5 family boundary.
-2. If continuing later, freeze the next non-P5 packet before any implementation.
+1. Commit the missing `quarantine_expired` exposure proof inside the reopened P5.4 boundary.
+2. Rerun the renewed post-close critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
+3. Re-record P5 family closeout only after that renewed gate passes.
