@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5 family closeout re-pass`
+- Last updated by: `Codex P6.0 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P5 family complete`
-- Active packet: `none`
-- Active packet state: `P5 family closeout re-recorded / awaiting next phase freeze`
+- Stage: `P6.0 status-summary input readiness`
+- Active packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Stop at the completed P5 family boundary.
-2. If work continues later, freeze the next non-P5 packet before any implementation.
+1. Implement `P6.0-STATUS-SUMMARY-INPUT-READINESS` inside its frozen boundary.
+2. Run targeted strategy-health evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -36,7 +36,7 @@ Metadata:
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
 - `architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
-- `next_round_handoff.md` has an unrelated local deletion and stays out of scope
+- `next_round_handoff.md` has unrelated local modifications and stays out of scope
 - `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
 - local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. the next frozen non-P5 packet, if work resumes
+5. current active packet

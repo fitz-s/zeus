@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5 family closeout re-pass`
+- Last updated by: `Codex P6.0 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,16 +30,40 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P5 family complete`
+- Mainline stage: `P6.0 status-summary input readiness`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current active packet: `none`
-- Current packet status: `P5 family closeout re-recorded / awaiting next phase freeze`
+- Current active packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the completed P5 family boundary
+  - no blocker inside the frozen P6.0 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
+
+## [2026-04-04 17:55 America/Chicago] P6.0-STATUS-SUMMARY-INPUT-READINESS frozen
+- Author: `Architects mainline lead`
+- Packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from completed P5 into a narrow P6 substrate-readiness packet
+- Basis / evidence:
+  - `docs/architecture/zeus_durable_architecture_spec.md` P6 requires `status_summary.py` to read `position_current`, `strategy_health`, and `risk_actions` before later control-plane compression
+  - current repo truth still has `src/observability/status_summary.py` reading `load_portfolio()` and `load_tracker()` as primary inputs
+  - `strategy_health` exists in schema, but no runtime emitter currently writes rows, so a full status-summary cutover packet would overclaim readiness
+  - independent read-only review recommended a narrower readiness packet before the real P6.1 cutover
+- Decisions frozen:
+  - P6 starts with strategy-health input readiness, not a full status-summary rewrite
+  - this packet may only install and prove the `strategy_health` substrate plus explicit absent/stale semantics
+  - no `status_summary.py` cutover, control-plane durability conversion, or `strategy_tracker` deletion is allowed in this packet
+- Open uncertainties:
+  - exact derivation shape for some recommended `strategy_health` fields still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P6.0-STATUS-SUMMARY-INPUT-READINESS` and run targeted strategy-health tests
+  - then run pre-close critic + verifier before any acceptance claim
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
