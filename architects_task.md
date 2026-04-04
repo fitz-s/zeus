@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.1 acceptance pass`
+- Last updated by: `Codex P5.2 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,18 +17,18 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Install the first authoritative lifecycle-phase kernel by freezing the finite P5 phase vocabulary and a packet-bounded legality surface behind a dedicated lifecycle manager, without yet rewiring the broader runtime mutation hot spots or legalizing later settlement/economic-close folds.
+Extend the lifecycle kernel from P5.1's vocabulary-first surface into explicit, packet-bounded fold legality on the remaining current canonical builder transitions, especially settlement-side folds, without yet widening into broad runtime phase-mutation cleanup or src/execution rewiring.
 
 ## Allowed files
 
-- work_packets/P5.1-LIFECYCLE-PHASE-KERNEL.md
+- work_packets/P5.2-FOLD-LEGALITY-FOLLOW-THROUGH.md
 - src/state/lifecycle_manager.py
 - src/engine/lifecycle_events.py
 - tests/test_architecture_contracts.py
@@ -69,8 +69,7 @@ Install the first authoritative lifecycle-phase kernel by freezing the finite P5
 
 ## Current blocker state
 
-- no blocker on the accepted P5.1 boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.2 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -81,10 +80,16 @@ Install the first authoritative lifecycle-phase kernel by freezing the finite P5
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.1 accepted and pushed
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.2 packet frozen
+- [ ] touched canonical builder fold legality implemented
+- [ ] targeted lifecycle fold-legality architecture tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.2 accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.1-LIFECYCLE-PHASE-KERNEL`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

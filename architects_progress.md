@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.1 acceptance pass`
+- Last updated by: `Codex P5.2 freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -32,12 +32,11 @@ Archive policy:
 
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- Current active packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.1 boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the frozen P5.2 boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -86,6 +85,46 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 18:31 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - independent post-close critic lane -> `PASS`
+  - accepted P5.1 control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` may now be frozen as the next P5 packet
+- Open uncertainties:
+  - none on the accepted P5.1 boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 18:33 America/Chicago] P5.2-FOLD-LEGALITY-FOLLOW-THROUGH frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P5.1 boundary plus passed post-close gate now permit the next P5 freeze
+  - P5.1 intentionally left later settlement/economic-close folds unlegalized, so fold follow-through is the next narrow lifecycle-engine slice
+  - current repo truth still leaves the remaining canonical builder fold behavior partly implicit, especially around settlement-side folds
+- Decisions frozen:
+  - keep this packet on packet-bounded fold legality follow-through only
+  - do not widen into broad runtime phase-mutation cleanup, schema work, or control/observability changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact builder-level legality shape still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` and run targeted architecture tests
 - Owner:
   - Architects mainline lead
 
