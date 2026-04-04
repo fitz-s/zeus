@@ -962,6 +962,121 @@ def log_availability_fact(
     )
     return {"status": "written", "table": "availability_fact"}
 
+
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _execution_intent_id(*, trade_id: str, order_role: str, explicit_intent_id: str | None = None) -> str:
+    if explicit_intent_id:
+        return explicit_intent_id
+    return f"{trade_id}:{order_role}"
+
+
+def log_execution_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    intent_id: str,
+    position_id: str,
+    order_role: str,
+    decision_id: str | None = None,
+    strategy_key: str | None = None,
+    posted_at: str | None = None,
+    filled_at: str | None = None,
+    voided_at: str | None = None,
+    submitted_price: float | None = None,
+    fill_price: float | None = None,
+    shares: float | None = None,
+    fill_quality: float | None = None,
+    latency_seconds: float | None = None,
+    venue_status: str | None = None,
+    terminal_exec_status: str | None = None,
+) -> dict:
+    if conn is None:
+        logger.info("Execution fact write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "execution_fact"}
+    if not _table_exists(conn, "execution_fact"):
+        logger.info("Execution fact table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "execution_fact"}
+
+    if order_role not in {"entry", "exit"}:
+        raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
+
+    current = conn.execute(
+        """
+        SELECT posted_at, filled_at, voided_at, submitted_price, fill_price, shares, fill_quality,
+               latency_seconds, venue_status, terminal_exec_status, decision_id, strategy_key
+        FROM execution_fact
+        WHERE intent_id = ?
+        """,
+        (intent_id,),
+    ).fetchone()
+
+    stored_posted_at = posted_at or (current["posted_at"] if current else None)
+    stored_filled_at = filled_at or (current["filled_at"] if current else None)
+    stored_voided_at = voided_at or (current["voided_at"] if current else None)
+    stored_submitted_price = submitted_price if submitted_price is not None else (current["submitted_price"] if current else None)
+    stored_fill_price = fill_price if fill_price is not None else (current["fill_price"] if current else None)
+    stored_shares = shares if shares is not None else (current["shares"] if current else None)
+    stored_fill_quality = fill_quality if fill_quality is not None else (current["fill_quality"] if current else None)
+    stored_venue_status = venue_status if venue_status not in (None, "") else (current["venue_status"] if current else None)
+    stored_terminal_status = terminal_exec_status if terminal_exec_status not in (None, "") else (current["terminal_exec_status"] if current else None)
+    stored_decision_id = decision_id if decision_id not in (None, "") else (current["decision_id"] if current else None)
+    stored_strategy_key = strategy_key if strategy_key not in (None, "") else (current["strategy_key"] if current else None)
+
+    if latency_seconds is None and stored_posted_at and stored_filled_at:
+        posted_dt = _parse_iso_timestamp(stored_posted_at)
+        filled_dt = _parse_iso_timestamp(stored_filled_at)
+        if posted_dt is not None and filled_dt is not None:
+            latency_seconds = max(0.0, (filled_dt - posted_dt).total_seconds())
+    stored_latency_seconds = latency_seconds if latency_seconds is not None else (current["latency_seconds"] if current else None)
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO execution_fact (
+            intent_id,
+            position_id,
+            decision_id,
+            order_role,
+            strategy_key,
+            posted_at,
+            filled_at,
+            voided_at,
+            submitted_price,
+            fill_price,
+            shares,
+            fill_quality,
+            latency_seconds,
+            venue_status,
+            terminal_exec_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            intent_id,
+            position_id,
+            stored_decision_id,
+            order_role,
+            stored_strategy_key,
+            stored_posted_at,
+            stored_filled_at,
+            stored_voided_at,
+            stored_submitted_price,
+            stored_fill_price,
+            stored_shares,
+            stored_fill_quality,
+            stored_latency_seconds,
+            stored_venue_status,
+            stored_terminal_status,
+        ),
+    )
+    return {"status": "written", "table": "execution_fact"}
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
@@ -1063,7 +1178,7 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
         )
 
 
-def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
+def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: str | None = None) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
     if not _legacy_runtime_position_event_schema_available(conn):
         if _canonical_position_surface_available(conn):
@@ -1093,18 +1208,52 @@ def log_execution_report(conn: sqlite3.Connection, pos, result) -> None:
         "order_status": getattr(pos, "order_status", ""),
     }
     status = getattr(result, "status", "")
+    order_role = str(getattr(result, "order_role", "") or "entry")
+    event_timestamp = (
+        getattr(result, "filled_at", None)
+        or getattr(pos, "order_posted_at", None)
+        or datetime.now(timezone.utc).isoformat()
+    )
     if status == "filled":
         event_type = "ORDER_FILLED"
     elif status in {"rejected", "cancelled", "canceled"}:
         event_type = "ORDER_REJECTED"
     else:
         event_type = "ORDER_ATTEMPTED"
+    terminal_exec_status = status or None
+    voided_at = event_timestamp if status in {"rejected", "cancelled", "canceled"} else None
+    posted_at = (
+        getattr(pos, "order_posted_at", None)
+        or getattr(result, "filled_at", None)
+        or event_timestamp
+    )
+    log_execution_fact(
+        conn,
+        intent_id=_execution_intent_id(
+            trade_id=getattr(pos, "trade_id", ""),
+            order_role=order_role,
+            explicit_intent_id=getattr(result, "intent_id", None),
+        ),
+        position_id=getattr(pos, "trade_id", ""),
+        decision_id=decision_id,
+        order_role=order_role,
+        strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
+        posted_at=posted_at,
+        filled_at=getattr(result, "filled_at", None) if status == "filled" else None,
+        voided_at=voided_at,
+        submitted_price=submitted_price,
+        fill_price=fill_price,
+        shares=getattr(result, "shares", None),
+        fill_quality=fill_quality,
+        venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
+        terminal_exec_status=terminal_exec_status,
+    )
     log_position_event(
         conn,
         event_type,
         pos,
         details=details,
-        timestamp=getattr(result, "filled_at", None) or getattr(pos, "order_posted_at", None),
+        timestamp=event_timestamp,
         source="execution",
     )
 
@@ -1679,6 +1828,60 @@ def log_exit_lifecycle_event(
     }
     if details:
         payload.update(details)
+    if event_type in {
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_ATTEMPTED",
+        "EXIT_ORDER_FILLED",
+        "EXIT_ORDER_REJECTED",
+        "EXIT_ORDER_VOIDED",
+        "EXIT_RETRY_SCHEDULED",
+        "EXIT_BACKOFF_EXHAUSTED",
+        "EXIT_FILL_CHECKED",
+        "EXIT_FILL_CONFIRMED",
+    }:
+        terminal_exec_status = None
+        voided_at = None
+        filled_at = None
+        if event_type == "EXIT_ORDER_FILLED":
+            terminal_exec_status = "filled"
+            filled_at = timestamp or getattr(pos, "last_exit_at", None) or datetime.now(timezone.utc).isoformat()
+        elif event_type in {"EXIT_RETRY_SCHEDULED", "EXIT_BACKOFF_EXHAUSTED", "EXIT_ORDER_REJECTED", "EXIT_ORDER_VOIDED"}:
+            terminal_exec_status = str(payload.get("status") or getattr(pos, "exit_state", "") or "rejected")
+            voided_at = timestamp or datetime.now(timezone.utc).isoformat()
+        elif event_type in {"EXIT_ORDER_ATTEMPTED", "EXIT_ORDER_POSTED", "EXIT_FILL_CHECKED", "EXIT_FILL_CONFIRMED"}:
+            terminal_exec_status = str(payload.get("status") or status or "pending")
+        posted_at = (
+            timestamp
+            or getattr(pos, "last_exit_at", None)
+            or getattr(pos, "entered_at", None)
+            or datetime.now(timezone.utc).isoformat()
+        )
+        submitted_price = None
+        sell_result = payload.get("sell_result")
+        if isinstance(sell_result, dict):
+            submitted_price = sell_result.get("submitted_price")
+        if submitted_price in (None, "") and event_type in {"EXIT_ORDER_POSTED", "EXIT_ORDER_ATTEMPTED"}:
+            submitted_price = payload.get("current_market_price")
+        log_execution_fact(
+            conn,
+            intent_id=_execution_intent_id(
+                trade_id=getattr(pos, "trade_id", ""),
+                order_role="exit",
+                explicit_intent_id=f"{getattr(pos, 'trade_id', '')}:exit",
+            ),
+            position_id=getattr(pos, "trade_id", ""),
+            order_role="exit",
+            strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
+            posted_at=posted_at if event_type in {"EXIT_ORDER_POSTED", "EXIT_ORDER_ATTEMPTED", "EXIT_FILL_CHECKED", "EXIT_FILL_CONFIRMED"} else None,
+            filled_at=filled_at,
+            voided_at=voided_at,
+            submitted_price=submitted_price,
+            fill_price=payload.get("fill_price"),
+            shares=payload.get("shares") if payload.get("shares") is not None else getattr(pos, "effective_shares", getattr(pos, "shares", None)),
+            fill_quality=None,
+            venue_status=str(payload.get("status") or status or "") or None,
+            terminal_exec_status=terminal_exec_status,
+        )
     log_position_event(
         conn,
         event_type,

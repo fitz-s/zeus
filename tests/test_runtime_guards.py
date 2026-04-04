@@ -374,6 +374,32 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            decision_id TEXT,
+            order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            posted_at TEXT,
+            filled_at TEXT,
+            voided_at TEXT,
+            submitted_price REAL,
+            fill_price REAL,
+            shares REAL,
+            fill_quality REAL,
+            latency_seconds REAL,
+            venue_status TEXT,
+            terminal_exec_status TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -436,6 +462,13 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         """
     ).fetchall()
     availability_count = conn.execute("SELECT COUNT(*) AS n FROM availability_fact").fetchone()
+    execution_rows = conn.execute(
+        """
+        SELECT intent_id, decision_id, order_role, terminal_exec_status
+        FROM execution_fact
+        ORDER BY intent_id
+        """
+    ).fetchall()
     conn.close()
     payload = json.loads(artifact["artifact_json"])
     trade_case = payload["trade_cases"][0]
@@ -472,6 +505,11 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert opportunity_rows[1]["snapshot_id"] == "snap-1"
     assert opportunity_rows[1]["rejection_stage"] == "EDGE_INSUFFICIENT"
     assert availability_count["n"] == 0
+    assert len(execution_rows) == 1
+    assert execution_rows[0]["intent_id"] == "rt1:entry"
+    assert execution_rows[0]["decision_id"] == "d1"
+    assert execution_rows[0]["order_role"] == "entry"
+    assert execution_rows[0]["terminal_exec_status"] == "filled"
 
 
 def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
@@ -2286,6 +2324,33 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            decision_id TEXT,
+            order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            posted_at TEXT,
+            filled_at TEXT,
+            voided_at TEXT,
+            submitted_price REAL,
+            fill_price REAL,
+            shares REAL,
+            fill_quality REAL,
+            latency_seconds REAL,
+            venue_status TEXT,
+            terminal_exec_status TEXT
+        )
+        """
+    )
+    conn.commit()
 
     pos = _position(
         trade_id="live-exit-1",
@@ -2372,6 +2437,13 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     )
 
     events = query_position_events(conn, "live-exit-1")
+    execution_fact_row = conn.execute(
+        """
+        SELECT order_role, posted_at, filled_at, submitted_price, fill_price, shares, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'live-exit-1:exit'
+        """
+    ).fetchone()
 
     assert p_dirty is True
     assert t_dirty is True
@@ -2469,6 +2541,14 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_pa
     assert fill_event["details"]["fill_price"] == pytest.approx(pos.exit_price)
     assert attempt_event["timestamp"] == pos.entered_at
     assert fill_event["timestamp"] != attempt_event["timestamp"]
+    assert execution_fact_row["order_role"] == "exit"
+    assert execution_fact_row["posted_at"] == pos.entered_at
+    assert execution_fact_row["filled_at"] == fill_event["timestamp"]
+    assert execution_fact_row["submitted_price"] == pytest.approx(0.46)
+    assert execution_fact_row["fill_price"] == pytest.approx(0.46)
+    assert execution_fact_row["shares"] == pytest.approx(25.0)
+    assert execution_fact_row["venue_status"] == "FILLED"
+    assert execution_fact_row["terminal_exec_status"] == "filled"
 
     conn.close()
 

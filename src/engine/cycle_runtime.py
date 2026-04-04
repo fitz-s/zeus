@@ -960,7 +960,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             decision_id=d.decision_id,
                             deps=deps,
                         )
-                        log_execution_report(conn, pos, result)
+                        log_execution_report(conn, pos, result, decision_id=d.decision_id)
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)
@@ -973,6 +973,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             conn,
                             _execution_stub(candidate, d, result, city, mode, deps=deps),
                             result,
+                            decision_id=d.decision_id,
                         )
                 else:
                     edge_source = ""

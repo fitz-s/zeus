@@ -67,7 +67,8 @@ Install the first durable `execution_fact` writer path for current entry/exit or
 
 ## Current blocker state
 
-- no active blocker at freeze time
+- repo-wide `python3 scripts/check_work_packets.py` currently fails on unrelated math packet markdown files outside the frozen P4.3 boundary
+- external/internal small pre-close review attempts via $ask are currently timing out
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -83,12 +84,12 @@ Install the first durable `execution_fact` writer path for current entry/exit or
 - [x] renewed post-close critic review passed
 - [x] renewed post-close verifier review passed
 - [x] P4.3 packet is frozen
-- [ ] P4.3 runtime/state seam implemented
+- [x] P4.3 runtime/state seam implemented
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
 - [ ] P4.3 accepted and pushed
 
 ## Next required action
 
-1. Implement `P4.3-EXECUTION-FACTS` within the frozen file boundary.
-2. Run targeted tests plus pre-close critic/verifier before acceptance.
+1. Preserve the implemented P4.3 slice; do not close yet.
+2. Resolve or route around the repo-wide work-packet grammar blocker and complete review evidence before acceptance.

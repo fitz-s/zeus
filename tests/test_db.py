@@ -73,6 +73,36 @@ def _create_availability_fact_table(conn):
     conn.commit()
 
 
+def _create_execution_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            decision_id TEXT,
+            order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            posted_at TEXT,
+            filled_at TEXT,
+            voided_at TEXT,
+            submitted_price REAL,
+            fill_price REAL,
+            shares REAL,
+            fill_quality REAL,
+            latency_seconds REAL,
+            venue_status TEXT,
+            terminal_exec_status TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
 def test_init_schema_creates_all_tables():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -229,6 +259,26 @@ def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
     conn.close()
 
     assert result == {"status": "skipped_missing_table", "table": "availability_fact"}
+    assert rows["n"] == 0
+
+
+def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_execution_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    result = log_execution_fact(
+        conn,
+        intent_id="intent-1",
+        position_id="pos-1",
+        order_role="entry",
+        terminal_exec_status="filled",
+    )
+    rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'execution_fact'").fetchone()
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "execution_fact"}
     assert rows["n"] == 0
 
 
@@ -589,6 +639,7 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_execution_fact_table(conn)
 
     pos = Position(
         trade_id="rt-exec",
@@ -617,10 +668,18 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
         timeout_seconds=60,
     )
 
-    log_execution_report(conn, pos, result)
+    log_execution_report(conn, pos, result, decision_id="dec-fill")
     conn.commit()
 
     events = query_position_events(conn, "rt-exec")
+    fact = conn.execute(
+        """
+        SELECT decision_id, order_role, posted_at, filled_at, submitted_price, fill_price, shares,
+               fill_quality, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec:entry'
+        """
+    ).fetchone()
     conn.close()
 
     assert len(events) == 1
@@ -628,6 +687,16 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     assert events[0]["details"]["submitted_price"] == pytest.approx(0.40)
     assert events[0]["details"]["fill_price"] == pytest.approx(0.42)
     assert events[0]["details"]["fill_quality"] == pytest.approx(0.05)
+    assert fact["decision_id"] == "dec-fill"
+    assert fact["order_role"] == "entry"
+    assert fact["posted_at"] == "2026-04-01T01:00:00Z"
+    assert fact["filled_at"] == "2026-04-01T01:00:05Z"
+    assert fact["submitted_price"] == pytest.approx(0.40)
+    assert fact["fill_price"] == pytest.approx(0.42)
+    assert fact["shares"] == pytest.approx(25.0)
+    assert fact["fill_quality"] == pytest.approx(0.05)
+    assert fact["venue_status"] == "filled"
+    assert fact["terminal_exec_status"] == "filled"
 
 
 def test_log_execution_report_emits_rejected_entry_event(tmp_path):
@@ -638,6 +707,7 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_execution_fact_table(conn)
 
     pos = Position(
         trade_id="rt-exec-rejected",
@@ -661,16 +731,28 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
         reason="insufficient_liquidity",
     )
 
-    log_execution_report(conn, pos, result)
+    log_execution_report(conn, pos, result, decision_id="dec-reject")
     conn.commit()
 
     events = query_position_events(conn, "rt-exec-rejected")
+    fact = conn.execute(
+        """
+        SELECT decision_id, order_role, voided_at, submitted_price, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exec-rejected:entry'
+        """
+    ).fetchone()
     conn.close()
 
     assert len(events) == 1
     assert events[0]["event_type"] == "ORDER_REJECTED"
     assert events[0]["details"]["status"] == "rejected"
     assert events[0]["details"]["reason"] == "insufficient_liquidity"
+    assert fact["decision_id"] == "dec-reject"
+    assert fact["order_role"] == "entry"
+    assert fact["voided_at"] is not None
+    assert fact["submitted_price"] == pytest.approx(0.40)
+    assert fact["terminal_exec_status"] == "rejected"
 
 
 def test_log_settlement_event_emits_durable_record(tmp_path):
@@ -1480,6 +1562,7 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_execution_fact_table(conn)
 
     pos = Position(
         trade_id="rt-exit-events",
@@ -1537,6 +1620,13 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     conn.commit()
 
     events = query_position_events(conn, "rt-exit-events")
+    fact = conn.execute(
+        """
+        SELECT order_role, posted_at, filled_at, submitted_price, fill_price, shares, venue_status, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-exit-events:exit'
+        """
+    ).fetchone()
     conn.close()
 
     event_types = [event["event_type"] for event in events]
@@ -1553,6 +1643,14 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     fill_event = next(event for event in events if event["event_type"] == "EXIT_ORDER_FILLED")
     assert fill_event["order_id"] == "sell-1"
     assert fill_event["details"]["fill_price"] == pytest.approx(0.43)
+    assert fact["order_role"] == "exit"
+    assert fact["posted_at"] is not None
+    assert fact["filled_at"] == "2026-04-01T01:05:00Z"
+    assert fact["submitted_price"] == pytest.approx(0.44)
+    assert fact["fill_price"] == pytest.approx(0.43)
+    assert fact["shares"] == pytest.approx(25.0)
+    assert fact["venue_status"] == "FILLED"
+    assert fact["terminal_exec_status"] == "filled"
 
 
 def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):

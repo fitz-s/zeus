@@ -36,7 +36,8 @@ Archive policy:
 - Current packet status: `P4.3 frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker at P4.3 freeze time
+  - repo-wide `python3 scripts/check_work_packets.py` currently fails on unrelated math packet markdown files outside the frozen P4.3 boundary
+  - pre-close small review attempts via `$ask` are timing out right now
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1772,5 +1773,29 @@ Archive policy:
   - exact intent/position identifier mapping and entry-vs-exit lifecycle coverage still need implementation review inside the frozen boundary
 - Next required action:
   - implement `P4.3-EXECUTION-FACTS` and run targeted runtime/db tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:48 America/Chicago] P4.3 implementation landed locally with green targeted runtime evidence
+- Author: `Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - implementation slice landed locally inside the frozen packet boundary
+  - targeted runtime/db execution-fact tests are green
+- Basis / evidence:
+  - `.venv/bin/pytest -q tests/test_db.py::test_log_execution_fact_skips_missing_table_explicitly tests/test_db.py::test_log_execution_report_emits_fill_telemetry tests/test_db.py::test_log_execution_report_emits_rejected_entry_event tests/test_db.py::test_exit_lifecycle_event_helpers_emit_sell_side_events tests/test_runtime_guards.py::test_trade_and_no_trade_artifacts_carry_replay_reference_fields tests/test_runtime_guards.py::test_monitoring_phase_persists_live_exit_telemetry_chain` -> `6 passed`
+  - `.venv/bin/pytest -q tests/test_db.py tests/test_runtime_guards.py` -> `96 passed`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - lsp diagnostics on touched files -> `0 errors`
+- Decisions frozen:
+  - entry execution lifecycle now has a durable `execution_fact` seam via `log_execution_report`
+  - exit execution lifecycle now updates a durable `execution_fact` row through current exit-lifecycle telemetry helpers
+  - no `outcome_fact`, analytics-query, or schema work is claimed in this slice
+- Open uncertainties:
+  - repo-wide `python3 scripts/check_work_packets.py` currently fails on unrelated math packet markdown files outside the frozen P4.3 boundary
+  - internal small pre-close `$ask` critic/verifier attempts are timing out right now
+- Next required action:
+  - resolve or route around the repo-wide work-packet grammar blocker, then complete pre-close review before acceptance
 - Owner:
   - Architects mainline lead
