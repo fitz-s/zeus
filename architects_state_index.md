@@ -37,7 +37,6 @@ Metadata:
 - `docs/archives/` is untracked and out of scope
 - `architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
 - `next_round_handoff.md` has an unrelated local deletion and stays out of scope
-- `src/signal/forecast_uncertainty.py` has unrelated local modifications and stays out of scope
 - `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
 - local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
