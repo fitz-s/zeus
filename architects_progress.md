@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.2 post-close repair pass`
+- Last updated by: `Codex reality-authority amendment acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,17 +30,61 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P4 in progress`
-- Last accepted packet: `P4.2-AVAILABILITY-FACTS`
+- Mainline stage: `foundation reality-authority amendment accepted`
+- Last accepted packet: `GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY`
 - Current active packet: `none`
-- Current packet status: `P4.3 frozen / ready for execution`
+- Current packet status: `amendment accepted / P4.3 paused pending resume decision`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - repo-wide `python3 scripts/check_work_packets.py` currently fails on unrelated math packet markdown files outside the frozen P4.3 boundary
-  - pre-close small review attempts via `$ask` are timing out right now
+  - no technical blocker on the accepted amendment itself
+  - P4.3 remains intentionally paused until resumed under the upgraded authority
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
+
+## [2026-04-04 00:00 America/Chicago] P4.3 paused behind discrete-settlement-support authority amendment
+- Author: `Architects mainline lead`
+- Packet: `GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY`
+- Status delta:
+  - mainline temporarily diverts from P4.3 implementation into a governance/spec amendment
+  - P4.3 remains paused, not rejected
+- Basis / evidence:
+  - repeated reality drift around finite bin semantics shows discrete settlement support is still below the current authority layer
+  - continuing P4.3 before lifting this domain truth would preserve the same false-world-model risk in later packets
+- Decisions frozen:
+  - discrete settlement support is treated as a P0-class foundation amendment
+  - P4.3 remains paused until this authority upgrade is accepted
+  - no runtime/schema/math implementation is mixed into this amendment packet
+- Open uncertainties:
+  - exact later packetization after the amendment remains open
+- Next required action:
+  - land the amendment file and accept the governance packet
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:55 America/Chicago] GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - discrete settlement support is now explicit authority in the repo law stack
+- Basis / evidence:
+  - `docs/architecture/zeus_discrete_settlement_support_amendment.md` landed with accepted authority wording
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - control surfaces now explicitly show P4.3 paused behind the accepted amendment rather than silently continuing
+  - attempted internal small `$ask` review timed out, but no blocker-level contradiction was found in main-thread review of the amendment/control surfaces
+- Decisions frozen:
+  - discrete settlement support, bin contract kind, settlement cardinality, and settlement support geometry are now explicit authority concepts
+  - future market-math or settlement packets must carry domain assumptions plus authority sources and invalidation conditions
+  - P4.3 is paused and must be deliberately resumed under the upgraded authority rather than auto-continuing from stale assumptions
+- Open uncertainties:
+  - whether the existing paused P4.3 slice remains fully valid under the accepted amendment still needs explicit resume judgment
+- Next required action:
+  - re-read the paused P4.3 work against the accepted amendment before resuming mainline implementation
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-03 02:55 America/Chicago] FOUNDATION-TEAM-GATE accepted and pushed
 - Author: `Architects mainline lead`

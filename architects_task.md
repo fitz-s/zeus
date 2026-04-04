@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.3 freeze pass`
+- Last updated by: `Codex reality-authority amendment acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,30 +17,25 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P4.3-EXECUTION-FACTS`
-- State: `FROZEN / READY FOR EXECUTION`
+- Packet: `none`
+- State: `AMENDMENT ACCEPTED / P4.3 STILL PAUSED PENDING RESUME DECISION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Install the first durable `execution_fact` writer path for current entry/exit order lifecycle events without widening into `outcome_fact`, analytics work, or schema changes.
+No live packet. The discrete-settlement-support foundation amendment is now accepted; P4.3 remains paused until it is deliberately resumed under the upgraded authority.
 
 ## Allowed files
 
-- `work_packets/P4.3-EXECUTION-FACTS.md`
-- `src/state/db.py`
-- `src/engine/cycle_runtime.py`
-- `src/execution/exit_lifecycle.py`
-- `tests/test_db.py`
-- `tests/test_runtime_guards.py`
+- post-amendment control surfaces only until the next resumed packet is made explicit
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo surfaces outside the frozen P4.3 packet boundary
+- all repo implementation/runtime/schema surfaces until the next resumed packet is made explicit
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -60,36 +55,27 @@ Install the first durable `execution_fact` writer path for current entry/exit or
 
 ## Non-goals
 
-- no `outcome_fact` writer work
+- no `P4.3-EXECUTION-FACTS` implementation work
+- no runtime code change
 - no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- repo-wide `python3 scripts/check_work_packets.py` currently fails on unrelated math packet markdown files outside the frozen P4.3 boundary
-- external/internal small pre-close review attempts via $ask are currently timing out
+- no blocker on the accepted amendment itself
+- `P4.3-EXECUTION-FACTS` remains intentionally paused pending resume judgment under the upgraded authority
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P4.1 post-close third-party critic review passed
-- [x] P4.1 post-close third-party verifier review passed
-- [x] P4.2 packet is frozen
-- [x] P4.2 runtime/state seam implemented
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P4.2 accepted and pushed
-- [x] external third-party review found prior control/evidence discipline failure and it was repaired
-- [x] renewed post-close critic review passed
-- [x] renewed post-close verifier review passed
-- [x] P4.3 packet is frozen
-- [x] P4.3 runtime/state seam implemented
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P4.3 accepted and pushed
+- [x] identify the discrete-settlement-support authority gap
+- [x] freeze a dedicated amendment packet
+- [x] land the amendment file
+- [x] update slim control surfaces to show P4.3 paused behind the amendment
+- [x] accept and push the amendment packet
 
 ## Next required action
 
-1. Preserve the implemented P4.3 slice; do not close yet.
-2. Resolve or route around the repo-wide work-packet grammar blocker and complete review evidence before acceptance.
+1. Re-read the paused P4.3 work against the accepted amendment before resuming it.
+2. Resume or re-freeze the next mainline packet explicitly before touching runtime/math surfaces again.
