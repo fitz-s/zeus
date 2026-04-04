@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.3 freeze pass`
+- Last updated by: `Codex reality-authority amendment acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P4 in progress`
-- Active packet: `P4.3-EXECUTION-FACTS`
-- Active packet state: `P4.3 frozen / ready for execution`
+- Stage: `foundation reality-authority amendment accepted`
+- Active packet: `none`
+- Active packet state: `amendment accepted / P4.3 paused pending resume decision`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P4.2-AVAILABILITY-FACTS`
+- Last accepted packet: `GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Execute `P4.3-EXECUTION-FACTS` within its frozen file boundary.
-2. Preserve the pre-close and post-close critic/verifier gates before any next freeze.
+1. Re-read the paused P4.3 work against the accepted discrete-settlement authority.
+2. Resume or re-freeze the next mainline packet explicitly before more implementation.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -45,4 +45,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P4.3-EXECUTION-FACTS.md`
+5. `docs/architecture/zeus_discrete_settlement_support_amendment.md`
+6. the next explicitly resumed packet, if work continues
