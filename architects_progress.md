@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.5 closeout pass`
+- Last updated by: `Codex P3 family closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 post-close review after final precedence proof`
+- Mainline stage: `P3 family complete`
 - Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
 - Current active packet: `none`
-- Current packet status: `awaiting post-close review gate`
+- Current packet status: `P3 family closeout recorded / awaiting next phase freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - run the user-required post-close third-party critic + verifier before recording P3 family closeout
+  - no active blocker inside the completed P3 family boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1508,5 +1508,49 @@ Archive policy:
   - P3 family closeout still requires the user-required post-close third-party critic + verifier gate on this accepted boundary
 - Next required action:
   - run the user-required post-close third-party critic + verifier before recording P3 family closeout
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:56 America/Chicago] P3.5 post-close third-party review gate passed
+- Author: `Architects mainline lead`
+- Packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Status delta:
+  - user-required post-close third-party critic review passed
+  - user-required post-close third-party verifier review passed
+  - P3 family closeout became allowed
+- Basis / evidence:
+  - post-close verifier rerun -> `PASS`
+  - post-close critic rerun -> `PASS`
+  - accepted P3.5 boundary no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - P3 family closeout may now be recorded honestly
+- Open uncertainties:
+  - none beyond preserving the explicit P3 scope boundary in the closeout language
+- Next required action:
+  - record P3 family closeout truth
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:58 America/Chicago] P3 family closeout recorded
+- Author: `Architects mainline lead`
+- Packet family: `P3`
+- Status delta:
+  - P3 family completion is now recorded under current repo truth
+  - no further P3 implementation packet is required under current repo law
+- Basis / evidence:
+  - `P3.1-STRATEGY-POLICY-TABLES` accepted and pushed
+  - `P3.2-POLICY-RESOLVER` accepted, repaired where needed, and pushed
+  - `P3.3-EVALUATOR-POLICY-CONSUMPTION` accepted and passed post-close review
+  - `P3.4-RISKGUARD-POLICY-EMISSION` accepted and passed post-close review
+  - `P3.5-MANUAL-OVERRIDE-PRECEDENCE` accepted and passed post-close review
+- Decisions frozen:
+  - P3 now covers table contract, resolver precedence, evaluator consumption, riskguard emission, and end-to-end manual override precedence proof
+  - this closeout does not claim later control-plane durability migration, post-P3 phase work, or broader mixed-runtime convergence beyond the scoped P3 commitments
+- Open uncertainties:
+  - non-bootstrapped runtime DBs still surface explicit advisory skip behavior where canonical durable tables are absent
+- Next required action:
+  - stop at the P3 family boundary until a new non-P3 packet is frozen
 - Owner:
   - Architects mainline lead
