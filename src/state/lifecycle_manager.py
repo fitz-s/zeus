@@ -39,16 +39,24 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
     LifecyclePhase.ACTIVE: frozenset(
         {
             LifecyclePhase.ACTIVE,
+            LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.SETTLED,
         }
     ),
     LifecyclePhase.DAY0_WINDOW: frozenset(
         {
             LifecyclePhase.DAY0_WINDOW,
+            LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.SETTLED,
         }
     ),
-    LifecyclePhase.PENDING_EXIT: frozenset({LifecyclePhase.PENDING_EXIT}),
+    LifecyclePhase.PENDING_EXIT: frozenset(
+        {
+            LifecyclePhase.PENDING_EXIT,
+            LifecyclePhase.ACTIVE,
+            LifecyclePhase.DAY0_WINDOW,
+        }
+    ),
     LifecyclePhase.ECONOMICALLY_CLOSED: frozenset(
         {
             LifecyclePhase.ECONOMICALLY_CLOSED,
@@ -133,3 +141,31 @@ def fold_lifecycle_phase(
         before_label = None if current is None else current.value
         raise ValueError(f"illegal lifecycle phase fold: {before_label!r} -> {next_phase.value!r}")
     return next_phase
+
+
+def enter_pending_exit_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
+    return LifecyclePhase.PENDING_EXIT.value
+
+
+def release_pending_exit_runtime_state(
+    previous_state: object,
+    *,
+    day0_entered_at: object = "",
+) -> str:
+    candidate = _normalized_state(previous_state) or (
+        LifecyclePhase.DAY0_WINDOW.value if day0_entered_at else "holding"
+    )
+    restored_phase = phase_for_runtime_position(state=candidate)
+    fold_lifecycle_phase(LifecyclePhase.PENDING_EXIT, restored_phase)
+    return candidate

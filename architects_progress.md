@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3A freeze pass`
+- Last updated by: `Codex P5.3A acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Last accepted packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
 - Current active packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.3A boundary
+  - no blocker on the accepted P5.3A boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -190,6 +191,30 @@ Archive policy:
   - exact kernel helper shape for touched pending-exit enter/release behavior still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT` and run targeted runtime/safety tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:03 America/Chicago] P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py::test_check_pending_exits_does_not_retry_bare_exit_intent_without_error tests/test_runtime_guards.py::test_check_pending_exits_restores_entered_state_after_bare_exit_intent_release tests/test_runtime_guards.py::test_lifecycle_kernel_enters_pending_exit_from_active_and_day0_states tests/test_runtime_guards.py::test_lifecycle_kernel_releases_pending_exit_to_preserved_or_active_runtime_state tests/test_live_safety_invariants.py::test_live_exit_never_closes_without_fill tests/test_live_safety_invariants.py::test_deferred_fill_logs_last_monitor_best_bid` -> `6 passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py` -> `113 passed`
+  - lsp diagnostics on `src/execution/exit_lifecycle.py` and `tests/test_runtime_guards.py` -> `0 errors`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - the touched pending-exit enter/release seam now routes through lifecycle-kernel helpers instead of direct ad hoc phase string assignment
+  - no cycle-runtime, reconciliation, schema, or observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
 - Owner:
   - Architects mainline lead
 

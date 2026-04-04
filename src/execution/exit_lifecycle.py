@@ -21,6 +21,10 @@ from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
+from src.state.lifecycle_manager import (
+    enter_pending_exit_runtime_state,
+    release_pending_exit_runtime_state,
+)
 from src.state.portfolio import (
     compute_economic_close,
     ExitContext,
@@ -102,14 +106,23 @@ def _active_runtime_state(position: Position) -> str:
 
 
 def _mark_pending_exit(position: Position) -> None:
-    if position.state != "pending_exit" and not getattr(position, "pre_exit_state", ""):
+    if position.state == "pending_exit":
+        return
+    if not getattr(position, "pre_exit_state", ""):
         position.pre_exit_state = getattr(position.state, "value", position.state)
-    position.state = "pending_exit"
+    position.state = enter_pending_exit_runtime_state(
+        getattr(position, "state", ""),
+        exit_state=getattr(position, "exit_state", ""),
+        chain_state=getattr(position, "chain_state", ""),
+    )
 
 
 def _release_pending_exit(position: Position) -> None:
     if position.state == "pending_exit":
-        position.state = getattr(position, "pre_exit_state", "") or _active_runtime_state(position)
+        position.state = release_pending_exit_runtime_state(
+            getattr(position, "pre_exit_state", ""),
+            day0_entered_at=getattr(position, "day0_entered_at", ""),
+        )
         position.pre_exit_state = ""
 
 
