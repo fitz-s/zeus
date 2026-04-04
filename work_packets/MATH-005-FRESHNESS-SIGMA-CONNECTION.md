@@ -1,11 +1,60 @@
 # MATH-005-FRESHNESS-SIGMA-CONNECTION
 
+```yaml
+work_packet_id: MATH-005-FRESHNESS-SIGMA-CONNECTION
+packet_type: bugfix_packet
+priority: P0
+status: COMPLETE
+depends_on: [MATH-003]
+triggered_by: MATH-003 defect finding
+owner: Math lane lead
+authority: math_task.md
+objective: Connect freshness_factor to distribution width so stale observations expand sigma.
+why_this_now: MATH-003 revealed critical defect - freshness_factor computed but not used in sigma calculation.
+why_not_other_approach:
+  - Ignore staleness | defect confirmed, stale data should expand uncertainty
+  - Full Bayesian model | too complex for immediate fix, can be future packet
+truth_layer: Stale data should expand uncertainty; fresh data keeps uncertainty tight.
+control_layer: Modify day0_post_peak_sigma() to accept and use freshness_factor parameter.
+evidence_layer: Before/after sigma values with stale data, test confirming expansion.
+zones_touched:
+  - K3_math_model
+invariants_touched:
+  - none (backward compatible with default freshness_factor=1.0)
+required_reads:
+  - AGENTS.md
+  - math_task.md
+  - math_progress.md
+  - src/signal/forecast_uncertainty.py
+  - src/signal/day0_signal.py
+files_may_change:
+  - src/signal/forecast_uncertainty.py
+  - src/signal/day0_signal.py
+  - tests/test_forecast_uncertainty.py
+  - math_progress.md
+  - math_task.md
+files_may_not_change:
+  - architecture/**
+  - docs/governance/**
+  - AGENTS.md
+schema_changes: false
+rollback: Revert freshness_factor parameter addition. Default value ensures backward compatibility.
+acceptance:
+  - day0_post_peak_sigma accepts freshness_factor parameter
+  - sigma expands by up to 1.5x when freshness_factor=0.0
+  - existing tests pass with default freshness_factor=1.0
+  - new tests document expansion profile
+evidence_required:
+  - pytest output showing all tests pass
+  - sigma expansion table in math_progress.md
+```
+
 ## Metadata
 
 - Packet ID: `MATH-005`
 - Priority: `P0 (blocking)`
 - Created: `2026-04-04 America/Chicago`
-- Status: `FROZEN / READY TO IMPLEMENT`
+- Status: `COMPLETE`
 - Depends on: `MATH-003`
 - Triggered by: `MATH-003 defect finding`
 - Owner: `Math lane lead`

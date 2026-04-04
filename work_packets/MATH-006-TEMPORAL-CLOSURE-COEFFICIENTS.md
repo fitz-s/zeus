@@ -1,11 +1,58 @@
 # MATH-006-TEMPORAL-CLOSURE-COEFFICIENTS
 
+```yaml
+work_packet_id: MATH-006-TEMPORAL-CLOSURE-COEFFICIENTS
+packet_type: evaluation_packet
+priority: P1
+status: COMPLETE
+depends_on: [MATH-002]
+owner: Math lane lead
+authority: math_task.md
+objective: Evaluate the temporal_closure coefficients (0.75, 0.50, 0.35) to determine if they are appropriate.
+why_this_now: After MATH-002 calibration framework is complete, can evaluate whether coefficients are empirically justified.
+why_not_other_approach:
+  - Change coefficients immediately | need evidence first, validation-before-change discipline
+  - Skip evaluation | coefficients directly affect trading accuracy
+truth_layer: These coefficients control how time, peak confidence, and daylight progress blend to form observation weight.
+control_layer: Evaluation only - no code changes until evidence gathered.
+evidence_layer: Test results documenting coefficient behavior, sensitivity, and alternatives.
+zones_touched:
+  - K3_math_model
+invariants_touched:
+  - none (evaluation only)
+required_reads:
+  - AGENTS.md
+  - math_task.md
+  - math_progress.md
+  - src/signal/forecast_uncertainty.py
+files_may_change:
+  - tests/test_temporal_closure_evaluation.py
+  - math_progress.md
+  - math_task.md
+files_may_not_change:
+  - src/signal/forecast_uncertainty.py
+  - src/signal/day0_signal.py
+  - architecture/**
+  - docs/governance/**
+schema_changes: false
+rollback: Remove evaluation tests. No production code is touched.
+acceptance:
+  - Document current coefficient dominance patterns
+  - Evaluate sensitivity to coefficient changes
+  - Document alternative coefficient combinations
+  - Produce recommendation for whether coefficients should change
+evidence_required:
+  - pytest output for evaluation tests
+  - documented coefficient behavior
+  - recommendation with rationale
+```
+
 ## Metadata
 
 - Packet ID: `MATH-006`
 - Priority: `P1`
 - Created: `2026-04-04 America/Chicago`
-- Status: `FROZEN / EVALUATION ONLY`
+- Status: `COMPLETE`
 - Depends on: `MATH-002`
 - Owner: `Math lane lead`
 - Authority: `math_task.md`
