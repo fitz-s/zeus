@@ -54,7 +54,6 @@ Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
-- `tests/test_runtime_guards.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
