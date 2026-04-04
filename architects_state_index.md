@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 acceptance pass`
+- Last updated by: `Codex P5 family closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P5 lifecycle phase engine start`
-- Active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P5 family complete`
+- Active packet: `none`
+- Active packet state: `P5 family closeout recorded / awaiting next phase freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
-2. Record P5 family closeout only after the post-close gate passes.
+1. Stop at the completed P5 family boundary.
+2. If work continues later, freeze the next non-P5 packet before any implementation.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P5.4-QUARANTINE-SEMANTICS-HARDENING.md`
+5. the next frozen non-P5 packet, if work resumes
