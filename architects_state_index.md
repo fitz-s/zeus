@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `P5 in progress`
 - Active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Active packet state: `accepted and pushed / renewed post-close gate pending`
+- Active packet state: `accepted and pushed / renewed post-close critic pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Rerun the post-close third-party critic and verifier gate on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
-2. Record P5 family closeout again only after the renewed post-close gate passes.
+1. Rerun the renewed post-close critic on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
+2. Record P5 family closeout again only after the renewed post-close critic passes.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
