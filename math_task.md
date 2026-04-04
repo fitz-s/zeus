@@ -12,28 +12,33 @@ Tracks exactly one frozen packet at a time plus the queue of verified next prior
 
 ## Current Active Packet
 
-- Packet: `ALL EVALUATIONS COMPLETE`
-- State: `READY FOR THIRD PARTY REVIEW`
-- Execution mode: `PAUSED`
+- Packet: `MATH LANE COMPLETE`
+- State: `ALL WORK DONE`
+- Execution mode: `IDLE`
 - Owner: `Math lane lead`
 
 ## Summary
 
-All P0/P1/P2 evaluation packets have been completed:
+All P0/P1/P2 math validation packets have been completed, including code changes:
 
 | Packet | Status | Key Finding |
 |--------|--------|-------------|
 | MATH-001 | ✅ PASS | Sunset collapse works correctly |
 | MATH-002 | ✅ PASS | 97.8% hit rate in high-confidence region |
 | MATH-003 | ⚠️ COND | Found freshness disconnect → MATH-005 |
-| MATH-004 | ✅ PASS | 50% floor is reasonable, defer to MATH-009 |
-| MATH-005 | ✅ PASS | Freshness-sigma connection implemented |
-| MATH-006 | ✅ PASS | Coefficients acceptable, document current |
+| MATH-004 | ✅ PASS | 50% floor acceptable, enhanced by MATH-010 |
+| MATH-005 | ✅ IMPL | Freshness-sigma connection implemented |
+| MATH-006 | ✅ PASS | Coefficients acceptable, renamed in MATH-010 |
 | MATH-007 | ✅ PASS | Lead multiplier is conservative and safe |
 | MATH-008 | DEFER | Cosmetic rename, low priority |
 | MATH-009 | ✅ PASS | Bayesian model promising but not urgent |
+| MATH-010 | ✅ IMPL | Quantization noise floor + named constants |
 
-**Next step**: Third party review of all findings before any coefficient changes.
+**Code changes implemented:**
+1. MATH-005: `freshness_factor` parameter added to `day0_post_peak_sigma()`
+2. MATH-010: Quantization noise floor (0.35°F/0.20°C) + all magic constants renamed
+
+**All 112 math tests pass.**
 
 ---
 
@@ -46,12 +51,13 @@ All packets are validation-first: measure before changing.
 | MATH-001 | P0 | Sunset sanity validation | **PASS** | - | Test proving Day0 distribution narrows appropriately near sunset | ✅ 7 tests pass |
 | MATH-002 | P0 | Bin hit-rate calibration framework | **PASS** | MATH-001 | Historical bin hit-rate vs predicted probability comparison tool | ✅ 6 tests pass, high-conf 97.8% hit rate |
 | MATH-003 | P0 | Stale-data stress test | **CONDITIONAL PASS** | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | ⚠️ Found defect, triggered MATH-005 |
-| MATH-004 | P1 | Sigma floor evaluation | **PASS** | MATH-001,002,003,005 | Evidence-based decision on 50% floor | ✅ 7 tests, verdict: keep current, defer to MATH-009 |
-| MATH-005 | P0 | Freshness-to-sigma connection | **PASS** | MATH-003 | Connect freshness_factor to distribution width | ✅ 3 new tests, 1.5x max expansion at 3h stale |
-| MATH-006 | P1 | temporal_closure coefficients calibration | **PASS** | MATH-002 | Data-driven 0.75/0.50/0.35 replacement | ✅ 6 tests, verdict: document current, plan for MATH-009 |
+| MATH-004 | P1 | Sigma floor evaluation | **PASS** | MATH-001,002,003,005 | Evidence-based decision on 50% floor | ✅ 7 tests, enhanced by MATH-010 |
+| MATH-005 | P0 | Freshness-to-sigma connection | **IMPL** | MATH-003 | Connect freshness_factor to distribution width | ✅ Implemented, 1.5x max expansion |
+| MATH-006 | P1 | temporal_closure coefficients calibration | **PASS** | MATH-002 | Data-driven 0.75/0.50/0.35 evaluation | ✅ 6 tests, constants renamed in MATH-010 |
 | MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | **PASS** | MATH-002 | MAE vs lead_days curve extraction from model_bias | ✅ 5 tests, verdict: current is conservative and safe |
 | MATH-008 | P2 | ens_dominance rename + documentation | DEFERRED | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Low priority, cosmetic |
 | MATH-009 | P2 | Bayesian sigma synthesis evaluation | **PASS** | MATH-004 | Prototype Bayesian sigma merge vs current linear floor | ✅ 5 tests, verdict: promising but not urgent |
+| MATH-010 | P0 | Quantization noise floor + named constants | **IMPL** | MATH-004,third-party | Implement floor and rename magic constants | ✅ Implemented per third-party review |
 
 ---
 
