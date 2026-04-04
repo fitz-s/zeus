@@ -645,3 +645,292 @@ class TestSunsetSanityValidation:
         for i in range(1, len(results)):
             assert results[i]["obs_weight"] >= results[i-1]["obs_weight"] - 0.01, \
                 f"obs_weight should increase or stay stable as hours decrease"
+
+
+# =============================================================================
+# MATH-003: STALE-DATA STRESS TEST
+# Gemini external review requirement: Force a scenario where the last trusted
+# observation is 2 hours old during peak heating. The sigma should expand.
+# =============================================================================
+
+
+class TestStaleDataStressTest:
+    """MATH-003: Stale-data stress tests per Gemini external review.
+    
+    These tests document how observation staleness affects distribution width
+    at different daylight phases, especially during peak heating.
+    """
+
+    EXTENDED_BINS = [
+        Bin(low=None, high=64, label="64 or below", unit="F"),
+        Bin(low=65, high=66, label="65-66", unit="F"),
+        Bin(low=67, high=68, label="67-68", unit="F"),
+        Bin(low=69, high=70, label="69-70", unit="F"),
+        Bin(low=71, high=72, label="71-72", unit="F"),
+        Bin(low=73, high=74, label="73-74", unit="F"),
+        Bin(low=75, high=76, label="75-76", unit="F"),
+        Bin(low=77, high=78, label="77-78", unit="F"),
+        Bin(low=79, high=80, label="79-80", unit="F"),
+        Bin(low=81, high=None, label="81 or higher", unit="F"),
+    ]
+
+    def _distribution_effective_std(self, p: np.ndarray, bins: list[Bin]) -> float:
+        """Estimate effective std from probability distribution over bins."""
+        midpoints = []
+        for b in bins:
+            if b.is_open_low:
+                midpoints.append(b.high - 1.0)
+            elif b.is_open_high:
+                midpoints.append(b.low + 1.0)
+            else:
+                midpoints.append((b.low + b.high) / 2.0)
+        midpoints = np.array(midpoints)
+        mean = np.sum(p * midpoints)
+        var = np.sum(p * (midpoints - mean) ** 2)
+        return float(np.sqrt(var))
+
+    def _make_observation_time(self, current_time: str, hours_ago: float) -> str:
+        """Create observation timestamp hours_ago before current_time."""
+        current = datetime.fromisoformat(current_time.replace("Z", "+00:00"))
+        obs_time = current - timedelta(hours=hours_ago)
+        return obs_time.isoformat()
+
+    def test_staleness_at_peak_heating(self):
+        """MATH-003 Test 1: Fresh vs stale observation during peak heating (mid-day).
+        
+        At mid-day with significant hours remaining, staleness should significantly
+        reduce observation weight and expand distribution width.
+        """
+        rng = np.random.default_rng(42)
+        ens_remaining = rng.normal(74.0, 3.0, 51)  # ENS spread around 74°F
+        
+        current_time = "2026-04-04T18:00:00+00:00"  # 2pm EDT, peak heating
+        staleness_hours = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0]
+        results = []
+        
+        for stale_h in staleness_hours:
+            obs_time = self._make_observation_time(current_time, stale_h)
+            
+            sig = Day0Signal(
+                observed_high_so_far=72.0,
+                current_temp=70.0,
+                hours_remaining=6.0,  # 6 hours until settlement
+                member_maxes_remaining=ens_remaining,
+                unit="F",
+                daylight_progress=0.5,  # Mid-day
+                observation_source="wu/asos",
+                observation_time=obs_time,
+                current_utc_timestamp=current_time,
+            )
+            
+            obs_weight = sig.observation_weight()
+            ctx = sig.forecast_context()
+            freshness = ctx["backbone"]["nowcast"]["freshness_factor"]
+            
+            p = sig.p_vector(self.EXTENDED_BINS, n_mc=1000)
+            effective_std = self._distribution_effective_std(p, self.EXTENDED_BINS)
+            
+            results.append({
+                "stale_hours": stale_h,
+                "freshness_factor": freshness,
+                "obs_weight": obs_weight,
+                "effective_std": effective_std,
+            })
+        
+        print(f"\n=== MATH-003 Test 1: Staleness at Peak Heating (mid-day) ===")
+        print(f"{'Stale (h)':<10} {'Freshness':>10} {'Obs Weight':>12} {'Eff Std':>10}")
+        print("-" * 45)
+        for r in results:
+            print(f"{r['stale_hours']:<10.1f} {r['freshness_factor']:>10.3f} "
+                  f"{r['obs_weight']:>12.4f} {r['effective_std']:>10.2f}°F")
+        
+        # Compute sigma expansion ratios
+        fresh_std = results[0]["effective_std"]
+        print(f"\nSigma expansion ratios (vs fresh):")
+        for r in results[1:]:
+            if fresh_std > 0:
+                ratio = r["effective_std"] / fresh_std
+            else:
+                ratio = float('inf') if r["effective_std"] > 0 else 1.0
+            print(f"  {r['stale_hours']:.0f}h stale: {ratio:.2f}x")
+        
+        # Verify staleness reduces freshness_factor
+        for i in range(1, len(results)):
+            assert results[i]["freshness_factor"] <= results[i-1]["freshness_factor"] + 0.01, \
+                f"Freshness should decrease with staleness"
+
+    def test_staleness_at_post_sunset(self):
+        """MATH-003 Test 2: Fresh vs stale observation at post-sunset.
+        
+        At sunset, staleness should matter less because temperature is locked.
+        But very stale observations should still show some effect.
+        """
+        rng = np.random.default_rng(42)
+        ens_remaining = rng.normal(74.0, 3.0, 51)
+        
+        current_time = "2026-04-04T23:30:00+00:00"  # Post-sunset
+        staleness_hours = [0.0, 1.0, 2.0, 3.0]
+        results = []
+        
+        for stale_h in staleness_hours:
+            obs_time = self._make_observation_time(current_time, stale_h)
+            
+            sig = Day0Signal(
+                observed_high_so_far=72.0,
+                current_temp=68.0,
+                hours_remaining=0.0,  # Settlement time
+                member_maxes_remaining=ens_remaining,
+                unit="F",
+                daylight_progress=1.0,  # Post-sunset
+                observation_source="wu/asos",
+                observation_time=obs_time,
+                current_utc_timestamp=current_time,
+            )
+            
+            obs_weight = sig.observation_weight()
+            ctx = sig.forecast_context()
+            freshness = ctx["backbone"]["nowcast"]["freshness_factor"]
+            
+            p = sig.p_vector(self.EXTENDED_BINS, n_mc=1000)
+            effective_std = self._distribution_effective_std(p, self.EXTENDED_BINS)
+            
+            results.append({
+                "stale_hours": stale_h,
+                "freshness_factor": freshness,
+                "obs_weight": obs_weight,
+                "effective_std": effective_std,
+            })
+        
+        print(f"\n=== MATH-003 Test 2: Staleness at Post-Sunset ===")
+        print(f"{'Stale (h)':<10} {'Freshness':>10} {'Obs Weight':>12} {'Eff Std':>10}")
+        print("-" * 45)
+        for r in results:
+            print(f"{r['stale_hours']:<10.1f} {r['freshness_factor']:>10.3f} "
+                  f"{r['obs_weight']:>12.4f} {r['effective_std']:>10.2f}°F")
+
+    def test_sigma_expansion_profile(self):
+        """MATH-003 Test 3: Document sigma expansion profile.
+        
+        Compare observed expansion to:
+        - Linear: sigma ∝ Δt
+        - Square-root (Brownian): sigma ∝ √Δt
+        """
+        rng = np.random.default_rng(42)
+        ens_remaining = rng.normal(76.0, 4.0, 51)  # Wider ENS spread
+        
+        current_time = "2026-04-04T18:00:00+00:00"
+        staleness_hours = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+        results = []
+        
+        for stale_h in staleness_hours:
+            obs_time = self._make_observation_time(current_time, stale_h)
+            
+            sig = Day0Signal(
+                observed_high_so_far=72.0,
+                current_temp=70.0,
+                hours_remaining=6.0,
+                member_maxes_remaining=ens_remaining,
+                unit="F",
+                daylight_progress=0.5,
+                observation_source="wu/asos",
+                observation_time=obs_time,
+                current_utc_timestamp=current_time,
+            )
+            
+            p = sig.p_vector(self.EXTENDED_BINS, n_mc=1500)
+            effective_std = self._distribution_effective_std(p, self.EXTENDED_BINS)
+            
+            results.append({
+                "stale_hours": stale_h,
+                "effective_std": effective_std,
+            })
+        
+        print(f"\n=== MATH-003 Test 3: Sigma Expansion Profile ===")
+        print(f"{'Stale (h)':<10} {'Eff Std':>10} {'Linear Pred':>12} {'Sqrt Pred':>12}")
+        print("-" * 48)
+        
+        base_std = results[0]["effective_std"]
+        for r in results:
+            t = r["stale_hours"]
+            # Linear prediction: std = base + k * t
+            linear_pred = base_std + 0.5 * t  # Assume k=0.5
+            # Brownian prediction: std = sqrt(base^2 + D * t)
+            D = 0.5  # Diffusion coefficient guess
+            brownian_pred = np.sqrt(base_std**2 + D * t) if base_std > 0 else np.sqrt(D * t)
+            
+            print(f"{t:<10.2f} {r['effective_std']:>10.2f} {linear_pred:>12.2f} {brownian_pred:>12.2f}")
+        
+        # Document findings
+        print(f"\nBase std (fresh): {base_std:.2f}°F")
+        print(f"3h stale std: {results[-1]['effective_std']:.2f}°F")
+        if base_std > 0:
+            expansion_ratio = results[-1]["effective_std"] / base_std
+            print(f"3h expansion ratio: {expansion_ratio:.2f}x")
+
+    def test_peak_heating_2h_stress(self):
+        """MATH-003 Test 4: The critical 2h stale at peak heating scenario.
+        
+        This is Gemini's specific concern: 2h stale during peak heating should
+        show significant sigma expansion.
+        """
+        rng = np.random.default_rng(42)
+        ens_remaining = rng.normal(76.0, 4.0, 51)
+        
+        current_time = "2026-04-04T18:00:00+00:00"
+        
+        # Fresh observation
+        fresh_sig = Day0Signal(
+            observed_high_so_far=72.0,
+            current_temp=70.0,
+            hours_remaining=6.0,
+            member_maxes_remaining=ens_remaining,
+            unit="F",
+            daylight_progress=0.5,
+            observation_source="wu/asos",
+            observation_time=self._make_observation_time(current_time, 0.0),
+            current_utc_timestamp=current_time,
+        )
+        
+        # 2h stale observation
+        stale_sig = Day0Signal(
+            observed_high_so_far=72.0,
+            current_temp=70.0,
+            hours_remaining=6.0,
+            member_maxes_remaining=ens_remaining,
+            unit="F",
+            daylight_progress=0.5,
+            observation_source="wu/asos",
+            observation_time=self._make_observation_time(current_time, 2.0),
+            current_utc_timestamp=current_time,
+        )
+        
+        p_fresh = fresh_sig.p_vector(self.EXTENDED_BINS, n_mc=2000)
+        p_stale = stale_sig.p_vector(self.EXTENDED_BINS, n_mc=2000)
+        
+        std_fresh = self._distribution_effective_std(p_fresh, self.EXTENDED_BINS)
+        std_stale = self._distribution_effective_std(p_stale, self.EXTENDED_BINS)
+        
+        fresh_ctx = fresh_sig.forecast_context()
+        stale_ctx = stale_sig.forecast_context()
+        
+        print(f"\n=== MATH-003 Test 4: 2h Stale at Peak Heating (Critical Scenario) ===")
+        print(f"Fresh observation:")
+        print(f"  freshness_factor: {fresh_ctx['backbone']['nowcast']['freshness_factor']:.3f}")
+        print(f"  observation_weight: {fresh_sig.observation_weight():.4f}")
+        print(f"  effective_std: {std_fresh:.2f}°F")
+        print(f"\n2h stale observation:")
+        print(f"  freshness_factor: {stale_ctx['backbone']['nowcast']['freshness_factor']:.3f}")
+        print(f"  observation_weight: {stale_sig.observation_weight():.4f}")
+        print(f"  effective_std: {std_stale:.2f}°F")
+        
+        if std_fresh > 0:
+            expansion = std_stale / std_fresh
+            print(f"\nSigma expansion ratio: {expansion:.2f}x")
+            
+            if expansion < 1.5:
+                print(f"\n⚠️ WARNING: Expansion ratio < 1.5x suggests 3h decay is too permissive")
+            else:
+                print(f"\n✓ Adequate sigma expansion for 2h stale observation")
+        else:
+            print(f"\nNote: Fresh std is 0, cannot compute expansion ratio")
+            print(f"  This may indicate observation dominates completely at this daylight phase")

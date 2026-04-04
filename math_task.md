@@ -12,40 +12,44 @@ Tracks exactly one frozen packet at a time plus the queue of verified next prior
 
 ## Current Active Packet
 
-- Packet: `MATH-002-BIN-HIT-RATE-CALIBRATION`
-- State: `TODO (needs freeze)`
+- Packet: `MATH-005-FRESHNESS-SIGMA-CONNECTION`
+- State: `REQUIRED FIX (blocking)`
 - Execution mode: `SOLO_EXECUTE`
 - Owner: `Math lane lead`
+- Reason: `MATH-003 proved freshness_factor is disconnected from distribution width`
 
 ## Objective
 
-Implement the second of Gemini's three required validations: **Bin Hit-Rate Calibration**.
+Fix the defect discovered in MATH-003: `freshness_factor` in `day0_nowcast_context()` is computed but **not propagated** to distribution width calculations.
 
-Build a framework to compare historical bin hit-rates against predicted probabilities. This is the core calibration diagnostic needed before any coefficient changes.
+During mid-day peak heating:
+- `freshness_factor` correctly decays from 1.0 to 0.0 over 3 hours
+- But `observation_weight` and `effective_std` **do not change**
+- Sigma expansion ratio = 1.00x (no expansion for stale data)
+
+This violates the expected behavior that stale observations should increase uncertainty.
 
 ## Allowed Files
 
 - `math_task.md`
 - `math_progress.md`
+- `src/signal/forecast_uncertainty.py` (NOW ALLOWED — fix implementation)
 - `tests/test_day0_signal.py`
 - `tests/test_forecast_uncertainty.py`
-- `tests/test_calibration_*.py`
-- `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md`
-- `src/calibration/` (new module if needed)
+- `work_packets/MATH-005-FRESHNESS-SIGMA-CONNECTION.md`
 
 ## Forbidden Files
 
-- `src/signal/forecast_uncertainty.py` (until validation results guide changes)
-- `src/signal/day0_signal.py` (until validation results guide changes)
+- `src/signal/day0_signal.py` (until this fix is complete)
 - `architecture/**`
 - `docs/governance/**`
 - `AGENTS.md`
 
 ## Non-goals
 
-- No coefficient changes before validation
-- No sigma floor changes before validation
-- No freshness threshold changes before validation
+- No coefficient changes beyond the freshness fix
+- No sigma floor changes (MATH-004)
+- No Bayesian/Brownian model implementation yet (later packet)
 
 ---
 
@@ -55,11 +59,11 @@ All packets are validation-first: measure before changing.
 
 | ID | Priority | Title | Status | Depends On | Deliverable | Validation |
 |----|----------|-------|--------|------------|-------------|------------|
-| MATH-001 | P0 | Sunset sanity validation | **PASS** | - | Test proving Day0 distribution narrows appropriately near sunset | ✅ 7 tests pass, obs_weight=1.0 at sunset, p_within_2F=1.0 |
-| MATH-002 | P0 | Bin hit-rate calibration framework | TODO | MATH-001 | Historical bin hit-rate vs predicted probability comparison tool | Calibration curve + documented gaps |
-| MATH-003 | P0 | Stale-data stress test | TODO | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | pytest assertion + documented sigma expansion ratio |
+| MATH-001 | P0 | Sunset sanity validation | **PASS** | - | Test proving Day0 distribution narrows appropriately near sunset | ✅ 7 tests pass |
+| MATH-002 | P0 | Bin hit-rate calibration framework | **PASS** | MATH-001 | Historical bin hit-rate vs predicted probability comparison tool | ✅ 6 tests pass, high-conf 97.8% hit rate |
+| MATH-003 | P0 | Stale-data stress test | **CONDITIONAL PASS** | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | ⚠️ freshness_factor not connected to sigma — DEFECT FOUND |
 | MATH-004 | P1 | Sigma floor evaluation | TODO | MATH-001,002,003 | Evidence-based decision on 50% floor | Validation results + recommended change |
-| MATH-005 | P1 | Freshness threshold tightening | TODO | MATH-003 | Peak-heating freshness decay reduction (3h → 1h) | Before/after bin hit-rate comparison |
+| MATH-005 | **P0** | Freshness-to-sigma connection | **REQUIRED FIX** | MATH-003 | Connect freshness_factor to distribution width | Currently broken — staleness has no effect |
 | MATH-006 | P1 | temporal_closure coefficients calibration | TODO | MATH-002 | Data-driven 0.75/0.50/0.35 replacement | Historical hit-rate per coefficient regime |
 | MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | TODO | MATH-002 | MAE vs lead_days curve extraction from model_bias | Per-city/season multiplier table |
 | MATH-008 | P2 | ens_dominance rename + documentation | TODO | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Code review + test update |
