@@ -88,6 +88,31 @@ Pre-closeout review rules:
   - and only re-close after fresh evidence and review.
 - If multiple confirmed defects sit on the same bottom-layer truth boundary and the human explicitly directs one repair package, prefer one tightly bounded repair packet over artificial packet fragmentation.
 
+Post-closeout gate rules:
+
+- Packet closeout does **not** automatically authorize the next packet freeze.
+- Before marking a packet accepted or pushed, finish the packet’s pre-close critic/verifier review.
+- After a packet is marked accepted/pushed, run one additional independent third-party critic review and one additional verifier pass on the accepted boundary before freezing the next packet.
+- If that post-close review finds a contradiction, stale control-surface snapshot, or evidence gap:
+  - reopen or repair explicitly before advancing,
+  - synchronize `architects_state_index.md`, `architects_task.md`, and the top-level `architects_progress.md` snapshot to repo truth,
+  - and rerun the post-close gate until it passes.
+- Treat a passed post-close gate as a separate advancement permission, not as a byproduct of acceptance.
+
+Packet evidence visibility rule:
+
+- Every item listed in `evidence_required` must appear explicitly either:
+  - in the packet file itself, or
+  - in a clearly named paired ledger/evidence surface referenced by the packet.
+- Do not treat chat memory, reviewer intuition, or implied knowledge as sufficient evidence for packet closeout.
+
+Capability-present / capability-absent proof rule:
+
+- When a packet introduces behavior that depends on a capability or substrate being present (for example a table, contract, service, or bootstrap state), acceptance must explicitly cover:
+  - the capability-present behavior, and
+  - the capability-absent behavior.
+- If the absent-path behavior is advisory skip, fail-loud, or staged no-op, say so plainly and test or evidence it directly instead of silently overclaiming the present-path result.
+
 Micro-event logging rule:
 
 - Do not dump every small attempt into `architects_progress.md`.
