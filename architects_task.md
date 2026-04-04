@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.2 acceptance pass`
+- Last updated by: `Codex P5.3A freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,21 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Extend the lifecycle kernel from P5.1's vocabulary-first surface into explicit, packet-bounded fold legality on the remaining current canonical builder transitions, especially settlement-side folds, without yet widening into broad runtime phase-mutation cleanup or src/execution rewiring.
+Remove the direct lifecycle phase-mutation hot spot in `src/execution/exit_lifecycle.py` by routing the touched pending-exit enter/release semantics through the lifecycle kernel, without yet widening into other phase hot spots.
 
 ## Allowed files
 
-- work_packets/P5.2-FOLD-LEGALITY-FOLLOW-THROUGH.md
+- work_packets/P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT.md
 - src/state/lifecycle_manager.py
-- src/engine/lifecycle_events.py
-- tests/test_architecture_contracts.py
+- src/execution/exit_lifecycle.py
+- tests/test_runtime_guards.py
+- tests/test_live_safety_invariants.py
 - architects_progress.md
 - architects_task.md
 - architects_state_index.md
@@ -44,15 +45,15 @@ Extend the lifecycle kernel from P5.1's vocabulary-first surface into explicit, 
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
-- `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/state/db.py`
 - `src/state/portfolio.py`
 - `src/state/chain_reconciliation.py`
+- `src/engine/**`
 - `src/supervisor_api/**`
+- `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
-- `tests/test_runtime_guards.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
@@ -69,8 +70,7 @@ Extend the lifecycle kernel from P5.1's vocabulary-first surface into explicit, 
 
 ## Current blocker state
 
-- no blocker on the accepted P5.2 boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.3A boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -89,8 +89,16 @@ Extend the lifecycle kernel from P5.1's vocabulary-first surface into explicit, 
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.2 accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.3A packet frozen
+- [ ] touched exit-lifecycle hotspot routed through lifecycle kernel
+- [ ] targeted exit-lifecycle hotspot tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.3A accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

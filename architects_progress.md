@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.2 acceptance pass`
+- Last updated by: `Codex P5.3A freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -32,12 +32,11 @@ Archive policy:
 
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
-- Current active packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.2 boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the frozen P5.3A boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -151,6 +150,46 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 18:48 America/Chicago] P5.2-FOLD-LEGALITY-FOLLOW-THROUGH post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - independent post-close critic lane -> `PASS`
+  - accepted P5.2 control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - the first P5.3 hotspot slice may now be frozen
+- Open uncertainties:
+  - none on the accepted P5.2 boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze the first P5.3 hotspot packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 18:50 America/Chicago] P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P5.2 boundary plus passed post-close gate now permit the next P5 freeze
+  - direct `position.state = \"pending_exit\"` / release mutation still lives in `src/execution/exit_lifecycle.py`, making it the narrowest remaining high-value phase-mutation hot spot
+  - the next spec-ordered move after fold legality is removing direct phase string mutation hot spots
+- Decisions frozen:
+  - keep this first P5.3 slice on the exit-lifecycle hotspot only
+  - do not widen into day0/cycle-runtime, reconciliation/portfolio cleanup, schema work, or control/observability changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact kernel helper shape for touched pending-exit enter/release behavior still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT` and run targeted runtime/safety tests
 - Owner:
   - Architects mainline lead
 
