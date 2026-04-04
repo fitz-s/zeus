@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3 family closeout pass`
+- Last updated by: `Codex P4.1 acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 family complete`
+- Stage: `P4 in progress`
 - Active packet: `none`
-- Active packet state: `P3 family closeout recorded / awaiting next phase freeze`
+- Active packet state: `P4.1 accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Stop at the completed P3 family boundary.
-2. If work continues, freeze the next non-P3 packet explicitly before implementation.
+1. Run the post-close third-party critic and verifier gate on accepted P4.1.
+2. Only freeze `P4.2-AVAILABILITY-FACTS` after the post-close gate passes.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -32,6 +32,7 @@ Metadata:
 - `README.md` is untracked and out of scope
 - `docs/architecture/zeus_durable_architecture_spec.md` has unrelated local modifications and stays out of scope
 - `docs/governance/zeus_runtime_delta_ledger.md` has unrelated local modifications and stays out of scope
+- `docs/architecture/zeus_design_philosophy.md` has an unrelated local deletion and stays out of scope
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
 - `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
@@ -44,4 +45,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. the next frozen non-P3 packet, if work resumes
+5. `work_packets/P4.1-OPPORTUNITY-FACTS.md`

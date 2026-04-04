@@ -3,12 +3,56 @@
 import json
 import sqlite3
 import tempfile
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from src.state.db import get_connection, init_schema
+
+
+def _create_opportunity_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_fact (
+            decision_id TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            discovery_mode TEXT,
+            entry_method TEXT,
+            snapshot_id TEXT,
+            p_raw REAL,
+            p_cal REAL,
+            p_market REAL,
+            alpha REAL,
+            best_edge REAL,
+            ci_width REAL,
+            rejection_stage TEXT,
+            rejection_reason_json TEXT,
+            availability_status TEXT CHECK (availability_status IN (
+                'ok',
+                'missing',
+                'stale',
+                'rate_limited',
+                'unavailable',
+                'chain_unavailable'
+            )),
+            should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
 
 
 def test_init_schema_creates_all_tables():
@@ -41,6 +85,109 @@ def test_init_schema_idempotent():
     init_schema(conn)
     init_schema(conn)  # Should not raise
     conn.close()
+
+
+def test_log_opportunity_fact_preserves_missing_snapshot_without_latest_fallback(tmp_path):
+    from src.state.db import log_opportunity_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    _create_opportunity_fact_table(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-1",
+        slug="nyc-apr-1",
+        discovery_mode="opening_hunt",
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_no",
+        p_model=0.75,
+        p_market=0.7,
+        edge=0.12,
+        ci_lower=0.05,
+        ci_upper=0.17,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="dec-1",
+        edge=edge,
+        strategy_key="center_buy",
+        selected_method="ens_member_counting",
+        decision_snapshot_id="",
+        availability_status="RATE_LIMITED",
+        p_raw=[0.2],
+        p_cal=[0.25],
+        p_market=[0.3],
+        bin_labels=["39-40°F"],
+        alpha=0.4,
+    )
+
+    result = log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        should_trade=False,
+        rejection_stage="MARKET_LIQUIDITY",
+        rejection_reasons=["429 capacity exhausted"],
+        recorded_at="2026-04-03T00:00:00Z",
+    )
+    row = conn.execute(
+        """
+        SELECT candidate_id, direction, snapshot_id, p_raw, p_cal, p_market, availability_status, should_trade
+        FROM opportunity_fact
+        WHERE decision_id = 'dec-1'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result["status"] == "written"
+    assert row["candidate_id"] == "evt-1"
+    assert row["direction"] == "buy_no"
+    assert row["snapshot_id"] is None
+    assert row["p_raw"] == pytest.approx(0.8)
+    assert row["p_cal"] == pytest.approx(0.75)
+    assert row["p_market"] == pytest.approx(0.7)
+    assert row["availability_status"] == "rate_limited"
+    assert row["should_trade"] == 0
+
+
+def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_opportunity_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-2",
+        discovery_mode="opening_hunt",
+    )
+    decision = types.SimpleNamespace(
+        decision_id="dec-2",
+        edge=None,
+        strategy_key="",
+        selected_method="ens_member_counting",
+        decision_snapshot_id="snap-1",
+        availability_status="DATA_UNAVAILABLE",
+    )
+
+    result = log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        should_trade=False,
+        rejection_stage="SIGNAL_QUALITY",
+        rejection_reasons=["obs down"],
+        recorded_at="2026-04-03T00:00:00Z",
+    )
+    rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'opportunity_fact'").fetchone()
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "opportunity_fact"}
+    assert rows["n"] == 0
 
 
 def test_ensemble_snapshots_unique_constraint():

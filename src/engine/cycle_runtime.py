@@ -592,6 +592,26 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if market_candidate_ctor is None:
         from src.engine.evaluator import MarketCandidate as market_candidate_ctor
 
+    def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
+        try:
+            from src.state.db import log_opportunity_fact
+
+            log_opportunity_fact(
+                conn,
+                candidate=candidate,
+                decision=decision,
+                should_trade=should_trade,
+                rejection_stage=rejection_stage,
+                rejection_reasons=rejection_reasons,
+                recorded_at=decision_time.isoformat(),
+            )
+        except Exception as exc:
+            deps.logger.warning(
+                "Opportunity fact write failed for %s: %s",
+                getattr(decision, "decision_id", ""),
+                exc,
+            )
+
     params = deps.MODE_PARAMS[mode]
     markets = deps.find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
     if "max_hours_since_open" in params:
@@ -694,6 +714,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 if d.should_trade and d.edge and d.tokens:
                     if not strategy_key:
                         summary["no_trades"] += 1
+                        rejection_stage = "SIGNAL_QUALITY"
+                        rejection_reasons = ["invalid_or_missing_strategy_key"]
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
                         artifact.add_no_trade(
                             deps.NoTradeCase(
                                 decision_id=d.decision_id,
@@ -701,12 +730,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 target_date=candidate.target_date,
                                 range_label=d.edge.bin.label if d.edge else "",
                                 direction=d.edge.direction if d.edge else "",
-                                rejection_stage="SIGNAL_QUALITY",
+                                rejection_stage=rejection_stage,
                                 strategy="",
                                 strategy_key="",
                                 edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
                                 availability_status=getattr(d, "availability_status", ""),
-                                rejection_reasons=["invalid_or_missing_strategy_key"],
+                                rejection_reasons=rejection_reasons,
                                 best_edge=d.edge.edge if d.edge else 0.0,
                                 model_prob=d.edge.p_posterior if d.edge else 0.0,
                                 market_price=d.edge.entry_price if d.edge else 0.0,
@@ -731,6 +760,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
                         summary["no_trades"] += 1
                         summary["strategy_gate_rejections"] = summary.get("strategy_gate_rejections", 0) + 1
+                        rejection_stage = "RISK_REJECTED"
+                        rejection_reasons = [f"strategy_gate_disabled:{strategy_name}"]
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
                         artifact.add_no_trade(
                             deps.NoTradeCase(
                                 decision_id=d.decision_id,
@@ -738,12 +776,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 target_date=candidate.target_date,
                                 range_label=d.edge.bin.label if d.edge else "",
                                 direction=d.edge.direction if d.edge else "",
-                                rejection_stage="RISK_REJECTED",
+                                rejection_stage=rejection_stage,
                                 strategy=strategy_name,
                                 strategy_key=strategy_name,
                                 edge_source=edge_source,
                                 availability_status=getattr(d, "availability_status", ""),
-                                rejection_reasons=[f"strategy_gate_disabled:{strategy_name}"],
+                                rejection_reasons=rejection_reasons,
                                 best_edge=d.edge.edge if d.edge else 0.0,
                                 model_prob=d.edge.p_posterior if d.edge else 0.0,
                                 market_price=d.edge.entry_price if d.edge else 0.0,
@@ -763,6 +801,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
+                    _record_opportunity_fact(
+                        candidate,
+                        d,
+                        should_trade=True,
+                        rejection_stage="",
+                        rejection_reasons=[],
+                    )
                     intent = deps.create_execution_intent(
                         edge_context=d.edge_context,
                         edge=d.edge,
@@ -854,6 +899,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         if not strategy_name:
                             rejection_stage = "SIGNAL_QUALITY"
                             rejection_reasons = [*rejection_reasons, "invalid_or_missing_strategy_key"]
+                    _record_opportunity_fact(
+                        candidate,
+                        d,
+                        should_trade=False,
+                        rejection_stage=rejection_stage,
+                        rejection_reasons=rejection_reasons,
+                    )
                     summary["no_trades"] += 1
                     artifact.add_no_trade(
                         deps.NoTradeCase(

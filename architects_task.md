@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3 family closeout pass`
+- Last updated by: `Codex P4.1 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,52 +18,66 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `P3 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
+- State: `P4.1 ACCEPTED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. The P3 family is complete under current repo truth.
+No live packet. P4.1 is accepted and pushed under current repo truth, but the post-close third-party review gate must still pass before P4.2 can freeze.
 
 ## Allowed files
 
-- future packet surfaces only after a new freeze
+- post-close review evidence surfaces for accepted P4.1
+- `architects_progress.md`
+- `architects_task.md`
+- `architects_state_index.md`
+- the next frozen packet surfaces only after the post-close gate passes
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- all repo implementation/runtime/schema surfaces until the post-close gate passes and the next packet is frozen
 - `AGENTS.md`
-- `src/**`
-- `tests/**`
-- `migrations/**`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
+- `migrations/**`
+- `src/control/**`
+- `src/execution/**`
+- `src/observability/**`
+- `src/riskguard/**`
+- `src/supervisor_api/**`
+- `tests/test_architecture_contracts.py`
+- `tests/test_pnl_flow_and_audit.py`
+- `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no next-phase work without a new frozen packet
+- no `P4.2-AVAILABILITY-FACTS` freeze before the post-close gate passes
+- no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside the completed P3 family boundary
+- no blocker on the accepted P4.1 boundary itself
+- the user-required post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P3.5 landed with green precedence evidence
-- [x] P3.5 acceptance is recorded honestly
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
-- [x] P3 family closeout is recorded honestly
+- [x] P4.1 packet is frozen
+- [x] P4.1 runtime/state seam implemented
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P4.1 accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Stop at the completed P3 family boundary.
-2. If continuing later, freeze the next non-P3 packet before any implementation.
+1. Run the post-close third-party critic + verifier on the accepted P4.1 boundary.
+2. Freeze `P4.2-AVAILABILITY-FACTS` only after that gate passes.

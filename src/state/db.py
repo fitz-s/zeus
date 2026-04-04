@@ -5,6 +5,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 """
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # Shared world data + env-tagged decisions
 RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
+logger = logging.getLogger(__name__)
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -724,6 +726,191 @@ def _coerce_snapshot_fk(value) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_opportunity_availability_status(value: str) -> str:
+    status = str(value or "").strip().upper()
+    if not status:
+        return "ok"
+    mapping = {
+        "OK": "ok",
+        "MISSING": "missing",
+        "DATA_MISSING": "missing",
+        "DATA_STALE": "stale",
+        "STALE": "stale",
+        "RATE_LIMITED": "rate_limited",
+        "UNAVAILABLE": "unavailable",
+        "DATA_UNAVAILABLE": "unavailable",
+        "CHAIN_UNAVAILABLE": "chain_unavailable",
+    }
+    return mapping.get(status, "unavailable")
+
+
+def _candidate_city_name(candidate) -> str:
+    city = getattr(candidate, "city", "")
+    return str(getattr(city, "name", city) or "")
+
+
+def _opportunity_fact_candidate_id(candidate) -> str:
+    event_id = str(getattr(candidate, "event_id", "") or "").strip()
+    if event_id:
+        return event_id
+    slug = str(getattr(candidate, "slug", "") or "").strip()
+    if slug:
+        return slug
+    city_name = _candidate_city_name(candidate)
+    target_date = str(getattr(candidate, "target_date", "") or "").strip()
+    if city_name and target_date:
+        return f"{city_name}:{target_date}"
+    return ""
+
+
+def _decision_vector_value(decision, attr_name: str) -> float | None:
+    edge = getattr(decision, "edge", None)
+    vector = getattr(decision, attr_name, None)
+    if edge is None or vector is None:
+        return None
+    try:
+        values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
+    except TypeError:
+        return None
+    label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
+    bin_labels = []
+    try:
+        bin_labels = list(getattr(decision, "bin_labels", []) or [])
+    except TypeError:
+        bin_labels = []
+    if not label or not bin_labels:
+        return None
+    try:
+        idx = bin_labels.index(label)
+    except ValueError:
+        return None
+    if idx >= len(values):
+        return None
+    try:
+        probability = float(values[idx])
+    except (TypeError, ValueError):
+        return None
+    if getattr(edge, "direction", "") == "buy_no":
+        probability = 1.0 - probability
+    return probability
+
+
+def log_opportunity_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate,
+    decision,
+    should_trade: bool,
+    rejection_stage: str,
+    rejection_reasons: list[str] | None,
+    recorded_at: str,
+) -> dict:
+    if conn is None:
+        logger.info("Opportunity fact write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "opportunity_fact"}
+    if not _table_exists(conn, "opportunity_fact"):
+        logger.info("Opportunity fact table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "opportunity_fact"}
+
+    edge = getattr(decision, "edge", None)
+    direction = str(getattr(edge, "direction", "") or "unknown")
+    if direction not in {"buy_yes", "buy_no", "unknown"}:
+        direction = "unknown"
+    range_label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
+    strategy_key = str(getattr(decision, "strategy_key", "") or "").strip() or None
+    snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip() or None
+    p_raw = _decision_vector_value(decision, "p_raw")
+    p_cal = _decision_vector_value(decision, "p_cal")
+    p_market = _decision_vector_value(decision, "p_market")
+    if p_cal is None and edge is not None:
+        try:
+            p_cal = float(getattr(edge, "p_model", None))
+        except (TypeError, ValueError):
+            p_cal = None
+    if p_market is None and edge is not None:
+        try:
+            p_market = float(getattr(edge, "p_market", None))
+        except (TypeError, ValueError):
+            p_market = None
+    best_edge = None
+    ci_width = None
+    alpha = getattr(decision, "alpha", None)
+    if edge is not None:
+        try:
+            best_edge = float(getattr(edge, "edge", None))
+        except (TypeError, ValueError):
+            best_edge = None
+        try:
+            ci_width = max(0.0, float(edge.ci_upper) - float(edge.ci_lower))
+        except (TypeError, ValueError, AttributeError):
+            ci_width = None
+    try:
+        alpha = float(alpha) if alpha not in (None, "") else None
+    except (TypeError, ValueError):
+        alpha = None
+    rejection_reason_json = None
+    if rejection_reasons:
+        rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO opportunity_fact (
+            decision_id,
+            candidate_id,
+            city,
+            target_date,
+            range_label,
+            direction,
+            strategy_key,
+            discovery_mode,
+            entry_method,
+            snapshot_id,
+            p_raw,
+            p_cal,
+            p_market,
+            alpha,
+            best_edge,
+            ci_width,
+            rejection_stage,
+            rejection_reason_json,
+            availability_status,
+            should_trade,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(getattr(decision, "decision_id", "") or ""),
+            _opportunity_fact_candidate_id(candidate) or None,
+            _candidate_city_name(candidate) or None,
+            str(getattr(candidate, "target_date", "") or "") or None,
+            range_label or None,
+            direction,
+            strategy_key,
+            str(getattr(candidate, "discovery_mode", "") or "") or None,
+            str(
+                getattr(decision, "selected_method", "")
+                or getattr(decision, "entry_method", "")
+                or ""
+            )
+            or None,
+            snapshot_id,
+            p_raw,
+            p_cal,
+            p_market,
+            alpha,
+            best_edge,
+            ci_width,
+            str(rejection_stage or "") or None,
+            rejection_reason_json,
+            _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
+            int(bool(should_trade)),
+            recorded_at,
+        ),
+    )
+    return {"status": "written", "table": "opportunity_fact"}
 
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""

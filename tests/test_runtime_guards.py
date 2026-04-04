@@ -321,6 +321,46 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS opportunity_fact (
+            decision_id TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            discovery_mode TEXT,
+            entry_method TEXT,
+            snapshot_id TEXT,
+            p_raw REAL,
+            p_cal REAL,
+            p_market REAL,
+            alpha REAL,
+            best_edge REAL,
+            ci_width REAL,
+            rejection_stage TEXT,
+            rejection_reason_json TEXT,
+            availability_status TEXT CHECK (availability_status IN (
+                'ok',
+                'missing',
+                'stale',
+                'rate_limited',
+                'unavailable',
+                'chain_unavailable'
+            )),
+            should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
     conn.close()
 
     portfolio = PortfolioState()
@@ -374,6 +414,13 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     conn = get_connection(db_path)
     artifact = conn.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
     shadow = conn.execute("SELECT p_raw_json, p_cal_json, edges_json FROM shadow_signals ORDER BY id DESC LIMIT 1").fetchone()
+    opportunity_rows = conn.execute(
+        """
+        SELECT decision_id, range_label, direction, strategy_key, snapshot_id, availability_status, should_trade, rejection_stage
+        FROM opportunity_fact
+        ORDER BY decision_id
+        """
+    ).fetchall()
     conn.close()
     payload = json.loads(artifact["artifact_json"])
     trade_case = payload["trade_cases"][0]
@@ -396,6 +443,19 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert json.loads(shadow["p_raw_json"]) == []
     assert json.loads(shadow["p_cal_json"]) == []
     assert len(json.loads(shadow["edges_json"])) == 2
+    assert [row["decision_id"] for row in opportunity_rows] == ["d1", "d2"]
+    assert opportunity_rows[0]["should_trade"] == 1
+    assert opportunity_rows[0]["range_label"] == "39-40°F"
+    assert opportunity_rows[0]["direction"] == "buy_yes"
+    assert opportunity_rows[0]["strategy_key"] == "center_buy"
+    assert opportunity_rows[0]["snapshot_id"] == "snap-1"
+    assert opportunity_rows[0]["availability_status"] == "ok"
+    assert opportunity_rows[1]["should_trade"] == 0
+    assert opportunity_rows[1]["range_label"] is None
+    assert opportunity_rows[1]["direction"] == "unknown"
+    assert opportunity_rows[1]["strategy_key"] is None
+    assert opportunity_rows[1]["snapshot_id"] == "snap-1"
+    assert opportunity_rows[1]["rejection_stage"] == "EDGE_INSUFFICIENT"
 
 
 def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):

@@ -30,13 +30,14 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 family complete`
-- Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Mainline stage: `P4 in progress`
+- Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
 - Current active packet: `none`
-- Current packet status: `P3 family closeout recorded / awaiting next phase freeze`
+- Current packet status: `P4.1 accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the completed P3 family boundary
+  - no blocker on the accepted P4.1 boundary itself
+  - the post-close third-party critic/verifier gate is still pending before P4.2 can freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1552,5 +1553,52 @@ Archive policy:
   - non-bootstrapped runtime DBs still surface explicit advisory skip behavior where canonical durable tables are absent
 - Next required action:
   - stop at the P3 family boundary until a new non-P3 packet is frozen
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:59 America/Chicago] P4.1-OPPORTUNITY-FACTS frozen
+- Author: `Architects mainline lead`
+- Packet: `P4.1-OPPORTUNITY-FACTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - P3 family closeout is already recorded and no live packet remained open
+  - `docs/architecture/zeus_durable_architecture_spec.md` names opportunity facts as the first P4 sequence item
+  - canonical schema already contains the learning fact tables, so P4 begins as a writer-install phase rather than schema-add work
+- Decisions frozen:
+  - keep this packet on `opportunity_fact` writes only
+  - use the `cycle_runtime -> src/state/db.py` seam rather than direct evaluator durable writes
+  - require explicit capability-present and capability-absent proof
+  - keep team closed by default
+- Open uncertainties:
+  - exact helper return shape for the table-missing advisory path still needs implementation choice inside the frozen boundary
+- Next required action:
+  - implement `P4.1-OPPORTUNITY-FACTS` and run targeted runtime/db tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 20:05 America/Chicago] P4.1-OPPORTUNITY-FACTS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P4.1-OPPORTUNITY-FACTS`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - first durable P4 learning-fact writer seam is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_db.py` -> `93 passed`
+  - independent pre-close critic review artifact: `.omx/artifacts/gemini-p4-1-preclose-critic-20260404T003337Z.md` -> `APPROVE`
+  - independent pre-close verifier artifact: `.omx/artifacts/gemini-p4-1-preclose-verifier-20260404T003337Z.md` -> `PASS`
+- Decisions frozen:
+  - `cycle_runtime` now records durable `opportunity_fact` rows for trade-eligible and no-trade evaluated attempts when the table exists
+  - missing `opportunity_fact` capability now yields an explicit `skipped_missing_table` advisory result instead of silent durable-write implication
+  - no `availability_fact`, `execution_fact`, `outcome_fact`, analytics-query, or schema work is claimed in this packet
+- Open uncertainties:
+  - the accepted P4.1 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.2-AVAILABILITY-FACTS` may freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted P4.1
 - Owner:
   - Architects mainline lead
