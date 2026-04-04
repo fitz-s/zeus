@@ -1077,6 +1077,105 @@ def log_execution_fact(
     )
     return {"status": "written", "table": "execution_fact"}
 
+
+def _hours_between(started_at: str | None, ended_at: str | None) -> float | None:
+    start_dt = _parse_iso_timestamp(started_at)
+    end_dt = _parse_iso_timestamp(ended_at)
+    if start_dt is None or end_dt is None:
+        return None
+    return max(0.0, (end_dt - start_dt).total_seconds() / 3600.0)
+
+
+def log_outcome_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    strategy_key: str | None = None,
+    entered_at: str | None = None,
+    exited_at: str | None = None,
+    settled_at: str | None = None,
+    exit_reason: str | None = None,
+    admin_exit_reason: str | None = None,
+    decision_snapshot_id: str | None = None,
+    pnl: float | None = None,
+    outcome: int | None = None,
+    hold_duration_hours: float | None = None,
+    monitor_count: int | None = None,
+    chain_corrections_count: int | None = None,
+) -> dict:
+    if conn is None:
+        logger.info("Outcome fact write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "outcome_fact"}
+    if not _table_exists(conn, "outcome_fact"):
+        logger.info("Outcome fact table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "outcome_fact"}
+
+    current = conn.execute(
+        """
+        SELECT entered_at, exited_at, settled_at, exit_reason, admin_exit_reason, decision_snapshot_id,
+               pnl, outcome, hold_duration_hours, monitor_count, chain_corrections_count, strategy_key
+        FROM outcome_fact
+        WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+
+    stored_entered_at = entered_at if entered_at not in (None, "") else (current["entered_at"] if current else None)
+    stored_exited_at = exited_at if exited_at not in (None, "") else (current["exited_at"] if current else None)
+    stored_settled_at = settled_at if settled_at not in (None, "") else (current["settled_at"] if current else None)
+    stored_exit_reason = exit_reason if exit_reason not in (None, "") else (current["exit_reason"] if current else None)
+    stored_admin_exit_reason = admin_exit_reason if admin_exit_reason not in (None, "") else (current["admin_exit_reason"] if current else None)
+    stored_snapshot = decision_snapshot_id if decision_snapshot_id not in (None, "") else (current["decision_snapshot_id"] if current else None)
+    stored_pnl = pnl if pnl is not None else (current["pnl"] if current else None)
+    stored_outcome = outcome if outcome is not None else (current["outcome"] if current else None)
+    stored_monitor_count = monitor_count if monitor_count is not None else (current["monitor_count"] if current else 0)
+    stored_chain_corrections = chain_corrections_count if chain_corrections_count is not None else (current["chain_corrections_count"] if current else 0)
+    stored_strategy_key = strategy_key if strategy_key not in (None, "") else (current["strategy_key"] if current else None)
+
+    if hold_duration_hours is None:
+        hold_duration_hours = _hours_between(
+            stored_entered_at,
+            stored_exited_at or stored_settled_at,
+        )
+    stored_hold_hours = hold_duration_hours if hold_duration_hours is not None else (current["hold_duration_hours"] if current else None)
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO outcome_fact (
+            position_id,
+            strategy_key,
+            entered_at,
+            exited_at,
+            settled_at,
+            exit_reason,
+            admin_exit_reason,
+            decision_snapshot_id,
+            pnl,
+            outcome,
+            hold_duration_hours,
+            monitor_count,
+            chain_corrections_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            position_id,
+            stored_strategy_key,
+            stored_entered_at,
+            stored_exited_at,
+            stored_settled_at,
+            stored_exit_reason,
+            stored_admin_exit_reason,
+            stored_snapshot,
+            stored_pnl,
+            stored_outcome,
+            stored_hold_hours,
+            stored_monitor_count,
+            stored_chain_corrections,
+        ),
+    )
+    return {"status": "written", "table": "outcome_fact"}
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
@@ -1258,12 +1357,37 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
     )
 
 
-def log_settlement_event(conn: sqlite3.Connection, pos, *, winning_bin: str, won: bool, outcome: int) -> None:
+def log_settlement_event(
+    conn: sqlite3.Connection,
+    pos,
+    *,
+    winning_bin: str,
+    won: bool,
+    outcome: int,
+    exited_at_override: str | None = None,
+) -> None:
     """Append a durable settlement event for learning/risk consumers."""
     if not _legacy_runtime_position_event_schema_available(conn):
         if _canonical_position_surface_available(conn):
             return
         _assert_legacy_runtime_position_event_schema(conn)
+    settled_at = getattr(pos, "last_exit_at", None)
+    entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
+    log_outcome_fact(
+        conn,
+        position_id=getattr(pos, "trade_id", ""),
+        strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
+        entered_at=entered_at,
+        exited_at=exited_at_override,
+        settled_at=settled_at,
+        exit_reason=getattr(pos, "exit_reason", None),
+        admin_exit_reason=getattr(pos, "admin_exit_reason", None),
+        decision_snapshot_id=getattr(pos, "decision_snapshot_id", None),
+        pnl=getattr(pos, "pnl", None),
+        outcome=outcome,
+        monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
+        chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
+    )
     log_position_event(
         conn,
         "POSITION_SETTLED",
@@ -1274,7 +1398,7 @@ def log_settlement_event(conn: sqlite3.Connection, pos, *, winning_bin: str, won
             won=won,
             outcome=outcome,
         ),
-        timestamp=getattr(pos, "last_exit_at", None),
+        timestamp=settled_at,
         source="settlement",
     )
 

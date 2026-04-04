@@ -103,6 +103,34 @@ def _create_execution_fact_table(conn):
     conn.commit()
 
 
+def _create_outcome_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outcome_fact (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            entered_at TEXT,
+            exited_at TEXT,
+            settled_at TEXT,
+            exit_reason TEXT,
+            admin_exit_reason TEXT,
+            decision_snapshot_id TEXT,
+            pnl REAL,
+            outcome INTEGER CHECK (outcome IN (0, 1)),
+            hold_duration_hours REAL,
+            monitor_count INTEGER,
+            chain_corrections_count INTEGER
+        )
+        """
+    )
+    conn.commit()
+
+
 def test_init_schema_creates_all_tables():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -279,6 +307,24 @@ def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
     conn.close()
 
     assert result == {"status": "skipped_missing_table", "table": "execution_fact"}
+    assert rows["n"] == 0
+
+
+def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_outcome_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    result = log_outcome_fact(
+        conn,
+        position_id="pos-1",
+        outcome=1,
+    )
+    rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'outcome_fact'").fetchone()
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "outcome_fact"}
     assert rows["n"] == 0
 
 
@@ -762,6 +808,7 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _create_outcome_fact_table(conn)
 
     pos = Position(
         trade_id="rt-settle",
@@ -790,6 +837,14 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     conn.commit()
 
     events = query_position_events(conn, "rt-settle")
+    outcome_row = conn.execute(
+        """
+        SELECT strategy_key, entered_at, exited_at, settled_at, exit_reason, decision_snapshot_id,
+               pnl, outcome, hold_duration_hours, monitor_count, chain_corrections_count
+        FROM outcome_fact
+        WHERE position_id = 'rt-settle'
+        """
+    ).fetchone()
     conn.close()
 
     assert len(events) == 1
@@ -802,6 +857,73 @@ def test_log_settlement_event_emits_durable_record(tmp_path):
     assert events[0]["details"]["exit_price"] == pytest.approx(1.0)
     assert events[0]["details"]["pnl"] == pytest.approx(15.0)
     assert events[0]["details"]["exit_reason"] == "SETTLEMENT"
+    assert outcome_row["strategy_key"] == "center_buy"
+    assert outcome_row["entered_at"] is None
+    assert outcome_row["exited_at"] is None
+    assert outcome_row["settled_at"] == "2026-04-01T23:00:00Z"
+    assert outcome_row["exit_reason"] == "SETTLEMENT"
+    assert outcome_row["decision_snapshot_id"] == "snap1"
+    assert outcome_row["pnl"] == pytest.approx(15.0)
+    assert outcome_row["outcome"] == 1
+    assert outcome_row["hold_duration_hours"] is None
+    assert outcome_row["monitor_count"] == 0
+    assert outcome_row["chain_corrections_count"] == 0
+
+
+def test_log_settlement_event_preserves_prior_exit_time_in_outcome_fact(tmp_path):
+    from src.state.db import log_settlement_event
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_outcome_fact_table(conn)
+
+    pos = Position(
+        trade_id="rt-settle-prior-exit",
+        market_id="m5",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        edge_source="center_buy",
+        decision_snapshot_id="snap1",
+        entered_at="2026-04-01T00:00:00Z",
+        exit_price=0.70,
+        pnl=7.5,
+        exit_reason="EDGE_REVERSAL",
+        last_exit_at="2026-04-01T18:00:00Z",
+        state="economically_closed",
+    )
+
+    log_settlement_event(
+        conn,
+        pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        exited_at_override="2026-04-01T18:00:00Z",
+    )
+    row = conn.execute(
+        """
+        SELECT entered_at, exited_at, settled_at, hold_duration_hours
+        FROM outcome_fact
+        WHERE position_id = 'rt-settle-prior-exit'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row["entered_at"] == "2026-04-01T00:00:00Z"
+    assert row["exited_at"] == "2026-04-01T18:00:00Z"
+    assert row["settled_at"] == "2026-04-01T18:00:00Z"
+    assert row["hold_duration_hours"] == pytest.approx(18.0)
 
 
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):

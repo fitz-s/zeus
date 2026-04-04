@@ -67,7 +67,8 @@ Install the first durable `outcome_fact` writer path for economically completed 
 
 ## Current blocker state
 
-- no active blocker at freeze time
+- no blocker on the accepted P4.4 boundary itself
+- the user-required post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -80,12 +81,12 @@ Install the first durable `outcome_fact` writer path for economically completed 
 - [x] post-close third-party critic review passed
 - [x] post-close third-party verifier review passed
 - [x] P4.4 packet is frozen
-- [ ] P4.4 runtime/state seam implemented
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P4.4 accepted and pushed
+- [x] P4.4 runtime/state seam implemented
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P4.4 accepted and pushed
 
 ## Next required action
 
-1. Implement `P4.4-OUTCOME-FACTS` within the frozen file boundary.
-2. Run targeted tests plus pre-close critic/verifier before acceptance.
+1. Run the post-close third-party critic + verifier on accepted P4.4.
+2. Freeze `P4.5-ANALYTICS-SMOKE-QUERIES` only after that gate passes.

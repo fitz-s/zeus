@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.4 freeze pass`
+- Last updated by: `Codex P4.4 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,11 @@ Archive policy:
 - Mainline stage: `P4 in progress`
 - Last accepted packet: `P4.3-EXECUTION-FACTS`
 - Current active packet: `none`
-- Current packet status: `P4.4 frozen / ready for execution`
+- Current packet status: `P4.4 accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker at P4.4 freeze time
+  - no blocker on the accepted P4.4 boundary itself
+  - the post-close third-party critic/verifier gate is still pending before P4.5 can freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1943,5 +1944,30 @@ Archive policy:
   - exact source seam for monitoring counts and chain correction counts still needs implementation review inside the frozen boundary
 - Next required action:
   - implement `P4.4-OUTCOME-FACTS` and run targeted runtime/db tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:35 America/Chicago] P4.4-OUTCOME-FACTS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P4.4-OUTCOME-FACTS`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - the first durable P4 outcome-fact writer seam is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_db.py` -> `37 passed`
+  - targeted outcome subset -> `3 passed`
+  - critic subagent -> `APPROVE`
+  - verifier subagent -> `PASS`
+- Decisions frozen:
+  - settlement/completion path now writes durable `outcome_fact` rows with explicit missing-table behavior
+  - no analytics-query or schema work is claimed in this packet
+- Open uncertainties:
+  - the accepted P4.4 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.5-ANALYTICS-SMOKE-QUERIES` may freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted P4.4
 - Owner:
   - Architects mainline lead

@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.4 freeze pass`
+- Last updated by: `Codex P4.4 acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P4 in progress`
 - Active packet: `none`
-- Active packet state: `P4.4 frozen / ready for execution`
+- Active packet state: `P4.4 accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P4.3-EXECUTION-FACTS`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Execute `P4.4-OUTCOME-FACTS` within its frozen file boundary.
-2. Preserve the pre-close and post-close critic/verifier gates before any next freeze.
+1. Run the post-close third-party critic and verifier gate on accepted P4.4.
+2. Only freeze `P4.5-ANALYTICS-SMOKE-QUERIES` after the post-close gate passes.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

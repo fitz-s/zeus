@@ -608,6 +608,7 @@ def _settle_positions(
         # Rainstorm comparison found the old formula underestimated winning P&L
         won = pos.bin_label == winning_label
         shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0
+        exited_at_before_settlement = getattr(pos, "last_exit_at", "")
         if pos.direction == "buy_yes":
             exit_price = 1.0 if won else 0.0
         else:
@@ -673,6 +674,7 @@ def _settle_positions(
             winning_bin=winning_label,
             won=won,
             outcome=outcome,
+            exited_at_override=exited_at_before_settlement or None,
         )
         _dual_write_canonical_settlement_if_available(
             conn,
