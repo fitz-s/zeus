@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3E freeze pass`
+- Last updated by: `Codex P5.3E acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -69,7 +69,8 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 
 ## Current blocker state
 
-- no active blocker inside the frozen P5.3E boundary
+- no blocker on the accepted P5.3E boundary itself
+- the post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -123,13 +124,13 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 - [x] post-close third-party critic review passed
 - [x] post-close third-party verifier review passed
 - [x] P5.3E packet frozen
-- [ ] touched entry hotspot family routed through lifecycle kernel
-- [ ] targeted entry-hotspot tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P5.3E accepted and pushed
+- [x] touched entry hotspot family routed through lifecycle kernel
+- [x] targeted entry-hotspot tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P5.3E accepted and pushed
 
 ## Next required action
 
-1. Implement `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` within the frozen file boundary.
-2. Run targeted tests plus pre-close critic/verifier before acceptance.
+1. Run the post-close third-party critic + verifier on accepted `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`.
+2. Freeze the next P5 packet only after that gate passes.

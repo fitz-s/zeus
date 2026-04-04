@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
 
+from src.state.lifecycle_manager import (
+    enter_filled_entry_runtime_state,
+    enter_voided_entry_runtime_state,
+)
 from src.state.portfolio import PortfolioState, Position, void_position
 
 logger = logging.getLogger(__name__)
@@ -200,7 +204,11 @@ def _mark_entry_filled(
             pos.fill_quality = (float(fill_price) - float(submitted_price)) / float(submitted_price)
         except (TypeError, ValueError, ZeroDivisionError):
             pass
-    pos.state = "entered"
+    pos.state = enter_filled_entry_runtime_state(
+        pos.state,
+        exit_state=getattr(pos, "exit_state", ""),
+        chain_state=getattr(pos, "chain_state", ""),
+    )
     pos.order_status = "filled"
     pos.chain_state = "local_only"
     pos.entered_at = now.isoformat()
@@ -228,7 +236,11 @@ def _mark_entry_voided(
     voided = void_position(portfolio, pos.trade_id, reason)
     target = voided or pos
     if voided is None:
-        target.state = "voided"
+        target.state = enter_voided_entry_runtime_state(
+            target.state,
+            exit_state=getattr(target, "exit_state", ""),
+            chain_state=getattr(target, "chain_state", ""),
+        )
         target.exit_reason = reason
         target.admin_exit_reason = reason
     _maybe_update_trade_lifecycle(target, deps=deps)

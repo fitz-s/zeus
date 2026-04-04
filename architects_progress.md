@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3E freeze pass`
+- Last updated by: `Codex P5.3E acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
+- Last accepted packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
 - Current active packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.3E boundary
+  - no blocker on the accepted P5.3E boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -385,6 +386,31 @@ Archive policy:
   - exact helper shape for the touched entry creation/fill/void transitions still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` and run targeted runtime tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:38 America/Chicago] P5.3E-ENTRY-LIFECYCLE-HOTSPOTS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py::test_lifecycle_kernel_maps_entry_runtime_states_for_order_status tests/test_runtime_guards.py::test_lifecycle_kernel_allows_touched_entry_runtime_transitions tests/test_runtime_guards.py::test_lifecycle_kernel_rejects_entry_fill_from_non_pending_phase tests/test_runtime_guards.py::test_check_pending_entries_ignores_non_pending_states tests/test_runtime_guards.py::test_reconcile_pending_positions_delegates_to_fill_tracker tests/test_runtime_guards.py::test_execution_stub_does_not_reinvent_strategy_without_strategy_key tests/test_runtime_guards.py::test_materialize_position_carries_semantic_snapshot_jsons` -> `7 passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py` -> `72 passed`
+  - lsp diagnostics on `src/state/lifecycle_manager.py`, `src/engine/cycle_runtime.py`, `src/execution/fill_tracker.py`, and `tests/test_runtime_guards.py` -> `0 errors`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - the touched entry creation/fill/void seam now routes lifecycle-bearing state through lifecycle-kernel helpers instead of ad hoc local mutation
+  - unfilled/non-filled entry results continue to map to `pending_tracked` on the touched cycle-runtime path
+  - no execution redesign, schema change, or control/observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze or closeout claim
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
 - Owner:
   - Architects mainline lead
 

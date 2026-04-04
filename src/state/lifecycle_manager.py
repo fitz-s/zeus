@@ -296,6 +296,51 @@ def enter_voided_runtime_state(
     return LifecyclePhase.VOIDED.value
 
 
+def initial_entry_runtime_state_for_order_status(status: object) -> str:
+    normalized = _normalized_state(status).lower()
+    if normalized == "filled":
+        return "entered"
+    return "pending_tracked"
+
+
+def enter_filled_entry_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.PENDING_ENTRY:
+        raise ValueError(
+            f"entry fill requires pending_entry runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.ACTIVE)
+    return "entered"
+
+
+def enter_voided_entry_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.PENDING_ENTRY:
+        raise ValueError(
+            f"entry void requires pending_entry runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.VOIDED)
+    return LifecyclePhase.VOIDED.value
+
+
 def release_pending_exit_runtime_state(
     previous_state: object,
     *,

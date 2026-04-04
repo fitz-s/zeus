@@ -13,7 +13,10 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.engine.time_context import lead_hours_to_target
-from src.state.lifecycle_manager import enter_day0_window_runtime_state
+from src.state.lifecycle_manager import (
+    enter_day0_window_runtime_state,
+    initial_entry_runtime_state_for_order_status,
+)
 
 
 CANONICAL_STRATEGY_KEYS = {
@@ -951,7 +954,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             portfolio,
                             city,
                             mode,
-                            state="entered" if result.status == "filled" else "pending_tracked",
+                            state=initial_entry_runtime_state_for_order_status(result.status),
                             bankroll_at_entry=entry_bankroll,
                             deps=deps,
                         )

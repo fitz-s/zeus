@@ -3216,6 +3216,48 @@ def test_compute_settlement_close_routes_economically_closed_through_kernel():
     assert pos.state == "settled"
 
 
+def test_lifecycle_kernel_maps_entry_runtime_states_for_order_status():
+    from src.state.lifecycle_manager import initial_entry_runtime_state_for_order_status
+
+    assert initial_entry_runtime_state_for_order_status("filled") == "entered"
+    assert initial_entry_runtime_state_for_order_status("pending") == "pending_tracked"
+    assert initial_entry_runtime_state_for_order_status("rejected") == "pending_tracked"
+
+
+def test_lifecycle_kernel_allows_touched_entry_runtime_transitions():
+    from src.state.lifecycle_manager import (
+        enter_filled_entry_runtime_state,
+        enter_voided_entry_runtime_state,
+    )
+
+    assert enter_filled_entry_runtime_state("pending_tracked") == "entered"
+    assert enter_voided_entry_runtime_state("pending_tracked") == "voided"
+
+
+def test_lifecycle_kernel_rejects_entry_fill_from_non_pending_phase():
+    from src.state.lifecycle_manager import enter_filled_entry_runtime_state
+
+    with pytest.raises(ValueError, match="entry fill requires pending_entry runtime phase"):
+        enter_filled_entry_runtime_state("entered")
+
+
+def test_check_pending_entries_ignores_non_pending_states():
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.portfolio import PortfolioState
+
+    pos = _position(state="entered", order_id="ord-1", entry_order_id="ord-1")
+    stats = check_pending_entries(PortfolioState(positions=[pos]), clob=None)
+
+    assert stats == {
+        "entered": 0,
+        "voided": 0,
+        "still_pending": 0,
+        "dirty": False,
+        "tracker_dirty": False,
+    }
+    assert pos.state == "entered"
+
+
 def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_release():
     pos = _position(state="day0_window")
     pos.day0_entered_at = "2026-04-04T00:00:00Z"
