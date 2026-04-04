@@ -36,10 +36,25 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.DAY0_WINDOW,
         }
     ),
-    LifecyclePhase.ACTIVE: frozenset({LifecyclePhase.ACTIVE}),
-    LifecyclePhase.DAY0_WINDOW: frozenset({LifecyclePhase.DAY0_WINDOW}),
+    LifecyclePhase.ACTIVE: frozenset(
+        {
+            LifecyclePhase.ACTIVE,
+            LifecyclePhase.SETTLED,
+        }
+    ),
+    LifecyclePhase.DAY0_WINDOW: frozenset(
+        {
+            LifecyclePhase.DAY0_WINDOW,
+            LifecyclePhase.SETTLED,
+        }
+    ),
     LifecyclePhase.PENDING_EXIT: frozenset({LifecyclePhase.PENDING_EXIT}),
-    LifecyclePhase.ECONOMICALLY_CLOSED: frozenset({LifecyclePhase.ECONOMICALLY_CLOSED}),
+    LifecyclePhase.ECONOMICALLY_CLOSED: frozenset(
+        {
+            LifecyclePhase.ECONOMICALLY_CLOSED,
+            LifecyclePhase.SETTLED,
+        }
+    ),
     LifecyclePhase.SETTLED: frozenset({LifecyclePhase.SETTLED}),
     LifecyclePhase.VOIDED: frozenset({LifecyclePhase.VOIDED}),
     LifecyclePhase.QUARANTINED: frozenset({LifecyclePhase.QUARANTINED}),

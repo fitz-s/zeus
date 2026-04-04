@@ -511,9 +511,12 @@ def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
         ("pending_entry", "active"),
         ("pending_entry", "day0_window"),
         ("active", "active"),
+        ("active", "settled"),
         ("day0_window", "day0_window"),
+        ("day0_window", "settled"),
         ("pending_exit", "pending_exit"),
         ("economically_closed", "economically_closed"),
+        ("economically_closed", "settled"),
         ("settled", "settled"),
         ("voided", "voided"),
         (None, "quarantined"),
@@ -652,6 +655,27 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
         "strategy_key": "center_buy",
     }
     conn.close()
+
+
+def test_settlement_builder_rejects_illegal_pending_exit_fold():
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+
+    settled_pos = _runtime_position(state="settled", chain_state="synced")
+    settled_pos.last_exit_at = "2026-04-03T01:00:00Z"
+    settled_pos.exit_price = 1.0
+    settled_pos.pnl = 10.0
+    settled_pos.exit_reason = "SETTLEMENT"
+
+    with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
+        build_settlement_canonical_write(
+            settled_pos,
+            winning_bin="39-40°F",
+            won=True,
+            outcome=1,
+            sequence_no=4,
+            phase_before="pending_exit",
+            source_module="src.execution.harvester",
+        )
 
 
 def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_that_append_cleanly():
