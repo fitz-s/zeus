@@ -328,6 +328,175 @@ def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
     assert rows["n"] == 0
 
 
+def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
+    from src.state.db import (
+        log_availability_fact,
+        log_execution_fact,
+        log_opportunity_fact,
+        log_outcome_fact,
+        query_p4_fact_smoke_summary,
+    )
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    _create_opportunity_fact_table(conn)
+    _create_availability_fact_table(conn)
+    _create_execution_fact_table(conn)
+    _create_outcome_fact_table(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-1",
+        discovery_mode="opening_hunt",
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_yes",
+        p_model=0.6,
+        p_market=0.4,
+        edge=0.2,
+        ci_lower=0.1,
+        ci_upper=0.3,
+    )
+    trade_decision = types.SimpleNamespace(
+        decision_id="dec-trade",
+        edge=edge,
+        strategy_key="center_buy",
+        selected_method="ens_member_counting",
+        decision_snapshot_id="snap-1",
+        availability_status="",
+        p_raw=[0.6],
+        p_cal=[0.6],
+        p_market=[0.4],
+        bin_labels=["39-40°F"],
+        alpha=0.5,
+    )
+    no_trade_decision = types.SimpleNamespace(
+        decision_id="dec-no-trade",
+        edge=None,
+        strategy_key="",
+        selected_method="ens_member_counting",
+        decision_snapshot_id="snap-2",
+        availability_status="RATE_LIMITED",
+        p_raw=[],
+        p_cal=[],
+        p_market=[],
+        bin_labels=[],
+        alpha=0.0,
+    )
+    no_edge_decision = types.SimpleNamespace(
+        decision_id="dec-no-edge",
+        edge=None,
+        strategy_key="",
+        selected_method="ens_member_counting",
+        decision_snapshot_id="snap-3",
+        availability_status="",
+        p_raw=[],
+        p_cal=[],
+        p_market=[],
+        bin_labels=[],
+        alpha=0.0,
+    )
+
+    log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=trade_decision,
+        should_trade=True,
+        rejection_stage="",
+        rejection_reasons=[],
+        recorded_at="2026-04-04T00:00:00Z",
+    )
+    log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=no_trade_decision,
+        should_trade=False,
+        rejection_stage="SIGNAL_QUALITY",
+        rejection_reasons=["rate limited"],
+        recorded_at="2026-04-04T00:00:00Z",
+    )
+    log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=no_edge_decision,
+        should_trade=False,
+        rejection_stage="EDGE_INSUFFICIENT",
+        rejection_reasons=["small edge"],
+        recorded_at="2026-04-04T00:00:00Z",
+    )
+    log_availability_fact(
+        conn,
+        availability_id="avail-1",
+        scope_type="candidate",
+        scope_key="dec-no-trade",
+        failure_type="rate_limited",
+        started_at="2026-04-04T00:00:00Z",
+        ended_at="2026-04-04T00:00:00Z",
+        impact="skip",
+        details={"availability_status": "RATE_LIMITED"},
+    )
+    log_execution_fact(
+        conn,
+        intent_id="exec-1",
+        position_id="pos-1",
+        decision_id="dec-trade",
+        order_role="entry",
+        submitted_price=0.4,
+        fill_price=0.42,
+        shares=25.0,
+        fill_quality=0.05,
+        terminal_exec_status="filled",
+    )
+    log_outcome_fact(
+        conn,
+        position_id="pos-1",
+        strategy_key="center_buy",
+        decision_snapshot_id="snap-1",
+        pnl=15.0,
+        outcome=1,
+    )
+
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert summary["missing_tables"] == []
+    assert summary["opportunity"]["total"] == 3
+    assert summary["opportunity"]["trade_eligible"] == 1
+    assert summary["opportunity"]["no_trade"] == 2
+    assert summary["availability"]["total"] == 1
+    assert summary["availability"]["failure_types"]["rate_limited"] == 1
+    assert summary["execution"]["total"] == 1
+    assert summary["execution"]["terminal_status_counts"]["filled"] == 1
+    assert summary["outcome"]["total"] == 1
+    assert summary["outcome"]["wins"] == 1
+    assert summary["separation"]["availability_failures"] == 1
+    assert summary["separation"]["opportunity_loss_without_availability"] == 1
+    assert summary["separation"]["execution_vs_outcome_gap"] == 0
+
+
+def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path):
+    from src.state.db import query_p4_fact_smoke_summary
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    summary = query_p4_fact_smoke_summary(conn)
+    conn.close()
+
+    assert summary["missing_tables"] == [
+        "opportunity_fact",
+        "availability_fact",
+        "execution_fact",
+        "outcome_fact",
+    ]
+    assert summary["opportunity"]["total"] == 0
+    assert summary["availability"]["total"] == 0
+    assert summary["execution"]["total"] == 0
+    assert summary["outcome"]["total"] == 0
+
+
 def test_ensemble_snapshots_unique_constraint():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)

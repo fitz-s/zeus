@@ -1770,6 +1770,94 @@ def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
     return str(rows[0].get("source") or "none")
 
 
+def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
+    missing_tables = [
+        table
+        for table in ("opportunity_fact", "availability_fact", "execution_fact", "outcome_fact")
+        if not _table_exists(conn, table)
+    ]
+    summary = {
+        "missing_tables": missing_tables,
+        "opportunity": {"total": 0, "trade_eligible": 0, "no_trade": 0, "availability_tagged": 0},
+        "availability": {"total": 0, "failure_types": {}},
+        "execution": {"total": 0, "terminal_status_counts": {}, "avg_fill_quality": None},
+        "outcome": {"total": 0, "wins": 0, "pnl_total": 0.0},
+        "separation": {
+            "opportunity_loss_without_availability": 0,
+            "availability_failures": 0,
+            "execution_vs_outcome_gap": 0,
+        },
+    }
+
+    if "opportunity_fact" not in missing_tables:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN should_trade = 1 THEN 1 ELSE 0 END) AS trade_eligible,
+                SUM(CASE WHEN should_trade = 0 THEN 1 ELSE 0 END) AS no_trade,
+                SUM(CASE WHEN availability_status IS NOT NULL AND availability_status != 'ok' THEN 1 ELSE 0 END) AS availability_tagged,
+                SUM(CASE WHEN should_trade = 0 AND (availability_status IS NULL OR availability_status = 'ok') THEN 1 ELSE 0 END) AS no_availability_loss
+            FROM opportunity_fact
+            """
+        ).fetchone()
+        summary["opportunity"] = {
+            "total": int(row["total"] or 0),
+            "trade_eligible": int(row["trade_eligible"] or 0),
+            "no_trade": int(row["no_trade"] or 0),
+            "availability_tagged": int(row["availability_tagged"] or 0),
+        }
+        summary["separation"]["opportunity_loss_without_availability"] = int(row["no_availability_loss"] or 0)
+
+    if "availability_fact" not in missing_tables:
+        rows = conn.execute(
+            "SELECT failure_type, COUNT(*) AS n FROM availability_fact GROUP BY failure_type"
+        ).fetchall()
+        failure_types = {str(r["failure_type"]): int(r["n"]) for r in rows}
+        summary["availability"] = {
+            "total": sum(failure_types.values()),
+            "failure_types": failure_types,
+        }
+        summary["separation"]["availability_failures"] = summary["availability"]["total"]
+
+    if "execution_fact" not in missing_tables:
+        rows = conn.execute(
+            "SELECT terminal_exec_status, COUNT(*) AS n FROM execution_fact GROUP BY terminal_exec_status"
+        ).fetchall()
+        status_counts = {str(r["terminal_exec_status"] or ""): int(r["n"]) for r in rows}
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS total, AVG(fill_quality) AS avg_fill_quality
+            FROM execution_fact
+            """
+        ).fetchone()
+        summary["execution"] = {
+            "total": int(row["total"] or 0),
+            "terminal_status_counts": status_counts,
+            "avg_fill_quality": float(row["avg_fill_quality"]) if row["avg_fill_quality"] is not None else None,
+        }
+
+    if "outcome_fact" not in missing_tables:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS wins,
+                   SUM(COALESCE(pnl, 0.0)) AS pnl_total
+            FROM outcome_fact
+            """
+        ).fetchone()
+        summary["outcome"] = {
+            "total": int(row["total"] or 0),
+            "wins": int(row["wins"] or 0),
+            "pnl_total": float(row["pnl_total"] or 0.0),
+        }
+    summary["separation"]["execution_vs_outcome_gap"] = max(
+        0,
+        summary["execution"]["total"] - summary["outcome"]["total"],
+    )
+    return summary
+
+
 def query_execution_event_summary(
     conn: sqlite3.Connection,
     *,

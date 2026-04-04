@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.4 freeze pass`
+- Last updated by: `Codex P4.5 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,35 +18,31 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `P4.5 ACCEPTED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Install the first durable `outcome_fact` writer path for economically completed positions without widening into analytics-query work or settlement-law redesign.
+No live packet. P4.5 is accepted and pushed under current repo truth, and the post-close third-party gate must now finish before P4 family closeout can be recorded.
 
 ## Allowed files
 
-- `work_packets/P4.4-OUTCOME-FACTS.md`
-- `src/state/db.py`
-- `src/execution/harvester.py`
-- `tests/test_db.py`
-- `tests/test_runtime_guards.py`
+- post-close review evidence surfaces for accepted P4.5
+- `work_packets/P4.5-ANALYTICS-SMOKE-QUERIES.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo surfaces outside the frozen P4.4 packet boundary
+- all repo implementation/runtime/schema surfaces until the post-close gate passes and the family closeout state is recorded
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
-- `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/supervisor_api/**`
@@ -59,15 +55,15 @@ Install the first durable `outcome_fact` writer path for economically completed 
 
 ## Non-goals
 
-- no analytics-query work
-- no runtime code change
+- no P4 family closeout before the post-close gate passes
+- no dashboard/observability surface widening
 - no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker on the accepted P4.4 boundary itself
+- no blocker on the accepted P4.5 boundary itself
 - the user-required post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
@@ -88,5 +84,5 @@ Install the first durable `outcome_fact` writer path for economically completed 
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted P4.4.
-2. Freeze `P4.5-ANALYTICS-SMOKE-QUERIES` only after that gate passes.
+1. Run the post-close third-party critic + verifier on accepted P4.5.
+2. Record honest P4 family closeout only after that gate passes.

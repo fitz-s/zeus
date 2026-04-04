@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.4 acceptance pass`
+- Last updated by: `Codex P4.5 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,13 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P4 in progress`
-- Last accepted packet: `P4.3-EXECUTION-FACTS`
+- Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
 - Current active packet: `none`
-- Current packet status: `P4.4 accepted and pushed / post-close gate pending`
+- Current packet status: `P4.5 accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no blocker on the accepted P4.4 boundary itself
-  - the post-close third-party critic/verifier gate is still pending before P4.5 can freeze
+  - post-close verifier is now passed, but critic must rerun after the control-surface repair before P4.5 can freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1969,5 +1969,92 @@ Archive policy:
   - the accepted P4.4 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.5-ANALYTICS-SMOKE-QUERIES` may freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted P4.4
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:42 America/Chicago] P4.4 post-close verifier passed and control-surface repair opened critic rerun
+- Author: `Architects mainline lead`
+- Packet: `P4.4-OUTCOME-FACTS`
+- Status delta:
+  - post-close verifier half passed
+  - post-close critic rerun remains required because slim control surfaces were stale on acceptance-state details
+- Basis / evidence:
+  - verifier subagent confirmed the accepted P4.4 boundary still holds and may advance once critic clears
+  - critic subagent found stale control-surface facts: wrong last-accepted packet, wrong state wording, and a forbidden/allowed file contradiction in `architects_task.md`
+- Decisions frozen:
+  - treat this as a control-surface repair issue, not a P4.4 runtime-code defect
+  - do not freeze `P4.5-ANALYTICS-SMOKE-QUERIES` until the repaired critic rerun passes
+- Open uncertainties:
+  - none beyond the critic rerun on repaired control surfaces
+- Next required action:
+  - rerun the post-close critic on the repaired P4.4 control surfaces
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:50 America/Chicago] P4.4 post-close gate passed after control-surface repair
+- Author: `Architects mainline lead`
+- Packet: `P4.4-OUTCOME-FACTS`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - verifier subagent -> `PASS`
+  - critic subagent rerun -> `PASS`
+  - synchronized control surfaces now align on accepted P4.4 truth
+- Decisions frozen:
+  - `P4.5-ANALYTICS-SMOKE-QUERIES` may now be frozen as the next packet
+- Open uncertainties:
+  - none on the accepted P4.4 boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P4.5-ANALYTICS-SMOKE-QUERIES`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:52 America/Chicago] P4.5-ANALYTICS-SMOKE-QUERIES frozen
+- Author: `Architects mainline lead`
+- Packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P4.4 outcome-fact boundary plus passed post-close gate now permit the final P4 freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` names analytics smoke queries as the fifth P4 sequence item
+  - current repo truth still lacks explicit smoke-query proof that the four P4 fact layers are read distinctly
+- Decisions frozen:
+  - keep this packet query-only on top of installed P4 fact layers
+  - do not widen into new persistence, schema, or dashboard work
+  - keep team closed by default
+- Open uncertainties:
+  - exact minimal query shape still needs implementation review inside the frozen boundary
+- Next required action:
+  - implement `P4.5-ANALYTICS-SMOKE-QUERIES` and run targeted query smoke tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 14:05 America/Chicago] P4.5-ANALYTICS-SMOKE-QUERIES accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - final P4 analytics smoke-query proof is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_db.py` -> `39 passed`
+  - targeted smoke subset -> `2 passed`
+  - critic subagent -> `APPROVE`
+  - verifier subagent -> `PASS`
+- Decisions frozen:
+  - P4 now has packet-bounded read/query proof that opportunity, availability, execution, and outcome layers can be separated
+  - no new persistence, schema, or dashboard work is claimed in this packet
+- Open uncertainties:
+  - the accepted P4.5 boundary still requires the user-required post-close third-party critic + verifier gate before P4 family closeout may be recorded
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted P4.5
 - Owner:
   - Architects mainline lead
