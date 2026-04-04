@@ -360,6 +360,20 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -421,6 +435,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         ORDER BY decision_id
         """
     ).fetchall()
+    availability_count = conn.execute("SELECT COUNT(*) AS n FROM availability_fact").fetchone()
     conn.close()
     payload = json.loads(artifact["artifact_json"])
     trade_case = payload["trade_cases"][0]
@@ -456,6 +471,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert opportunity_rows[1]["strategy_key"] is None
     assert opportunity_rows[1]["snapshot_id"] == "snap-1"
     assert opportunity_rows[1]["rejection_stage"] == "EDGE_INSUFFICIENT"
+    assert availability_count["n"] == 0
 
 
 def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
@@ -2726,6 +2742,21 @@ def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
 
     artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-03T00:00:00Z")
     tracker = StrategyTracker()
@@ -2768,8 +2799,20 @@ def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch
 
     assert summary["no_trades"] == 1
     case = artifact.no_trade_cases[0]
+    availability_row = conn.execute(
+        """
+        SELECT scope_type, scope_key, failure_type, impact
+        FROM availability_fact
+        ORDER BY availability_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     assert case.availability_status == "DATA_UNAVAILABLE"
     assert case.rejection_stage == "SIGNAL_QUALITY"
+    assert availability_row["scope_type"] == "city_target"
+    assert availability_row["scope_key"] == "NYC:2026-04-01"
+    assert availability_row["failure_type"] == "observation_missing"
+    assert availability_row["impact"] == "skip"
     conn.close()
 
 
@@ -2818,6 +2861,106 @@ def test_learning_summary_separates_no_data_from_no_edge(tmp_path):
 def test_availability_status_helper_maps_rate_limited_and_chain():
     assert cycle_runtime._availability_status_for_exception(RuntimeError("429 capacity exhausted")) == "RATE_LIMITED"
     assert cycle_runtime._availability_status_for_exception(RuntimeError("chain rpc unavailable")) == "CHAIN_UNAVAILABLE"
+
+
+def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z")
+    tracker = StrategyTracker()
+    portfolio = PortfolioState()
+    summary = {"candidates": 0, "no_trades": 0}
+
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "outcomes": [],
+        "hours_since_open": 1.0,
+        "hours_to_resolution": 4.0,
+        "event_id": "evt-rate",
+        "slug": "slug-rate",
+    }
+    decision = types.SimpleNamespace(
+        should_trade=False,
+        edge=None,
+        decision_id="d-rate",
+        rejection_stage="SIGNAL_QUALITY",
+        rejection_reasons=["429 capacity exhausted"],
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="snap-rate",
+        edge_source="",
+        strategy_key="",
+        availability_status="RATE_LIMITED",
+        settlement_semantics_json="",
+        epistemic_context_json="",
+        edge_context_json="",
+        p_raw=[],
+        p_cal=[],
+        p_market=[],
+        alpha=0.0,
+        agreement="",
+    )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [market],
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        _classify_edge_source=lambda *args, **kwargs: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=tracker,
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        deps=deps,
+    )
+
+    row = conn.execute(
+        """
+        SELECT scope_type, scope_key, failure_type, impact, details_json
+        FROM availability_fact
+        WHERE scope_key = 'd-rate'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    assert row["scope_type"] == "candidate"
+    assert row["scope_key"] == "d-rate"
+    assert row["failure_type"] == "rate_limited"
+    assert row["impact"] == "skip"
+    assert "RATE_LIMITED" in row["details_json"]
 
 
 def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):

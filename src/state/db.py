@@ -912,6 +912,56 @@ def log_opportunity_fact(
     )
     return {"status": "written", "table": "opportunity_fact"}
 
+
+def log_availability_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    availability_id: str,
+    scope_type: str,
+    scope_key: str,
+    failure_type: str,
+    started_at: str,
+    impact: str,
+    details: dict | None = None,
+    ended_at: str | None = None,
+) -> dict:
+    if conn is None:
+        logger.info("Availability fact write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "availability_fact"}
+    if not _table_exists(conn, "availability_fact"):
+        logger.info("Availability fact table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "availability_fact"}
+
+    normalized_scope_type = scope_type if scope_type in {"cycle", "candidate", "city_target", "order", "chain"} else "candidate"
+    normalized_impact = impact if impact in {"skip", "degrade", "retry", "block"} else "skip"
+    payload = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO availability_fact (
+            availability_id,
+            scope_type,
+            scope_key,
+            failure_type,
+            started_at,
+            ended_at,
+            impact,
+            details_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            availability_id,
+            normalized_scope_type,
+            scope_key,
+            failure_type,
+            started_at,
+            ended_at,
+            normalized_impact,
+            payload,
+        ),
+    )
+    return {"status": "written", "table": "availability_fact"}
+
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard

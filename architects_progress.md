@@ -33,11 +33,11 @@ Archive policy:
 - Mainline stage: `P4 in progress`
 - Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
 - Current active packet: `none`
-- Current packet status: `P4.1 accepted and pushed / post-close gate pending`
+- Current packet status: `P4.2 accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P4.1 boundary itself
-  - the post-close third-party critic/verifier gate is still pending before P4.2 can freeze
+  - no blocker on the accepted P4.2 boundary itself
+  - the post-close third-party critic/verifier gate is still pending before P4.3 can freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1600,5 +1600,72 @@ Archive policy:
   - the accepted P4.1 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.2-AVAILABILITY-FACTS` may freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted P4.1
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 20:08 America/Chicago] P4.1 post-close third-party review gate passed
+- Author: `Architects mainline lead`
+- Packet: `P4.1-OPPORTUNITY-FACTS`
+- Status delta:
+  - user-required post-close third-party critic review passed
+  - user-required post-close third-party verifier review passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - independent post-close critic artifact: `.omx/artifacts/gemini-p4-1-postclose-critic-20260404T003337Z.md` -> `PASS`
+  - independent post-close verifier artifact: `.omx/artifacts/gemini-p4-1-postclose-verifier-20260404T003337Z.md` -> `PASS`
+  - accepted P4.1 boundary no longer shows blocker-level contradiction in the reviewed commit
+- Decisions frozen:
+  - `P4.2-AVAILABILITY-FACTS` may now be frozen as the next packet
+- Open uncertainties:
+  - none on the accepted P4.1 boundary beyond preserving its fact-layer scope limit
+- Next required action:
+  - freeze `P4.2-AVAILABILITY-FACTS`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 20:09 America/Chicago] P4.2-AVAILABILITY-FACTS frozen
+- Author: `Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P4.1 opportunity-fact boundary plus passed post-close review gate now permit the next P4 freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` names availability facts as the second P4 sequence item
+  - current repo truth still leaves availability failures embedded in rejection strings/logs rather than a dedicated durable fact table writer
+- Decisions frozen:
+  - keep this packet on discovery/evaluation-path `availability_fact` writes only
+  - do not widen into order/chain execution availability, `execution_fact`, `outcome_fact`, or analytics work
+  - keep team closed by default
+- Open uncertainties:
+  - exact failure-type mapping and scope-key shape still need implementation review inside the frozen boundary
+- Next required action:
+  - implement `P4.2-AVAILABILITY-FACTS` and run targeted runtime/db tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 20:17 America/Chicago] P4.2-AVAILABILITY-FACTS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - the first durable P4 availability-fact writer seam is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py tests/test_db.py` -> `95 passed`
+  - independent pre-close critic artifact: `.omx/artifacts/gemini-p4-2-preclose-critic-20260404T003337Z.md` -> `APPROVE`
+  - independent pre-close verifier artifact: `.omx/artifacts/gemini-p4-2-preclose-verifier-20260404T003337Z.md` -> `PASS`
+- Decisions frozen:
+  - discovery/evaluation-time availability failures now write durable `availability_fact` rows with explicit scope and impact when the table exists
+  - missing `availability_fact` capability now yields an explicit `skipped_missing_table` advisory result instead of silent durable-write implication
+  - no `execution_fact`, `outcome_fact`, analytics-query, or schema work is claimed in this packet
+- Open uncertainties:
+  - the accepted P4.2 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.3-EXECUTION-FACTS` may freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted P4.2
 - Owner:
   - Architects mainline lead

@@ -55,6 +55,24 @@ def _create_opportunity_fact_table(conn):
     conn.commit()
 
 
+def _create_availability_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
 def test_init_schema_creates_all_tables():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -187,6 +205,30 @@ def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
     conn.close()
 
     assert result == {"status": "skipped_missing_table", "table": "opportunity_fact"}
+    assert rows["n"] == 0
+
+
+def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_availability_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    result = log_availability_fact(
+        conn,
+        availability_id="avail-1",
+        scope_type="city_target",
+        scope_key="NYC:2026-04-01",
+        failure_type="rate_limited",
+        started_at="2026-04-03T00:00:00Z",
+        ended_at="2026-04-03T00:00:00Z",
+        impact="skip",
+        details={"availability_status": "RATE_LIMITED"},
+    )
+    rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'availability_fact'").fetchone()
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "availability_fact"}
     assert rows["n"] == 0
 
 
