@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.2 post-close repair pass`
+- Last updated by: `Codex P4.3 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,26 +17,30 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `P4.2 POST-CLOSE GATE FAILED / RE-REVIEW PENDING`
+- Packet: `P4.3-EXECUTION-FACTS`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. Accepted P4.2 remains blocked from advancement because the prior post-close gate failed on stale control-surface truth and incomplete verifier evidence; renewed review must complete before P4.3 can freeze.
+Install the first durable `execution_fact` writer path for current entry/exit order lifecycle events without widening into `outcome_fact`, analytics work, or schema changes.
 
 ## Allowed files
 
-- post-close review evidence surfaces for accepted P4.2
-- `.omx/artifacts/user-p4-2-postclose-review-20260404T010500Z.md`
+- `work_packets/P4.3-EXECUTION-FACTS.md`
+- `src/state/db.py`
+- `src/engine/cycle_runtime.py`
+- `src/execution/exit_lifecycle.py`
+- `tests/test_db.py`
+- `tests/test_runtime_guards.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until renewed review passes and the next packet is frozen
+- all repo surfaces outside the frozen P4.3 packet boundary
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -56,15 +60,14 @@ No live packet. Accepted P4.2 remains blocked from advancement because the prior
 
 ## Non-goals
 
-- no `P4.3-EXECUTION-FACTS` freeze before renewed post-close review passes
+- no `outcome_fact` writer work
 - no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- accepted P4.2 boundary itself has no new code blocker in the reported review
-- advancement is blocked on stale control-surface truth and incomplete verifier evidence
+- no active blocker at freeze time
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -76,11 +79,16 @@ No live packet. Accepted P4.2 remains blocked from advancement because the prior
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P4.2 accepted and pushed
-- [x] external third-party review found blocker-level control/evidence discipline failures
-- [ ] renewed post-close critic review passed
-- [ ] renewed post-close verifier review passed
+- [x] external third-party review found prior control/evidence discipline failure and it was repaired
+- [x] renewed post-close critic review passed
+- [x] renewed post-close verifier review passed
+- [x] P4.3 packet is frozen
+- [ ] P4.3 runtime/state seam implemented
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P4.3 accepted and pushed
 
 ## Next required action
 
-1. Keep `P4.3-EXECUTION-FACTS` unfrozen.
-2. Complete a renewed post-close verifier/review cycle on synchronized control surfaces before any next-packet advancement.
+1. Implement `P4.3-EXECUTION-FACTS` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

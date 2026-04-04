@@ -33,11 +33,10 @@ Archive policy:
 - Mainline stage: `P4 in progress`
 - Last accepted packet: `P4.2-AVAILABILITY-FACTS`
 - Current active packet: `none`
-- Current packet status: `P4.2 post-close gate failed / control surfaces repaired / renewed review pending`
+- Current packet status: `P4.3 frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted P4.2 boundary itself has no newly reported code blocker
-  - post-close advancement is blocked on stale control-surface truth and incomplete verifier evidence
+  - no active blocker at P4.3 freeze time
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1709,5 +1708,69 @@ Archive policy:
   - awaiting renewed verifier/review completion on the synchronized state
 - Next required action:
   - obtain renewed post-close verifier evidence and, if needed, renewed external review before freezing any next packet
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:31 America/Chicago] P4.2 renewed verifier passed on synchronized repo truth
+- Author: `External third-party verifier promoted by Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - renewed verifier half of the post-close gate passed
+  - `P4.3-EXECUTION-FACTS` freeze remains blocked because the renewed critic side is not yet recorded
+- Basis / evidence:
+  - verifier review promoted at `.omx/artifacts/user-p4-2-renewed-verifier-20260404T123100Z.md`
+  - verifier explicitly confirmed that P4.2 implementation/test files remain unchanged since `448ced5` and still sit inside packet boundary
+  - verifier explicitly confirmed current control surfaces now honestly repair the stale-snapshot problem
+- Decisions frozen:
+  - treat the renewed verifier half as passed
+  - do not yet treat the full renewed post-close gate as passed
+- Open uncertainties:
+  - renewed critic side still needs to be recorded before advancement permission exists
+- Next required action:
+  - record or obtain the renewed critic side, then reassess `P4.3-EXECUTION-FACTS` freeze permission
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:35 America/Chicago] P4.2 renewed post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - renewed critic side passed
+  - renewed verifier side passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - renewed verifier review promoted at `.omx/artifacts/user-p4-2-renewed-verifier-20260404T123100Z.md`
+  - internal small renewed critic artifact: `.omx/artifacts/gemini-p4-2-renewed-critic-20260404T123100Z.md` -> `PASS`
+  - synchronized control surfaces no longer misstate repo truth
+- Decisions frozen:
+  - repaired control/evidence discipline is now sufficient to restore advancement permission
+  - `P4.3-EXECUTION-FACTS` may now be frozen as the next packet
+- Open uncertainties:
+  - none on the accepted P4.2 boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P4.3-EXECUTION-FACTS`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:36 America/Chicago] P4.3-EXECUTION-FACTS frozen
+- Author: `Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P4.2 availability-fact boundary plus renewed post-close gate now permit the next P4 freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` names execution facts as the third P4 sequence item
+  - current repo truth still keeps execution-order truth in mixed event helpers rather than a dedicated durable fact table writer
+- Decisions frozen:
+  - keep this packet on current entry/exit order-lifecycle `execution_fact` writes only
+  - do not widen into `outcome_fact`, analytics work, or schema changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact intent/position identifier mapping and entry-vs-exit lifecycle coverage still need implementation review inside the frozen boundary
+- Next required action:
+  - implement `P4.3-EXECUTION-FACTS` and run targeted runtime/db tests
 - Owner:
   - Architects mainline lead
