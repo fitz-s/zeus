@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex reality-authority amendment acceptance pass`
+- Last updated by: `Codex P4.3 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,14 +30,14 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `foundation reality-authority amendment accepted`
-- Last accepted packet: `GOV-REALITY-01-DISCRETE-SETTLEMENT-SUPPORT-AUTHORITY`
+- Mainline stage: `P4 in progress`
+- Last accepted packet: `P4.3-EXECUTION-FACTS`
 - Current active packet: `none`
-- Current packet status: `amendment accepted / P4.3 paused pending resume decision`
+- Current packet status: `P4.3 accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no technical blocker on the accepted amendment itself
-  - P4.3 remains intentionally paused until resumed under the upgraded authority
+  - no blocker on the accepted P4.3 boundary itself
+  - the post-close third-party critic/verifier gate is still pending before P4.4 can freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1841,5 +1841,30 @@ Archive policy:
   - internal small pre-close `$ask` critic/verifier attempts are timing out right now
 - Next required action:
   - resolve or route around the repo-wide work-packet grammar blocker, then complete pre-close review before acceptance
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:05 America/Chicago] P4.3 resumed unchanged under accepted discrete-settlement authority and accepted
+- Author: `Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - paused packet re-approved under the accepted discrete-settlement authority amendment
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - accepted amendment `docs/architecture/zeus_discrete_settlement_support_amendment.md` does not introduce any authority contradiction for the execution-telemetry-only P4.3 slice
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_db.py tests/test_runtime_guards.py` -> `96 passed`
+  - critic subagent judged the packet authority-valid unchanged under the amendment
+  - verifier subagent judged the acceptance shape satisfied in principle; main-thread verification reran the packet-local evidence on current repo truth
+- Decisions frozen:
+  - P4.3 remains execution telemetry only and does not derive settlement or pricing semantics from discrete contract support
+  - no `outcome_fact`, analytics-query, or schema work is claimed in this packet
+- Open uncertainties:
+  - the accepted P4.3 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.4-OUTCOME-FACTS` may freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted P4.3
 - Owner:
   - Architects mainline lead

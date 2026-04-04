@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex reality-authority amendment acceptance pass`
+- Last updated by: `Codex P4.3 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,24 +18,25 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `AMENDMENT ACCEPTED / P4.3 STILL PAUSED PENDING RESUME DECISION`
+- State: `P4.3 ACCEPTED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. The discrete-settlement-support foundation amendment is now accepted; P4.3 remains paused until it is deliberately resumed under the upgraded authority.
+No live packet. P4.3 is accepted and pushed under current repo truth, and the post-close third-party gate must now finish before P4.4 can freeze.
 
 ## Allowed files
 
-- post-amendment control surfaces only until the next resumed packet is made explicit
+- post-close review evidence surfaces for accepted P4.3
+- `work_packets/P4.3-EXECUTION-FACTS.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next resumed packet is made explicit
+- all repo implementation/runtime/schema surfaces until the post-close gate passes and the next packet is frozen
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -55,7 +56,7 @@ No live packet. The discrete-settlement-support foundation amendment is now acce
 
 ## Non-goals
 
-- no `P4.3-EXECUTION-FACTS` implementation work
+- no `P4.4-OUTCOME-FACTS` freeze before the post-close gate passes
 - no runtime code change
 - no schema changes
 - no cutover
@@ -63,19 +64,21 @@ No live packet. The discrete-settlement-support foundation amendment is now acce
 
 ## Current blocker state
 
-- no blocker on the accepted amendment itself
-- `P4.3-EXECUTION-FACTS` remains intentionally paused pending resume judgment under the upgraded authority
+- no blocker on the accepted P4.3 boundary itself
+- the user-required post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] identify the discrete-settlement-support authority gap
-- [x] freeze a dedicated amendment packet
-- [x] land the amendment file
-- [x] update slim control surfaces to show P4.3 paused behind the amendment
-- [x] accept and push the amendment packet
+- [x] P4.3 packet remains valid under the accepted discrete-settlement authority amendment
+- [x] P4.3 runtime/state seam implemented
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P4.3 accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Re-read the paused P4.3 work against the accepted amendment before resuming it.
-2. Resume or re-freeze the next mainline packet explicitly before touching runtime/math surfaces again.
+1. Run the post-close third-party critic + verifier on accepted P4.3.
+2. Freeze `P4.4-OUTCOME-FACTS` only after that gate passes.
