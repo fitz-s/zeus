@@ -5,8 +5,8 @@ Purpose:
 - exactly one live packet at a time
 
 Metadata:
-- Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P4.2 acceptance pass`
+- Last updated: `2026-04-04 America/Chicago`
+- Last updated by: `Codex P4.2 post-close repair pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,25 +18,25 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `P4.2 ACCEPTED / POST-CLOSE GATE PENDING`
+- State: `P4.2 POST-CLOSE GATE FAILED / RE-REVIEW PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. P4.2 is accepted and pushed under current repo truth, but the post-close third-party review gate must still pass before P4.3 can freeze.
+No live packet. Accepted P4.2 remains blocked from advancement because the prior post-close gate failed on stale control-surface truth and incomplete verifier evidence; renewed review must complete before P4.3 can freeze.
 
 ## Allowed files
 
 - post-close review evidence surfaces for accepted P4.2
+- `.omx/artifacts/user-p4-2-postclose-review-20260404T010500Z.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- the next frozen packet surfaces only after the post-close gate passes
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the post-close gate passes and the next packet is frozen
+- all repo implementation/runtime/schema surfaces until renewed review passes and the next packet is frozen
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -56,15 +56,15 @@ No live packet. P4.2 is accepted and pushed under current repo truth, but the po
 
 ## Non-goals
 
-- no `P4.3-EXECUTION-FACTS` freeze before the post-close gate passes
+- no `P4.3-EXECUTION-FACTS` freeze before renewed post-close review passes
 - no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker on the accepted P4.2 boundary itself
-- the user-required post-close third-party critic/verifier gate is still pending
+- accepted P4.2 boundary itself has no new code blocker in the reported review
+- advancement is blocked on stale control-surface truth and incomplete verifier evidence
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -76,10 +76,11 @@ No live packet. P4.2 is accepted and pushed under current repo truth, but the po
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P4.2 accepted and pushed
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] external third-party review found blocker-level control/evidence discipline failures
+- [ ] renewed post-close critic review passed
+- [ ] renewed post-close verifier review passed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on the accepted P4.2 boundary.
-2. Freeze `P4.3-EXECUTION-FACTS` only after that gate passes.
+1. Keep `P4.3-EXECUTION-FACTS` unfrozen.
+2. Complete a renewed post-close verifier/review cycle on synchronized control surfaces before any next-packet advancement.

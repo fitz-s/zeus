@@ -5,17 +5,17 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P4.2 acceptance pass`
+- Last updated: `2026-04-04 America/Chicago`
+- Last updated by: `Codex P4.2 post-close repair pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P4 in progress`
 - Active packet: `none`
-- Active packet state: `P4.2 accepted and pushed / post-close gate pending`
+- Active packet state: `P4.2 post-close gate failed / control surfaces repaired / renewed review pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
+- Last accepted packet: `P4.2-AVAILABILITY-FACTS`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted P4.2.
-2. Only freeze `P4.3-EXECUTION-FACTS` after the post-close gate passes.
+1. Preserve the blocked state: do not freeze `P4.3-EXECUTION-FACTS` yet.
+2. Use the synchronized control surfaces plus review artifacts to complete a renewed post-close verifier/review cycle.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

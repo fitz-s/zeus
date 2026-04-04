@@ -6,8 +6,8 @@ Purpose:
 - records only real state transitions, accepted evidence, blockers, and next-packet moves
 
 Metadata:
-- Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3 family closeout pass`
+- Last updated: `2026-04-04 America/Chicago`
+- Last updated by: `Codex P4.2 post-close repair pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,13 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P4 in progress`
-- Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
+- Last accepted packet: `P4.2-AVAILABILITY-FACTS`
 - Current active packet: `none`
-- Current packet status: `P4.2 accepted and pushed / post-close gate pending`
+- Current packet status: `P4.2 post-close gate failed / control surfaces repaired / renewed review pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P4.2 boundary itself
-  - the post-close third-party critic/verifier gate is still pending before P4.3 can freeze
+  - accepted P4.2 boundary itself has no newly reported code blocker
+  - post-close advancement is blocked on stale control-surface truth and incomplete verifier evidence
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1667,5 +1667,47 @@ Archive policy:
   - the accepted P4.2 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.3-EXECUTION-FACTS` may freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted P4.2
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 11:55 America/Chicago] P4.2 post-close third-party review failed and blocked advancement
+- Author: `External third-party review promoted by Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - post-close advancement gate failed
+  - `P4.3-EXECUTION-FACTS` freeze remains forbidden
+- Basis / evidence:
+  - external review promoted at `.omx/artifacts/user-p4-2-postclose-review-20260404T010500Z.md`
+  - current branch truth includes later math commits after `448ced5` (`3bd72d3`, `fb0fb30`) while Architects control surfaces still reported only `P4.2 accepted and pushed / post-close gate pending`
+  - no durable post-close verifier artifact existed for `P4.2`
+  - existing post-close critic artifact was insufficient because it did not catch the stale control-surface mismatch
+- Decisions frozen:
+  - do not treat the previous `P4.2` post-close gate as passed
+  - do not freeze `P4.3-EXECUTION-FACTS` until control surfaces are synchronized and renewed review/verifier evidence exists
+- Open uncertainties:
+  - whether a renewed internal verifier plus later external review will be enough to clear the gate
+- Next required action:
+  - synchronize control surfaces to current repo truth
+  - create renewed verifier/review evidence before any P4 advancement
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 12:05 America/Chicago] P4.2 control surfaces synchronized after failed post-close review
+- Author: `Architects mainline lead`
+- Packet: `P4.2-AVAILABILITY-FACTS`
+- Status delta:
+  - slim control surfaces now record the blocked post-close state honestly
+- Basis / evidence:
+  - `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` now reflect that accepted `P4.2` cannot yet advance
+  - no repo implementation/runtime claim was widened during this repair
+- Decisions frozen:
+  - `P4.3-EXECUTION-FACTS` remains unfrozen
+  - renewed verifier/review evidence is still required before advancement
+- Open uncertainties:
+  - awaiting renewed verifier/review completion on the synchronized state
+- Next required action:
+  - obtain renewed post-close verifier evidence and, if needed, renewed external review before freezing any next packet
 - Owner:
   - Architects mainline lead
