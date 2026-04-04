@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4 family closeout pass`
+- Last updated by: `Codex P5.1 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,32 +17,42 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `P4 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
+- Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. The P4 family is complete under current repo truth.
+Install the first authoritative lifecycle-phase kernel by freezing the finite P5 phase vocabulary and fold-legality surface behind a dedicated lifecycle manager, without yet rewiring the broader runtime mutation hot spots.
 
 ## Allowed files
 
-- future packet surfaces only after a new non-P4 freeze
+- work_packets/P5.1-LIFECYCLE-PHASE-KERNEL.md
+- src/state/lifecycle_manager.py
+- src/engine/lifecycle_events.py
+- tests/test_architecture_contracts.py
+- architects_progress.md
+- architects_task.md
+- architects_state_index.md
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
+- `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
+- `src/state/db.py`
+- `src/state/portfolio.py`
+- `src/state/chain_reconciliation.py`
 - `src/supervisor_api/**`
-- `tests/test_architecture_contracts.py`
+- `tests/test_db.py`
+- `tests/test_runtime_guards.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
@@ -51,33 +61,30 @@ No live packet. The P4 family is complete under current repo truth.
 
 ## Non-goals
 
-- no next-phase work without a new frozen packet
-- no dashboard/observability surface widening
+- no broad runtime hotspot rewiring
+- no dashboard/observability/control-plane widening
 - no schema changes
-- no cutover
+- no cutover or migration claims
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside the completed P4 family boundary
+- no active blocker inside the frozen P5.1 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P4.3 packet remains valid under the accepted discrete-settlement authority amendment
-- [x] P4.3 runtime/state seam implemented
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P4.3 accepted and pushed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
-- [x] P4.4 packet is frozen
-- [x] P4.4 runtime/state seam implemented
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P4.4 accepted and pushed
+- [x] P5.1 packet frozen
+- [ ] lifecycle kernel surface installed
+- [ ] targeted lifecycle-kernel architecture tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.1 accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Stop at the completed P4 family boundary.
-2. If continuing later, freeze the next non-P4 packet before any implementation.
+1. Install the lifecycle kernel surface inside the frozen boundary.
+2. Prove targeted lifecycle-kernel mapping/fold legality with architecture tests.
+3. Do not close the packet before pre-close critic + verifier finish.

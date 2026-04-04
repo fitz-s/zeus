@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4 family closeout pass`
+- Last updated by: `Codex P5.1 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,16 +30,38 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P4 family complete`
+- Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
-- Current active packet: `none`
-- Current packet status: `P4 family closeout recorded / awaiting next phase freeze`
+- Current active packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the completed P4 family boundary
+  - no active blocker inside the frozen P5.1 boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
+
+## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from completed P4 into the first P5 lifecycle-phase packet
+- Basis / evidence:
+  - `docs/architecture/zeus_durable_architecture_spec.md` P5 requires a bounded authoritative lifecycle phase machine with finite vocabulary and fold legality before broader hotspot rewiring
+  - `architecture/kernel_manifest.yaml` and `architecture/invariants.yaml` already treat phase grammar as authoritative kernel law
+  - current repo truth still keeps canonical phase derivation in `src/engine/lifecycle_events.py` rather than a dedicated lifecycle kernel surface
+- Decisions frozen:
+  - P5 starts with lifecycle-kernel installation, not broad runtime mutation cleanup
+  - this first packet may install a dedicated lifecycle manager surface and delegate current canonical builder phase derivation through it
+  - no schema, control-plane, observability, or learning/protection widening is allowed in this packet
+- Open uncertainties:
+  - whether `src/state/projection.py` needs any support changes or remains untouched after delegation stays implementation-time evidence
+- Next required action:
+  - implement the lifecycle kernel surface and targeted architecture tests
+  - then run pre-close critic + verifier before any acceptance claim
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-04 00:00 America/Chicago] P4.3 paused behind discrete-settlement-support authority amendment
 - Author: `Architects mainline lead`

@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4 family closeout pass`
+- Last updated by: `Codex P5.1 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P4 family complete`
-- Active packet: `none`
-- Active packet state: `P4 family closeout recorded / awaiting next phase freeze`
+- Stage: `P5 lifecycle phase engine start`
+- Active packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
 - Execution mode default: `solo`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Stop at the completed P4 family boundary.
-2. If work continues, freeze the next non-P4 packet explicitly before implementation.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. Execute `P5.1-LIFECYCLE-PHASE-KERNEL` inside its frozen boundary.
+2. Keep out-of-scope local dirt excluded from packet commits.
+3. Do not widen from lifecycle-kernel installation into broader runtime hotspot rewiring before the packet proves out.
 
 ## Current out-of-scope dirt
 
@@ -49,4 +49,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. the next frozen non-P4 packet, if work resumes
+5. `work_packets/P5.1-LIFECYCLE-PHASE-KERNEL.md`
