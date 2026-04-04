@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5 family closeout pass`
+- Last updated by: `Codex P5.4 repair pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P5 family complete`
+- Mainline stage: `P5 in progress`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current active packet: `none`
-- Current packet status: `P5 family closeout recorded / awaiting next phase freeze`
+- Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Current packet status: `accepted and pushed / renewed post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the completed P5 family boundary
+  - renewed post-close gate is pending because `quarantine_expired` exposure exclusion proof was missing from the accepted P5.4 boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -519,6 +519,26 @@ Archive policy:
   - none inside the completed P5 family boundary
 - Next required action:
   - stop at the P5 family boundary until a new non-P5 packet is frozen
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:24 America/Chicago] P5 family closeout reopened on missing quarantine_expired exposure proof
+- Author: `Architects mainline lead`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Status delta:
+  - prior P5 family closeout claim is reopened
+  - active packet returns to accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+  - renewed post-close gate becomes required
+- Basis / evidence:
+  - post-close critic found that the accepted P5.4 boundary lacked an explicit committed test proving `quarantine_expired` positions stay outside open/exposure semantics
+  - closeout cannot stand while the final packet's proof claim overstates repo truth
+- Decisions frozen:
+  - repair stays inside the existing P5.4 packet boundary
+  - no new P5 repair packet is needed as long as the proof gap can be fixed inside the frozen P5.4 scope
+- Open uncertainties:
+  - whether the missing proof can land as a test-only repair or needs minimal runtime adjustment
+- Next required action:
+  - add the missing `quarantine_expired` exposure proof and rerun the renewed post-close gate
 - Owner:
   - Architects mainline lead
 
