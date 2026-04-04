@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3C acceptance pass`
+- Last updated by: `Codex P5.3D freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,21 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Remove the direct lifecycle mutation hot spots on the touched reconciliation seam by routing the pending-fill rescue and chain-only quarantine transitions through lifecycle-kernel helpers, without widening into portfolio cleanup or broader reconciliation redesign.
+Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.py` by routing the touched economically_closed, settled, admin_closed, and voided transitions through lifecycle-kernel helpers, without widening into fill-tracker cleanup or broader portfolio refactors.
 
 ## Allowed files
 
-- work_packets/P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT.md
+- work_packets/P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT.md
 - src/state/lifecycle_manager.py
-- src/state/chain_reconciliation.py
+- src/state/portfolio.py
 - tests/test_live_safety_invariants.py
+- tests/test_runtime_guards.py
 - architects_progress.md
 - architects_task.md
 - architects_state_index.md
@@ -49,7 +50,7 @@ Remove the direct lifecycle mutation hot spots on the touched reconciliation sea
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/state/db.py`
-- `src/state/portfolio.py`
+- `src/state/chain_reconciliation.py`
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
@@ -70,8 +71,7 @@ Remove the direct lifecycle mutation hot spots on the touched reconciliation sea
 
 ## Current blocker state
 
-- no blocker on the accepted P5.3C boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.3D boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -114,8 +114,16 @@ Remove the direct lifecycle mutation hot spots on the touched reconciliation sea
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.3C accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.3D packet frozen
+- [ ] touched terminal-state hotspot routed through lifecycle kernel
+- [ ] targeted terminal-hotspot tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.3D accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.
