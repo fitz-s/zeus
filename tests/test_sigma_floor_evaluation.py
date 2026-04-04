@@ -1,8 +1,10 @@
 """MATH-004: Sigma Floor Evaluation Tests.
 
-Evaluate whether the 50% sigma floor in day0_post_peak_sigma is appropriate.
-These tests are EVALUATION ONLY - they document behavior and provide
-recommendations, but do not modify production code.
+Evaluate whether the quantization noise floor in day0_post_peak_sigma is appropriate.
+These tests document behavior after the MATH-010 floor implementation.
+
+The floor ensures sigma never drops below QUANTIZATION_NOISE_FLOOR (0.35°F / 0.20°C)
+to absorb integer settlement rounding and sensor noise (Gamma risk mitigation).
 """
 
 import numpy as np
@@ -10,7 +12,11 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 from src.signal.day0_signal import Day0Signal
-from src.signal.forecast_uncertainty import day0_post_peak_sigma
+from src.signal.forecast_uncertainty import (
+    day0_post_peak_sigma,
+    QUANTIZATION_NOISE_FLOOR_F,
+    QUANTIZATION_NOISE_FLOOR_C,
+)
 from src.signal.ensemble_signal import sigma_instrument
 
 
@@ -19,8 +25,9 @@ class TestSigmaFloorBehavior:
 
     def test_sigma_floor_at_various_peak_confidence(self):
         """Document sigma values at different peak confidence levels."""
-        print("\n=== MATH-004 Test 1: Sigma Floor Behavior ===")
-        print("\nUnit: F, base_sigma =", sigma_instrument("F").value)
+        print("\n=== MATH-004 Test 1: Sigma Floor Behavior (with quantization floor) ===")
+        print(f"\nUnit: F, base_sigma = {sigma_instrument('F').value}")
+        print(f"Quantization floor: {QUANTIZATION_NOISE_FLOOR_F}°F")
         print("\npeak_conf | sigma | % of base | floor effect")
         print("-" * 50)
 
@@ -30,9 +37,9 @@ class TestSigmaFloorBehavior:
         for peak in [0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]:
             sigma = day0_post_peak_sigma("F", peak, freshness_factor=1.0)
             pct = sigma / base * 100
-            # Without floor, sigma would be: base * (1 - peak)
-            theoretical_no_floor = base * (1 - peak)
-            floor_active = sigma > theoretical_no_floor * 1.01  # 1% tolerance
+            # Raw sigma without floor
+            raw_sigma = base * (1 - peak * 0.5)
+            floor_active = sigma > raw_sigma * 1.01  # 1% tolerance
 
             results.append({
                 "peak": peak,
@@ -43,9 +50,9 @@ class TestSigmaFloorBehavior:
 
             print(f"{peak:>9.1f} | {sigma:.3f} | {pct:>8.1f}% | {'YES' if floor_active else 'no'}")
 
-        # At peak=1.0, sigma should be exactly 50% of base
-        assert abs(results[-1]["sigma"] - base * 0.5) < 0.001
-        # At peak=0.0, sigma should be 100% of base
+        # At peak=1.0, sigma should be at floor (0.35) since raw would be 0.25
+        assert abs(results[-1]["sigma"] - QUANTIZATION_NOISE_FLOOR_F) < 0.001
+        # At peak=0.0, sigma should be 100% of base (above floor)
         assert abs(results[0]["sigma"] - base) < 0.001
 
         print("\nCurrent formula: sigma = base * (1 - peak * 0.5)")
@@ -246,27 +253,27 @@ class TestSigmaFloorEdgeCases:
             print(row)
 
         print(f"\nBase sigma: {base}°F")
-        print("\nFormula: sigma = base * (1 - peak * 0.5) * (1 + (1 - fresh) * 0.5)")
-        print("At peak=1.0, fresh=0.0: sigma = base * 0.5 * 1.5 = 0.75 * base")
+        print(f"Quantization floor: {QUANTIZATION_NOISE_FLOOR_F}°F")
+        print("\nFormula: sigma = max(floor, base * (1 - peak * 0.5) * (1 + (1 - fresh) * 0.5))")
 
         # Verify the interaction
         max_sigma = day0_post_peak_sigma("F", 0.0, freshness_factor=0.0)
         min_sigma = day0_post_peak_sigma("F", 1.0, freshness_factor=1.0)
-        assert max_sigma == base * 1.5  # 0 peak, 3h stale
-        assert min_sigma == base * 0.5  # 1.0 peak, fresh
+        assert max_sigma == base * 1.5  # 0 peak, 3h stale (above floor)
+        assert min_sigma == QUANTIZATION_NOISE_FLOOR_F  # 1.0 peak, fresh → floor
 
     def test_floor_prevents_zero_sigma(self):
         """Verify floor prevents sigma from reaching zero."""
         print("\n=== MATH-004 Test 4b: Zero Sigma Prevention ===")
 
-        # Even at extreme confidence, sigma should never be zero
-        for unit in ["F", "C"]:
+        # Even at extreme confidence, sigma should never be below floor
+        for unit, floor in [("F", QUANTIZATION_NOISE_FLOOR_F), ("C", QUANTIZATION_NOISE_FLOOR_C)]:
             base = sigma_instrument(unit).value
             min_sigma = day0_post_peak_sigma(unit, 1.0, freshness_factor=1.0)
 
-            print(f"{unit}: min_sigma = {min_sigma:.4f} ({min_sigma/base*100:.1f}% of base)")
+            print(f"{unit}: min_sigma = {min_sigma:.4f} (floor = {floor})")
             assert min_sigma > 0, f"Sigma should never be zero for {unit}"
-            assert min_sigma >= base * 0.5, f"Floor should be at least 50% for {unit}"
+            assert min_sigma >= floor, f"Sigma should be at least floor for {unit}"
 
 
 if __name__ == "__main__":

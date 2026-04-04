@@ -27,29 +27,36 @@ def test_analysis_bootstrap_sigma_matches_current_instrument_sigma():
 
 
 def test_day0_post_peak_sigma_matches_existing_formula_endpoints():
+    """Test sigma formula with quantization noise floor enforcement."""
+    from src.signal.forecast_uncertainty import QUANTIZATION_NOISE_FLOOR_F
     base_f = sigma_instrument("F").value
-    # With default freshness_factor=1.0, behavior is unchanged
+    # At peak=0.0, raw_sigma = base_f = 0.5, which is above floor
     assert day0_post_peak_sigma("F", 0.0) == base_f
-    assert day0_post_peak_sigma("F", 1.0) == base_f * 0.5
+    # At peak=1.0, raw_sigma = base_f * 0.5 = 0.25, but floor is 0.35
+    assert day0_post_peak_sigma("F", 1.0) == QUANTIZATION_NOISE_FLOOR_F
 
 
 def test_day0_post_peak_sigma_clamps_peak_confidence():
+    """Test peak confidence clamping with floor enforcement."""
+    from src.signal.forecast_uncertainty import QUANTIZATION_NOISE_FLOOR_C
     base_c = sigma_instrument("C").value
-    # With default freshness_factor=1.0, behavior is unchanged
+    # At peak=-1.0 (clamped to 0), raw_sigma = base_c, above floor
     assert day0_post_peak_sigma("C", -1.0) == base_c
-    assert day0_post_peak_sigma("C", 2.0) == base_c * 0.5
+    # At peak=2.0 (clamped to 1.0), raw_sigma = 0.14, but floor is 0.20
+    assert day0_post_peak_sigma("C", 2.0) == QUANTIZATION_NOISE_FLOOR_C
 
 
 def test_day0_post_peak_sigma_expands_with_stale_data():
     """MATH-005: Sigma expands when data is stale (low freshness_factor)."""
+    from src.signal.forecast_uncertainty import QUANTIZATION_NOISE_FLOOR_F
     base_f = sigma_instrument("F").value
     peak = 0.5  # Mid-confidence level
 
-    # Fresh data: no expansion
+    # Fresh data: no expansion, raw_sigma = 0.5 * 0.75 = 0.375, above floor
     fresh_sigma = day0_post_peak_sigma("F", peak, freshness_factor=1.0)
     assert fresh_sigma == base_f * 0.75  # base * (1 - 0.5*0.5) * 1.0
 
-    # Stale data (3h+): 1.5x expansion
+    # Stale data (3h+): 1.5x expansion, raw_sigma = 0.5625, above floor
     stale_sigma = day0_post_peak_sigma("F", peak, freshness_factor=0.0)
     assert stale_sigma == base_f * 0.75 * 1.5  # 50% expansion
 
