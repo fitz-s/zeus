@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3E acceptance pass`
+- Last updated by: `Codex P5.4 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,22 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Remove the remaining direct entry-lifecycle mutation hot spots by routing the touched cycle-runtime entry creation and fill-tracker entered/voided transitions through lifecycle-kernel helpers, without widening into execution redesign or non-entry lifecycle cleanup.
+Lock the remaining quarantine semantics that define P5 completion by proving quarantined and quarantine-expired positions stay outside standard active exposure/open-position semantics and only follow the dedicated resolution path.
 
 ## Allowed files
 
-- work_packets/P5.3E-ENTRY-LIFECYCLE-HOTSPOTS.md
-- src/state/lifecycle_manager.py
+- work_packets/P5.4-QUARANTINE-SEMANTICS-HARDENING.md
+- src/state/portfolio.py
+- src/engine/cycle_runner.py
 - src/engine/cycle_runtime.py
-- src/execution/fill_tracker.py
 - tests/test_runtime_guards.py
+- tests/test_live_safety_invariants.py
 - architects_progress.md
 - architects_task.md
 - architects_state_index.md
@@ -45,7 +46,7 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
-- `src/state/portfolio.py`
+- `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/state/db.py`
@@ -53,7 +54,6 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_db.py`
-- `tests/test_live_safety_invariants.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
@@ -70,8 +70,7 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 
 ## Current blocker state
 
-- no blocker on the accepted P5.3E boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.4 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -130,8 +129,16 @@ Remove the remaining direct entry-lifecycle mutation hot spots by routing the to
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.3E accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.4 packet frozen
+- [ ] targeted quarantine-semantics proof installed
+- [ ] targeted quarantine-semantics tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.4 accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.4-QUARANTINE-SEMANTICS-HARDENING` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

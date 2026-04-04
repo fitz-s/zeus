@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3E acceptance pass`
+- Last updated by: `Codex P5.4 freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -32,12 +32,11 @@ Archive policy:
 
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
-- Current active packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.3E boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the frozen P5.4 boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -411,6 +410,46 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze or closeout claim
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:50 America/Chicago] P5.3E-ENTRY-LIFECYCLE-HOTSPOTS post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - renewed post-close critic lane -> `PASS`
+  - accepted P5.3E control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - `P5.4-QUARANTINE-SEMANTICS-HARDENING` may now be frozen as the final P5 packet
+- Open uncertainties:
+  - none on the accepted P5.3E boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:53 America/Chicago] P5.4-QUARANTINE-SEMANTICS-HARDENING frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P5.3E boundary plus passed post-close gate now permit the next P5 freeze
+  - the remaining explicit P5 spec item is quarantine semantics hardening
+  - the current packet stays on quarantine-semantics proof/hardening only and does not mix in later control-plane or product work
+- Decisions frozen:
+  - keep this packet on the final quarantine-semantics obligation only
+  - do not widen into control-plane redesign, schema work, or control/observability changes
+  - keep team closed by default
+- Open uncertainties:
+  - whether the existing runtime already satisfies the full quarantine semantics with test-only proof or needs a minimal code adjustment remains implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P5.4-QUARANTINE-SEMANTICS-HARDENING` and run targeted runtime tests
 - Owner:
   - Architects mainline lead
 
