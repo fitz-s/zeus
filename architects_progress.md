@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 repair pass`
+- Last updated by: `Codex P5 family closeout re-pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P5 in progress`
+- Mainline stage: `P5 family complete`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current packet status: `accepted and pushed / renewed post-close critic pending`
+- Current active packet: `none`
+- Current packet status: `P5 family closeout re-recorded / awaiting next phase freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - renewed post-close critic gate is pending after the `quarantine_expired` exposure exclusion proof repair
+  - no active blocker inside the completed P5 family boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -539,6 +539,51 @@ Archive policy:
   - whether the missing proof can land as a test-only repair or needs minimal runtime adjustment
 - Next required action:
   - add the missing `quarantine_expired` exposure proof and rerun the renewed post-close gate
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:34 America/Chicago] P5.4 renewed post-close gate passed after proof repair
+- Author: `Architects mainline lead`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Status delta:
+  - renewed post-close critic review passed
+  - renewed post-close verifier review passed
+  - P5 family closeout became allowed again
+- Basis / evidence:
+  - renewed post-close verifier lane -> `PASS`
+  - renewed post-close critic lane -> `PASS`
+  - explicit `quarantine_expired` exposure exclusion proof is now committed in `tests/test_runtime_guards.py`
+- Decisions frozen:
+  - P5 family closeout may now be re-recorded honestly
+- Open uncertainties:
+  - none beyond preserving the reopened/repair history in the closeout language
+- Next required action:
+  - re-record P5 family closeout truth
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:36 America/Chicago] P5 family closeout re-recorded
+- Author: `Architects mainline lead`
+- Packet family: `P5`
+- Status delta:
+  - P5 family completion is re-recorded under current repo truth after the reopened proof repair
+  - no further P5 implementation packet is required under current repo law
+- Basis / evidence:
+  - `P5.1-LIFECYCLE-PHASE-KERNEL` accepted and passed post-close review
+  - `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` accepted and passed post-close review
+  - `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT` accepted and passed post-close review
+  - `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT` accepted and passed post-close review
+  - `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT` accepted and passed post-close review
+  - `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT` accepted and passed post-close review
+  - `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` accepted and passed post-close review
+  - `P5.4-QUARANTINE-SEMANTICS-HARDENING` accepted, reopened on missing proof, repaired, and passed the renewed post-close review
+- Decisions frozen:
+  - P5 now covers kernel-owned lifecycle vocabulary, explicit fold legality, hotspot cleanup across exit/day0/reconciliation/terminal/entry seams, and explicit quarantine semantics proof including `quarantine_expired` exposure exclusion
+  - this closeout does not claim later control-plane durability, migration, or non-P5 phase work
+- Open uncertainties:
+  - none inside the completed P5 family boundary
+- Next required action:
+  - stop at the P5 family boundary until a new non-P5 packet is frozen
 - Owner:
   - Architects mainline lead
 
