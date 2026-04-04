@@ -203,14 +203,19 @@ def test_day0_post_peak_sigma_is_continuous():
         )
         sigmas.append(sig._sigma)
 
-    # Must be monotonically decreasing
+    # Must be monotonically decreasing (or at floor)
     assert all(
         sigmas[i] >= sigmas[i + 1] for i in range(len(sigmas) - 1)
     ), f"sigma not monotonically decreasing with peak_confidence: {list(zip(confidences, sigmas))}"
 
-    # At peak=0: sigma = base; at peak=1: sigma = base * 0.5
+    # At peak=0: sigma = base
     assert abs(sigmas[0] - base) < 1e-9, "sigma at peak=0 must equal base_sigma"
-    assert abs(sigmas[-1] - base * 0.5) < 1e-9, "sigma at peak=1 must equal base_sigma * 0.5"
+    
+    # At peak=1: sigma = max(floor, base * 0.5)
+    # With floor=0.20 for C and raw=0.14, we get 0.20
+    from src.signal.forecast_uncertainty import QUANTIZATION_NOISE_FLOOR_C
+    expected_floor = max(QUANTIZATION_NOISE_FLOOR_C, base * 0.5)
+    assert abs(sigmas[-1] - expected_floor) < 1e-9, f"sigma at peak=1 must equal floor or base*0.5, got {sigmas[-1]}"
 
     # No abrupt jump at 0.7 — the step from 0.69 to 0.71 must be small
     step = abs(sigmas[confidences.index(0.69)] - sigmas[confidences.index(0.71)])

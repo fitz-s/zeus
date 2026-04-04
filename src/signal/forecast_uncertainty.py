@@ -14,6 +14,41 @@ import numpy as np
 from src.signal.ensemble_signal import sigma_instrument
 
 
+# =============================================================================
+# Named Constants for Uncertainty Policy
+# =============================================================================
+# These constants replace "magic numbers" with semantically meaningful names.
+# They are derived from quantitative finance and signal processing principles.
+
+# Quantization noise floor: minimum sigma to absorb integer settlement rounding.
+# Settlement values are integers (e.g., 75°F). The rounding from continuous to
+# discrete introduces irreducible uncertainty σ = √(Δ²/12) ≈ 0.29 for Δ=1.
+# Combined with sensor noise (~0.1), the floor is ~0.31. We use 0.35 for margin.
+QUANTIZATION_NOISE_FLOOR_F = 0.35  # °F — absorbs rounding + sensor noise
+QUANTIZATION_NOISE_FLOOR_C = 0.20  # °C — scaled for Celsius settlements
+
+# Peak shrinkage coefficient: how much sigma shrinks as peak confidence rises.
+# At peak_confidence=1.0, sigma shrinks to (1 - PEAK_SHRINKAGE_COEFF) of base.
+PEAK_SHRINKAGE_COEFF = 0.5  # 50% max shrinkage at full peak confidence
+
+# Staleness expansion coefficient: how much sigma expands as data gets stale.
+# At freshness=0.0 (3h+ stale), sigma expands by (1 + STALENESS_EXPANSION_COEFF).
+STALENESS_EXPANSION_COEFF = 0.5  # 50% max expansion at 3h+ stale
+
+# Temporal closure coefficients: weights for max() combination in observation weight.
+# These control how time, peak, daylight, and ensemble signals compete.
+TEMPORAL_CLOSURE_PEAK_COEFF = 0.75      # Peak confidence weight
+TEMPORAL_CLOSURE_DAYLIGHT_COEFF = 0.50  # Daylight progress weight
+TEMPORAL_CLOSURE_ENS_COEFF = 0.35       # Ensemble dominance weight
+# Note: time_closure has implicit coefficient 1.0 (dominates by default)
+
+# Hours for linear time closure: time_closure = 1 - hours_remaining / this value
+TIME_CLOSURE_HORIZON_HOURS = 12.0
+
+# Freshness decay hours: freshness = 1 - age_hours / this value
+FRESHNESS_DECAY_HOURS = 3.0
+
+
 def _finite_float(value) -> float | None:
     try:
         parsed = float(value)
@@ -246,8 +281,15 @@ def day0_temporal_closure_weight(
     daylight_progress: float | None,
     ens_dominance: float,
 ) -> float:
-    """Bounded day0 closure policy driven by the strongest active signal."""
-    time_closure = min(1.0, max(0.0, 1.0 - float(hours_remaining) / 12.0))
+    """Bounded day0 closure policy driven by the strongest active signal.
+    
+    Uses named constants for coefficients:
+    - TIME_CLOSURE_HORIZON_HOURS: hours for linear time decay
+    - TEMPORAL_CLOSURE_PEAK_COEFF: peak confidence weight (0.75)
+    - TEMPORAL_CLOSURE_DAYLIGHT_COEFF: daylight progress weight (0.50)
+    - TEMPORAL_CLOSURE_ENS_COEFF: ensemble dominance weight (0.35)
+    """
+    time_closure = min(1.0, max(0.0, 1.0 - float(hours_remaining) / TIME_CLOSURE_HORIZON_HOURS))
     peak_signal = min(1.0, max(0.0, float(peak_confidence)))
     daylight_signal = (
         min(1.0, max(0.0, float(daylight_progress)))
@@ -257,9 +299,9 @@ def day0_temporal_closure_weight(
     ens_signal = min(1.0, max(0.0, float(ens_dominance)))
     return max(
         time_closure,
-        0.75 * peak_signal,
-        0.50 * daylight_signal,
-        0.35 * ens_signal,
+        TEMPORAL_CLOSURE_PEAK_COEFF * peak_signal,
+        TEMPORAL_CLOSURE_DAYLIGHT_COEFF * daylight_signal,
+        TEMPORAL_CLOSURE_ENS_COEFF * ens_signal,
     )
 
 
@@ -476,7 +518,7 @@ def day0_nowcast_context(
             if current_at.tzinfo is None:
                 current_at = current_at.replace(tzinfo=timezone.utc)
             age_hours = max(0.0, (current_at - observed_at).total_seconds() / 3600.0)
-            freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / 3.0))
+            freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / FRESHNESS_DECAY_HOURS))
         except ValueError:
             age_hours = None
             freshness_factor = 0.0
@@ -533,21 +575,29 @@ def day0_post_peak_sigma(
         Sigma (std dev) for the Day0 distribution.
 
     The formula is:
-        sigma = base_sigma * peak_shrinkage * staleness_expansion
+        sigma = max(floor, base_sigma * peak_shrinkage * staleness_expansion)
 
-    - peak_shrinkage: (1.0 - peak * 0.5) — sigma shrinks as peak confidence rises
-    - staleness_expansion: (1.0 + (1.0 - fresh) * 0.5) — sigma expands as data gets stale
+    Named constants used:
+    - QUANTIZATION_NOISE_FLOOR_F/C: minimum sigma to absorb integer rounding
+    - PEAK_SHRINKAGE_COEFF: how much sigma shrinks with peak confidence
+    - STALENESS_EXPANSION_COEFF: how much sigma expands with stale data
 
-    At freshness=1.0 (fresh data), staleness_expansion=1.0 (no expansion).
-    At freshness=0.0 (3h+ stale), staleness_expansion=1.5 (50% expansion).
+    The floor ensures sigma never drops below quantization noise, preventing
+    overconfidence at bin boundaries (Gamma risk mitigation).
     """
     peak = min(1.0, max(0.0, float(peak_confidence)))
     fresh = min(1.0, max(0.0, float(freshness_factor)))
     base_sigma = sigma_instrument(unit).value
 
-    # Original formula: base_sigma * (1.0 - peak * 0.5)
-    # MATH-005: Add staleness expansion
-    peak_shrinkage = 1.0 - peak * 0.5
-    staleness_expansion = 1.0 + (1.0 - fresh) * 0.5  # up to 1.5x at freshness=0
+    # Select unit-appropriate quantization noise floor
+    quant_floor = QUANTIZATION_NOISE_FLOOR_F if unit == "F" else QUANTIZATION_NOISE_FLOOR_C
 
-    return base_sigma * peak_shrinkage * staleness_expansion
+    # Peak shrinkage: sigma shrinks as peak confidence rises
+    peak_shrinkage = 1.0 - peak * PEAK_SHRINKAGE_COEFF
+
+    # Staleness expansion: sigma expands as data gets stale (MATH-005)
+    staleness_expansion = 1.0 + (1.0 - fresh) * STALENESS_EXPANSION_COEFF
+
+    # Compute raw sigma, then enforce quantization noise floor
+    raw_sigma = base_sigma * peak_shrinkage * staleness_expansion
+    return max(quant_floor, raw_sigma)
