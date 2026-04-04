@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P4.1 acceptance pass`
+- Last updated by: `Codex P4.2 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,17 +18,17 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `P4.1 ACCEPTED / POST-CLOSE GATE PENDING`
+- State: `P4.2 ACCEPTED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. P4.1 is accepted and pushed under current repo truth, but the post-close third-party review gate must still pass before P4.2 can freeze.
+No live packet. P4.2 is accepted and pushed under current repo truth, but the post-close third-party review gate must still pass before P4.3 can freeze.
 
 ## Allowed files
 
-- post-close review evidence surfaces for accepted P4.1
+- post-close review evidence surfaces for accepted P4.2
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -56,28 +56,30 @@ No live packet. P4.1 is accepted and pushed under current repo truth, but the po
 
 ## Non-goals
 
-- no `P4.2-AVAILABILITY-FACTS` freeze before the post-close gate passes
+- no `P4.3-EXECUTION-FACTS` freeze before the post-close gate passes
 - no schema changes
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker on the accepted P4.1 boundary itself
+- no blocker on the accepted P4.2 boundary itself
 - the user-required post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P4.1 packet is frozen
-- [x] P4.1 runtime/state seam implemented
+- [x] P4.1 post-close third-party critic review passed
+- [x] P4.1 post-close third-party verifier review passed
+- [x] P4.2 packet is frozen
+- [x] P4.2 runtime/state seam implemented
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
-- [x] P4.1 accepted and pushed
+- [x] P4.2 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on the accepted P4.1 boundary.
-2. Freeze `P4.2-AVAILABILITY-FACTS` only after that gate passes.
+1. Run the post-close third-party critic + verifier on the accepted P4.2 boundary.
+2. Freeze `P4.3-EXECUTION-FACTS` only after that gate passes.

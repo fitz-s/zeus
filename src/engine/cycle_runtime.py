@@ -612,6 +612,75 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 exc,
             )
 
+    def _availability_scope_key(*, candidate=None, city_name: str = "", target_date: str = "") -> str:
+        if candidate is not None:
+            event_id = str(getattr(candidate, "event_id", "") or "").strip()
+            if event_id:
+                return event_id
+            slug = str(getattr(candidate, "slug", "") or "").strip()
+            if slug:
+                return slug
+            city_name = city_name or str(getattr(getattr(candidate, "city", None), "name", "") or "")
+            target_date = target_date or str(getattr(candidate, "target_date", "") or "")
+        if city_name and target_date:
+            return f"{city_name}:{target_date}"
+        return city_name or target_date or "unknown"
+
+    def _availability_failure_type(status: str, reasons: list[str]) -> str:
+        normalized = str(status or "").strip().upper()
+        reason_text = " ".join(reasons).lower()
+        if normalized == "RATE_LIMITED":
+            return "rate_limited"
+        if normalized == "CHAIN_UNAVAILABLE":
+            return "chain_unavailable"
+        if normalized == "DATA_STALE":
+            return "data_stale"
+        if "observation" in reason_text or "obs " in reason_text or reason_text.startswith("obs"):
+            return "observation_missing"
+        if "ens" in reason_text:
+            return "ens_missing"
+        return "data_unavailable"
+
+    def _record_availability_fact(
+        *,
+        status: str,
+        reasons: list[str],
+        scope_type: str,
+        scope_key: str,
+        details: dict,
+    ):
+        normalized = str(status or "").strip().upper()
+        if not normalized or normalized == "OK":
+            return
+        try:
+            from src.state.db import log_availability_fact
+
+            failure_type = _availability_failure_type(normalized, reasons)
+            availability_id = ":".join(
+                part
+                for part in (
+                    "availability",
+                    scope_type,
+                    scope_key,
+                    decision_time.isoformat(),
+                    failure_type,
+                )
+                if part
+            )
+            log_availability_fact(
+                conn,
+                availability_id=availability_id,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                failure_type=failure_type,
+                started_at=decision_time.isoformat(),
+                ended_at=decision_time.isoformat(),
+                impact="skip",
+                details=details,
+            )
+        except Exception as exc:
+            deps.logger.warning("Availability fact write failed for %s: %s", scope_key, exc)
+
     params = deps.MODE_PARAMS[mode]
     markets = deps.find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
     if "max_hours_since_open" in params:
@@ -641,6 +710,22 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
 
             if isinstance(e, (ObservationUnavailableError, MissingCalibrationError)):
                 deps.logger.warning("Skipping candidate for %s: %s", city.name, e)
+                availability_status = _availability_status_for_exception(e)
+                _record_availability_fact(
+                    status=availability_status,
+                    reasons=[str(e)],
+                    scope_type="city_target",
+                    scope_key=_availability_scope_key(city_name=city.name, target_date=market["target_date"]),
+                    details={
+                        "city": city.name,
+                        "target_date": market["target_date"],
+                        "mode": mode.value,
+                        "availability_status": availability_status,
+                        "failure_reason": str(e),
+                        "event_id": market.get("event_id", ""),
+                        "slug": market.get("slug", ""),
+                    },
+                )
                 artifact.add_no_trade(
                     deps.NoTradeCase(
                         decision_id="",
@@ -652,7 +737,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         strategy_key="",
                         strategy="",
                         edge_source="",
-                        availability_status=_availability_status_for_exception(e),
+                        availability_status=availability_status,
                         rejection_reasons=[str(e)],
                         timestamp=decision_time.isoformat(),
                     )
@@ -899,6 +984,30 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         if not strategy_name:
                             rejection_stage = "SIGNAL_QUALITY"
                             rejection_reasons = [*rejection_reasons, "invalid_or_missing_strategy_key"]
+                    availability_status = str(getattr(d, "availability_status", "") or "")
+                    if availability_status:
+                        _record_availability_fact(
+                            status=availability_status,
+                            reasons=rejection_reasons,
+                            scope_type="candidate" if d.decision_id else "city_target",
+                            scope_key=(
+                                d.decision_id
+                                if d.decision_id
+                                else _availability_scope_key(candidate=candidate)
+                            ),
+                            details={
+                                "decision_id": d.decision_id,
+                                "candidate_id": _availability_scope_key(candidate=candidate),
+                                "city": city.name,
+                                "target_date": candidate.target_date,
+                                "range_label": d.edge.bin.label if d.edge else "",
+                                "direction": d.edge.direction if d.edge else "unknown",
+                                "rejection_stage": rejection_stage,
+                                "rejection_reasons": rejection_reasons,
+                                "availability_status": availability_status,
+                                "strategy_key": strategy_name,
+                            },
+                        )
                     _record_opportunity_fact(
                         candidate,
                         d,

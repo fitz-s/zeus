@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P4.1 acceptance pass`
+- Last updated by: `Codex P4.2 acceptance pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P4 in progress`
 - Active packet: `none`
-- Active packet state: `P4.1 accepted and pushed / post-close gate pending`
+- Active packet state: `P4.2 accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P4.1-OPPORTUNITY-FACTS`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted P4.1.
-2. Only freeze `P4.2-AVAILABILITY-FACTS` after the post-close gate passes.
+1. Run the post-close third-party critic and verifier gate on accepted P4.2.
+2. Only freeze `P4.3-EXECUTION-FACTS` after the post-close gate passes.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -45,4 +45,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P4.1-OPPORTUNITY-FACTS.md`
+5. `work_packets/P4.2-AVAILABILITY-FACTS.md`
