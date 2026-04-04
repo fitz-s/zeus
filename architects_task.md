@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.5 acceptance pass`
+- Last updated by: `Codex P4 family closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,25 +18,21 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `P4.5 ACCEPTED / POST-CLOSE GATE PENDING`
+- State: `P4 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. P4.5 is accepted and pushed under current repo truth, and the post-close third-party gate must now finish before P4 family closeout can be recorded.
+No live packet. The P4 family is complete under current repo truth.
 
 ## Allowed files
 
-- post-close review evidence surfaces for accepted P4.5
-- `work_packets/P4.5-ANALYTICS-SMOKE-QUERIES.md`
-- `architects_progress.md`
-- `architects_task.md`
-- `architects_state_index.md`
+- future packet surfaces only after a new non-P4 freeze
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the post-close gate passes and the family closeout state is recorded
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -55,7 +51,7 @@ No live packet. P4.5 is accepted and pushed under current repo truth, and the po
 
 ## Non-goals
 
-- no P4 family closeout before the post-close gate passes
+- no next-phase work without a new frozen packet
 - no dashboard/observability surface widening
 - no schema changes
 - no cutover
@@ -63,8 +59,7 @@ No live packet. P4.5 is accepted and pushed under current repo truth, and the po
 
 ## Current blocker state
 
-- no blocker on the accepted P4.5 boundary itself
-- the user-required post-close third-party critic/verifier gate is still pending
+- no active blocker inside the completed P4 family boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -84,5 +79,5 @@ No live packet. P4.5 is accepted and pushed under current repo truth, and the po
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted P4.5.
-2. Record honest P4 family closeout only after that gate passes.
+1. Stop at the completed P4 family boundary.
+2. If continuing later, freeze the next non-P4 packet before any implementation.
