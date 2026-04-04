@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3D acceptance pass`
+- Last updated by: `Codex P5.3E freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -32,12 +32,11 @@ Archive policy:
 
 - Mainline stage: `P5 lifecycle phase engine start`
 - Last accepted packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
-- Current active packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.3D boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the frozen P5.3E boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -346,6 +345,46 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:22 America/Chicago] P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - renewed post-close critic lane -> `PASS`
+  - accepted P5.3D control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` may now be frozen as the next P5 packet
+- Open uncertainties:
+  - none on the accepted P5.3D boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:25 America/Chicago] P5.3E-ENTRY-LIFECYCLE-HOTSPOTS frozen
+- Author: `Architects mainline lead`
+- Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P5.3D boundary plus passed post-close gate now permit the next P5 freeze
+  - direct lifecycle-bearing entry state mutation still remains in cycle runtime and fill tracker
+  - the current packet stays on the touched entry seam only and does not mix in broader execution redesign
+- Decisions frozen:
+  - keep this packet on the entry-lifecycle seam only
+  - do not widen into execution redesign, schema work, or control/observability changes
+  - keep team closed by default
+- Open uncertainties:
+  - exact helper shape for the touched entry creation/fill/void transitions still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` and run targeted runtime tests
 - Owner:
   - Architects mainline lead
 

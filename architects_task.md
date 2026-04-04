@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3D acceptance pass`
+- Last updated by: `Codex P5.3E freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,21 +17,21 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.py` by routing the touched economically_closed, settled, admin_closed, and voided transitions through lifecycle-kernel helpers, without widening into fill-tracker cleanup or broader portfolio refactors.
+Remove the remaining direct entry-lifecycle mutation hot spots by routing the touched cycle-runtime entry creation and fill-tracker entered/voided transitions through lifecycle-kernel helpers, without widening into execution redesign or non-entry lifecycle cleanup.
 
 ## Allowed files
 
-- work_packets/P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT.md
+- work_packets/P5.3E-ENTRY-LIFECYCLE-HOTSPOTS.md
 - src/state/lifecycle_manager.py
-- src/state/portfolio.py
-- tests/test_live_safety_invariants.py
+- src/engine/cycle_runtime.py
+- src/execution/fill_tracker.py
 - tests/test_runtime_guards.py
 - architects_progress.md
 - architects_task.md
@@ -45,8 +45,7 @@ Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.
 - `architecture/**`
 - `migrations/**`
 - `src/control/**`
-- `src/engine/**`
-- `src/execution/**`
+- `src/state/portfolio.py`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/state/db.py`
@@ -70,8 +69,7 @@ Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.
 
 ## Current blocker state
 
-- no blocker on the accepted P5.3D boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the frozen P5.3E boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -122,8 +120,16 @@ Remove the direct terminal lifecycle mutation hot spots in `src/state/portfolio.
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.3D accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P5.3E packet frozen
+- [ ] touched entry hotspot family routed through lifecycle kernel
+- [ ] targeted entry-hotspot tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P5.3E accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`.
-2. Freeze the next P5 packet only after that gate passes.
+1. Implement `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.
