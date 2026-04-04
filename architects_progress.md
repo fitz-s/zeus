@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.1 freeze`
+- Last updated by: `Codex P5.1 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P4.5-ANALYTICS-SMOKE-QUERIES`
+- Last accepted packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
 - Current active packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.1 boundary
+  - no blocker on the accepted P5.1 boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -60,6 +61,31 @@ Archive policy:
 - Next required action:
   - implement the lifecycle kernel surface and targeted architecture tests
   - then run pre-close critic + verifier before any acceptance claim
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 18:24 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py` -> `77 passed`
+  - lsp diagnostics on `src/state/lifecycle_manager.py`, `src/engine/lifecycle_events.py`, and `tests/test_architecture_contracts.py` -> `0 errors`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - lifecycle vocabulary is now kernel-owned through `src/state/lifecycle_manager.py`
+  - canonical phase derivation on the current canonical builder path now delegates to the lifecycle kernel
+  - packet-bounded legality remains intentionally narrow to entry/quarantine/self-preserving folds and does not yet legalize later settlement/economic-close transitions
+  - no broad runtime hotspot rewiring, schema change, or control/observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.1-LIFECYCLE-PHASE-KERNEL`
 - Owner:
   - Architects mainline lead
 

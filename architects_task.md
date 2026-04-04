@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.1 freeze`
+- Last updated by: `Codex P5.1 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,13 +18,13 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Install the first authoritative lifecycle-phase kernel by freezing the finite P5 phase vocabulary and fold-legality surface behind a dedicated lifecycle manager, without yet rewiring the broader runtime mutation hot spots.
+Install the first authoritative lifecycle-phase kernel by freezing the finite P5 phase vocabulary and a packet-bounded legality surface behind a dedicated lifecycle manager, without yet rewiring the broader runtime mutation hot spots or legalizing later settlement/economic-close folds.
 
 ## Allowed files
 
@@ -69,22 +69,22 @@ Install the first authoritative lifecycle-phase kernel by freezing the finite P5
 
 ## Current blocker state
 
-- no active blocker inside the frozen P5.1 boundary
+- no blocker on the accepted P5.1 boundary itself
+- the post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
 - [x] P5.1 packet frozen
-- [ ] lifecycle kernel surface installed
-- [ ] targeted lifecycle-kernel architecture tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P5.1 accepted and pushed
+- [x] lifecycle kernel surface installed
+- [x] targeted lifecycle-kernel architecture tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P5.1 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Install the lifecycle kernel surface inside the frozen boundary.
-2. Prove targeted lifecycle-kernel mapping/fold legality with architecture tests.
-3. Do not close the packet before pre-close critic + verifier finish.
+1. Run the post-close third-party critic + verifier on accepted `P5.1-LIFECYCLE-PHASE-KERNEL`.
+2. Freeze the next P5 packet only after that gate passes.

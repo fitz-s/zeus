@@ -3,16 +3,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.state.lifecycle_manager import (
+    LifecyclePhase,
+    fold_lifecycle_phase,
+    phase_for_runtime_position,
+)
 
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 
-PENDING_EXIT_STATES = {
-    "exit_intent",
-    "sell_placed",
-    "sell_pending",
-    "retry_pending",
-    "backoff_exhausted",
-}
+PENDING_ENTRY = LifecyclePhase.PENDING_ENTRY.value
+ACTIVE = LifecyclePhase.ACTIVE.value
+DAY0_WINDOW = LifecyclePhase.DAY0_WINDOW.value
+PENDING_EXIT = LifecyclePhase.PENDING_EXIT.value
+ECONOMICALLY_CLOSED = LifecyclePhase.ECONOMICALLY_CLOSED.value
+SETTLED = LifecyclePhase.SETTLED.value
+QUARANTINED = LifecyclePhase.QUARANTINED.value
 
 
 def _normalized_state(value: object) -> str:
@@ -42,33 +47,11 @@ def _strategy_key(position: Any) -> str:
 
 
 def canonical_phase_for_position(position: Any) -> str:
-    state = _normalized_state(getattr(position, "state", ""))
-    exit_state = _normalized_state(getattr(position, "exit_state", ""))
-    chain_state = _normalized_state(getattr(position, "chain_state", ""))
-
-    if state == "voided":
-        return "voided"
-    if state == "settled":
-        return "settled"
-    if state == "economically_closed":
-        return "economically_closed"
-    if state == "admin_closed":
-        return "admin_closed"
-    if state == "quarantined":
-        return "quarantined"
-    if state == "pending_exit":
-        return "pending_exit"
-    if chain_state in {"quarantined", "quarantine_expired"}:
-        return "quarantined"
-    if exit_state in PENDING_EXIT_STATES or chain_state == "exit_pending_missing":
-        return "pending_exit"
-    if state == "pending_tracked":
-        return "pending_entry"
-    if state == "day0_window":
-        return "day0_window"
-    if state in {"entered", "holding"}:
-        return "active"
-    raise ValueError(f"unsupported runtime position state for canonical phase mapping: {state!r}")
+    return phase_for_runtime_position(
+        state=getattr(position, "state", ""),
+        exit_state=getattr(position, "exit_state", ""),
+        chain_state=getattr(position, "chain_state", ""),
+    ).value
 
 
 def projection_updated_at(position: Any) -> str:
@@ -178,7 +161,7 @@ def build_entry_canonical_write(
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
     canonical_phase = projection["phase"]
-    if canonical_phase not in {"pending_entry", "active", "day0_window"}:
+    if canonical_phase not in {PENDING_ENTRY, ACTIVE, DAY0_WINDOW}:
         raise ValueError(
             f"entry canonical builder only supports pending/active entry states, got {canonical_phase!r}"
         )
@@ -196,7 +179,7 @@ def build_entry_canonical_write(
             sequence_no=1,
             occurred_at=posted_at,
             phase_before=None,
-            phase_after="pending_entry",
+            phase_after=fold_lifecycle_phase(None, PENDING_ENTRY).value,
             decision_id=decision_id,
             source_module=source_module,
             order_id=None,
@@ -206,15 +189,15 @@ def build_entry_canonical_write(
             event_type="ENTRY_ORDER_POSTED",
             sequence_no=2,
             occurred_at=posted_at,
-            phase_before="pending_entry",
-            phase_after="pending_entry",
+            phase_before=PENDING_ENTRY,
+            phase_after=fold_lifecycle_phase(PENDING_ENTRY, PENDING_ENTRY).value,
             decision_id=decision_id,
             source_module=source_module,
             order_id=order_id,
         ),
     ]
 
-    if canonical_phase in {"active", "day0_window"}:
+    if canonical_phase in {ACTIVE, DAY0_WINDOW}:
         filled_at = _non_empty(
             getattr(position, "entered_at", ""),
             getattr(position, "day0_entered_at", ""),
@@ -226,8 +209,8 @@ def build_entry_canonical_write(
                 event_type="ENTRY_ORDER_FILLED",
                 sequence_no=3,
                 occurred_at=filled_at,
-                phase_before="pending_entry",
-                phase_after=canonical_phase,
+                phase_before=PENDING_ENTRY,
+                phase_after=fold_lifecycle_phase(PENDING_ENTRY, canonical_phase).value,
                 decision_id=decision_id,
                 source_module=source_module,
                 order_id=order_id,
@@ -248,7 +231,7 @@ def build_settlement_canonical_write(
     source_module: str = "src.execution.harvester",
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
-    if projection["phase"] != "settled":
+    if projection["phase"] != SETTLED:
         raise ValueError("settlement canonical builder requires a settled position projection")
 
     occurred_at = _non_empty(
@@ -278,7 +261,7 @@ def build_settlement_canonical_write(
         "event_type": "SETTLED",
         "occurred_at": occurred_at,
         "phase_before": phase_before,
-        "phase_after": "settled",
+        "phase_after": SETTLED,
         "strategy_key": _strategy_key(position),
         "decision_id": None,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
@@ -300,7 +283,7 @@ def build_reconciliation_rescue_canonical_write(
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
-    if projection["phase"] != "active":
+    if projection["phase"] != ACTIVE:
         raise ValueError("reconciliation rescue canonical builder requires an active position projection")
 
     occurred_at = _non_empty(
@@ -340,8 +323,8 @@ def build_reconciliation_rescue_canonical_write(
         "sequence_no": sequence_no,
         "event_type": "CHAIN_SYNCED",
         "occurred_at": occurred_at,
-        "phase_before": "pending_entry",
-        "phase_after": "active",
+        "phase_before": PENDING_ENTRY,
+        "phase_after": fold_lifecycle_phase(PENDING_ENTRY, ACTIVE).value,
         "strategy_key": _strategy_key(position),
         "decision_id": None,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
@@ -364,7 +347,7 @@ def build_chain_size_corrected_canonical_write(
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
-    phase = projection["phase"]
+    phase = fold_lifecycle_phase(projection["phase"], projection["phase"]).value
     occurred_at = _non_empty(
         getattr(position, "chain_verified_at", ""),
         projection["updated_at"],
@@ -427,7 +410,7 @@ def build_chain_quarantined_canonical_write(
         setattr(position, "strategy_key", original_strategy_key)
         setattr(position, "strategy", original_strategy)
 
-    if projection["phase"] != "quarantined":
+    if projection["phase"] != QUARANTINED:
         raise ValueError("chain quarantine canonical builder requires a quarantined position projection")
 
     occurred_at = _non_empty(
@@ -457,7 +440,7 @@ def build_chain_quarantined_canonical_write(
         "event_type": "CHAIN_QUARANTINED",
         "occurred_at": occurred_at,
         "phase_before": None,
-        "phase_after": "quarantined",
+        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
         "strategy_key": strategy_key,
         "decision_id": None,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
@@ -481,7 +464,7 @@ def build_chain_size_corrected_canonical_write(
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
     projection = build_position_current_projection(position)
-    phase = projection["phase"]
+    phase = fold_lifecycle_phase(projection["phase"], projection["phase"]).value
     occurred_at = _non_empty(
         getattr(position, "chain_verified_at", ""),
         projection["updated_at"],
@@ -544,7 +527,7 @@ def build_chain_quarantined_canonical_write(
         setattr(position, "strategy_key", original_strategy_key)
         setattr(position, "strategy", original_strategy)
 
-    if projection["phase"] != "quarantined":
+    if projection["phase"] != QUARANTINED:
         raise ValueError("chain quarantine canonical builder requires a quarantined position projection")
 
     occurred_at = _non_empty(
@@ -574,7 +557,7 @@ def build_chain_quarantined_canonical_write(
         "event_type": "CHAIN_QUARANTINED",
         "occurred_at": occurred_at,
         "phase_before": None,
-        "phase_after": "quarantined",
+        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
         "strategy_key": strategy_key,
         "decision_id": None,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),

@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -483,6 +484,52 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
     assert canonical_phase_for_position(_runtime_position(state="economically_closed")) == "economically_closed"
     assert canonical_phase_for_position(_runtime_position(state="settled")) == "settled"
     assert canonical_phase_for_position(_runtime_position(state="admin_closed")) == "admin_closed"
+
+
+def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
+    from src.state.lifecycle_manager import LIFECYCLE_PHASE_VOCABULARY
+
+    assert LIFECYCLE_PHASE_VOCABULARY == (
+        "pending_entry",
+        "active",
+        "day0_window",
+        "pending_exit",
+        "economically_closed",
+        "settled",
+        "voided",
+        "quarantined",
+        "admin_closed",
+    )
+
+
+def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
+    from src.state.lifecycle_manager import fold_lifecycle_phase
+
+    allowed = [
+        (None, "pending_entry"),
+        ("pending_entry", "pending_entry"),
+        ("pending_entry", "active"),
+        ("pending_entry", "day0_window"),
+        ("active", "active"),
+        ("day0_window", "day0_window"),
+        ("pending_exit", "pending_exit"),
+        ("economically_closed", "economically_closed"),
+        ("settled", "settled"),
+        ("voided", "voided"),
+        (None, "quarantined"),
+        ("quarantined", "quarantined"),
+        ("admin_closed", "admin_closed"),
+    ]
+
+    for phase_before, phase_after in allowed:
+        assert fold_lifecycle_phase(phase_before, phase_after).value == phase_after
+
+
+def test_lifecycle_phase_kernel_rejects_illegal_fold():
+    from src.state.lifecycle_manager import fold_lifecycle_phase
+
+    with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
+        fold_lifecycle_phase("settled", "active")
 
 
 def test_entry_builder_emits_pending_entry_batch_and_projection():
