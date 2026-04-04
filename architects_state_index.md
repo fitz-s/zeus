@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.1 acceptance pass`
+- Last updated by: `Codex P5.2 freeze pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P5 lifecycle phase engine start`
-- Active packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Active packet: `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted `P5.1-LIFECYCLE-PHASE-KERNEL`.
-2. Freeze the next P5 packet only after the post-close gate passes.
+1. Execute `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` inside its frozen boundary.
+2. Preserve the pre-close and post-close critic/verifier gates before any next freeze.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -49,4 +49,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P5.1-LIFECYCLE-PHASE-KERNEL.md`
+5. `work_packets/P5.2-FOLD-LEGALITY-FOLLOW-THROUGH.md`
