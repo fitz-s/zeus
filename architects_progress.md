@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 freeze pass`
+- Last updated by: `Codex P5.4 acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS`
+- Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.4 boundary
+  - no blocker on the accepted P5.4 boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -450,6 +451,30 @@ Archive policy:
   - whether the existing runtime already satisfies the full quarantine semantics with test-only proof or needs a minimal code adjustment remains implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P5.4-QUARANTINE-SEMANTICS-HARDENING` and run targeted runtime tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:05 America/Chicago] P5.4-QUARANTINE-SEMANTICS-HARDENING accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py::test_quarantined_positions_do_not_count_as_open_exposure tests/test_runtime_guards.py::test_quarantine_expired_positions_do_not_count_as_same_city_range_open tests/test_runtime_guards.py::test_quarantine_blocks_new_entries tests/test_live_safety_invariants.py::test_monitoring_marks_quarantine_for_admin_resolution_once tests/test_live_safety_invariants.py::test_quarantine_expired_marks_distinct_admin_resolution_reason tests/test_live_safety_invariants.py::test_quarantine_expired_blocks_new_entries_until_resolved` -> `6 passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py` -> `74 passed`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py` -> `54 passed`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - quarantined and quarantine-expired positions now have explicit proof that they stay outside normal open/exposure semantics and remain on the dedicated resolution/admin path
+  - no control-plane redesign, schema change, or control/observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before P5 family closeout may be recorded
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Owner:
   - Architects mainline lead
 

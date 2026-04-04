@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 freeze pass`
+- Last updated by: `Codex P5.4 acceptance pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -70,7 +70,8 @@ Lock the remaining quarantine semantics that define P5 completion by proving qua
 
 ## Current blocker state
 
-- no active blocker inside the frozen P5.4 boundary
+- no blocker on the accepted P5.4 boundary itself
+- the post-close third-party critic/verifier gate is still pending
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -132,13 +133,13 @@ Lock the remaining quarantine semantics that define P5 completion by proving qua
 - [x] post-close third-party critic review passed
 - [x] post-close third-party verifier review passed
 - [x] P5.4 packet frozen
-- [ ] targeted quarantine-semantics proof installed
-- [ ] targeted quarantine-semantics tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P5.4 accepted and pushed
+- [x] targeted quarantine-semantics proof installed
+- [x] targeted quarantine-semantics tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P5.4 accepted and pushed
 
 ## Next required action
 
-1. Implement `P5.4-QUARANTINE-SEMANTICS-HARDENING` within the frozen file boundary.
-2. Run targeted tests plus pre-close critic/verifier before acceptance.
+1. Run the post-close third-party critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
+2. Record P5 family closeout only after that gate passes.
