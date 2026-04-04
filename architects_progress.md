@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.3D freeze pass`
+- Last updated by: `Codex P5.3D acceptance pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,13 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P5 lifecycle phase engine start`
-- Last accepted packet: `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT`
+- Last accepted packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
 - Current active packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no active blocker inside the frozen P5.3D boundary
+  - no blocker on the accepted P5.3D boundary itself
+  - post-close third-party critic/verifier gate still pending
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -319,6 +320,32 @@ Archive policy:
   - exact helper shape for the touched terminal transitions still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT` and run targeted runtime tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:10 America/Chicago] P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py::test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions tests/test_runtime_guards.py::test_lifecycle_kernel_rejects_portfolio_terminal_transition_from_wrong_phase tests/test_runtime_guards.py::test_compute_economic_close_routes_pending_exit_through_kernel tests/test_runtime_guards.py::test_compute_settlement_close_routes_economically_closed_through_kernel tests/test_live_safety_invariants.py::test_paper_exit_does_not_use_sell_order tests/test_live_safety_invariants.py::test_backoff_exhausted_holds_to_settlement tests/test_live_safety_invariants.py::test_chain_reconciliation_does_not_void_economically_closed_positions` -> `7 passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py` -> `68 passed`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py` -> `54 passed`
+  - lsp diagnostics on `src/state/lifecycle_manager.py`, `src/state/portfolio.py`, and `tests/test_runtime_guards.py` -> `0 errors`
+  - pre-close critic -> `PASS`
+  - pre-close verifier -> `PASS`
+- Decisions frozen:
+  - the touched portfolio terminal-state seam now routes lifecycle-bearing terminal states through lifecycle-kernel helpers instead of ad hoc local mutation
+  - touched terminal transitions remain packet-bounded to economically_closed, settled, admin_closed, and voided
+  - no fill-tracker cleanup, schema change, or control/observability widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close third-party critic + verifier gate before the next P5 freeze
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT`
 - Owner:
   - Architects mainline lead
 

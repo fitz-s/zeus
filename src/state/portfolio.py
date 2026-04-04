@@ -22,6 +22,12 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.state.lifecycle_manager import (
+    enter_admin_closed_runtime_state,
+    enter_economically_closed_runtime_state,
+    enter_settled_runtime_state,
+    enter_voided_runtime_state,
+)
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -814,7 +820,11 @@ def compute_economic_close(
     for pos in state.positions:
         if pos.trade_id != trade_id:
             continue
-        pos.state = "economically_closed"
+        pos.state = enter_economically_closed_runtime_state(
+            pos.state,
+            exit_state=getattr(pos, "exit_state", ""),
+            chain_state=getattr(pos, "chain_state", ""),
+        )
         pos.pre_exit_state = ""
         pos.exit_price = exit_price
         pos.exit_reason = exit_reason
@@ -841,7 +851,11 @@ def compute_settlement_close(
             continue
         pos = state.positions.pop(state.positions.index(pos_ref))
         was_economically_closed = pos.state == "economically_closed"
-        pos.state = "settled"
+        pos.state = enter_settled_runtime_state(
+            pos.state,
+            exit_state=getattr(pos, "exit_state", ""),
+            chain_state=getattr(pos, "chain_state", ""),
+        )
         pos.pre_exit_state = ""
         pos.last_exit_at = now
         pos.exit_reason = exit_reason
@@ -872,7 +886,11 @@ def mark_admin_closed(
     for i, p in enumerate(state.positions):
         if p.trade_id == trade_id:
             pos = state.positions.pop(i)
-            pos.state = "admin_closed"
+            pos.state = enter_admin_closed_runtime_state(
+                pos.state,
+                exit_state=getattr(pos, "exit_state", ""),
+                chain_state=getattr(pos, "chain_state", ""),
+            )
             pos.pre_exit_state = ""
             pos.admin_exit_reason = reason
             pos.exit_reason = reason
@@ -893,7 +911,11 @@ def void_position(
     for i, p in enumerate(state.positions):
         if p.trade_id == trade_id:
             pos = state.positions.pop(i)
-            pos.state = "voided"
+            pos.state = enter_voided_runtime_state(
+                pos.state,
+                exit_state=getattr(pos, "exit_state", ""),
+                chain_state=getattr(pos, "chain_state", ""),
+            )
             pos.exit_reason = reason
             pos.exit_price = 0.0
             pos.pnl = 0.0

@@ -34,6 +34,7 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.PENDING_ENTRY,
             LifecyclePhase.ACTIVE,
             LifecyclePhase.DAY0_WINDOW,
+            LifecyclePhase.VOIDED,
         }
     ),
     LifecyclePhase.ACTIVE: frozenset(
@@ -42,6 +43,7 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.SETTLED,
+            LifecyclePhase.VOIDED,
         }
     ),
     LifecyclePhase.DAY0_WINDOW: frozenset(
@@ -49,6 +51,7 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.SETTLED,
+            LifecyclePhase.VOIDED,
         }
     ),
     LifecyclePhase.PENDING_EXIT: frozenset(
@@ -56,12 +59,16 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.PENDING_EXIT,
             LifecyclePhase.ACTIVE,
             LifecyclePhase.DAY0_WINDOW,
+            LifecyclePhase.ECONOMICALLY_CLOSED,
+            LifecyclePhase.ADMIN_CLOSED,
+            LifecyclePhase.VOIDED,
         }
     ),
     LifecyclePhase.ECONOMICALLY_CLOSED: frozenset(
         {
             LifecyclePhase.ECONOMICALLY_CLOSED,
             LifecyclePhase.SETTLED,
+            LifecyclePhase.VOIDED,
         }
     ),
     LifecyclePhase.SETTLED: frozenset({LifecyclePhase.SETTLED}),
@@ -200,6 +207,93 @@ def rescue_pending_runtime_state(
 def enter_chain_quarantined_runtime_state() -> str:
     fold_lifecycle_phase(None, LifecyclePhase.QUARANTINED)
     return LifecyclePhase.QUARANTINED.value
+
+
+def enter_economically_closed_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.PENDING_EXIT:
+        raise ValueError(
+            f"economic close requires pending_exit runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.ECONOMICALLY_CLOSED)
+    return LifecyclePhase.ECONOMICALLY_CLOSED.value
+
+
+def enter_settled_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase not in {
+        LifecyclePhase.ACTIVE,
+        LifecyclePhase.DAY0_WINDOW,
+        LifecyclePhase.ECONOMICALLY_CLOSED,
+    }:
+        raise ValueError(
+            f"settlement requires active/day0/economically_closed runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
+    return LifecyclePhase.SETTLED.value
+
+
+def enter_admin_closed_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase is not LifecyclePhase.PENDING_EXIT:
+        raise ValueError(
+            f"admin close requires pending_exit runtime phase, got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.ADMIN_CLOSED)
+    return LifecyclePhase.ADMIN_CLOSED.value
+
+
+def enter_voided_runtime_state(
+    current_state: object,
+    *,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> str:
+    current_phase = phase_for_runtime_position(
+        state=current_state,
+        exit_state=exit_state,
+        chain_state=chain_state,
+    )
+    if current_phase not in {
+        LifecyclePhase.PENDING_ENTRY,
+        LifecyclePhase.ACTIVE,
+        LifecyclePhase.DAY0_WINDOW,
+        LifecyclePhase.PENDING_EXIT,
+        LifecyclePhase.ECONOMICALLY_CLOSED,
+    }:
+        raise ValueError(
+            "void transition requires pending/active/day0/pending_exit/economically_closed runtime phase, "
+            f"got {current_phase.value!r}"
+        )
+    fold_lifecycle_phase(current_phase, LifecyclePhase.VOIDED)
+    return LifecyclePhase.VOIDED.value
 
 
 def release_pending_exit_runtime_state(

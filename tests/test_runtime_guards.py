@@ -3157,6 +3157,65 @@ def test_lifecycle_kernel_releases_pending_exit_to_preserved_or_active_runtime_s
     assert release_pending_exit_runtime_state("", day0_entered_at="") == "holding"
 
 
+def test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions():
+    from src.state.lifecycle_manager import (
+        enter_admin_closed_runtime_state,
+        enter_economically_closed_runtime_state,
+        enter_settled_runtime_state,
+        enter_voided_runtime_state,
+    )
+
+    assert enter_economically_closed_runtime_state("pending_exit", exit_state="sell_pending") == "economically_closed"
+    assert enter_settled_runtime_state("economically_closed") == "settled"
+    assert enter_admin_closed_runtime_state(
+        "pending_exit",
+        exit_state="retry_pending",
+        chain_state="exit_pending_missing",
+    ) == "admin_closed"
+    assert enter_voided_runtime_state("pending_tracked") == "voided"
+
+
+def test_lifecycle_kernel_rejects_portfolio_terminal_transition_from_wrong_phase():
+    from src.state.lifecycle_manager import enter_admin_closed_runtime_state
+
+    with pytest.raises(ValueError, match="admin close requires pending_exit runtime phase"):
+        enter_admin_closed_runtime_state("entered")
+
+
+def test_compute_economic_close_routes_pending_exit_through_kernel():
+    from src.state.portfolio import PortfolioState, compute_economic_close
+
+    pos = _position(state="pending_exit", exit_state="sell_pending")
+    state = PortfolioState(positions=[pos])
+
+    closed = compute_economic_close(
+        state,
+        pos.trade_id,
+        exit_price=0.46,
+        exit_reason="forward edge failed",
+    )
+
+    assert closed is pos
+    assert pos.state == "economically_closed"
+
+
+def test_compute_settlement_close_routes_economically_closed_through_kernel():
+    from src.state.portfolio import PortfolioState, compute_settlement_close
+
+    pos = _position(state="economically_closed")
+    state = PortfolioState(positions=[pos])
+
+    closed = compute_settlement_close(
+        state,
+        pos.trade_id,
+        settlement_price=1.0,
+        exit_reason="SETTLEMENT",
+    )
+
+    assert closed is pos
+    assert pos.state == "settled"
+
+
 def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_release():
     pos = _position(state="day0_window")
     pos.day0_entered_at = "2026-04-04T00:00:00Z"
