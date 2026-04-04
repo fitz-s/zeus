@@ -257,6 +257,40 @@ If a human user can still trivially identify blocker-level issues after a closur
 
 When several confirmed defects sit on the same bottom-layer truth boundary and a human explicitly directs one repair package, Zeus may use one tightly bounded repair packet instead of artificial fragmentation, but that packet must still keep files, evidence, and non-goals explicit.
 
+### 7.0.b Post-close advancement gate
+
+Packet acceptance is not, by itself, permission to advance to the next packet.
+
+Before a packet is marked accepted or pushed, its pre-close critic/verifier review must already be complete.
+
+After a packet is marked accepted/pushed, Zeus must run:
+- one additional independent third-party critic review, and
+- one additional verifier pass
+
+on the accepted packet boundary before the next packet freeze is allowed.
+
+If that post-close review finds a contradiction, stale control-surface snapshot, or evidence gap:
+- treat advancement as blocked,
+- repair or reopen explicitly,
+- synchronize slim and durable control surfaces to repo truth,
+- and rerun the post-close gate before proceeding.
+
+### 7.0.c Evidence visibility rule
+
+Every item listed in a packet’s `evidence_required` field must be explicitly visible either:
+- in the packet file itself, or
+- in a clearly named paired evidence/control surface that the packet references.
+
+Zeus must not treat chat memory, implied reviewer context, or unrecorded rationale as acceptable substitutes for required evidence.
+
+### 7.0.d Capability-present / capability-absent proof rule
+
+When a packet introduces behavior that depends on a capability or substrate being present, its acceptance must explicitly cover both:
+- the capability-present behavior, and
+- the capability-absent behavior.
+
+If the absent-path behavior is advisory skip, fail-loud, or staged no-op, that must be stated plainly and evidenced directly instead of being silently collapsed into the present-path success claim.
+
 ### 7.1 Minimum evidence by class
 - **Math:** targeted tests + strategy/risk evidence + no truth-contract drift
 - **Architecture:** tests + manifests/invariants reference + gate output + rollback
