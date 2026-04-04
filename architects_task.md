@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 acceptance pass`
+- Last updated by: `Codex P5 family closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,26 +17,18 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- State: `ACCEPTED / PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `none`
+- State: `P5 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Lock the remaining quarantine semantics that define P5 completion by proving quarantined and quarantine-expired positions stay outside standard active exposure/open-position semantics and only follow the dedicated resolution path.
+No live packet. The P5 family is complete under current repo truth.
 
 ## Allowed files
 
-- work_packets/P5.4-QUARANTINE-SEMANTICS-HARDENING.md
-- src/state/portfolio.py
-- src/engine/cycle_runner.py
-- src/engine/cycle_runtime.py
-- tests/test_runtime_guards.py
-- tests/test_live_safety_invariants.py
-- architects_progress.md
-- architects_task.md
-- architects_state_index.md
+- future packet surfaces only after a new non-P5 freeze
 
 ## Forbidden files
 
@@ -45,15 +37,17 @@ Lock the remaining quarantine semantics that define P5 completion by proving qua
 - `docs/architecture/**`
 - `architecture/**`
 - `migrations/**`
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
+- `AGENTS.md`
+- `docs/governance/**`
+- `docs/architecture/**`
+- `architecture/**`
+- `migrations/**`
 - `src/control/**`
-- `src/execution/**`
 - `src/observability/**`
 - `src/riskguard/**`
-- `src/state/db.py`
-- `src/state/chain_reconciliation.py`
 - `src/supervisor_api/**`
 - `tests/test_architecture_contracts.py`
-- `tests/test_db.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_replay_time_provenance.py`
 - `.github/workflows/**`
@@ -62,16 +56,15 @@ Lock the remaining quarantine semantics that define P5 completion by proving qua
 
 ## Non-goals
 
-- no broad runtime hotspot rewiring
-- no dashboard/observability/control-plane widening
+- no next-phase work without a new frozen packet
 - no schema changes
-- no cutover or migration claims
+- no dashboard/observability/control-plane widening
+- no cutover
 - no team launch
 
 ## Current blocker state
 
-- no blocker on the accepted P5.4 boundary itself
-- the post-close third-party critic/verifier gate is still pending
+- no active blocker inside the completed P5 family boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -138,8 +131,10 @@ Lock the remaining quarantine semantics that define P5 completion by proving qua
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P5.4 accepted and pushed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
-2. Record P5 family closeout only after that gate passes.
+1. Stop at the completed P5 family boundary.
+2. If continuing later, freeze the next non-P5 packet before any implementation.

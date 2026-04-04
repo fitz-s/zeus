@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P5.4 acceptance pass`
+- Last updated by: `Codex P5 family closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,14 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P5 lifecycle phase engine start`
+- Mainline stage: `P5 family complete`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `none`
+- Current packet status: `P5 family closeout recorded / awaiting next phase freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P5.4 boundary itself
-  - post-close third-party critic/verifier gate still pending
+  - no active blocker inside the completed P5 family boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -475,6 +474,51 @@ Archive policy:
   - the accepted boundary still needs the post-close third-party critic + verifier gate before P5 family closeout may be recorded
 - Next required action:
   - run the post-close third-party critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:15 America/Chicago] P5.4-QUARANTINE-SEMANTICS-HARDENING post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - P5 family closeout became allowed
+- Basis / evidence:
+  - post-close verifier lane -> `PASS`
+  - post-close critic lane -> `PASS`
+  - accepted P5.4 control surfaces consistently showed `accepted and pushed / post-close gate pending` until this gate cleared
+- Decisions frozen:
+  - P5 family closeout may now be recorded honestly
+- Open uncertainties:
+  - none beyond preserving the explicit P5 scope boundary in the closeout language
+- Next required action:
+  - record P5 family closeout truth
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:17 America/Chicago] P5 family closeout recorded
+- Author: `Architects mainline lead`
+- Packet family: `P5`
+- Status delta:
+  - P5 family completion is now recorded under current repo truth
+  - no further P5 implementation packet is required under current repo law
+- Basis / evidence:
+  - `P5.1-LIFECYCLE-PHASE-KERNEL` accepted and passed post-close review
+  - `P5.2-FOLD-LEGALITY-FOLLOW-THROUGH` accepted and passed post-close review
+  - `P5.3A-EXIT-LIFECYCLE-PHASE-HOTSPOT` accepted and passed post-close review
+  - `P5.3B-DAY0-LIFECYCLE-PHASE-HOTSPOT` accepted and passed post-close review
+  - `P5.3C-RECONCILIATION-LIFECYCLE-HOTSPOT` accepted and passed post-close review
+  - `P5.3D-PORTFOLIO-TERMINAL-LIFECYCLE-HOTSPOT` accepted and passed post-close review
+  - `P5.3E-ENTRY-LIFECYCLE-HOTSPOTS` accepted and passed post-close review
+  - `P5.4-QUARANTINE-SEMANTICS-HARDENING` accepted and passed post-close review
+- Decisions frozen:
+  - P5 now covers kernel-owned lifecycle vocabulary, explicit fold legality, hotspot cleanup across exit/day0/reconciliation/terminal/entry seams, and explicit quarantine semantics proof
+  - this closeout does not claim later control-plane durability, migration, or non-P5 phase work
+- Open uncertainties:
+  - none inside the completed P5 family boundary
+- Next required action:
+  - stop at the P5 family boundary until a new non-P5 packet is frozen
 - Owner:
   - Architects mainline lead
 
