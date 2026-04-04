@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- State: `ACCEPTED / PUSHED / RENEWED POST-CLOSE GATE PENDING`
+- State: `ACCEPTED / PUSHED / RENEWED POST-CLOSE CRITIC PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -30,17 +30,13 @@ Reopened P5.4 to repair the missing explicit proof that `quarantine_expired` pos
 
 - work_packets/P5.4-QUARANTINE-SEMANTICS-HARDENING.md
 - tests/test_runtime_guards.py
+- tests/test_live_safety_invariants.py
 - architects_progress.md
 - architects_task.md
 - architects_state_index.md
 
 ## Forbidden files
 
-- `AGENTS.md`
-- `docs/governance/**`
-- `docs/architecture/**`
-- `architecture/**`
-- `migrations/**`
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -67,7 +63,7 @@ Reopened P5.4 to repair the missing explicit proof that `quarantine_expired` pos
 
 ## Current blocker state
 
-- renewed post-close gate is pending because `quarantine_expired` exposure exclusion proof was missing from the accepted P5.4 boundary
+- renewed post-close critic gate is pending after the reopened `quarantine_expired` exposure proof repair
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -135,14 +131,11 @@ Reopened P5.4 to repair the missing explicit proof that `quarantine_expired` pos
 - [x] pre-close verifier review passed
 - [x] P5.4 accepted and pushed
 - [x] renewed missing-proof blocker identified
-- [ ] `quarantine_expired` exposure exclusion proof added
+- [x] `quarantine_expired` exposure exclusion proof added
 - [ ] renewed post-close critic review passed
-- [ ] renewed post-close verifier review passed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] renewed post-close verifier review passed
 
 ## Next required action
 
-1. Commit the missing `quarantine_expired` exposure proof inside the reopened P5.4 boundary.
-2. Rerun the renewed post-close critic + verifier on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
-3. Re-record P5 family closeout only after that renewed gate passes.
+1. Rerun the renewed post-close critic on accepted `P5.4-QUARANTINE-SEMANTICS-HARDENING`.
+2. Re-record P5 family closeout only after that renewed critic passes.

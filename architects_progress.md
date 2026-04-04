@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P5 in progress`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Current active packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
-- Current packet status: `accepted and pushed / renewed post-close gate pending`
+- Current packet status: `accepted and pushed / renewed post-close critic pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - renewed post-close gate is pending because `quarantine_expired` exposure exclusion proof was missing from the accepted P5.4 boundary
+  - renewed post-close critic gate is pending after the `quarantine_expired` exposure exclusion proof repair
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
