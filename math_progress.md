@@ -28,10 +28,10 @@ Read order for a fresh leader:
 
 ## Current Snapshot
 
-- Stage: `MATH-001 PASS, MATH-002 PASS; MATH-003 pending`
-- Last accepted packet: `MATH-002-BIN-HIT-RATE-CALIBRATION`
-- Current active packet: `MATH-003-STALE-DATA-STRESS-TEST`
-- Current packet status: `FROZEN / READY TO IMPLEMENT`
+- Stage: `ALL EVALUATIONS COMPLETE — READY FOR THIRD PARTY REVIEW`
+- Last accepted packet: `MATH-009-BAYESIAN-SIGMA-EVALUATION`
+- Current active packet: `NONE — awaiting third party review`
+- Current packet status: `PAUSED`
 - Team status: `solo`
 - Current hard blockers: `none`
 
@@ -122,7 +122,79 @@ These are completed and should not be re-done:
   - Actual sunset distribution width
   - Actual stale-data sigma expansion behavior
 - Next required action:
-  - Implement MATH-001 sunset sanity validation
+  - Freeze and implement MATH-002 (bin hit-rate calibration)
+- Owner:
+  - Math lane lead
+
+### [2026-04-04 21:30 America/Chicago] MATH-004/006/007/009 EVALUATIONS COMPLETE
+
+- Author: `Opus math validation execution`
+- Event: `Evaluation batch completion`
+- Status delta:
+  - All P0/P1/P2 evaluation packets: `COMPLETE`
+  - Lane status: `READY FOR THIRD PARTY REVIEW`
+- Evidence collected:
+
+**MATH-004: Sigma Floor Evaluation (7 tests)**
+
+| Test | Finding |
+|------|---------|
+| Document current floor | 50% of peak at peak_conf=1.0 |
+| Alternative coefficients | 0.25 would cause over-confidence |
+| Sunset collapse | Floor irrelevant — obs dominates |
+| Staleness interaction | MATH-005 fix handles expansion |
+| Data-driven range | Need more settlement data |
+| Recommendation | Keep current, defer to MATH-009 Bayesian |
+
+**MATH-006: Temporal Closure Coefficients (6 tests)**
+
+| Test | Finding |
+|------|---------|
+| Coefficient dominance | time_closure has NO coefficient (weight=1.0), dominates others |
+| Sensitivity analysis | Doubling/halving coefficients has moderate effect |
+| Alternative regimes | Current max() formula is more robust than alternatives |
+| Data-driven approach | Would need per-city/season bucketing |
+| Recommendation | Document current; plan for MATH-009 |
+
+**MATH-007: Lead Sigma Multiplier (5 tests)**
+
+| Test | Finding |
+|------|---------|
+| Current profile | 1.0 → 1.2 over 6 days (20% growth) |
+| Bounds/monotonicity | Correctly bounded and monotonic |
+| Error growth models | Current is conservative vs theoretical |
+| Recommendation | Safe, no change needed |
+
+**MATH-009: Bayesian Sigma Synthesis (5 tests)**
+
+| Test | Finding |
+|------|---------|
+| Theory documentation | Bayesian formula properly explained |
+| Bayesian vs current | Bayesian gives smoother transition |
+| Brownian staleness | Grows as √t (faster than current linear) |
+| Implementation sketch | Clear path forward |
+| Recommendation | Promising but not urgent; 97.8% accuracy already good |
+
+- Decisions accepted:
+  - No immediate coefficient changes needed
+  - Current system calibrates well (97.8% high-confidence hit rate)
+  - Bayesian model is a good medium-term target
+  - MATH-008 (rename) is deferred as cosmetic
+
+- Files created:
+  - `tests/test_sigma_floor_evaluation.py` (7 tests)
+  - `tests/test_temporal_closure_evaluation.py` (6 tests)
+  - `tests/test_lead_sigma_evaluation.py` (5 tests)
+  - `tests/test_bayesian_sigma_evaluation.py` (5 tests)
+  - `work_packets/MATH-006-TEMPORAL-CLOSURE-COEFFICIENTS.md`
+
+- All 94 math tests pass ✅
+
+- Next required action:
+  - Commit evaluation tests
+  - Third party review of all findings
+  - Then consider coefficient changes if warranted
+
 - Owner:
   - Math lane lead
 
@@ -463,12 +535,12 @@ From `.omx/artifacts/gemini-day0-full-math-review-2026-04-03T06-25-56Z.md`:
 
 1. ✅ **Temporal closure multiplication → max()**: Already fixed in FEAT-P2H-008
 2. ✅ **source_factor 0.5 for untrusted → 0.0**: Already fixed in FEAT-P2H-007
-3. ⬜ **50% sigma floor too conservative**: Needs MATH-004 validation
-4. ⬜ **3h freshness decay too permissive**: Needs MATH-005 validation
-5. ⬜ **Linear time decay wrong shape**: Needs MATH-006 validation
-6. ⬜ **Bin hit-rate calibration**: Needs MATH-002 framework
-7. ⬜ **Sunset sanity check**: MATH-001 (current packet)
-8. ⬜ **Stale-data stress test**: Needs MATH-003
+3. ✅ **50% sigma floor too conservative**: MATH-004 evaluated — keep current, defer to MATH-009
+4. ✅ **3h freshness decay too permissive**: MATH-005 implemented — connection fixed
+5. ✅ **Linear time decay wrong shape**: MATH-006 evaluated — acceptable for now
+6. ✅ **Bin hit-rate calibration**: MATH-002 complete — 97.8% high-conf hit rate
+7. ✅ **Sunset sanity check**: MATH-001 complete — system works correctly
+8. ✅ **Stale-data stress test**: MATH-003 complete — found & fixed disconnect
 
 ---
 

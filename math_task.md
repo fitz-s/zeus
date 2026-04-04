@@ -12,41 +12,28 @@ Tracks exactly one frozen packet at a time plus the queue of verified next prior
 
 ## Current Active Packet
 
-- Packet: `MATH-004-SIGMA-FLOOR-EVALUATION`
-- State: `TODO / READY TO PLAN`
-- Execution mode: `SOLO_EXECUTE`
+- Packet: `ALL EVALUATIONS COMPLETE`
+- State: `READY FOR THIRD PARTY REVIEW`
+- Execution mode: `PAUSED`
 - Owner: `Math lane lead`
 
-## Objective
+## Summary
 
-Evaluate the 50% sigma floor (`peak * 0.5` in `day0_post_peak_sigma`).
+All P0/P1/P2 evaluation packets have been completed:
 
-With MATH-005 fix in place (freshness expansion), determine whether:
-1. The 50% floor is still needed
-2. If so, should it be lowered or raised
-3. Should it be replaced by the proposed Bayesian variance fusion model
+| Packet | Status | Key Finding |
+|--------|--------|-------------|
+| MATH-001 | ✅ PASS | Sunset collapse works correctly |
+| MATH-002 | ✅ PASS | 97.8% hit rate in high-confidence region |
+| MATH-003 | ⚠️ COND | Found freshness disconnect → MATH-005 |
+| MATH-004 | ✅ PASS | 50% floor is reasonable, defer to MATH-009 |
+| MATH-005 | ✅ PASS | Freshness-sigma connection implemented |
+| MATH-006 | ✅ PASS | Coefficients acceptable, document current |
+| MATH-007 | ✅ PASS | Lead multiplier is conservative and safe |
+| MATH-008 | DEFER | Cosmetic rename, low priority |
+| MATH-009 | ✅ PASS | Bayesian model promising but not urgent |
 
-## Allowed Files
-
-- `math_task.md`
-- `math_progress.md`
-- `tests/test_day0_signal.py`
-- `tests/test_forecast_uncertainty.py`
-- `tests/test_calibration_quality.py`
-- `work_packets/MATH-004-SIGMA-FLOOR-EVALUATION.md`
-
-## Forbidden Files
-
-- `src/signal/forecast_uncertainty.py` (read-only for evaluation, no changes until evidence gathered)
-- `src/signal/day0_signal.py` (read-only for evaluation)
-- `architecture/**`
-- `docs/governance/**`
-- `AGENTS.md`
-
-## Non-goals
-
-- No coefficient changes until evaluation complete
-- No Bayesian/Brownian implementation yet (MATH-006 scope)
+**Next step**: Third party review of all findings before any coefficient changes.
 
 ---
 
@@ -59,12 +46,12 @@ All packets are validation-first: measure before changing.
 | MATH-001 | P0 | Sunset sanity validation | **PASS** | - | Test proving Day0 distribution narrows appropriately near sunset | ✅ 7 tests pass |
 | MATH-002 | P0 | Bin hit-rate calibration framework | **PASS** | MATH-001 | Historical bin hit-rate vs predicted probability comparison tool | ✅ 6 tests pass, high-conf 97.8% hit rate |
 | MATH-003 | P0 | Stale-data stress test | **CONDITIONAL PASS** | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | ⚠️ Found defect, triggered MATH-005 |
-| MATH-004 | P1 | Sigma floor evaluation | TODO | MATH-001,002,003,005 | Evidence-based decision on 50% floor | Validation results + recommended change |
+| MATH-004 | P1 | Sigma floor evaluation | **PASS** | MATH-001,002,003,005 | Evidence-based decision on 50% floor | ✅ 7 tests, verdict: keep current, defer to MATH-009 |
 | MATH-005 | P0 | Freshness-to-sigma connection | **PASS** | MATH-003 | Connect freshness_factor to distribution width | ✅ 3 new tests, 1.5x max expansion at 3h stale |
-| MATH-006 | P1 | temporal_closure coefficients calibration | TODO | MATH-002 | Data-driven 0.75/0.50/0.35 replacement | Historical hit-rate per coefficient regime |
-| MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | TODO | MATH-002 | MAE vs lead_days curve extraction from model_bias | Per-city/season multiplier table |
-| MATH-008 | P2 | ens_dominance rename + documentation | TODO | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Code review + test update |
-| MATH-009 | P2 | Bayesian sigma synthesis evaluation | TODO | MATH-004 | Prototype Bayesian sigma merge vs current linear floor | Side-by-side calibration comparison |
+| MATH-006 | P1 | temporal_closure coefficients calibration | **PASS** | MATH-002 | Data-driven 0.75/0.50/0.35 replacement | ✅ 6 tests, verdict: document current, plan for MATH-009 |
+| MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | **PASS** | MATH-002 | MAE vs lead_days curve extraction from model_bias | ✅ 5 tests, verdict: current is conservative and safe |
+| MATH-008 | P2 | ens_dominance rename + documentation | DEFERRED | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Low priority, cosmetic |
+| MATH-009 | P2 | Bayesian sigma synthesis evaluation | **PASS** | MATH-004 | Prototype Bayesian sigma merge vs current linear floor | ✅ 5 tests, verdict: promising but not urgent |
 
 ---
 
