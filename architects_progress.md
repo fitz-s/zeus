@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.5 freeze pass`
+- Last updated by: `Codex P3.5 closeout pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P3 strategy-aware protective spine`
-- Last accepted packet: `P3.4-RISKGUARD-POLICY-EMISSION`
-- Current active packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
-- Current packet status: `frozen / ready for execution`
-- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but current packet remains `solo / no-team-default`
+- Mainline stage: `P3 post-close review after final precedence proof`
+- Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Current active packet: `none`
+- Current packet status: `awaiting post-close review gate`
+- Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside packet scope
+  - run the user-required post-close third-party critic + verifier before recording P3 family closeout
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1483,5 +1483,30 @@ Archive policy:
   - whether any code change is still needed beyond targeted end-to-end precedence tests
 - Next required action:
   - implement `P3.5-MANUAL-OVERRIDE-PRECEDENCE` and run targeted precedence tests
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-03 19:43 America/Chicago] P3.5-MANUAL-OVERRIDE-PRECEDENCE accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
+- Status delta:
+  - packet accepted
+  - packet pushed
+  - final P3 precedence proof is now cloud-visible truth
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py tests/test_riskguard.py` -> `78 passed`
+  - independent verifier review -> `ACCEPTED`
+  - explicit adversarial review -> `Acceptable to close P3.5`
+- Decisions frozen:
+  - manual overrides now have packet-bounded end-to-end precedence proof over automatic risk actions on the active evaluator/resolver path
+  - expired manual overrides now have packet-bounded end-to-end proof that automatic policy is restored
+  - no riskguard emission, control-plane-write, or post-P3 phase work is claimed in this packet
+- Open uncertainties:
+  - P3 family closeout still requires the user-required post-close third-party critic + verifier gate on this accepted boundary
+- Next required action:
+  - run the user-required post-close third-party critic + verifier before recording P3 family closeout
 - Owner:
   - Architects mainline lead

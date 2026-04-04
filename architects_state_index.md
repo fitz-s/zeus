@@ -6,25 +6,25 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.5 freeze pass`
+- Last updated by: `Codex P3.5 closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 strategy-aware protective spine`
-- Active packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
-- Active packet state: `frozen / ready for execution`
+- Stage: `P3 post-close review after final precedence proof`
+- Active packet: `none`
+- Active packet state: `awaiting post-close review gate`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P3.4-RISKGUARD-POLICY-EMISSION`
+- Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - current packet is `NO_TEAM_DEFAULT`
+  - no team is active
 
 ## Current next action
 
-1. Read the current packet `required_reads` before implementation.
-2. Keep `P3.5-MANUAL-OVERRIDE-PRECEDENCE` confined to final precedence proof only.
+1. Run post-close third-party critic + verifier on the accepted P3.5 boundary.
+2. If post-close review passes, record the P3 family closeout truth.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -43,5 +43,5 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P3.5-MANUAL-OVERRIDE-PRECEDENCE.md`
-6. current packet `required_reads`
+5. accepted packet `work_packets/P3.5-MANUAL-OVERRIDE-PRECEDENCE.md`
+6. record P3 family closeout only after post-close review passes
