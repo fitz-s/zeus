@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.3 acceptance pass`
+- Last updated by: `Codex P4.4 freeze pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P4 in progress`
 - Active packet: `none`
-- Active packet state: `P4.3 accepted and pushed / post-close gate pending`
+- Active packet state: `P4.4 frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P4.3-EXECUTION-FACTS`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close third-party critic and verifier gate on accepted P4.3.
-2. Only freeze `P4.4-OUTCOME-FACTS` after the post-close gate passes.
+1. Execute `P4.4-OUTCOME-FACTS` within its frozen file boundary.
+2. Preserve the pre-close and post-close critic/verifier gates before any next freeze.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -35,9 +35,13 @@ Metadata:
 - `docs/architecture/zeus_design_philosophy.md` has an unrelated local deletion and stays out of scope
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
-- `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
 - `architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
+- `next_round_handoff.md` has an unrelated local deletion and stays out of scope
+- `src/signal/forecast_uncertainty.py` has unrelated local modifications and stays out of scope
+- `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
+- local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
+- `zeus_final_tribunal_overlay/` is a tracked reference subtree outside packet scope and must remain untouched
 
 ## Fresh-session read order
 
@@ -45,4 +49,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/P4.3-EXECUTION-FACTS.md`
+5. `work_packets/P4.4-OUTCOME-FACTS.md`

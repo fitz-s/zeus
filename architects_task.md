@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.3 acceptance pass`
+- Last updated by: `Codex P4.4 freeze pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,25 +18,28 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `P4.3 ACCEPTED / POST-CLOSE GATE PENDING`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. P4.3 is accepted and pushed under current repo truth, and the post-close third-party gate must now finish before P4.4 can freeze.
+Install the first durable `outcome_fact` writer path for economically completed positions without widening into analytics-query work or settlement-law redesign.
 
 ## Allowed files
 
-- post-close review evidence surfaces for accepted P4.3
-- `work_packets/P4.3-EXECUTION-FACTS.md`
+- `work_packets/P4.4-OUTCOME-FACTS.md`
+- `src/state/db.py`
+- `src/execution/harvester.py`
+- `tests/test_db.py`
+- `tests/test_runtime_guards.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until the post-close gate passes and the next packet is frozen
+- all repo surfaces outside the frozen P4.4 packet boundary
 - `AGENTS.md`
 - `docs/governance/**`
 - `docs/architecture/**`
@@ -56,7 +59,7 @@ No live packet. P4.3 is accepted and pushed under current repo truth, and the po
 
 ## Non-goals
 
-- no `P4.4-OUTCOME-FACTS` freeze before the post-close gate passes
+- no analytics-query work
 - no runtime code change
 - no schema changes
 - no cutover
@@ -64,8 +67,7 @@ No live packet. P4.3 is accepted and pushed under current repo truth, and the po
 
 ## Current blocker state
 
-- no blocker on the accepted P4.3 boundary itself
-- the user-required post-close third-party critic/verifier gate is still pending
+- no active blocker at freeze time
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -75,10 +77,15 @@ No live packet. P4.3 is accepted and pushed under current repo truth, and the po
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P4.3 accepted and pushed
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P4.4 packet is frozen
+- [ ] P4.4 runtime/state seam implemented
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P4.4 accepted and pushed
 
 ## Next required action
 
-1. Run the post-close third-party critic + verifier on accepted P4.3.
-2. Freeze `P4.4-OUTCOME-FACTS` only after that gate passes.
+1. Implement `P4.4-OUTCOME-FACTS` within the frozen file boundary.
+2. Run targeted tests plus pre-close critic/verifier before acceptance.

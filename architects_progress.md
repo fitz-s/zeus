@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P4.3 acceptance pass`
+- Last updated by: `Codex P4.4 freeze pass`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,11 +33,10 @@ Archive policy:
 - Mainline stage: `P4 in progress`
 - Last accepted packet: `P4.3-EXECUTION-FACTS`
 - Current active packet: `none`
-- Current packet status: `P4.3 accepted and pushed / post-close gate pending`
+- Current packet status: `P4.4 frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker on the accepted P4.3 boundary itself
-  - the post-close third-party critic/verifier gate is still pending before P4.4 can freeze
+  - no active blocker at P4.4 freeze time
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -1866,5 +1865,83 @@ Archive policy:
   - the accepted P4.3 boundary still requires the user-required post-close third-party critic + verifier gate before `P4.4-OUTCOME-FACTS` may freeze
 - Next required action:
   - run the post-close third-party critic + verifier on accepted P4.3
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:12 America/Chicago] P4.3 post-close verifier passed
+- Author: `Verifier subagent integrated by Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - post-close verifier half passed
+- Basis / evidence:
+  - verifier subagent confirmed current repo truth still satisfies the accepted P4.3 boundary and that next-freeze permission still waits on critic evidence
+- Decisions frozen:
+  - do not freeze `P4.4-OUTCOME-FACTS` yet because the critic half remains outstanding
+- Open uncertainties:
+  - critic side still needs to clear the post-close gate
+- Next required action:
+  - complete the critic side of the post-close gate
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:15 America/Chicago] P4.3 post-close critic failed on stale out-of-scope dirt accounting
+- Author: `Critic subagent integrated by Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - post-close gate remains blocked
+- Basis / evidence:
+  - critic found the control surfaces' out-of-scope dirt snapshot incomplete versus current `git status`
+  - no packet-boundary blocker or hidden widening was found in the accepted P4.3 code itself
+- Decisions frozen:
+  - treat this as a control-surface repair issue, not a P4.3 runtime-code defect
+  - do not freeze `P4.4-OUTCOME-FACTS` until the stale dirt accounting is repaired and critic reruns
+- Open uncertainties:
+  - none beyond the repaired critic rerun
+- Next required action:
+  - synchronize the out-of-scope dirt snapshot and rerun the post-close critic
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:18 America/Chicago] P4.3 post-close gate passed after control-surface repair
+- Author: `Architects mainline lead`
+- Packet: `P4.3-EXECUTION-FACTS`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze becomes allowed again
+- Basis / evidence:
+  - verifier subagent -> `PASS`
+  - critic subagent rerun -> `PASS`
+  - synchronized dirt snapshot now matches current repo truth for the reviewed boundary
+- Decisions frozen:
+  - `P4.4-OUTCOME-FACTS` may now be frozen as the next packet
+- Open uncertainties:
+  - none on the accepted P4.3 boundary beyond preserving its packet scope limit
+- Next required action:
+  - freeze `P4.4-OUTCOME-FACTS`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-04 13:20 America/Chicago] P4.4-OUTCOME-FACTS frozen
+- Author: `Architects mainline lead`
+- Packet: `P4.4-OUTCOME-FACTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P4.3 execution-fact boundary plus passed post-close gate now permit the next P4 freeze
+  - `docs/architecture/zeus_durable_architecture_spec.md` names outcome facts as the fourth P4 sequence item
+  - current repo truth still keeps completed-position outcome truth indirect rather than a dedicated durable outcome fact row
+- Decisions frozen:
+  - keep this packet on current economically-complete position `outcome_fact` writes only
+  - do not widen into analytics-query work or settlement-law redesign
+  - keep team closed by default
+- Open uncertainties:
+  - exact source seam for monitoring counts and chain correction counts still needs implementation review inside the frozen boundary
+- Next required action:
+  - implement `P4.4-OUTCOME-FACTS` and run targeted runtime/db tests
 - Owner:
   - Architects mainline lead
