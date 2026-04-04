@@ -3141,6 +3141,37 @@ def test_check_pending_exits_restores_entered_state_after_bare_exit_intent_relea
     assert pos.state == "entered"
 
 
+def test_lifecycle_kernel_enters_pending_exit_from_active_and_day0_states():
+    from src.state.lifecycle_manager import enter_pending_exit_runtime_state
+
+    assert enter_pending_exit_runtime_state("entered") == "pending_exit"
+    assert enter_pending_exit_runtime_state("holding") == "pending_exit"
+    assert enter_pending_exit_runtime_state("day0_window") == "pending_exit"
+
+
+def test_lifecycle_kernel_releases_pending_exit_to_preserved_or_active_runtime_state():
+    from src.state.lifecycle_manager import release_pending_exit_runtime_state
+
+    assert release_pending_exit_runtime_state("entered") == "entered"
+    assert release_pending_exit_runtime_state("", day0_entered_at="2026-04-04T00:00:00Z") == "day0_window"
+    assert release_pending_exit_runtime_state("", day0_entered_at="") == "holding"
+
+
+def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_release():
+    pos = _position(state="day0_window")
+    pos.day0_entered_at = "2026-04-04T00:00:00Z"
+    pos.exit_state = "exit_intent"
+    pos.last_exit_error = ""
+    portfolio = PortfolioState(positions=[pos])
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=None, conn=None)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos.exit_state == ""
+    assert pos.state == "day0_window"
+
+
 def test_check_pending_exits_emits_void_semantics_for_rejected_sell(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
