@@ -12,44 +12,41 @@ Tracks exactly one frozen packet at a time plus the queue of verified next prior
 
 ## Current Active Packet
 
-- Packet: `MATH-005-FRESHNESS-SIGMA-CONNECTION`
-- State: `REQUIRED FIX (blocking)`
+- Packet: `MATH-004-SIGMA-FLOOR-EVALUATION`
+- State: `TODO / READY TO PLAN`
 - Execution mode: `SOLO_EXECUTE`
 - Owner: `Math lane lead`
-- Reason: `MATH-003 proved freshness_factor is disconnected from distribution width`
 
 ## Objective
 
-Fix the defect discovered in MATH-003: `freshness_factor` in `day0_nowcast_context()` is computed but **not propagated** to distribution width calculations.
+Evaluate the 50% sigma floor (`peak * 0.5` in `day0_post_peak_sigma`).
 
-During mid-day peak heating:
-- `freshness_factor` correctly decays from 1.0 to 0.0 over 3 hours
-- But `observation_weight` and `effective_std` **do not change**
-- Sigma expansion ratio = 1.00x (no expansion for stale data)
-
-This violates the expected behavior that stale observations should increase uncertainty.
+With MATH-005 fix in place (freshness expansion), determine whether:
+1. The 50% floor is still needed
+2. If so, should it be lowered or raised
+3. Should it be replaced by the proposed Bayesian variance fusion model
 
 ## Allowed Files
 
 - `math_task.md`
 - `math_progress.md`
-- `src/signal/forecast_uncertainty.py` (NOW ALLOWED — fix implementation)
 - `tests/test_day0_signal.py`
 - `tests/test_forecast_uncertainty.py`
-- `work_packets/MATH-005-FRESHNESS-SIGMA-CONNECTION.md`
+- `tests/test_calibration_quality.py`
+- `work_packets/MATH-004-SIGMA-FLOOR-EVALUATION.md`
 
 ## Forbidden Files
 
-- `src/signal/day0_signal.py` (until this fix is complete)
+- `src/signal/forecast_uncertainty.py` (read-only for evaluation, no changes until evidence gathered)
+- `src/signal/day0_signal.py` (read-only for evaluation)
 - `architecture/**`
 - `docs/governance/**`
 - `AGENTS.md`
 
 ## Non-goals
 
-- No coefficient changes beyond the freshness fix
-- No sigma floor changes (MATH-004)
-- No Bayesian/Brownian model implementation yet (later packet)
+- No coefficient changes until evaluation complete
+- No Bayesian/Brownian implementation yet (MATH-006 scope)
 
 ---
 
@@ -61,9 +58,9 @@ All packets are validation-first: measure before changing.
 |----|----------|-------|--------|------------|-------------|------------|
 | MATH-001 | P0 | Sunset sanity validation | **PASS** | - | Test proving Day0 distribution narrows appropriately near sunset | ✅ 7 tests pass |
 | MATH-002 | P0 | Bin hit-rate calibration framework | **PASS** | MATH-001 | Historical bin hit-rate vs predicted probability comparison tool | ✅ 6 tests pass, high-conf 97.8% hit rate |
-| MATH-003 | P0 | Stale-data stress test | **CONDITIONAL PASS** | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | ⚠️ freshness_factor not connected to sigma — DEFECT FOUND |
-| MATH-004 | P1 | Sigma floor evaluation | TODO | MATH-001,002,003 | Evidence-based decision on 50% floor | Validation results + recommended change |
-| MATH-005 | **P0** | Freshness-to-sigma connection | **REQUIRED FIX** | MATH-003 | Connect freshness_factor to distribution width | Currently broken — staleness has no effect |
+| MATH-003 | P0 | Stale-data stress test | **CONDITIONAL PASS** | MATH-001 | Test proving 2h-stale trusted observation expands sigma appropriately | ⚠️ Found defect, triggered MATH-005 |
+| MATH-004 | P1 | Sigma floor evaluation | TODO | MATH-001,002,003,005 | Evidence-based decision on 50% floor | Validation results + recommended change |
+| MATH-005 | P0 | Freshness-to-sigma connection | **PASS** | MATH-003 | Connect freshness_factor to distribution width | ✅ 3 new tests, 1.5x max expansion at 3h stale |
 | MATH-006 | P1 | temporal_closure coefficients calibration | TODO | MATH-002 | Data-driven 0.75/0.50/0.35 replacement | Historical hit-rate per coefficient regime |
 | MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | TODO | MATH-002 | MAE vs lead_days curve extraction from model_bias | Per-city/season multiplier table |
 | MATH-008 | P2 | ens_dominance rename + documentation | TODO | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Code review + test update |

@@ -211,6 +211,83 @@ These are completed and should not be re-done:
 - Owner:
   - Math lane lead
 
+### [2026-04-04 17:10 America/Chicago] MATH-005-FRESHNESS-SIGMA-CONNECTION COMPLETED
+
+- Author: `Opus math lane execution`
+- Packet: `MATH-005-FRESHNESS-SIGMA-CONNECTION`
+- Status delta:
+  - Packet status: `REQUIRED FIX` → `PASS`
+  - Current active packet: `MATH-005` → `MATH-004`
+- Evidence collected:
+
+**Fix Implementation:**
+
+Modified `day0_post_peak_sigma()` in `src/signal/forecast_uncertainty.py`:
+
+```python
+def day0_post_peak_sigma(
+    unit: str,
+    peak_confidence: float,
+    freshness_factor: float = 1.0,  # NEW: default preserves backward compat
+) -> float:
+    peak = min(1.0, max(0.0, float(peak_confidence)))
+    fresh = min(1.0, max(0.0, float(freshness_factor)))
+    base_sigma = sigma_instrument(unit).value
+
+    # MATH-005: Add staleness expansion
+    peak_shrinkage = 1.0 - peak * 0.5
+    staleness_expansion = 1.0 + (1.0 - fresh) * 0.5  # up to 1.5x at freshness=0
+
+    return base_sigma * peak_shrinkage * staleness_expansion
+```
+
+**Direct Function Test Results:**
+
+| freshness_factor | sigma (F, peak=0.5) | expansion |
+|------------------|---------------------|-----------|
+| 1.000 | 0.375°F | 1.00x |
+| 0.833 | 0.406°F | 1.08x |
+| 0.667 | 0.437°F | 1.17x |
+| 0.333 | 0.500°F | 1.33x |
+| 0.000 | 0.562°F | 1.50x |
+
+**Integration:**
+
+Modified `Day0Signal.__init__()` in `src/signal/day0_signal.py`:
+- Now calls `day0_nowcast_context()` to get `freshness_factor`
+- Passes `freshness_factor` to `day0_post_peak_sigma()`
+
+**Test Results:**
+
+- 3 new tests added to `tests/test_forecast_uncertainty.py`:
+  - `test_day0_post_peak_sigma_expands_with_stale_data` ✅
+  - `test_day0_post_peak_sigma_freshness_is_bounded` ✅
+  - `test_day0_post_peak_sigma_freshness_profile` ✅
+- 1 existing test fixed in `tests/test_instrument_invariants.py`:
+  - `test_day0_post_peak_sigma_is_continuous` — needed fresh observation time
+- All 83 math-related tests pass ✅
+
+**Design Rationale:**
+
+1. **Backward compatible**: Default `freshness_factor=1.0` returns unchanged values
+2. **Bounded expansion**: Maximum 1.5x at 3h+ stale (conservative)
+3. **Linear profile**: Expansion is linear with staleness, easy to calibrate
+4. **Separate from Bayesian model**: This is a minimal fix; Brownian/Bayesian can be a later packet
+
+**Files changed:**
+- `src/signal/forecast_uncertainty.py`: Added freshness_factor parameter
+- `src/signal/day0_signal.py`: Import and pass freshness_factor
+- `tests/test_forecast_uncertainty.py`: 3 new tests
+- `tests/test_instrument_invariants.py`: Fixed 1 test
+- `work_packets/MATH-005-FRESHNESS-SIGMA-CONNECTION.md`: Created
+
+**Remaining work:**
+- MATH-004: Sigma floor evaluation (now unblocked)
+- Consider increasing 1.5x max expansion after calibration data
+- Consider Bayesian/Brownian model as MATH-006
+
+---
+
 ### [2026-04-04 16:50 America/Chicago] MATH-003-STALE-DATA-STRESS-TEST COMPLETED
 
 - Author: `Opus math validation execution`

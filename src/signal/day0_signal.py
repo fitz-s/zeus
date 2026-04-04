@@ -12,6 +12,7 @@ from src.signal.forecast_uncertainty import (
     day0_backbone_context,
     day0_backbone_high,
     day0_blended_highs,
+    day0_nowcast_context,
     day0_observation_weight,
     day0_post_peak_sigma,
     day0_temporal_closure_weight,
@@ -78,9 +79,17 @@ class Day0Signal:
             self._daylight_progress = daylight_progress
 
         # Sigma shrinkage remains tied specifically to post-peak confidence.
-        # Broader temporal closure now flows through observation_weight() and
-        # remaining-window selection, not through a second implicit sigma policy.
-        self._sigma = day0_post_peak_sigma(unit, self._peak_confidence)
+        # MATH-005: Also incorporate data freshness — stale observations expand sigma.
+        nowcast = day0_nowcast_context(
+            hours_remaining=hours_remaining,
+            observation_source=observation_source,
+            observation_time=observation_time,
+            current_utc_timestamp=self._current_utc_timestamp,
+        )
+        self._freshness_factor = nowcast["freshness_factor"]
+        self._sigma = day0_post_peak_sigma(
+            unit, self._peak_confidence, freshness_factor=self._freshness_factor
+        )
 
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.

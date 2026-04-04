@@ -28,14 +28,66 @@ def test_analysis_bootstrap_sigma_matches_current_instrument_sigma():
 
 def test_day0_post_peak_sigma_matches_existing_formula_endpoints():
     base_f = sigma_instrument("F").value
+    # With default freshness_factor=1.0, behavior is unchanged
     assert day0_post_peak_sigma("F", 0.0) == base_f
     assert day0_post_peak_sigma("F", 1.0) == base_f * 0.5
 
 
 def test_day0_post_peak_sigma_clamps_peak_confidence():
     base_c = sigma_instrument("C").value
+    # With default freshness_factor=1.0, behavior is unchanged
     assert day0_post_peak_sigma("C", -1.0) == base_c
     assert day0_post_peak_sigma("C", 2.0) == base_c * 0.5
+
+
+def test_day0_post_peak_sigma_expands_with_stale_data():
+    """MATH-005: Sigma expands when data is stale (low freshness_factor)."""
+    base_f = sigma_instrument("F").value
+    peak = 0.5  # Mid-confidence level
+
+    # Fresh data: no expansion
+    fresh_sigma = day0_post_peak_sigma("F", peak, freshness_factor=1.0)
+    assert fresh_sigma == base_f * 0.75  # base * (1 - 0.5*0.5) * 1.0
+
+    # Stale data (3h+): 1.5x expansion
+    stale_sigma = day0_post_peak_sigma("F", peak, freshness_factor=0.0)
+    assert stale_sigma == base_f * 0.75 * 1.5  # 50% expansion
+
+    # Verify expansion ratio
+    assert stale_sigma / fresh_sigma == 1.5
+
+
+def test_day0_post_peak_sigma_freshness_is_bounded():
+    """MATH-005: Freshness factor is clamped to [0, 1]."""
+    base_f = sigma_instrument("F").value
+
+    # Freshness > 1 should be clamped to 1
+    assert day0_post_peak_sigma("F", 0.0, freshness_factor=2.0) == base_f
+
+    # Freshness < 0 should be clamped to 0 (maximum expansion)
+    assert day0_post_peak_sigma("F", 0.0, freshness_factor=-1.0) == base_f * 1.5
+
+
+def test_day0_post_peak_sigma_freshness_profile():
+    """MATH-005: Verify freshness expansion profile is linear."""
+    base_f = sigma_instrument("F").value
+    peak = 0.0  # No peak shrinkage to isolate freshness effect
+
+    # Profile: staleness_expansion = 1.0 + (1.0 - fresh) * 0.5
+    test_cases = [
+        (1.0, 1.0),    # fresh=1.0 → expansion=1.0
+        (0.8, 1.1),    # fresh=0.8 → expansion=1.1
+        (0.5, 1.25),   # fresh=0.5 → expansion=1.25
+        (0.2, 1.4),    # fresh=0.2 → expansion=1.4
+        (0.0, 1.5),    # fresh=0.0 → expansion=1.5
+    ]
+
+    for freshness, expected_expansion in test_cases:
+        sigma = day0_post_peak_sigma("F", peak, freshness_factor=freshness)
+        expected_sigma = base_f * expected_expansion
+        assert abs(sigma - expected_sigma) < 0.001, (
+            f"freshness={freshness}: got {sigma}, expected {expected_sigma}"
+        )
 
 
 def test_analysis_lead_sigma_multiplier_is_continuous_and_bounded():

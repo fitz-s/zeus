@@ -517,8 +517,37 @@ def analysis_bootstrap_sigma(
     )["final_sigma"]
 
 
-def day0_post_peak_sigma(unit: str, peak_confidence: float) -> float:
-    """Current Phase-0 day0 sigma policy, extracted behind a forecast seam."""
+def day0_post_peak_sigma(
+    unit: str,
+    peak_confidence: float,
+    freshness_factor: float = 1.0,
+) -> float:
+    """Current Phase-0 day0 sigma policy, extracted behind a forecast seam.
+
+    Args:
+        unit: Temperature unit ("F" or "C")
+        peak_confidence: How confident we are peak has been reached (0.0 to 1.0)
+        freshness_factor: How fresh the observation is (1.0=fresh, 0.0=3h+ stale)
+
+    Returns:
+        Sigma (std dev) for the Day0 distribution.
+
+    The formula is:
+        sigma = base_sigma * peak_shrinkage * staleness_expansion
+
+    - peak_shrinkage: (1.0 - peak * 0.5) — sigma shrinks as peak confidence rises
+    - staleness_expansion: (1.0 + (1.0 - fresh) * 0.5) — sigma expands as data gets stale
+
+    At freshness=1.0 (fresh data), staleness_expansion=1.0 (no expansion).
+    At freshness=0.0 (3h+ stale), staleness_expansion=1.5 (50% expansion).
+    """
     peak = min(1.0, max(0.0, float(peak_confidence)))
+    fresh = min(1.0, max(0.0, float(freshness_factor)))
     base_sigma = sigma_instrument(unit).value
-    return base_sigma * (1.0 - peak * 0.5)
+
+    # Original formula: base_sigma * (1.0 - peak * 0.5)
+    # MATH-005: Add staleness expansion
+    peak_shrinkage = 1.0 - peak * 0.5
+    staleness_expansion = 1.0 + (1.0 - fresh) * 0.5  # up to 1.5x at freshness=0
+
+    return base_sigma * peak_shrinkage * staleness_expansion

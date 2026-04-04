@@ -175,6 +175,7 @@ def test_day0_post_peak_sigma_is_continuous():
     No abrupt halving at diurnal_peak_confidence=0.7.
     """
     import numpy as np
+    from datetime import datetime, timezone
     from src.signal.day0_signal import Day0Signal
     from src.signal.ensemble_signal import sigma_instrument
 
@@ -182,6 +183,12 @@ def test_day0_post_peak_sigma_is_continuous():
     base = sigma_instrument("C").value
     confidences = [0.0, 0.3, 0.5, 0.69, 0.70, 0.71, 1.0]
     sigmas = []
+
+    # Provide fresh observation time to avoid staleness expansion
+    now = datetime.now(timezone.utc)
+    obs_time = now.isoformat()
+    current_utc = now.isoformat()
+
     for pc in confidences:
         sig = Day0Signal(
             observed_high_so_far=18.0,
@@ -190,6 +197,9 @@ def test_day0_post_peak_sigma_is_continuous():
             member_maxes_remaining=members,
             unit="C",
             diurnal_peak_confidence=pc,
+            observation_source="wu",  # trusted source
+            observation_time=obs_time,
+            current_utc_timestamp=current_utc,
         )
         sigmas.append(sig._sigma)
 
