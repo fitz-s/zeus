@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.5 closeout pass`
+- Last updated by: `Codex P3 family closeout pass`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,23 +18,21 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `none`
-- State: `AWAITING POST-CLOSE REVIEW / P3 FAMILY CLOSEOUT`
+- State: `P3 FAMILY COMPLETE / AWAITING NEXT PHASE FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Hold at the accepted P3.5 boundary until the required post-close third-party critic + verifier review finishes, then record the P3 family closeout truth.
+No live packet. The P3 family is complete under current repo truth.
 
 ## Allowed files
 
-- `architects_progress.md`
-- `architects_task.md`
-- `architects_state_index.md`
+- future packet surfaces only after a new freeze
 
 ## Forbidden files
 
-- all repo implementation/runtime/schema surfaces until post-close review finishes
+- all repo implementation/runtime/schema surfaces until the next packet is frozen
 - `AGENTS.md`
 - `src/**`
 - `tests/**`
@@ -48,24 +46,24 @@ Hold at the accepted P3.5 boundary until the required post-close third-party cri
 
 ## Non-goals
 
-- no post-P3 phase work before post-close review finishes
+- no next-phase work without a new frozen packet
 - no cutover
 - no team launch
 
 ## Current blocker state
 
-- no active blocker inside the completed P3.5 boundary
+- no active blocker inside the completed P3 family boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
 - [x] P3.5 landed with green precedence evidence
 - [x] P3.5 acceptance is recorded honestly
-- [ ] run post-close third-party critic review
-- [ ] run post-close third-party verifier review
-- [ ] if both pass, record the P3 family closeout truth
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
+- [x] P3 family closeout is recorded honestly
 
 ## Next required action
 
-1. Run post-close third-party critic + verifier on the accepted P3.5 boundary.
-2. If both pass, record the P3 family closeout truth before moving beyond P3.
+1. Stop at the completed P3 family boundary.
+2. If continuing later, freeze the next non-P3 packet before any implementation.

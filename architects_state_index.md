@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-03 America/Chicago`
-- Last updated by: `Codex P3.5 closeout pass`
+- Last updated by: `Codex P3 family closeout pass`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P3 post-close review after final precedence proof`
+- Stage: `P3 family complete`
 - Active packet: `none`
-- Active packet state: `awaiting post-close review gate`
+- Active packet state: `P3 family closeout recorded / awaiting next phase freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P3.5-MANUAL-OVERRIDE-PRECEDENCE`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close third-party critic + verifier on the accepted P3.5 boundary.
-2. If post-close review passes, record the P3 family closeout truth.
+1. Stop at the completed P3 family boundary.
+2. If work continues, freeze the next non-P3 packet explicitly before implementation.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -36,6 +36,7 @@ Metadata:
 - `docs/archives/` is untracked and out of scope
 - `zeus_final_tribunal_overlay/` is an untracked reference directory outside packet scope
 - `architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
+- `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
 
 ## Fresh-session read order
 
@@ -43,5 +44,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. accepted packet `work_packets/P3.5-MANUAL-OVERRIDE-PRECEDENCE.md`
-6. record P3 family closeout only after post-close review passes
+5. the next frozen non-P3 packet, if work resumes
