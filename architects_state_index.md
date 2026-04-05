@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 freeze`
+- Last updated by: `Codex P7.7 close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P7.7 tracker compatibility hardening`
 - Active packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`.
-2. Keep the packet bounded to tracker compatibility semantics only; do not mix in M4 retirement/delete work.
+1. Run the post-close critic + verifier gate for accepted `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`.
+2. Do not freeze any later P7 packet unless the post-close gate passes and a new bounded seam is still justified.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

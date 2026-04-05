@@ -38,6 +38,27 @@ def _default_accounting(path: Path | None = None) -> dict[str, Any]:
     }
 
 
+def _normalized_accounting(accounting: dict[str, Any] | None = None) -> dict[str, Any]:
+    accounting = dict(accounting or {})
+    scope = str(accounting.get("accounting_scope") or "current_regime")
+    if scope == "full_history_archive":
+        return {
+            "accounting_scope": "full_history_archive",
+            "performance_headline_authority": str(state_path("status_summary.json")),
+            "tracker_role": "history_archive",
+            "authority_mode": "non_authority_compatibility",
+            "includes_legacy_history": True,
+            "current_regime_started_at": str(accounting.get("current_regime_started_at") or ""),
+            "history_archive_path": str(accounting.get("history_archive_path") or ""),
+        }
+
+    normalized = _default_accounting()
+    normalized["current_regime_started_at"] = str(accounting.get("current_regime_started_at") or "")
+    normalized["includes_legacy_history"] = bool(accounting.get("includes_legacy_history", False))
+    normalized["history_archive_path"] = str(accounting.get("history_archive_path") or "")
+    return normalized
+
+
 class StrategyMetrics:
     """Metrics for a single strategy."""
 
@@ -116,7 +137,7 @@ class StrategyTracker:
         self.strategies: dict[str, StrategyMetrics] = {
             s: StrategyMetrics() for s in STRATEGIES
         }
-        self.accounting: dict[str, Any] = _default_accounting()
+        self.accounting: dict[str, Any] = _normalized_accounting()
 
     def _refresh_current_regime_started_at(self) -> None:
         if self.accounting.get("includes_legacy_history", False):
@@ -199,8 +220,7 @@ class StrategyTracker:
         includes_legacy_history: bool = False,
         history_archive_path: str = "",
     ) -> None:
-        self.accounting = _default_accounting()
-        self.accounting.update({
+        self.accounting = _normalized_accounting({
             "current_regime_started_at": current_regime_started_at,
             "includes_legacy_history": includes_legacy_history,
             "history_archive_path": history_archive_path,
@@ -222,8 +242,7 @@ class StrategyTracker:
         for name in STRATEGIES:
             tracker.strategies[name] = StrategyMetrics.from_dict(strategies.get(name, {}))
         accounting = data.get("accounting", {})
-        if isinstance(accounting, dict):
-            tracker.accounting.update(accounting)
+        tracker.accounting = _normalized_accounting(accounting if isinstance(accounting, dict) else None)
         if not tracker.accounting.get("current_regime_started_at"):
             tracker._refresh_current_regime_started_at()
         return tracker
@@ -272,6 +291,7 @@ def save_tracker(tracker: StrategyTracker, path: Optional[Path] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     import json
     generated_at = datetime.now(timezone.utc).isoformat()
+    tracker.accounting = _normalized_accounting(tracker.accounting)
     payload = annotate_truth_payload(
         tracker.to_dict(),
         path,

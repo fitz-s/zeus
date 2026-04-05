@@ -49,6 +49,7 @@ def run(mode: str | None = None) -> dict:
         history_accounting.update({
             "accounting_scope": "full_history_archive",
             "tracker_role": "history_archive",
+            "authority_mode": "non_authority_compatibility",
             "includes_legacy_history": True,
             "history_archive_path": str(history_path),
         })

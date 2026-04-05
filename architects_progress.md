@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 freeze`
+- Last updated by: `Codex P7.7 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7.7 tracker compatibility hardening`
-- Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
 - Current active packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - persisted tracker metadata still contradicts compatibility-only repo law
+  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -301,6 +301,29 @@ Archive policy:
   - whether runtime tracker normalization can stay entirely inside save/rebuild paths still needs implementation-time evidence
 - Next required action:
   - implement `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING` and run targeted tracker compatibility tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:44 America/Chicago] P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_strategy_tracker_regime.py tests/test_truth_layer.py` -> `13 passed`
+  - pre-close critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p77-preclose-critic-20260405T000000Z.md`)
+  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p77-preclose-verifier-20260405T000000Z.md`)
+  - clean-lane runtime note: save/load normalize stale `tracker_role = attribution_surface` metadata into `compatibility_surface` + `non_authority_compatibility`
+- Decisions frozen:
+  - tracker metadata and compatibility helpers now align explicitly with compatibility-only law
+  - this packet does not delete `strategy_tracker.json` and does not claim M4 retirement
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
 - Owner:
   - Architects mainline lead
 
