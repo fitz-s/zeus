@@ -81,3 +81,11 @@ evidence_required:
 ## Closeout readiness notes
 
 - P7.8-readiness note: if this repair packet lands cleanly and its post-close gate passes, reassess whether any bounded non-destructive pre-retirement packet remains before M4 decisions.
+
+## Evidence log
+
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- explicit runtime before/after metadata note: `.omx/artifacts/p7r7-runtime-normalization-note-20260405T000000Z.md`
+- rollback note: restore the prior runtime tracker file snapshots if needed and revert the slim control-surface updates together; repo returns to the accepted P7.7 code boundary while the runtime-file contradiction remains open
+- p7.8-readiness note: after a clean P7R7 closeout, reassess whether any bounded non-destructive pre-retirement packet remains before M4 decisions

@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R7 freeze`
+- Last updated by: `Codex P7R7 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7R7 runtime tracker normalization`
-- Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- Last accepted packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
 - Current active packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - runtime tracker file drift required explicit reopen/repair after the accepted P7.7 code boundary
+  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -365,6 +365,29 @@ Archive policy:
   - none beyond recording honest before/after runtime metadata evidence and passing packet-bounded review
 - Next required action:
   - record runtime normalization evidence and run pre-close review on the repair packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:06 America/Chicago] P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - pre-close critic via `gemini -p` -> `PASS`
+  - pre-close verifier via `claude -p` -> `PASS`
+  - explicit runtime before/after note captured in `.omx/artifacts/p7r7-runtime-normalization-note-20260405T000000Z.md`
+- Decisions frozen:
+  - the live runtime tracker file now advertises compatibility-only metadata consistent with repo law
+  - this repair remains explicitly separate from the accepted P7.7 code-path hardening boundary
+  - no M4 retirement/delete work is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
 - Owner:
   - Architects mainline lead
 
