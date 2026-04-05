@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.3 close`
+- Last updated by: `Codex P7.1 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P6.3 strategy-tracker deletion path`
-- Active packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7.1 M0 schema add only`
+- Active packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P6.3-STRATEGY-TRACKER-DELETION-PATH`.
-2. Do not freeze any P7 packet unless the post-close gate passes on the accepted boundary.
+1. Implement `P7.1-M0-SCHEMA-ADD-ONLY` inside its frozen boundary.
+2. Run targeted schema-smoke evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

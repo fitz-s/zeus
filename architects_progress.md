@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.3 close`
+- Last updated by: `Codex P7.1 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P6.3 strategy-tracker deletion path`
-- Last accepted packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
-- Current active packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Mainline stage: `P7.1 M0 schema add only`
+- Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Current active packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the accepted P6.3 boundary yet
+  - no blocker inside the frozen P7.1 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -285,6 +285,48 @@ Archive policy:
   - the accepted boundary still needs the post-close critic + verifier gate before any P7 packet may be frozen
 - Next required action:
   - run the post-close critic + verifier on accepted `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:55 America/Chicago] P6.3-STRATEGY-TRACKER-DELETION-PATH post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `11 passed, 38 deselected`, `5 passed`, `work packet grammar ok`, `kernel manifests ok`
+- Decisions frozen:
+  - P6.3 acceptance stands without reopen
+  - P6 family is complete under current repo truth
+  - freezing the first explicit P7 packet is now allowed
+- Open uncertainties:
+  - none on the accepted P6.3 boundary beyond preserving packet scope
+- Next required action:
+  - freeze `P7.1-M0-SCHEMA-ADD-ONLY`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:58 America/Chicago] P7.1-M0-SCHEMA-ADD-ONLY frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from completed P6 into the first explicit P7 migration packet
+- Basis / evidence:
+  - accepted P6.3 boundary plus passed post-close gate now permit the next packet freeze
+  - the spec-ordered next move after completed P6 is P7 migration phase M0: schema add only
+  - this freeze keeps P7 honest by starting with an additive-only schema slice before any dual-write behavior
+- Decisions frozen:
+  - keep this packet additive-only
+  - do not claim runtime behavior change, cutover, parity, or deletion inside P7.1
+- Open uncertainties:
+  - implementation-time evidence must still prove whether any further M0 schema is actually needed beyond the current installed surfaces
+- Next required action:
+  - implement `P7.1-M0-SCHEMA-ADD-ONLY` and run targeted schema smoke tests
 - Owner:
   - Architects mainline lead
 
