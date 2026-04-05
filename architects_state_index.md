@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.2 close`
+- Last updated by: `Codex P6.3 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P6.2 control-plane durable override writes`
-- Active packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P6.3 strategy-tracker deletion path`
+- Active packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
+- Last accepted packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`.
-2. Do not freeze the next packet unless the post-close gate passes on the accepted boundary.
+1. Implement `P6.3-STRATEGY-TRACKER-DELETION-PATH` inside its frozen boundary.
+2. Run targeted strategy-tracker demotion evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
