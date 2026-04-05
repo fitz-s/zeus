@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R7 freeze`
+- Last updated by: `Codex P7R7 close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P7R7 runtime tracker normalization`
 - Active packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- Last accepted packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Finish the bounded runtime tracker-file normalization repair packet.
-2. Keep the packet bounded to runtime metadata normalization only; do not mix in M4 retirement/delete work.
+1. Run the post-close critic + verifier gate for accepted `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`.
+2. Do not freeze any later P7 packet unless the post-close gate passes and a new bounded seam is still justified.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
