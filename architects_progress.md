@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.6 close`
+- Last updated by: `Codex P7.6 post-close boundary`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,14 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7.6 RiskGuard DB-first`
+- Mainline stage: `P7 reader seams complete`
 - Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- Current active packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `none`
+- Current packet status: `no live packet / awaiting next lawful freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
+  - no later bounded non-destructive packet has been frozen yet
+  - obvious next work trends toward M4 retirement/cutover territory, which is not auto-authorized by momentum alone
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -260,6 +261,28 @@ Archive policy:
   - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
 - Next required action:
   - run the post-close critic + verifier on accepted `P7.6-M3-RISKGUARD-DB-FIRST`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:30 America/Chicago] P7.6-M3-RISKGUARD-DB-FIRST post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - no later packet freeze was auto-recorded
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p76-postclose-critic-20260405T000000Z.md`)
+  - accepted-boundary clean-lane verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p76-postclose-verifier-20260405T000000Z.md`)
+  - accepted-boundary checks stayed green: `work packet grammar ok`, `kernel manifests ok`, targeted RiskGuard pytest `7 passed, 31 deselected`
+- Decisions frozen:
+  - P7.6 acceptance stands without reopen
+  - P7 reader seams now have bounded DB-first coverage on the touched runtime/governance surfaces
+  - no fake next packet is frozen from momentum alone
+- Open uncertainties:
+  - the next truthful move sits near M4 retirement/cutover territory and needs fresh bounded justification before freezing
+- Next required action:
+  - stop at this boundary until a new bounded non-destructive packet is explicitly justified
 - Owner:
   - Architects mainline lead
 

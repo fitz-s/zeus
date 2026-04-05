@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.6 close`
+- Last updated by: `Codex P7.6 post-close boundary`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7.6 RiskGuard DB-first`
-- Active packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7 reader seams complete`
+- Active packet: `none`
+- Active packet state: `no live packet / awaiting next lawful freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P7.6-M3-RISKGUARD-DB-FIRST`.
-2. Do not freeze any later P7 packet unless the post-close gate passes and the next seam is still justified by repo truth.
+1. Do not freeze any later P7 packet until a bounded non-destructive next seam is explicitly justified.
+2. Treat obvious M4 retirement/cutover/delete work as outside the current autonomous stop boundary.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
