@@ -5,17 +5,17 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R2 close`
+- Last updated: `2026-04-05 America/Chicago`
+- Last updated by: `Codex P7.3 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7R2 DELTA-05 init_schema additive canonical tables`
-- Active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7.3 open-position canonical backfill`
+- Active packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7.2-M2-PARITY-REPORTING`
+- Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`.
-2. Do not freeze any later P7 packet unless the post-close gate passes and the new parity output supports it.
+1. Implement `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL` inside its frozen boundary.
+2. Run targeted backfill/parity evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
