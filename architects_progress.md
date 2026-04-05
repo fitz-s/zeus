@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.1 close`
+- Last updated by: `Codex P6.2 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P6.1 status-summary DB derived`
-- Last accepted packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
-- Current active packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Mainline stage: `P6.2 control-plane durable override writes`
+- Last accepted packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
+- Current active packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the accepted P6.1 boundary yet
+  - no blocker inside the frozen P6.2 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -155,6 +155,48 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+
+## [2026-04-04 20:10 America/Chicago] P6.1-STATUS-SUMMARY-DB-DERIVED post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `10 passed, 38 deselected`, `7 passed`, `work packet grammar ok`, `kernel manifests ok`
+- Decisions frozen:
+  - P6.1 acceptance stands without reopen
+  - freezing the control-plane durable override packet is now allowed
+- Open uncertainties:
+  - none on the accepted P6.1 boundary beyond preserving packet scope
+- Next required action:
+  - freeze `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:12 America/Chicago] P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES frozen
+- Author: `Architects mainline lead`
+- Packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the accepted P6.1 consumer packet into the control-plane durable override bridge packet
+- Basis / evidence:
+  - accepted P6.1 boundary plus passed post-close gate now permit the next P6 freeze
+  - `control_plane.py` still depends on memory-only `_control_state` for durable behavior even though operator status is now DB-derived
+  - the next spec-ordered move after P6.1 is the control-plane durable override bridge
+- Decisions frozen:
+  - keep this packet on the current override-capable command path only
+  - preserve ingress-only `control_plane.json`
+  - do not widen into `lifecycle_commands` or `strategy_tracker` deletion
+- Open uncertainties:
+  - exact command subset that can be bridged honestly through `control_overrides` still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES` and run targeted durability tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
