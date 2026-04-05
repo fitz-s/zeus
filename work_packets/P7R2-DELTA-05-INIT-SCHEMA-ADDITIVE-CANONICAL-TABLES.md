@@ -94,3 +94,23 @@ evidence_required:
 ## Closeout readiness notes
 
 - P7.3-readiness note: if this packet lands cleanly and its post-close gate passes, the next lawful move is reassessing whether parity evidence now supports a later DB-first/cutover-prep packet.
+
+## Evidence log
+
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema_bootstraps_additive_canonical_support_tables or apply_architecture_kernel_schema_rejects_legacy_runtime_position_events or replay_parity'` -> `5 passed, 77 deselected in 0.22s`
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- runtime bootstrap evidence: running `src.state.db.init_schema()` against `state/zeus.db` leaves `position_current`, `strategy_health`, `risk_actions`, and `control_overrides` present in current runtime DB reality
+- replay/parity output after bootstrap: `python3 scripts/replay_parity.py` -> parity advanced beyond `missing_tables = [position_current]` and now reports concrete mismatch details instead (`status = mismatch`)
+- rollback note: revert the P7R2 bootstrap edits and paired slim control-surface updates together; repo returns to the completed P7.2 reporting boundary with DELTA-05 still explicitly open
+- p7.3-readiness note: the next lawful move after a clean P7R2 closeout is reassessing whether parity evidence now supports a later DB-first/cutover-prep packet
+
+## Evidence log
+
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema_bootstraps_additive_canonical_support_tables or apply_architecture_kernel_schema_rejects_legacy_runtime_position_events or replay_parity'` -> `5 passed, 77 deselected in 0.22s`
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- runtime bootstrap evidence: running `src.state.db.init_schema()` against `state/zeus.db` yields `position_current`, `strategy_health`, `risk_actions`, and `control_overrides` tables present in current runtime DB reality
+- replay/parity output after bootstrap: `python3 scripts/replay_parity.py` -> parity advanced beyond `missing_tables = [position_current]` and now reports concrete mismatch details instead
+- rollback note: revert the P7R2 bootstrap edits and paired slim control-surface updates together; repo returns to the completed P7.2 reporting boundary with DELTA-05 still explicitly open
+- p7.3-readiness note: the next lawful move after a clean P7R2 closeout is reassessing whether parity evidence now supports a later DB-first/cutover-prep packet

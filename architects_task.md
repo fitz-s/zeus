@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R2 freeze`
+- Last updated by: `Codex P7R2 implementation`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `IMPLEMENTED / PRE-CLOSE REVIEW PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -74,8 +74,8 @@ Resolve DELTA-05 by upgrading the runtime bootstrap seam in `src/state/db.py::in
 ## Immediate checklist
 
 - [x] P7R2 packet frozen
-- [ ] init_schema/runtime bootstrap path can produce `position_current` and additive canonical support tables
-- [ ] targeted schema/bootstrap tests green
+- [x] init_schema/runtime bootstrap path can produce `position_current` and additive canonical support tables
+- [x] targeted schema/bootstrap tests green
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
 - [ ] P7R2 accepted and pushed
@@ -84,6 +84,6 @@ Resolve DELTA-05 by upgrading the runtime bootstrap seam in `src/state/db.py::in
 
 ## Next required action
 
-1. Implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`.
-2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
+1. Finish pre-close critic + verifier on the implemented `P7R2` boundary.
+2. Accept/push only if both pre-close lanes pass and the slim control surfaces stay honest.
 3. Do not freeze the next packet until this packet’s post-close gate passes.

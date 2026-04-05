@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R2 freeze`
+- Last updated by: `Codex P7R2 implementation`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P7R2 DELTA-05 init_schema additive canonical tables`
 - Active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `implemented / pre-close review pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7.2-M2-PARITY-REPORTING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES` inside its frozen boundary.
-2. Run targeted schema/bootstrap evidence plus pre-close critic + verifier before any acceptance claim.
+1. Finish pre-close critic + verifier for `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`.
+2. If both pass, accept/push the packet and then run post-close critic + verifier before freezing any later P7 packet.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
