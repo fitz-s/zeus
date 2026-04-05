@@ -32,7 +32,14 @@ QUANTIZATION_NOISE_FLOOR_C = 0.20  # °C — scaled for Celsius settlements
 PEAK_SHRINKAGE_COEFF = 0.5  # 50% max shrinkage at full peak confidence
 
 # Staleness expansion coefficient: how much sigma expands as data gets stale.
-# At freshness=0.0 (3h+ stale), sigma expands by (1 + STALENESS_EXPANSION_COEFF).
+# At freshness=0.0 (3h+ stale), sigma expands by (1 + STALENESS_EXPANSION_COEFF) = 1.5x.
+#
+# Rationale for 1.5x upper limit (MATH-005):
+# - Conservative bound derived from third-party review quantization analysis
+# - At 3h stale during peak heating, temperature can drift ~2-3°F
+# - 50% sigma expansion captures this uncertainty without overreacting
+# - Balances Gemini's "3h too permissive" concern against gamma risk at bin boundaries
+# - Linear profile chosen for engineering simplicity; Bayesian model (MATH-009) deferred
 STALENESS_EXPANSION_COEFF = 0.5  # 50% max expansion at 3h+ stale
 
 # Temporal closure coefficients: weights for max() combination in observation weight.
