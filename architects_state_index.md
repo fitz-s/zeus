@@ -6,13 +6,13 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.1 freeze`
+- Last updated by: `Codex P7.2 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7.1 M0 schema add only`
-- Active packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Stage: `P7.2 parity reporting`
+- Active packet: `P7.2-M2-PARITY-REPORTING`
 - Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7.1-M0-SCHEMA-ADD-ONLY` inside its frozen boundary.
-2. Run targeted schema-smoke evidence plus pre-close critic + verifier before any acceptance claim.
+1. Implement `P7.2-M2-PARITY-REPORTING` inside its frozen boundary.
+2. Run targeted parity/reporting evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

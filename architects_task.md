@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.1 freeze`
+- Last updated by: `Codex P7.2 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Packet: `P7.2-M2-PARITY-REPORTING`
 - State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Start P7 with an additive-only schema prep slice for later migration work, with no runtime behavior change or cutover claims.
+Replace the placeholder replay/parity reporting with a truthful parity surface that compares canonical DB projection against surviving legacy exports on the touched migration seams, without cutover or deletion.
 
 ## Allowed files
 
-- `work_packets/P7.1-M0-SCHEMA-ADD-ONLY.md`
-- `migrations/**`
+- `work_packets/P7.2-M2-PARITY-REPORTING.md`
+- `scripts/replay_parity.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -41,15 +41,8 @@ Start P7 with an additive-only schema prep slice for later migration work, with 
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `src/control/**`
-- `src/observability/**`
-- `src/riskguard/**`
-- `src/engine/**`
-- `src/execution/**`
-- `src/supervisor_api/**`
-- `src/state/portfolio.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
+- `migrations/**`
+- `src/**`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_runtime_guards.py`
 - `tests/test_riskguard.py`
@@ -60,30 +53,29 @@ Start P7 with an additive-only schema prep slice for later migration work, with 
 
 ## Non-goals
 
-- no runtime behavior change
-- no dual-write yet
-- no parity/cutover/delete work yet
-- no destructive migration action
+- no DB-first cutover yet
+- no dual-write widening yet
+- no deletion/demotion of runtime surfaces here
 - no team launch
 
 ## Current blocker state
 
-- no blocker inside the frozen P7.1 boundary
+- no blocker inside the frozen P7.2 boundary
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7.1 packet frozen
-- [ ] additive-only schema prep installed if needed
-- [ ] targeted schema smoke tests green
+- [x] P7.2 packet frozen
+- [ ] placeholder parity surface replaced with truthful compare output
+- [ ] targeted parity/reporting tests green
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
-- [ ] P7.1 accepted and pushed
+- [ ] P7.2 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement `P7.1-M0-SCHEMA-ADD-ONLY`.
+1. Implement `P7.2-M2-PARITY-REPORTING`.
 2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
-3. Do not freeze the next packet until P7.1 post-close gate passes.
+3. Do not freeze the next packet until P7.2 post-close gate passes.
