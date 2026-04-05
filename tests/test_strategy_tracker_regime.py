@@ -175,3 +175,21 @@ def test_tracker_record_trade_updates_current_regime_started_at():
     )
 
     assert tracker.accounting["current_regime_started_at"] == "2026-04-01T00:00:00+00:00"
+
+
+def test_tracker_from_dict_normalizes_legacy_compatibility_metadata():
+    tracker = strategy_tracker_module.StrategyTracker.from_dict(
+        {
+            "strategies": {},
+            "accounting": {
+                "accounting_scope": "current_regime",
+                "tracker_role": "attribution_surface",
+                "performance_headline_authority": "/tmp/legacy-status.json",
+                "includes_legacy_history": False,
+            },
+        }
+    )
+
+    assert tracker.accounting["tracker_role"] == "compatibility_surface"
+    assert tracker.accounting["authority_mode"] == "non_authority_compatibility"
+    assert tracker.accounting["performance_headline_authority"].endswith("status_summary-paper.json")

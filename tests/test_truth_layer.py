@@ -71,6 +71,21 @@ def test_portfolio_and_tracker_save_truth_metadata(tmp_path):
     assert portfolio_data["truth"]["source_path"] == str(portfolio_path)
     assert tracker_data["truth"]["deprecated"] is False
     assert tracker_data["truth"]["source_path"] == str(tracker_path)
+    assert tracker_data["accounting"]["tracker_role"] == "compatibility_surface"
+    assert tracker_data["accounting"]["authority_mode"] == "non_authority_compatibility"
+
+
+def test_save_tracker_normalizes_stale_compatibility_metadata(tmp_path):
+    tracker_path = tmp_path / "strategy_tracker-paper.json"
+    tracker = StrategyTracker()
+    tracker.accounting["tracker_role"] = "attribution_surface"
+    tracker.accounting.pop("authority_mode", None)
+
+    save_tracker(tracker, tracker_path)
+
+    tracker_data = json.loads(tracker_path.read_text())
+    assert tracker_data["accounting"]["tracker_role"] == "compatibility_surface"
+    assert tracker_data["accounting"]["authority_mode"] == "non_authority_compatibility"
 
 
 def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl():

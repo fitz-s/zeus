@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 freeze`
+- Last updated by: `Codex P7.7 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -74,16 +74,16 @@ Bring the persisted strategy-tracker compatibility surface into explicit alignme
 ## Immediate checklist
 
 - [x] P7.7 packet frozen
-- [ ] tracker compatibility metadata aligns with compatibility-only law
-- [ ] targeted tracker compatibility tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P7.7 accepted and pushed
+- [x] tracker compatibility metadata aligns with compatibility-only law
+- [x] targeted tracker compatibility tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P7.7 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement the bounded tracker compatibility-hardening seam.
-2. Prove tracker metadata and rebuild/save helpers align with compatibility-only law.
-3. Do not widen into M4 retirement/delete work.
+1. Finish the post-close critic + verifier on the accepted `P7.7` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
+3. Do not freeze the next packet until P7.7 post-close gate passes.
