@@ -9,7 +9,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from src.config import STATE_DIR, state_path, settings
 from src.state.ledger import (
@@ -627,6 +627,15 @@ def _canonical_position_surface_available(conn: sqlite3.Connection) -> bool:
     )
 
 
+def _missing_canonical_position_tables(conn: sqlite3.Connection) -> list[str]:
+    missing: list[str] = []
+    if not _table_exists(conn, "position_events"):
+        missing.append("position_events")
+    if not _table_exists(conn, "position_current"):
+        missing.append("position_current")
+    return missing
+
+
 def _legacy_runtime_position_event_schema_available(conn: sqlite3.Connection) -> bool:
     legacy_table = _legacy_position_events_table(conn)
     event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
@@ -643,6 +652,96 @@ def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> No
         raise RuntimeError("legacy runtime position_events schema not installed")
     if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
         raise RuntimeError("legacy runtime position_events schema not installed")
+
+
+def backfill_open_legacy_paper_positions(
+    conn: sqlite3.Connection | None,
+    positions: Iterable[object],
+    *,
+    source_module: str = "scripts.backfill_open_positions_canonical",
+) -> dict:
+    positions = list(positions)
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "seeded_trade_ids": [],
+            "seeded_count": 0,
+        }
+    if not _canonical_position_surface_available(conn):
+        return {
+            "status": "skipped_missing_canonical_tables",
+            "missing_tables": _missing_canonical_position_tables(conn),
+            "seeded_trade_ids": [],
+            "seeded_count": 0,
+        }
+
+    from src.engine.lifecycle_events import build_entry_canonical_write, canonical_phase_for_position
+
+    seeded_trade_ids: list[str] = []
+    skipped_existing_trade_ids: list[str] = []
+    skipped_non_open_trade_ids: list[str] = []
+    skipped_non_paper_trade_ids: list[str] = []
+
+    for position in positions:
+        trade_id = str(getattr(position, "trade_id", "") or "").strip()
+        if not trade_id:
+            raise ValueError("cannot backfill canonical open position without trade_id")
+
+        env = str(getattr(position, "env", "") or "paper").strip()
+        if env != "paper":
+            skipped_non_paper_trade_ids.append(trade_id)
+            continue
+
+        canonical_phase = canonical_phase_for_position(position)
+        if canonical_phase not in OPEN_EXPOSURE_PHASES:
+            skipped_non_open_trade_ids.append(trade_id)
+            continue
+
+        event_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+                (trade_id,),
+            ).fetchone()[0]
+        )
+        projection_row = conn.execute(
+            """
+            SELECT 1
+            FROM position_current
+            WHERE position_id = ? OR trade_id = ?
+            LIMIT 1
+            """,
+            (trade_id, trade_id),
+        ).fetchone()
+        projection_exists = projection_row is not None
+        if bool(event_count) != projection_exists:
+            raise RuntimeError(
+                f"partial canonical state blocks open-position backfill for {trade_id}"
+            )
+        if event_count and projection_exists:
+            skipped_existing_trade_ids.append(trade_id)
+            continue
+
+        events, projection = build_entry_canonical_write(
+            position,
+            decision_id=None,
+            source_module=source_module,
+        )
+        append_many_and_project(conn, events, projection)
+        seeded_trade_ids.append(trade_id)
+
+    status = "seeded" if seeded_trade_ids else "seeded_empty"
+    return {
+        "status": status,
+        "candidate_count": len(positions),
+        "seeded_trade_ids": seeded_trade_ids,
+        "seeded_count": len(seeded_trade_ids),
+        "skipped_existing_trade_ids": skipped_existing_trade_ids,
+        "skipped_existing_count": len(skipped_existing_trade_ids),
+        "skipped_non_open_trade_ids": skipped_non_open_trade_ids,
+        "skipped_non_open_count": len(skipped_non_open_trade_ids),
+        "skipped_non_paper_trade_ids": skipped_non_paper_trade_ids,
+        "skipped_non_paper_count": len(skipped_non_paper_trade_ids),
+    }
 
 def record_shadow_attribution_trade(
     conn: sqlite3.Connection,

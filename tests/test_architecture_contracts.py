@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -574,6 +576,177 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(t
     payload = json.loads(run.stdout)
     assert payload["status"] == "ok"
     assert payload["canonical"]["open_positions"] == 0
+
+
+def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advances_parity(tmp_path):
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "zeus.db"
+    legacy_path = tmp_path / "positions-paper.json"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.close()
+
+    pos1 = asdict(_runtime_position(state="entered", chain_state="unknown"))
+    pos1.update({
+        "trade_id": "paper-open-1",
+        "strategy_key": "opening_inertia",
+        "strategy": "opening_inertia",
+        "edge_source": "opening_inertia",
+        "discovery_mode": "opening_hunt",
+        "env": "paper",
+    })
+    pos2 = asdict(_runtime_position(state="entered", chain_state="unknown"))
+    pos2.update({
+        "trade_id": "paper-open-2",
+        "market_id": "mkt-2",
+        "bin_label": "41-42°F",
+        "strategy_key": "opening_inertia",
+        "strategy": "opening_inertia",
+        "edge_source": "opening_inertia",
+        "discovery_mode": "opening_hunt",
+        "env": "paper",
+    })
+    legacy_path.write_text(json.dumps({"positions": [pos1, pos2]}))
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
+            "--db",
+            str(db_path),
+            "--positions",
+            str(legacy_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "ZEUS_MODE": "paper"},
+    )
+
+    assert run.returncode == 0
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "seeded"
+    assert payload["seeded_count"] == 2
+    assert sorted(payload["seeded_trade_ids"]) == ["paper-open-1", "paper-open-2"]
+
+    parity = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "replay_parity.py"),
+            "--db",
+            str(db_path),
+            "--legacy-export",
+            str(legacy_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert parity.returncode == 0
+    parity_payload = json.loads(parity.stdout)
+    assert parity_payload["status"] == "ok"
+    assert parity_payload["canonical"]["open_positions"] == 2
+    assert parity_payload["legacy_exports"][0]["comparison"]["status"] == "match"
+
+
+def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    legacy_path = tmp_path / "positions-paper.json"
+    sqlite3.connect(str(db_path)).close()
+    legacy_path.write_text(json.dumps({"positions": [asdict(_runtime_position(state="entered", chain_state="unknown"))]}))
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
+            "--db",
+            str(db_path),
+            "--positions",
+            str(legacy_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "ZEUS_MODE": "paper"},
+    )
+
+    assert run.returncode == 0
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "skipped_missing_canonical_tables"
+    assert "position_events" in payload["missing_tables"]
+    assert "position_current" in payload["missing_tables"]
+
+
+def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_positions(tmp_path):
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "zeus.db"
+    legacy_path = tmp_path / "positions-paper.json"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.close()
+
+    pos = asdict(_runtime_position(state="entered", chain_state="unknown"))
+    pos.update({
+        "trade_id": "paper-open-1",
+        "strategy_key": "opening_inertia",
+        "strategy": "opening_inertia",
+        "edge_source": "opening_inertia",
+        "discovery_mode": "opening_hunt",
+        "env": "paper",
+    })
+    legacy_path.write_text(json.dumps({"positions": [pos]}))
+
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "backfill_open_positions_canonical.py"),
+        "--db",
+        str(db_path),
+        "--positions",
+        str(legacy_path),
+    ]
+    env = {**os.environ, "ZEUS_MODE": "paper"}
+    first = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    second = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["status"] == "seeded"
+    assert first_payload["seeded_count"] == 1
+    assert second_payload["status"] == "seeded_empty"
+    assert second_payload["skipped_existing_count"] == 1
+
+
+def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions():
+    from src.state.db import apply_architecture_kernel_schema, backfill_open_legacy_paper_positions
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pending_exit = _runtime_position(
+        state="pending_exit",
+        exit_state="sell_pending",
+        chain_state="exit_pending_missing",
+    )
+    pending_exit.env = "paper"
+    pending_exit.strategy_key = "opening_inertia"
+    pending_exit.strategy = "opening_inertia"
+    pending_exit.edge_source = "opening_inertia"
+    pending_exit.discovery_mode = "opening_hunt"
+
+    with pytest.raises(ValueError, match="entry canonical builder only supports pending/active entry states"):
+        backfill_open_legacy_paper_positions(conn, [pending_exit])
+
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    conn.close()
 
 
 def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
