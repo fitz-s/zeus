@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 post-close boundary`
+- Last updated by: `Codex P7R7 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7 pre-retirement seams complete`
-- Active packet: `none`
-- Active packet state: `no live packet / awaiting next lawful freeze`
+- Stage: `P7R7 runtime tracker normalization`
+- Active packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Do not freeze any later P7 packet until a new bounded non-destructive seam is explicitly justified.
-2. Treat obvious next work near M4 retirement/delete territory as outside the current autonomous stop boundary.
+1. Finish the bounded runtime tracker-file normalization repair packet.
+2. Keep the packet bounded to runtime metadata normalization only; do not mix in M4 retirement/delete work.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

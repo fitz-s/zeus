@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 post-close boundary`
+- Last updated by: `Codex P7R7 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,17 +17,18 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `NO LIVE PACKET / AWAITING NEXT LAWFUL FREEZE`
+- Packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. Hold at the post-P7.7 boundary until the next bounded non-destructive packet is explicitly justified.
+Normalize the live runtime `strategy_tracker-paper.json` compatibility metadata so the persisted file matches the compatibility-only law already enforced by code/tests, without widening into M4 retirement or broader runtime redesign.
 
 ## Allowed files
 
+- `work_packets/P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -58,28 +59,27 @@ No live packet. Hold at the post-P7.7 boundary until the next bounded non-destru
 
 - no broad DB-first cutover yet
 - no legacy-surface deletion yet
-- no M4 retirement/delete freeze without a new explicit packet
+- no M4 retirement/delete work
 - no team launch
 
 ## Current blocker state
 
-- no later bounded non-destructive packet has been frozen yet
-- obvious next work trends toward M4 retirement/delete territory, which is not auto-authorized by momentum alone
+- live runtime `state/strategy_tracker-paper.json` still showed stale `tracker_role = attribution_surface` until explicit normalization ran
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7.7 packet frozen
-- [x] tracker compatibility metadata aligns with compatibility-only law
-- [x] targeted tracker compatibility tests green
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P7.7 accepted and pushed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] P7R7 packet frozen
+- [ ] live runtime tracker file normalized to compatibility-only metadata
+- [ ] packet-bounded evidence recorded
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P7R7 accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Hold at the post-P7.7 boundary until a new bounded packet is explicitly justified.
-2. Do not invent a fake next freeze just to preserve momentum.
-3. Treat destructive/retirement transitions as out of the current autonomous stop boundary.
+1. Record the runtime before/after metadata normalization evidence honestly.
+2. Keep this repair bounded to runtime tracker-file normalization only.
+3. Do not widen into M4 retirement/delete work.

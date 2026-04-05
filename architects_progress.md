@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 post-close boundary`
+- Last updated by: `Codex P7R7 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,14 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7 pre-retirement seams complete`
+- Mainline stage: `P7R7 runtime tracker normalization`
 - Last accepted packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
-- Current active packet: `none`
-- Current packet status: `no live packet / awaiting next lawful freeze`
+- Current active packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no later bounded non-destructive packet has been frozen yet
-  - obvious next work trends toward M4 retirement/delete territory, which is not auto-authorized by momentum alone
+  - runtime tracker file drift required explicit reopen/repair after the accepted P7.7 code boundary
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -347,6 +346,25 @@ Archive policy:
   - any next lawful P7 move needs a fresh bounded justification before freezing
 - Next required action:
   - stop at this boundary until a new bounded non-destructive packet is explicitly justified
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:54 America/Chicago] P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- Status delta:
+  - current active repair packet frozen
+- Basis / evidence:
+  - after accepted P7.7, current runtime `state/strategy_tracker-paper.json` still showed stale `tracker_role = attribution_surface`
+  - loading the tracker already normalized metadata in memory, but the persisted file itself contradicted the accepted claim about the persisted compatibility surface
+  - running the existing rebuild path normalized the live file without requiring broader code changes, so the contradiction is concrete and bounded
+- Decisions frozen:
+  - treat this as an explicit reopen/repair packet on the runtime file boundary
+  - do not widen into tracker deletion, broader runtime redesign, or M4 work
+- Open uncertainties:
+  - none beyond recording honest before/after runtime metadata evidence and passing packet-bounded review
+- Next required action:
+  - record runtime normalization evidence and run pre-close review on the repair packet
 - Owner:
   - Architects mainline lead
 
