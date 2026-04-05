@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.2 close`
+- Last updated by: `Codex P6.3 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P6.2 control-plane durable override writes`
-- Last accepted packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
-- Current active packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Mainline stage: `P6.3 strategy-tracker deletion path`
+- Last accepted packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Current active packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the accepted P6.2 boundary yet
+  - no blocker inside the frozen P6.3 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -219,6 +219,47 @@ Archive policy:
   - the accepted boundary still needs the post-close critic + verifier gate before the next packet may be frozen
 - Next required action:
   - run the post-close critic + verifier on accepted `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:05 America/Chicago] P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `10 passed, 39 deselected`, `work packet grammar ok`, `kernel manifests ok`
+- Decisions frozen:
+  - P6.2 acceptance stands without reopen
+  - freezing the strategy-tracker demotion packet is now allowed
+- Open uncertainties:
+  - none on the accepted P6.2 boundary beyond preserving packet scope
+- Next required action:
+  - freeze `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:07 America/Chicago] P6.3-STRATEGY-TRACKER-DELETION-PATH frozen
+- Author: `Architects mainline lead`
+- Packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the accepted P6.2 durable-override packet into the final P6 tracker demotion packet
+- Basis / evidence:
+  - accepted P6.2 boundary plus passed post-close gate now permit the next P6 freeze
+  - `strategy_tracker` still survives as a remaining compatibility/authority-risk surface after status and durable overrides moved to DB-backed paths
+  - the next spec-ordered move after P6.2 is the strategy-tracker deletion/demotion path
+- Decisions frozen:
+  - keep this packet on tracker demotion/removal only
+  - do not widen into broader P7 migration or unrelated operator redesign
+- Open uncertainties:
+  - exact remaining authority-bearing tracker consumers still need implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P6.3-STRATEGY-TRACKER-DELETION-PATH` and run targeted demotion tests
 - Owner:
   - Architects mainline lead
 
