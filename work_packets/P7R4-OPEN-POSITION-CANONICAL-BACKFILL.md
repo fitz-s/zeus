@@ -95,8 +95,20 @@ evidence_required:
 
 - Team remains closed by default for this packet.
 - This packet is about canonical seeding/backfill for existing open legacy paper positions, not general migration cleanup or cutover.
+- The touched backfill path is intentionally entry-phase only. If a later legacy paper cohort includes `pending_exit` positions, that requires a follow-on packet rather than fabricating exit-lifecycle history here.
 - If implementation evidence shows the mismatch still depends on a deeper blocker, reopen or supersede honestly instead of fabricating projection-only parity.
 
 ## Closeout readiness notes
 
 - P7.5-readiness note: if this packet lands cleanly and its post-close gate passes, the next lawful move is reassessing whether parity evidence now supports a later DB-first/cutover-prep packet.
+
+## Evidence log
+
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'replay_parity or open_position_canonical_backfill or init_schema_creates_legacy_and_canonical_event_tables_side_by_side'` -> `7 passed, 79 deselected`
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- capability-absent proof: on a blank SQLite DB, `scripts/backfill_open_positions_canonical.py` reports `skipped_missing_canonical_tables` and `scripts/replay_parity.py` reports `staged_missing_canonical_tables`
+- capability-present proof: after `init_schema()` on a seedable SQLite DB, `scripts/backfill_open_positions_canonical.py` seeds all 12 currently open paper positions and `scripts/replay_parity.py` reports `status = ok`
+- runtime parity-before/after note: before the backfill, `scripts/replay_parity.py --db state/zeus.db --legacy-export state/positions-paper.json` reported `status = mismatch` with canonical open side `0`; after the backfill it reports `status = ok`, and a rerun of the backfill script reports `seeded_empty` with `skipped_existing_count = 12`
+- rollback note: revert the P7R4 backfill helper/script/tests and paired slim control-surface updates together; repo returns to the accepted P7R3 boundary while the current runtime parity mismatch reappears
+- p7.5-readiness note: after a clean P7R4 closeout, the next lawful move is reassessing whether parity evidence now supports a later DB-first/cutover-prep packet

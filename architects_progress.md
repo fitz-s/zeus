@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R3 post-close + P7R4 freeze`
+- Last updated by: `Codex P7R4 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7R4 open-position canonical backfill`
-- Last accepted packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Last accepted packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
 - Current active packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - parity still reports canonical open side empty while legacy paper state reports 12 open `opening_inertia` positions
+  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -103,6 +103,33 @@ Archive policy:
   - exact minimum builder/script support for idempotent seeding still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P7R4-OPEN-POSITION-CANONICAL-BACKFILL` and run targeted backfill/parity tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:51 America/Chicago] P7R4-OPEN-POSITION-CANONICAL-BACKFILL accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'replay_parity or open_position_canonical_backfill or init_schema_creates_legacy_and_canonical_event_tables_side_by_side'` -> `8 passed, 79 deselected`
+  - pre-close critic via `claude -p` -> `PASS` (`.omx/artifacts/claude-p7r4-preclose-critic-20260405T025116Z.md`)
+  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p7r4-preclose-verifier-20260405T025116Z.md`)
+  - root runtime parity before backfill: `scripts/replay_parity.py --db state/zeus.db --legacy-export state/positions-paper.json` -> `status = mismatch`, canonical open side `0`, legacy paper open side `12`
+  - root runtime backfill: `scripts/backfill_open_positions_canonical.py --db state/zeus.db --positions state/positions-paper.json` -> `seeded_count = 12`
+  - root runtime parity after backfill: `scripts/replay_parity.py --db state/zeus.db --legacy-export state/positions-paper.json` -> `status = ok`
+  - root runtime idempotence rerun: `scripts/backfill_open_positions_canonical.py --db state/zeus.db --positions state/positions-paper.json` -> `seeded_empty`, `skipped_existing_count = 12`
+- Decisions frozen:
+  - currently open legacy paper positions now gain canonical event+projection representation on the touched backfill path
+  - this packet proves capability-absent skip and capability-present parity advancement without claiming DB-first cutover or legacy deletion
+  - `pending_exit` legacy cohorts remain out of scope here and must fail loud rather than fabricate exit history
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
 - Owner:
   - Architects mainline lead
 
