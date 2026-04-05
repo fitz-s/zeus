@@ -84,3 +84,8 @@ evidence_required:
 ## Closeout readiness notes
 
 - P7.3-readiness note: if this packet lands cleanly and its post-close gate passes, the next lawful move is reassessing whether a DB-first/cutover-prep packet is now actually supported by parity evidence.
+
+## Supersession note
+
+- Implementation evidence showed the actual DELTA-05 repair seam is `src/state/db.py::init_schema()`, not migration SQL alone.
+- This freeze is therefore superseded by a packet that can touch the runtime bootstrap seam directly.

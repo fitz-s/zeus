@@ -460,6 +460,45 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-04 23:40 America/Chicago] P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP superseded before implementation
+- Author: `Architects mainline lead`
+- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Status delta:
+  - frozen packet superseded before implementation
+  - active packet moved off a migration-only boundary that could not touch the real fix seam
+- Basis / evidence:
+  - implementation evidence showed the actual DELTA-05 repair seam is `src/state/db.py::init_schema()`
+  - a migration-only packet could not change the runtime bootstrap path that currently produces the local DB shape
+- Decisions frozen:
+  - P7R is not accepted as implemented work
+  - the next honest packet must allow the runtime bootstrap seam itself to change
+- Open uncertainties:
+  - none on the superseded P7R boundary beyond preserving the supersession note
+- Next required action:
+  - freeze `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:43 America/Chicago] P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the superseded migration-only repair packet into the bootstrap-seam repair packet
+- Basis / evidence:
+  - actual parity blocker is `position_current` absent in runtime DB reality
+  - `src/state/db.py::init_schema()` is the seam that currently provisions the runtime DB shape
+  - freezing a packet that cannot touch that seam would be dishonest
+- Decisions frozen:
+  - keep this packet on additive runtime bootstrap support only
+  - do not claim DB-first reads, cutover, or legacy-surface deletion in this packet
+- Open uncertainties:
+  - exact additive bootstrap shape that avoids breaking legacy runtime helpers still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES` and run targeted schema/bootstrap tests
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`

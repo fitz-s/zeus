@@ -6,13 +6,13 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R freeze`
+- Last updated by: `Codex P7R2 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7R DELTA-05 runtime position_current bootstrap`
-- Active packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Stage: `P7R2 DELTA-05 init_schema additive canonical tables`
+- Active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
 - Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7.2-M2-PARITY-REPORTING`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP` inside its frozen boundary.
+1. Implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES` inside its frozen boundary.
 2. Run targeted schema/bootstrap evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 

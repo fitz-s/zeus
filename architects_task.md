@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R freeze`
+- Last updated by: `Codex P7R2 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,19 +17,19 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
 - State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Resolve DELTA-05 by making the canonical projection substrate (`position_current` and compatible runtime bootstrap path) actually present in current runtime DB reality, without pretending DB-first reads or cutover are already authorized.
+Resolve DELTA-05 by upgrading the runtime bootstrap seam in `src/state/db.py::init_schema()` so current/fresh runtime DBs gain the additive canonical support tables without claiming cutover.
 
 ## Allowed files
 
-- `work_packets/P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP.md`
-- `migrations/**`
+- `work_packets/P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES.md`
+- `src/state/db.py`
 - `tests/test_architecture_contracts.py`
 - `architects_progress.md`
 - `architects_task.md`
@@ -41,7 +41,16 @@ Resolve DELTA-05 by making the canonical projection substrate (`position_current
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `src/**`
+- `migrations/**`
+- `src/control/**`
+- `src/observability/**`
+- `src/riskguard/**`
+- `src/engine/**`
+- `src/execution/**`
+- `src/supervisor_api/**`
+- `src/state/portfolio.py`
+- `src/state/ledger.py`
+- `src/state/projection.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_runtime_guards.py`
 - `tests/test_riskguard.py`
@@ -59,22 +68,22 @@ Resolve DELTA-05 by making the canonical projection substrate (`position_current
 
 ## Current blocker state
 
-- current parity evidence says `position_current` is absent in the local runtime DB reality
+- current parity evidence says `position_current` is absent in current runtime DB reality
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7R packet frozen
-- [ ] runtime/bootstrap path can produce `position_current`
+- [x] P7R2 packet frozen
+- [ ] init_schema/runtime bootstrap path can produce `position_current` and additive canonical support tables
 - [ ] targeted schema/bootstrap tests green
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
-- [ ] P7R accepted and pushed
+- [ ] P7R2 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`.
+1. Implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`.
 2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
 3. Do not freeze the next packet until this packet’s post-close gate passes.
