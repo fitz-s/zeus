@@ -5,17 +5,17 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-05 America/Chicago`
-- Last updated by: `Codex P7R3 close`
+- Last updated: `2026-04-04 America/Chicago`
+- Last updated by: `Codex P7R3 post-close + P7R4 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7R3 legacy position_events collision repair`
-- Active packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7R4 open-position canonical backfill`
+- Active packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Last accepted packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`.
-2. Do not freeze any later P7 packet unless the post-close gate passes and the new parity output supports it.
+1. Implement `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`.
+2. Keep the packet bounded to canonical seeding/backfill for currently open legacy paper positions; do not mix in DB-first cutover or legacy deletion.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

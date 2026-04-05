@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.3 freeze`
+- Last updated by: `Codex P7R3 post-close + P7R4 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,16 +30,81 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7.3 open-position canonical backfill`
-- Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- Current active packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Mainline stage: `P7R4 open-position canonical backfill`
+- Last accepted packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Current active packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
 - Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the implemented P7R2 boundary yet
+  - parity still reports canonical open side empty while legacy paper state reports 12 open `opening_inertia` positions
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
+
+## [2026-04-04 21:23 America/Chicago] P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema or replay_parity or apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events'` -> `7 passed, 76 deselected`
+  - root runtime SQLite inspection on `state/zeus.db` shows `position_events`, `position_events_legacy`, and `position_current` present side by side
+  - pre-close critic via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - runtime/bootstrap now preserves a canonical `position_events` authority table while retaining `position_events_legacy` for legacy helper behavior
+  - this packet does not claim canonical backfill, DB-first cutover, or legacy-surface deletion
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any next packet may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:34 America/Chicago] P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p7r3-postclose-critic-20260405T023446Z.md`)
+  - accepted-boundary clean-lane verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p7r3-postclose-verifier-20260405T023446Z.md`)
+  - accepted-boundary checks stayed green: `work packet grammar ok`, `kernel manifests ok`, targeted architecture pytest `7 passed, 76 deselected`
+  - fresh bootstrap proof on `/tmp/zeus_p7r3_bootstrap.db` plus parity replay against `state/positions-paper.json` no longer reports missing canonical tables; it reports mismatch instead
+  - root runtime parity on `state/zeus.db` still reports the concrete next mismatch: canonical open side `0` vs legacy paper open side `12` (`opening_inertia`)
+- Decisions frozen:
+  - P7R3 acceptance stands without reopen
+  - the event-authority collision is no longer the active blocker
+  - freezing a bounded open-position canonical backfill packet is now lawful
+- Open uncertainties:
+  - none on the accepted P7R3 boundary beyond preserving scope and using the mismatch truth honestly
+- Next required action:
+  - freeze a bounded open-position canonical backfill packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:35 America/Chicago] P7R4-OPEN-POSITION-CANONICAL-BACKFILL frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P7R3 boundary plus passed post-close gate now permit the next freeze
+  - current runtime parity still reports canonical open positions `0` while `state/positions-paper.json` reports `12` open `opening_inertia` positions
+  - append-first canonical seeding is now technically possible because the legacy `position_events` collision has been repaired
+- Decisions frozen:
+  - keep this packet on bounded canonical seeding/backfill for currently open legacy paper positions only
+  - do not widen into DB-first cutover, legacy deletion, or broad migration cleanup
+- Open uncertainties:
+  - exact minimum builder/script support for idempotent seeding still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7R4-OPEN-POSITION-CANONICAL-BACKFILL` and run targeted backfill/parity tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-04 17:55 America/Chicago] P6.0-STATUS-SUMMARY-INPUT-READINESS frozen
 - Author: `Architects mainline lead`
