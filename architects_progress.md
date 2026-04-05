@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.2 freeze`
+- Last updated by: `Codex P6.2 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P6.2 control-plane durable override writes`
 - Last accepted packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
 - Current active packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P6.2 boundary yet
+  - no blocker inside the accepted P6.2 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -195,6 +195,30 @@ Archive policy:
   - exact command subset that can be bridged honestly through `control_overrides` still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES` and run targeted durability tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 20:40 America/Chicago] P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'control or recommended_commands'` -> `10 passed, 39 deselected in 1.18s`
+  - lsp diagnostics on `src/control/control_plane.py`, `src/state/db.py`, and `tests/test_pnl_flow_and_audit.py` -> `0 errors`
+  - pre-close critic clean lane via `gemini -p` -> `PASS`
+  - pre-close verifier clean lane via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - pause/tighten/strategy-gate commands now bridge into `control_overrides`
+  - restart-survival is proven on the durable override subset
+  - `control_plane.json` remains ingress-only and no `lifecycle_commands` or tracker-demotion work is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before the next packet may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
 - Owner:
   - Architects mainline lead
 
