@@ -7,7 +7,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +46,12 @@ AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
     "outcome",
     "pnl",
     "settled_at",
+)
+OPEN_EXPOSURE_PHASES = (
+    "pending_entry",
+    "active",
+    "day0_window",
+    "pending_exit",
 )
 
 
@@ -1768,6 +1774,297 @@ def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
     if not rows:
         return "none"
     return str(rows[0].get("source") or "none")
+
+
+def refresh_strategy_health(
+    conn: sqlite3.Connection | None,
+    *,
+    as_of: str | None = None,
+) -> dict:
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "table": "strategy_health",
+            "rows_written": 0,
+        }
+    if not _table_exists(conn, "strategy_health"):
+        return {
+            "status": "skipped_missing_table",
+            "table": "strategy_health",
+            "rows_written": 0,
+        }
+
+    required_tables = ("position_current",)
+    optional_tables = ("outcome_fact", "execution_fact", "risk_actions")
+    missing_required_tables = [table for table in required_tables if not _table_exists(conn, table)]
+    missing_optional_tables = [table for table in optional_tables if not _table_exists(conn, table)]
+    refresh_time = as_of or datetime.now(timezone.utc).isoformat()
+    if missing_required_tables:
+        return {
+            "status": "skipped_missing_inputs",
+            "table": "strategy_health",
+            "rows_written": 0,
+            "as_of": refresh_time,
+            "missing_required_tables": missing_required_tables,
+            "missing_optional_tables": missing_optional_tables,
+            "omitted_fields": [
+                "risk_level",
+                "brier_30d",
+                "edge_trend_30d",
+            ],
+        }
+
+    position_rows = conn.execute(
+        f"""
+        SELECT
+            strategy_key,
+            SUM(COALESCE(size_usd, 0.0)) AS open_exposure_usd,
+            SUM(
+                CASE
+                    WHEN shares IS NOT NULL
+                     AND last_monitor_market_price IS NOT NULL
+                     AND cost_basis_usd IS NOT NULL
+                    THEN (shares * last_monitor_market_price) - cost_basis_usd
+                    ELSE 0.0
+                END
+            ) AS unrealized_pnl
+        FROM position_current
+        WHERE phase IN ({", ".join("?" for _ in OPEN_EXPOSURE_PHASES)})
+        GROUP BY strategy_key
+        """,
+        OPEN_EXPOSURE_PHASES,
+    ).fetchall()
+    position_metrics = {
+        str(row["strategy_key"]): {
+            "open_exposure_usd": round(float(row["open_exposure_usd"] or 0.0), 2),
+            "unrealized_pnl": round(float(row["unrealized_pnl"] or 0.0), 2),
+        }
+        for row in position_rows
+    }
+
+    settled_cutoff = _shift_iso_timestamp(refresh_time, days=30)
+    settlement_metrics: dict[str, dict] = {}
+    if "outcome_fact" not in missing_optional_tables:
+        settlement_rows = conn.execute(
+            """
+            SELECT
+                strategy_key,
+                COUNT(*) AS settled_trades_30d,
+                SUM(COALESCE(pnl, 0.0)) AS realized_pnl_30d,
+                SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS wins
+            FROM outcome_fact
+            WHERE settled_at IS NOT NULL
+              AND settled_at >= ?
+            GROUP BY strategy_key
+            """,
+            (settled_cutoff,),
+        ).fetchall()
+        for row in settlement_rows:
+            trade_count = int(row["settled_trades_30d"] or 0)
+            settlement_metrics[str(row["strategy_key"])] = {
+                "settled_trades_30d": trade_count,
+                "realized_pnl_30d": round(float(row["realized_pnl_30d"] or 0.0), 2),
+                "win_rate_30d": round(float(row["wins"] or 0) / trade_count, 4) if trade_count else None,
+            }
+
+    execution_cutoff = _shift_iso_timestamp(refresh_time, days=14)
+    execution_metrics: dict[str, dict] = {}
+    if "execution_fact" not in missing_optional_tables:
+        execution_rows = conn.execute(
+            """
+            SELECT
+                strategy_key,
+                SUM(CASE WHEN terminal_exec_status = 'filled' THEN 1 ELSE 0 END) AS filled,
+                SUM(CASE WHEN terminal_exec_status IN ('rejected', 'cancelled', 'canceled') THEN 1 ELSE 0 END) AS rejected
+            FROM execution_fact
+            WHERE order_role = 'entry'
+              AND COALESCE(filled_at, voided_at, posted_at) IS NOT NULL
+              AND COALESCE(filled_at, voided_at, posted_at) >= ?
+            GROUP BY strategy_key
+            """,
+            (execution_cutoff,),
+        ).fetchall()
+        for row in execution_rows:
+            filled = int(row["filled"] or 0)
+            rejected = int(row["rejected"] or 0)
+            observed = filled + rejected
+            fill_rate = round(filled / observed, 4) if observed else None
+            execution_metrics[str(row["strategy_key"])] = {
+                "fill_rate_14d": fill_rate,
+                "execution_decay_flag": int(fill_rate is not None and observed >= 10 and fill_rate < 0.3),
+            }
+
+    risk_action_metrics: dict[str, dict] = {}
+    if "risk_actions" not in missing_optional_tables:
+        risk_action_rows = conn.execute(
+            """
+            SELECT strategy_key, action_type, reason
+            FROM risk_actions
+            WHERE status = 'active'
+              AND (effective_until IS NULL OR effective_until > ?)
+              AND issued_at <= ?
+            """,
+            (refresh_time, refresh_time),
+        ).fetchall()
+        for row in risk_action_rows:
+            strategy_key = str(row["strategy_key"] or "")
+            if not strategy_key:
+                continue
+            bucket = risk_action_metrics.setdefault(
+                strategy_key,
+                {
+                    "edge_compression_flag": 0,
+                    "execution_decay_flag": 0,
+                },
+            )
+            reason = str(row["reason"] or "")
+            if "edge_compression" in reason:
+                bucket["edge_compression_flag"] = 1
+            if "execution_decay(" in reason:
+                bucket["execution_decay_flag"] = 1
+
+    strategy_keys = set(position_metrics)
+    strategy_keys.update(settlement_metrics)
+    strategy_keys.update(execution_metrics)
+    strategy_keys.update(risk_action_metrics)
+
+    conn.execute("DELETE FROM strategy_health WHERE as_of = ?", (refresh_time,))
+    rows_written = 0
+    for strategy_key in sorted(strategy_keys):
+        position_bucket = position_metrics.get(strategy_key, {})
+        settlement_bucket = settlement_metrics.get(strategy_key, {})
+        execution_bucket = execution_metrics.get(strategy_key, {})
+        action_bucket = risk_action_metrics.get(strategy_key, {})
+        conn.execute(
+            """
+            INSERT INTO strategy_health (
+                strategy_key,
+                as_of,
+                open_exposure_usd,
+                settled_trades_30d,
+                realized_pnl_30d,
+                unrealized_pnl,
+                win_rate_30d,
+                brier_30d,
+                fill_rate_14d,
+                edge_trend_30d,
+                risk_level,
+                execution_decay_flag,
+                edge_compression_flag
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)
+            """,
+            (
+                strategy_key,
+                refresh_time,
+                float(position_bucket.get("open_exposure_usd", 0.0)),
+                int(settlement_bucket.get("settled_trades_30d", 0)),
+                float(settlement_bucket.get("realized_pnl_30d", 0.0)),
+                float(position_bucket.get("unrealized_pnl", 0.0)),
+                settlement_bucket.get("win_rate_30d"),
+                execution_bucket.get("fill_rate_14d"),
+                int(
+                    max(
+                        int(execution_bucket.get("execution_decay_flag", 0)),
+                        int(action_bucket.get("execution_decay_flag", 0)),
+                    )
+                ),
+                int(action_bucket.get("edge_compression_flag", 0)),
+            ),
+        )
+        rows_written += 1
+    refresh_status = "refreshed" if rows_written else "refreshed_empty"
+    return {
+        "status": refresh_status,
+        "table": "strategy_health",
+        "rows_written": rows_written,
+        "as_of": refresh_time,
+        "missing_required_tables": missing_required_tables,
+        "missing_optional_tables": missing_optional_tables,
+        "omitted_fields": [
+            "risk_level",
+            "brier_30d",
+            "edge_trend_30d",
+        ],
+    }
+
+
+def query_strategy_health_snapshot(
+    conn: sqlite3.Connection | None,
+    *,
+    now: str | None = None,
+    max_age_seconds: int = 300,
+) -> dict:
+    snapshot_time = now or datetime.now(timezone.utc).isoformat()
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "table": "strategy_health",
+            "by_strategy": {},
+            "stale_strategy_keys": [],
+        }
+    if not _table_exists(conn, "strategy_health"):
+        return {
+            "status": "missing_table",
+            "table": "strategy_health",
+            "by_strategy": {},
+            "stale_strategy_keys": [],
+        }
+    rows = conn.execute(
+        """
+        SELECT sh.*
+        FROM strategy_health sh
+        JOIN (
+            SELECT strategy_key, MAX(as_of) AS latest_as_of
+            FROM strategy_health
+            GROUP BY strategy_key
+        ) latest
+          ON latest.strategy_key = sh.strategy_key
+         AND latest.latest_as_of = sh.as_of
+        ORDER BY sh.strategy_key
+        """
+    ).fetchall()
+    if not rows:
+        return {
+            "status": "empty",
+            "table": "strategy_health",
+            "by_strategy": {},
+            "stale_strategy_keys": [],
+        }
+
+    snapshot_dt = _parse_iso_timestamp(snapshot_time)
+    stale_strategy_keys: list[str] = []
+    by_strategy: dict[str, dict] = {}
+    for row in rows:
+        strategy_key = str(row["strategy_key"])
+        as_of_raw = str(row["as_of"] or "")
+        row_as_of = _parse_iso_timestamp(as_of_raw)
+        age_seconds = None
+        if snapshot_dt is not None and row_as_of is not None:
+            age_seconds = max(0.0, (snapshot_dt - row_as_of).total_seconds())
+        if age_seconds is None or age_seconds > max_age_seconds:
+            stale_strategy_keys.append(strategy_key)
+        by_strategy[strategy_key] = {
+            key: row[key]
+            for key in row.keys()
+        }
+        by_strategy[strategy_key]["age_seconds"] = age_seconds
+
+    return {
+        "status": "stale" if stale_strategy_keys else "fresh",
+        "table": "strategy_health",
+        "as_of": max(str(row["as_of"] or "") for row in rows),
+        "by_strategy": by_strategy,
+        "stale_strategy_keys": stale_strategy_keys,
+        "max_age_seconds": max_age_seconds,
+    }
+
+
+def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
+    parsed = _parse_iso_timestamp(timestamp)
+    if parsed is None:
+        return timestamp
+    return (parsed - timedelta(days=days)).isoformat()
 
 
 def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:

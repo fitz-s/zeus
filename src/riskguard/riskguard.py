@@ -19,7 +19,13 @@ from src.riskguard.metrics import (
     evaluate_brier,
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
-from src.state.db import RISK_DB_PATH, get_connection, query_authoritative_settlement_rows
+from src.state.db import (
+    RISK_DB_PATH,
+    get_connection,
+    query_authoritative_settlement_rows,
+    query_strategy_health_snapshot,
+    refresh_strategy_health,
+)
 from src.state.portfolio import load_portfolio
 from src.state.strategy_tracker import load_tracker
 
@@ -339,6 +345,11 @@ def tick() -> RiskLevel:
         recommended_strategy_gate_reasons,
         issued_at=now,
     )
+    strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
+    strategy_health_snapshot = query_strategy_health_snapshot(
+        zeus_conn,
+        now=now,
+    )
     risk_conn.execute("""
         INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -385,6 +396,13 @@ def tick() -> RiskLevel:
             "durable_risk_action_emission_status": durable_action_status["status"],
             "durable_risk_action_emitted_count": durable_action_status["emitted_count"],
             "durable_risk_action_expired_count": durable_action_status["expired_count"],
+            "strategy_health_refresh_status": strategy_health_refresh["status"],
+            "strategy_health_rows_written": strategy_health_refresh.get("rows_written", 0),
+            "strategy_health_missing_required_tables": list(strategy_health_refresh.get("missing_required_tables", [])),
+            "strategy_health_missing_optional_tables": list(strategy_health_refresh.get("missing_optional_tables", [])),
+            "strategy_health_omitted_fields": list(strategy_health_refresh.get("omitted_fields", [])),
+            "strategy_health_snapshot_status": strategy_health_snapshot["status"],
+            "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
         }),
         now,
     ))

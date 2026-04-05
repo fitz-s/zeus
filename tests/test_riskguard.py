@@ -15,7 +15,11 @@ from src.riskguard.metrics import (
     directional_accuracy,
     evaluate_brier,
 )
-from src.state.db import get_connection
+from src.state.db import (
+    get_connection,
+    query_strategy_health_snapshot,
+    refresh_strategy_health,
+)
 from src.state.portfolio import Position
 from src.state.portfolio import PortfolioState
 
@@ -65,6 +69,94 @@ def _insert_risk_action(
             "riskguard",
             precedence,
             status,
+        ),
+    )
+
+
+def _insert_position_current(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    strategy_key: str,
+    phase: str = "active",
+    size_usd: float = 0.0,
+    shares: float = 0.0,
+    cost_basis_usd: float = 0.0,
+    last_monitor_market_price: float | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (?, ?, ?, '', '', '', '', '', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', '', '', '', ?)
+        """,
+        (
+            position_id,
+            phase,
+            position_id,
+            size_usd,
+            shares,
+            cost_basis_usd,
+            last_monitor_market_price,
+            strategy_key,
+            "2026-04-04T12:00:00+00:00",
+        ),
+    )
+
+
+def _insert_outcome_fact(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    strategy_key: str,
+    settled_at: str,
+    pnl: float,
+    outcome: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO outcome_fact (
+            position_id, strategy_key, entered_at, exited_at, settled_at,
+            exit_reason, admin_exit_reason, decision_snapshot_id, pnl, outcome,
+            hold_duration_hours, monitor_count, chain_corrections_count
+        ) VALUES (?, ?, NULL, NULL, ?, '', '', '', ?, ?, NULL, 0, 0)
+        """,
+        (
+            position_id,
+            strategy_key,
+            settled_at,
+            pnl,
+            outcome,
+        ),
+    )
+
+
+def _insert_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    intent_id: str,
+    strategy_key: str,
+    terminal_exec_status: str,
+    posted_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, decision_id, order_role, strategy_key, posted_at,
+            filled_at, voided_at, submitted_price, fill_price, shares, fill_quality,
+            latency_seconds, venue_status, terminal_exec_status
+        ) VALUES (?, ?, NULL, 'entry', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+        """,
+        (
+            intent_id,
+            intent_id,
+            strategy_key,
+            posted_at,
+            terminal_exec_status,
         ),
     )
 
@@ -901,3 +993,188 @@ class TestStrategyPolicyResolver:
         assert row["level"] == RiskLevel.RED.value
         assert details["settlement_quality_level"] == "RED"
         assert details["settlement_metric_ready_count"] == 0
+
+
+def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
+    conn = _policy_conn()
+    as_of = "2026-04-04T12:00:00+00:00"
+
+    _insert_position_current(
+        conn,
+        position_id="pos-center",
+        strategy_key="center_buy",
+        size_usd=25.0,
+        shares=10.0,
+        cost_basis_usd=20.0,
+        last_monitor_market_price=2.5,
+    )
+    _insert_outcome_fact(
+        conn,
+        position_id="settle-center-1",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=7.5,
+        outcome=1,
+    )
+    _insert_outcome_fact(
+        conn,
+        position_id="settle-center-2",
+        strategy_key="center_buy",
+        settled_at="2026-03-20T12:00:00+00:00",
+        pnl=-2.0,
+        outcome=0,
+    )
+    for idx in range(2):
+        _insert_execution_fact(
+            conn,
+            intent_id=f"filled-{idx}",
+            strategy_key="center_buy",
+            terminal_exec_status="filled",
+            posted_at="2026-04-02T12:00:00+00:00",
+        )
+    for idx in range(8):
+        _insert_execution_fact(
+            conn,
+            intent_id=f"rejected-{idx}",
+            strategy_key="center_buy",
+            terminal_exec_status="rejected",
+            posted_at="2026-04-02T12:00:00+00:00",
+        )
+    _insert_risk_action(
+        conn,
+        action_id="riskguard:gate:center_buy",
+        strategy_key="center_buy",
+        action_type="gate",
+        value="true",
+        issued_at="2026-04-04T11:55:00+00:00",
+        effective_until=None,
+        precedence=50,
+        status="active",
+    )
+    conn.execute(
+        "UPDATE risk_actions SET reason = ? WHERE action_id = ?",
+        ("edge_compression|execution_decay(fill_rate=0.2, observed=10)", "riskguard:gate:center_buy"),
+    )
+
+    result = refresh_strategy_health(conn, as_of=as_of)
+    snapshot = query_strategy_health_snapshot(
+        conn,
+        now="2026-04-04T12:04:00+00:00",
+        max_age_seconds=300,
+    )
+    row = conn.execute(
+        """
+        SELECT open_exposure_usd, settled_trades_30d, realized_pnl_30d, unrealized_pnl,
+               win_rate_30d, fill_rate_14d, execution_decay_flag, edge_compression_flag
+        FROM strategy_health
+        WHERE strategy_key = 'center_buy' AND as_of = ?
+        """,
+        (as_of,),
+    ).fetchone()
+
+    assert result["status"] == "refreshed"
+    assert result["rows_written"] == 1
+    assert row["open_exposure_usd"] == pytest.approx(25.0)
+    assert row["settled_trades_30d"] == 2
+    assert row["realized_pnl_30d"] == pytest.approx(5.5)
+    assert row["unrealized_pnl"] == pytest.approx(5.0)
+    assert row["win_rate_30d"] == pytest.approx(0.5)
+    assert row["fill_rate_14d"] == pytest.approx(0.2)
+    assert row["execution_decay_flag"] == 1
+    assert row["edge_compression_flag"] == 1
+    assert snapshot["status"] == "fresh"
+    assert snapshot["stale_strategy_keys"] == []
+
+
+def test_refresh_strategy_health_reports_missing_inputs_explicitly():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    result = refresh_strategy_health(conn, as_of="2026-04-04T12:00:00+00:00")
+    snapshot = query_strategy_health_snapshot(conn)
+
+    assert result["status"] == "skipped_missing_table"
+    assert result["rows_written"] == 0
+    assert snapshot["status"] == "missing_table"
+
+
+def test_refresh_strategy_health_reports_required_input_gap_when_projection_missing():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE strategy_health (strategy_key TEXT, as_of TEXT)")
+
+    result = refresh_strategy_health(conn, as_of="2026-04-04T12:00:00+00:00")
+
+    assert result["status"] == "skipped_missing_inputs"
+    assert result["missing_required_tables"] == ["position_current"]
+    assert result["omitted_fields"] == [
+        "risk_level",
+        "brier_30d",
+        "edge_trend_30d",
+    ]
+
+
+def test_query_strategy_health_snapshot_reports_stale_rows():
+    conn = _policy_conn()
+    conn.execute(
+        """
+        INSERT INTO strategy_health (
+            strategy_key, as_of, open_exposure_usd, settled_trades_30d, realized_pnl_30d,
+            unrealized_pnl, win_rate_30d, brier_30d, fill_rate_14d, edge_trend_30d,
+            risk_level, execution_decay_flag, edge_compression_flag
+        ) VALUES ('center_buy', '2026-04-04T11:40:00+00:00', 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, 0, 0)
+        """
+    )
+
+    snapshot = query_strategy_health_snapshot(
+        conn,
+        now="2026-04-04T12:00:00+00:00",
+        max_age_seconds=300,
+    )
+
+    assert snapshot["status"] == "stale"
+    assert snapshot["stale_strategy_keys"] == ["center_buy"]
+
+
+def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    conn = get_connection(zeus_db)
+    _bootstrap_policy_tables(conn)
+    _insert_position_current(
+        conn,
+        position_id="pos-center",
+        strategy_key="center_buy",
+        size_usd=30.0,
+        shares=12.0,
+        cost_basis_usd=24.0,
+        last_monitor_market_price=2.5,
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+    monkeypatch.setattr(
+        riskguard_module,
+        "query_authoritative_settlement_rows",
+        lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+    )
+
+    riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+
+    assert details["strategy_health_refresh_status"] == "refreshed"
+    assert details["strategy_health_rows_written"] == 1
+    assert details["strategy_health_snapshot_status"] == "fresh"
+    assert details["strategy_health_stale_strategy_keys"] == []

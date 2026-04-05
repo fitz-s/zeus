@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `P6.0 status-summary input readiness`
 - Active packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P6.0-STATUS-SUMMARY-INPUT-READINESS` inside its frozen boundary.
-2. Run targeted strategy-health evidence plus pre-close critic + verifier before any acceptance claim.
+1. Run the post-close critic + verifier gate for accepted `P6.0-STATUS-SUMMARY-INPUT-READINESS`.
+2. Do not freeze `P6.1` unless the post-close gate passes on the accepted boundary.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P6.0 status-summary input readiness`
 - Last accepted packet: `P5.4-QUARANTINE-SEMANTICS-HARDENING`
 - Current active packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P6.0 boundary yet
+  - no blocker inside the accepted P6.0 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -61,6 +61,30 @@ Archive policy:
 - Next required action:
   - implement `P6.0-STATUS-SUMMARY-INPUT-READINESS` and run targeted strategy-health tests
   - then run pre-close critic + verifier before any acceptance claim
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:15 America/Chicago] P6.0-STATUS-SUMMARY-INPUT-READINESS accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py` -> `36 passed in 0.18s`
+  - lsp diagnostics on `src/state/db.py`, `src/riskguard/riskguard.py`, and `tests/test_riskguard.py` -> `0 errors`
+  - pre-close verifier clean lane -> `PASS`
+  - external adversarial clean-lane review via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - `strategy_health` is now a real DB substrate with explicit `fresh`, `stale`, `missing_table`, and `skipped_missing_inputs` semantics
+  - riskguard now records strategy-health refresh/snapshot metadata for operator visibility without touching `status_summary.py`
+  - this packet does not certify status-summary DB-cutover readiness and does not widen into control-plane durability or strategy-tracker deletion
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before `P6.1` may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P6.0-STATUS-SUMMARY-INPUT-READINESS`
 - Owner:
   - Architects mainline lead
 
