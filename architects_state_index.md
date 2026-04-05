@@ -6,13 +6,13 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-05 America/Chicago`
-- Last updated by: `Codex P7.3 freeze`
+- Last updated by: `Codex P7R3 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7.3 open-position canonical backfill`
-- Active packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Stage: `P7R3 legacy position_events collision repair`
+- Active packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
 - Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL` inside its frozen boundary.
-2. Run targeted backfill/parity evidence plus pre-close critic + verifier before any acceptance claim.
+1. Implement `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR` inside its frozen boundary.
+2. Run targeted schema/bootstrap evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
