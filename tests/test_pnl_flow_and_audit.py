@@ -992,7 +992,12 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
 
 def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_path):
     control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
     control_path.write_text(
         json.dumps(
             {
@@ -1007,11 +1012,24 @@ def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_pat
     assert processed == ["set_strategy_gate"]
     assert control_plane_module.is_strategy_enabled("opening_inertia") is False
     assert control_plane_module.is_strategy_enabled("center_buy") is True
+    control_plane_module.clear_control_state()
+    assert control_plane_module.is_strategy_enabled("opening_inertia") is False
+    row = get_connection(db_path).execute(
+        "SELECT value, issued_by, precedence FROM control_overrides WHERE override_id = 'control_plane:strategy:opening_inertia:gate'"
+    ).fetchone()
+    assert row["value"] == "true"
+    assert row["issued_by"] == "control_plane"
+    assert row["precedence"] == 100
 
 
 def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path):
     control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
 
@@ -1023,11 +1041,22 @@ def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path)
     control_plane_module.clear_control_state()
 
     assert control_plane_module.is_entries_paused() is True
+    row = get_connection(db_path).execute(
+        "SELECT value, issued_by, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+    ).fetchone()
+    assert row["value"] == "true"
+    assert row["issued_by"] == "control_plane"
+    assert row["precedence"] == 100
 
 
 def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatch, tmp_path):
     control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "tighten_risk"}], "acks": []}))
 
@@ -1059,6 +1088,33 @@ def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatc
 
     assert control_plane_module.is_entries_paused() is False
     assert control_plane_module.get_edge_threshold_multiplier() == 1.0
+    row = get_connection(db_path).execute(
+        "SELECT value, issued_by, precedence, effective_until FROM control_overrides WHERE override_id = 'control_plane:global:edge_threshold_multiplier'"
+    ).fetchone()
+    assert row["value"] == "2.0"
+    assert row["issued_by"] == "control_plane"
+    assert row["precedence"] == 100
+    assert row["effective_until"] is not None
+
+
+def test_inv_control_plane_records_explicit_skip_when_control_overrides_table_missing(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    conn.close()
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
+    control_plane_module.clear_control_state()
+    control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
+
+    processed = control_plane_module.process_commands()
+    payload = json.loads(control_path.read_text())
+
+    assert processed == ["pause_entries"]
+    assert payload["commands"] == []
+    assert payload["acks"][-1]["reason"] == "missing_control_overrides_table"
+    control_plane_module.clear_control_state()
+    assert control_plane_module.is_entries_paused() is False
 
 
 def test_inv_supervisor_command_matches_real_control_plane_contract():

@@ -9,6 +9,13 @@ import logging
 from datetime import datetime, timezone
 
 from src.config import state_path
+from src.state.db import (
+    DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    expire_control_override,
+    get_connection,
+    query_control_override_state,
+    upsert_control_override,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,35 +104,36 @@ def refresh_control_state() -> None:
     entries_paused = False
     edge_threshold_multiplier = DEFAULT_EDGE_THRESHOLD_MULTIPLIER
     gates: dict[str, bool] = {}
+    durable_state = {"status": "skipped_no_connection"}
+    conn = None
+    try:
+        conn = get_connection()
+        durable_state = query_control_override_state(conn)
+    except Exception:
+        durable_state = {"status": "query_error"}
+    finally:
+        if conn is not None:
+            conn.close()
+    if durable_state.get("status") == "ok":
+        entries_paused = bool(durable_state.get("entries_paused", False))
+        edge_threshold_multiplier = float(
+            durable_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
+        )
+        gates = dict(durable_state.get("strategy_gates", {}))
     for ack in data.get("acks", []):
         if ack.get("status") != "executed":
             continue
         command = ack.get("command")
-        if command == "pause_entries":
-            entries_paused = True
-            continue
-        if command == "resume":
-            entries_paused = False
-            edge_threshold_multiplier = DEFAULT_EDGE_THRESHOLD_MULTIPLIER
-            continue
-        if command == "tighten_risk":
-            edge_threshold_multiplier = TIGHTENED_EDGE_THRESHOLD_MULTIPLIER
-            continue
         if command == "acknowledge_quarantine_clear":
             token_id = _extract_quarantine_token_id(ack)
             if token_id:
                 acknowledged_tokens.add(token_id)
             continue
-        if ack.get("command") != "set_strategy_gate":
-            continue
-        strategy = str(ack.get("strategy") or "")
-        enabled = ack.get("enabled")
-        if strategy and isinstance(enabled, bool):
-            gates[strategy] = enabled
     _control_state["entries_paused"] = entries_paused
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
     _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
+    _control_state["durable_override_status"] = durable_state.get("status", "unknown")
 
 
 
@@ -173,33 +181,93 @@ def _acknowledge_command(name: str, cmd: dict, *, status: str, reason: str = "")
 
 
 def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
-    if name == "pause_entries":
-        _set_state("entries_paused", True)
+    conn = None
+    issued_at = datetime.now(timezone.utc).isoformat()
+    note = str(cmd.get("note") or cmd.get("reason") or "")
+    issued_by = str(cmd.get("issued_by") or "control_plane")
+    effective_until = cmd.get("effective_until")
+    precedence = int(cmd.get("precedence") or DEFAULT_CONTROL_OVERRIDE_PRECEDENCE)
+    try:
+        conn = get_connection()
+    except Exception:
+        conn = None
+    try:
+        if name == "pause_entries":
+            result = upsert_control_override(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                target_type="global",
+                target_key="entries",
+                action_type="gate",
+                value="true",
+                issued_by=issued_by,
+                issued_at=issued_at,
+                reason=note or "control_plane:pause_entries",
+                effective_until=effective_until,
+                precedence=precedence,
+            )
+            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+        if name == "resume":
+            expire_control_override(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                expired_at=issued_at,
+            )
+            expire_control_override(
+                conn,
+                override_id="control_plane:global:edge_threshold_multiplier",
+                expired_at=issued_at,
+            )
+            return True, ""
+        if name == "tighten_risk":
+            result = upsert_control_override(
+                conn,
+                override_id="control_plane:global:edge_threshold_multiplier",
+                target_type="global",
+                target_key="entries",
+                action_type="threshold_multiplier",
+                value=str(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER),
+                issued_by=issued_by,
+                issued_at=issued_at,
+                reason=note or "control_plane:tighten_risk",
+                effective_until=effective_until,
+                precedence=precedence,
+            )
+            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+        if name == "request_status":
+            from src.observability.status_summary import write_status
+            write_status()
+            return True, ""
+        if name == "set_strategy_gate":
+            strategy = str(cmd.get("strategy") or "")
+            enabled = cmd.get("enabled")
+            if not strategy:
+                return False, "missing_strategy"
+            if not isinstance(enabled, bool):
+                return False, "missing_enabled_bool"
+            result = upsert_control_override(
+                conn,
+                override_id=f"control_plane:strategy:{strategy}:gate",
+                target_type="strategy",
+                target_key=strategy,
+                action_type="gate",
+                value="false" if enabled else "true",
+                issued_by=issued_by,
+                issued_at=issued_at,
+                reason=note or f"control_plane:set_strategy_gate:{'enable' if enabled else 'disable'}",
+                effective_until=effective_until,
+                precedence=precedence,
+            )
+            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+        if name == "acknowledge_quarantine_clear":
+            if not _extract_quarantine_token_id(cmd):
+                return False, "missing_token_id"
+            return True, ""
         return True, ""
-    if name == "resume":
-        _set_state("entries_paused", False)
-        _set_state("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
-        return True, ""
-    if name == "tighten_risk":
-        _set_state("edge_threshold_multiplier", TIGHTENED_EDGE_THRESHOLD_MULTIPLIER)
-        return True, ""
-    if name == "request_status":
-        from src.observability.status_summary import write_status
-        write_status()
-        return True, ""
-    if name == "set_strategy_gate":
-        strategy = str(cmd.get("strategy") or "")
-        enabled = cmd.get("enabled")
-        if not strategy:
-            return False, "missing_strategy"
-        if not isinstance(enabled, bool):
-            return False, "missing_enabled_bool"
-        return True, ""
-    if name == "acknowledge_quarantine_clear":
-        if not _extract_quarantine_token_id(cmd):
-            return False, "missing_token_id"
-        return True, ""
-    return True, ""
+    finally:
+        if conn is not None:
+            conn.commit()
+            conn.close()
 
 
 

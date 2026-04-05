@@ -53,6 +53,7 @@ OPEN_EXPOSURE_PHASES = (
     "day0_window",
     "pending_exit",
 )
+DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -2179,11 +2180,148 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     }
 
 
+def upsert_control_override(
+    conn: sqlite3.Connection | None,
+    *,
+    override_id: str,
+    target_type: str,
+    target_key: str,
+    action_type: str,
+    value: str,
+    issued_by: str,
+    issued_at: str,
+    reason: str,
+    effective_until: str | None = None,
+    precedence: int = DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "control_overrides"}
+    if not _table_exists(conn, "control_overrides"):
+        return {"status": "skipped_missing_table", "table": "control_overrides"}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            override_id,
+            target_type,
+            target_key,
+            action_type,
+            value,
+            issued_by,
+            issued_at,
+            effective_until,
+            reason,
+            precedence,
+        ),
+    )
+    return {"status": "written", "table": "control_overrides", "override_id": override_id}
+
+
+def expire_control_override(
+    conn: sqlite3.Connection | None,
+    *,
+    override_id: str,
+    expired_at: str,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "control_overrides", "expired_count": 0}
+    if not _table_exists(conn, "control_overrides"):
+        return {"status": "skipped_missing_table", "table": "control_overrides", "expired_count": 0}
+    cur = conn.execute(
+        """
+        UPDATE control_overrides
+        SET effective_until = ?
+        WHERE override_id = ?
+          AND (effective_until IS NULL OR effective_until > ?)
+        """,
+        (expired_at, override_id, expired_at),
+    )
+    return {
+        "status": "expired" if cur.rowcount else "noop",
+        "table": "control_overrides",
+        "expired_count": int(cur.rowcount or 0),
+        "override_id": override_id,
+    }
+
+
+def query_control_override_state(
+    conn: sqlite3.Connection | None,
+    *,
+    now: str | None = None,
+) -> dict:
+    current_time = now or datetime.now(timezone.utc).isoformat()
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "entries_paused": False,
+            "edge_threshold_multiplier": 1.0,
+            "strategy_gates": {},
+        }
+    if not _table_exists(conn, "control_overrides"):
+        return {
+            "status": "missing_table",
+            "entries_paused": False,
+            "edge_threshold_multiplier": 1.0,
+            "strategy_gates": {},
+        }
+    rows = conn.execute(
+        """
+        SELECT override_id, target_type, target_key, action_type, value, precedence, issued_at
+        FROM control_overrides
+        WHERE target_type IN ('global', 'strategy')
+          AND issued_at <= ?
+          AND (effective_until IS NULL OR effective_until > ?)
+        ORDER BY precedence DESC, issued_at DESC, override_id DESC
+        """,
+        (current_time, current_time),
+    ).fetchall()
+    entries_paused = False
+    edge_threshold_multiplier = 1.0
+    strategy_gates: dict[str, bool] = {}
+    seen_strategy_gate: set[str] = set()
+    global_gate_seen = False
+    global_threshold_seen = False
+    for row in rows:
+        target_type = str(row["target_type"] or "")
+        target_key = str(row["target_key"] or "")
+        action_type = str(row["action_type"] or "")
+        value = str(row["value"] or "")
+        if target_type == "global" and target_key == "entries" and action_type == "gate" and not global_gate_seen:
+            entries_paused = _parse_boolish_text(value)
+            global_gate_seen = True
+            continue
+        if target_type == "global" and target_key == "entries" and action_type == "threshold_multiplier" and not global_threshold_seen:
+            try:
+                edge_threshold_multiplier = max(1.0, float(value))
+            except (TypeError, ValueError):
+                edge_threshold_multiplier = 1.0
+            global_threshold_seen = True
+            continue
+        if target_type == "strategy" and action_type == "gate" and target_key and target_key not in seen_strategy_gate:
+            strategy_gates[target_key] = not _parse_boolish_text(value)
+            seen_strategy_gate.add(target_key)
+    return {
+        "status": "ok",
+        "entries_paused": entries_paused,
+        "edge_threshold_multiplier": edge_threshold_multiplier,
+        "strategy_gates": strategy_gates,
+    }
+
+
 def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
     parsed = _parse_iso_timestamp(timestamp)
     if parsed is None:
         return timestamp
     return (parsed - timedelta(days=days)).isoformat()
+
+
+def _parse_boolish_text(raw: str) -> bool:
+    text = str(raw).strip().lower()
+    return text in {"1", "true", "yes", "on", "enabled", "gate"}
 
 
 def _query_transitional_position_hints(
