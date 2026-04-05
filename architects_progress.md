@@ -637,6 +637,66 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-05 00:45 America/Chicago] P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed, but only on the next real parity blocker
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `5 passed, 77 deselected`, `work packet grammar ok`, `kernel manifests ok`
+  - actual `python3 scripts/replay_parity.py` output now reports `status = mismatch` instead of missing canonical tables
+- Decisions frozen:
+  - P7R2 acceptance stands without reopen
+  - DELTA-05 is repaired on the touched bootstrap path
+  - the next concrete blocker is the legacy `position_events` schema collision preventing append-first canonical seeding
+- Open uncertainties:
+  - none on the accepted P7R2 boundary beyond preserving packet scope
+- Next required action:
+  - freeze a bounded packet that owns the legacy `position_events` schema collision
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-05 00:48 America/Chicago] P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL superseded before implementation
+- Author: `Architects mainline lead`
+- Packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Status delta:
+  - frozen packet superseded before implementation
+- Basis / evidence:
+  - implementation evidence showed append-first canonical seeding is blocked by the legacy `position_events` schema itself
+  - projection/event seeding could not land honestly while the event table remained legacy-shaped
+- Decisions frozen:
+  - P7.3 is not accepted as implemented work
+  - the next honest packet must own the event-authority collision directly
+- Open uncertainties:
+  - none on the superseded P7.3 boundary beyond preserving the supersession note
+- Next required action:
+  - freeze `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-05 00:50 America/Chicago] P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the superseded open-position backfill packet into the event-schema collision repair packet
+- Basis / evidence:
+  - append-first canonical seeding is blocked because runtime DBs still carry the legacy `position_events` table shape
+  - freezing a packet that ignores that collision would be dishonest
+- Decisions frozen:
+  - keep this packet on the event-authority collision only
+  - do not claim DB-first reads, cutover, or legacy-surface deletion in this packet
+- Open uncertainties:
+  - exact repair shape for the event-table collision still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR` and run targeted schema/bootstrap tests
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
