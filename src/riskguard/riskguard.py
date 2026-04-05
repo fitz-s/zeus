@@ -23,13 +23,87 @@ from src.state.db import (
     RISK_DB_PATH,
     get_connection,
     query_authoritative_settlement_rows,
+    query_portfolio_loader_view,
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
-from src.state.portfolio import load_portfolio
+from src.state.portfolio import PortfolioState, Position, load_portfolio
 from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def _portfolio_position_from_loader_row(row: dict) -> Position:
+    return Position(
+        trade_id=str(row.get("trade_id") or ""),
+        market_id=str(row.get("market_id") or ""),
+        city=str(row.get("city") or ""),
+        cluster=str(row.get("cluster") or ""),
+        target_date=str(row.get("target_date") or ""),
+        bin_label=str(row.get("bin_label") or ""),
+        direction=str(row.get("direction") or "unknown"),
+        unit=str(row.get("unit") or "F"),
+        env=str(row.get("env") or settings.mode),
+        size_usd=float(row.get("size_usd") or 0.0),
+        shares=float(row.get("shares") or 0.0),
+        cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
+        entry_price=float(row.get("entry_price") or 0.0),
+        p_posterior=float(row.get("p_posterior") or 0.0),
+        entered_at=str(row.get("entered_at") or ""),
+        day0_entered_at=str(row.get("day0_entered_at") or ""),
+        decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
+        entry_method=str(row.get("entry_method") or ""),
+        strategy_key=str(row.get("strategy_key") or ""),
+        strategy=str(row.get("strategy") or row.get("strategy_key") or ""),
+        edge_source=str(row.get("edge_source") or ""),
+        discovery_mode=str(row.get("discovery_mode") or ""),
+        state=str(row.get("state") or "entered"),
+        order_id=str(row.get("order_id") or ""),
+        order_status=str(row.get("order_status") or ""),
+        chain_state=str(row.get("chain_state") or ""),
+        exit_state=str(row.get("exit_state") or ""),
+        last_monitor_prob=float(row.get("last_monitor_prob") or 0.0),
+        last_monitor_edge=float(row.get("last_monitor_edge") or 0.0),
+        last_monitor_market_price=row.get("last_monitor_market_price"),
+        admin_exit_reason=str(row.get("admin_exit_reason") or ""),
+        entry_fill_verified=bool(row.get("entry_fill_verified", False)),
+    )
+
+
+def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
+    loader_view = query_portfolio_loader_view(zeus_conn)
+    if loader_view.get("status") == "ok":
+        positions = [
+            _portfolio_position_from_loader_row(row)
+            for row in loader_view.get("positions", [])
+        ]
+        bankroll = float(settings.capital_base_usd)
+        portfolio = PortfolioState(
+            positions=positions,
+            bankroll=bankroll,
+            updated_at="",
+            audit_logging_enabled=True,
+            daily_baseline_total=bankroll,
+            weekly_baseline_total=bankroll,
+            recent_exits=[],
+            ignored_tokens=[],
+        )
+        return portfolio, {
+            "source": "position_current",
+            "loader_status": str(loader_view.get("status") or "unknown"),
+            "fallback_active": False,
+            "fallback_reason": "",
+            "position_count": len(positions),
+        }
+
+    portfolio = load_portfolio()
+    return portfolio, {
+        "source": "working_state_fallback",
+        "loader_status": str(loader_view.get("status") or "unknown"),
+        "fallback_active": True,
+        "fallback_reason": str(loader_view.get("status") or "unknown"),
+        "position_count": len(portfolio.positions),
+    }
 
 
 def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
@@ -225,7 +299,7 @@ def tick() -> RiskLevel:
     init_risk_db(risk_conn)
 
     thresholds = settings["riskguard"]
-    portfolio = load_portfolio()
+    portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
     current_env = settings.mode
 
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
@@ -368,6 +442,11 @@ def tick() -> RiskLevel:
             "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
             "total_pnl": round(portfolio.total_pnl, 2),
             "effective_bankroll": round(portfolio.effective_bankroll, 2),
+            "portfolio_truth_source": portfolio_truth["source"],
+            "portfolio_loader_status": portfolio_truth["loader_status"],
+            "portfolio_fallback_active": portfolio_truth["fallback_active"],
+            "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
+            "portfolio_position_count": portfolio_truth["position_count"],
             "settlement_sample_size": len(p_forecasts),
             "settlement_storage_source": settlement_storage_source,
             "settlement_row_storage_sources": settlement_row_storage_sources,

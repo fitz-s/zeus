@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.5 post-close + P7.6 freeze`
+- Last updated by: `Codex P7.6 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7.6 RiskGuard DB-first`
-- Last accepted packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
 - Current active packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - RiskGuard still depends on working-state portfolio reads as primary input after the loader seam has moved DB-first
+  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -196,6 +196,70 @@ Archive policy:
   - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
 - Next required action:
   - run the post-close critic + verifier on accepted `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:14 America/Chicago] P7.5-M3-LOAD-PORTFOLIO-DB-FIRST post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p75-postclose-critic-20260405T025545Z.md` equivalent current lane)
+  - accepted-boundary external verifier via `gemini -p` -> `PASS`
+  - accepted-boundary checks stayed green: `work packet grammar ok`, `kernel manifests ok`, targeted runtime-guard pytest `5 passed, 73 deselected`
+- Decisions frozen:
+  - P7.5 acceptance stands without reopen
+  - the loader seam is no longer the active DB-first blocker
+  - freezing a bounded RiskGuard DB-first packet is now lawful
+- Open uncertainties:
+  - none on the accepted P7.5 boundary beyond preserving bounded M3 scope
+- Next required action:
+  - freeze `P7.6-M3-RISKGUARD-DB-FIRST`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:15 America/Chicago] P7.6-M3-RISKGUARD-DB-FIRST frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P7.5 boundary plus passed post-close gate now permit the next freeze
+  - RiskGuard still depended on working-state portfolio reads after the loader seam had already moved DB-first
+- Decisions frozen:
+  - keep this packet on the RiskGuard reader seam only
+  - do not widen into broader cutover, status-summary changes, or deletion
+- Open uncertainties:
+  - exact fallback trigger shape still needed implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7.6-M3-RISKGUARD-DB-FIRST` and run targeted RiskGuard tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:26 America/Chicago] P7.6-M3-RISKGUARD-DB-FIRST accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py -k 'portfolio_truth or strategy_health or current_level_fails_closed_when_risk_state_has_no_rows or records_strategy_health_refresh_metadata'` -> `7 passed, 31 deselected`
+  - pre-close critic via `claude -p` -> `PASS` (`.omx/artifacts/claude-p76-preclose-critic-20260405T000000Z.md`)
+  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p76-preclose-verifier-20260405T000000Z.md`)
+  - clean-lane present-path proof: RiskGuard tick records `portfolio_truth_source = position_current`, `portfolio_loader_status = ok`, `portfolio_fallback_active = false`, `portfolio_position_count = 1`
+- Decisions frozen:
+  - RiskGuard is now DB-first on the touched seam
+  - any fallback to working-state inputs remains explicit and only activates when canonical projection is unavailable
+  - this packet does not claim broader DB-first cutover, status-summary changes, or deletion
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7.6-M3-RISKGUARD-DB-FIRST`
 - Owner:
   - Architects mainline lead
 

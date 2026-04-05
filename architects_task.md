@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.5 post-close + P7.6 freeze`
+- Last updated by: `Codex P7.6 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -73,16 +73,16 @@ Make RiskGuard read DB-backed portfolio truth first while keeping any legacy wor
 ## Immediate checklist
 
 - [x] P7.6 packet frozen
-- [ ] RiskGuard becomes DB-first on the touched seam
-- [ ] targeted RiskGuard tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P7.6 accepted and pushed
+- [x] RiskGuard becomes DB-first on the touched seam
+- [x] targeted RiskGuard tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P7.6 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement the bounded RiskGuard DB-first reader seam.
-2. Prove any fallback to working-state portfolio inputs stays explicit and only activates when canonical projection is unavailable.
-3. Do not widen into broader cutover or deletion work.
+1. Finish the post-close critic + verifier on the accepted `P7.6` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
+3. Do not freeze the next packet until P7.6 post-close gate passes.

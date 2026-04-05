@@ -245,6 +245,84 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
+    def test_tick_prefers_position_current_for_portfolio_truth(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema
+
+        init_schema(conn)
+        _insert_position_current(
+            conn,
+            position_id="db-pos-1",
+            strategy_key="center_buy",
+            size_usd=25.0,
+            shares=10.0,
+            cost_basis_usd=20.0,
+            last_monitor_market_price=2.5,
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: (_ for _ in ()).throw(AssertionError("load_portfolio fallback should not run")),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["portfolio_truth_source"] == "position_current"
+        assert details["portfolio_loader_status"] == "ok"
+        assert details["portfolio_fallback_active"] is False
+        assert details["portfolio_position_count"] == 1
+        assert details["unrealized_pnl"] == pytest.approx(5.0)
+
+    def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["portfolio_truth_source"] == "working_state_fallback"
+        assert details["portfolio_loader_status"] == "missing_table"
+        assert details["portfolio_fallback_active"] is True
+        assert details["portfolio_fallback_reason"] == "missing_table"
+        assert details["portfolio_position_count"] == 0
+
     def test_get_current_level_fails_closed_when_risk_state_has_no_rows(self, monkeypatch, tmp_path):
         risk_db = tmp_path / "risk_state.db"
 
