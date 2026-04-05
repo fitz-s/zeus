@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.7 close`
+- Last updated by: `Codex P7.7 post-close boundary`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,22 +17,17 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
-- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `none`
+- State: `NO LIVE PACKET / AWAITING NEXT LAWFUL FREEZE`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Bring the persisted strategy-tracker compatibility surface into explicit alignment with repo law by hardening tracker metadata and compatibility semantics, without deleting the tracker or widening into M4 retirement work.
+No live packet. Hold at the post-P7.7 boundary until the next bounded non-destructive packet is explicitly justified.
 
 ## Allowed files
 
-- `work_packets/P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING.md`
-- `src/state/strategy_tracker.py`
-- `scripts/rebuild_strategy_tracker_current_regime.py`
-- `tests/test_strategy_tracker_regime.py`
-- `tests/test_truth_layer.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -63,12 +58,13 @@ Bring the persisted strategy-tracker compatibility surface into explicit alignme
 
 - no broad DB-first cutover yet
 - no legacy-surface deletion yet
-- no M4 retirement/delete work
+- no M4 retirement/delete freeze without a new explicit packet
 - no team launch
 
 ## Current blocker state
 
-- current runtime tracker metadata still advertises `tracker_role = attribution_surface`, which contradicts compatibility-only repo law
+- no later bounded non-destructive packet has been frozen yet
+- obvious next work trends toward M4 retirement/delete territory, which is not auto-authorized by momentum alone
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
@@ -79,11 +75,11 @@ Bring the persisted strategy-tracker compatibility surface into explicit alignme
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] P7.7 accepted and pushed
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Finish the post-close critic + verifier on the accepted `P7.7` boundary.
-2. Keep the slim control surfaces honest while the post-close gate is pending.
-3. Do not freeze the next packet until P7.7 post-close gate passes.
+1. Hold at the post-P7.7 boundary until a new bounded packet is explicitly justified.
+2. Do not invent a fake next freeze just to preserve momentum.
+3. Treat destructive/retirement transitions as out of the current autonomous stop boundary.
