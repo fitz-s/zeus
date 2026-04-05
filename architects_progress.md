@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R2 implementation`
+- Last updated by: `Codex P7R2 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,7 +33,7 @@ Archive policy:
 - Mainline stage: `P7R2 DELTA-05 init_schema additive canonical tables`
 - Last accepted packet: `P7.2-M2-PARITY-REPORTING`
 - Current active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- Current packet status: `implemented / pre-close review pending`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no blocker inside the implemented P7R2 boundary yet
@@ -568,6 +568,30 @@ Archive policy:
   - exact additive bootstrap shape that avoids breaking legacy runtime helpers still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES` and run targeted schema/bootstrap tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-05 00:05 America/Chicago] P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema_bootstraps_additive_canonical_support_tables or apply_architecture_kernel_schema_rejects_legacy_runtime_position_events or replay_parity'` -> `5 passed, 77 deselected in 0.22s`
+  - actual `python3 scripts/replay_parity.py` output advanced from `staged_missing_canonical_tables` to `status = mismatch`
+  - pre-close clean-lane PASS via `gemini -p`
+- Decisions frozen:
+  - DELTA-05 is repaired on the touched bootstrap path
+  - runtime DB reality now includes `position_current` and the additive canonical support tables on the touched bootstrap seam
+  - no DB-first cutover or legacy-surface deletion is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before any later P7 packet may be frozen
+  - parity still reports real data mismatches, so later migration advancement remains evidence-gated
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
 - Owner:
   - Architects mainline lead
 
