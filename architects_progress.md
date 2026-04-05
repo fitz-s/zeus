@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R4 close`
+- Last updated by: `Codex P7R4 post-close + P7.5 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7R4 open-position canonical backfill`
+- Mainline stage: `P7.5 load_portfolio DB-first`
 - Last accepted packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
-- Current active packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
+  - `load_portfolio()` still reads legacy JSON as primary truth even though current paper open-position parity is now available through canonical projection
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -130,6 +130,48 @@ Archive policy:
   - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
 - Next required action:
   - run the post-close critic + verifier on accepted `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:55 America/Chicago] P7R4-OPEN-POSITION-CANONICAL-BACKFILL post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p7r4-postclose-critic-20260405T025545Z.md`)
+  - accepted-boundary clean-lane verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p7r4-postclose-verifier-20260405T025545Z.md`)
+  - accepted-boundary checks stayed green: `work packet grammar ok`, `kernel manifests ok`, targeted architecture pytest `8 passed, 79 deselected`
+  - root runtime parity remains `status = ok` for `state/zeus.db` vs `state/positions-paper.json`
+- Decisions frozen:
+  - P7R4 acceptance stands without reopen
+  - the open-paper canonical parity blocker is no longer the active migration blocker
+  - freezing a bounded M3 loader-read packet is now lawful
+- Open uncertainties:
+  - none on the accepted P7R4 boundary beyond preserving packet scope and parity-backed honesty
+- Next required action:
+  - freeze a bounded `load_portfolio()` DB-first packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:56 America/Chicago] P7.5-M3-LOAD-PORTFOLIO-DB-FIRST frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P7R4 boundary plus passed post-close gate now permit the next freeze
+  - current paper open-position parity is now available through canonical projection
+  - the next concrete M3 blocker is `load_portfolio()` still reading legacy JSON as primary truth
+- Decisions frozen:
+  - keep this packet on the loader seam only
+  - do not widen into riskguard DB-first cutover or legacy-surface deletion
+- Open uncertainties:
+  - exact emergency-fallback trigger shape still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST` and run targeted DB-first loader tests
 - Owner:
   - Architects mainline lead
 

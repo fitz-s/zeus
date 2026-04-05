@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R4 close`
+- Last updated by: `Codex P7R4 post-close + P7.5 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,22 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
-- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
+- Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Seed canonical event+projection state for currently open legacy paper positions so parity no longer reports an empty canonical open side against a non-empty legacy export, without claiming DB-first cutover or deleting legacy surfaces.
+Make `load_portfolio()` read canonical `position_current` first while keeping JSON fallback explicit as emergency compatibility only when canonical projection is unavailable, without deleting legacy surfaces or widening into broader cutover.
 
 ## Allowed files
 
-- `work_packets/P7R4-OPEN-POSITION-CANONICAL-BACKFILL.md`
+- `work_packets/P7.5-M3-LOAD-PORTFOLIO-DB-FIRST.md`
 - `src/state/db.py`
-- `src/engine/lifecycle_events.py`
-- `scripts/**`
-- `tests/test_architecture_contracts.py`
+- `src/state/portfolio.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_pnl_flow_and_audit.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -46,13 +46,12 @@ Seed canonical event+projection state for currently open legacy paper positions 
 - `src/control/**`
 - `src/observability/**`
 - `src/riskguard/**`
+- `src/engine/**`
 - `src/execution/**`
 - `src/supervisor_api/**`
-- `src/state/portfolio.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_runtime_guards.py`
+- `tests/test_architecture_contracts.py`
 - `tests/test_riskguard.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
@@ -61,29 +60,29 @@ Seed canonical event+projection state for currently open legacy paper positions 
 
 ## Non-goals
 
-- no DB-first cutover yet
+- no broad DB-first cutover yet
 - no legacy-surface deletion yet
-- no broad migration cleanup
+- no riskguard DB-first shift yet
 - no team launch
 
 ## Current blocker state
 
-- accepted P7R4 boundary still needs the post-close critic + verifier gate before any later P7 freeze may be recorded
+- `load_portfolio()` still treats legacy JSON as primary truth even though current paper open-position parity is now available through canonical projection
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7R4 packet frozen
-- [x] bounded canonical backfill path seeds open legacy paper positions through canonical events + projection
-- [x] targeted backfill/parity tests green
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P7R4 accepted and pushed
+- [x] P7.5 packet frozen
+- [ ] `load_portfolio()` becomes DB-first on the touched seam
+- [ ] targeted DB-first loader tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P7.5 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Finish the post-close critic + verifier on the accepted `P7R4` boundary.
-2. Keep the slim control surfaces honest while the post-close gate is pending.
-3. Do not freeze the next packet until P7R4 post-close gate passes.
+1. Implement the bounded `load_portfolio()` DB-first seam.
+2. Prove the explicit JSON fallback path still works only when canonical projection is unavailable.
+3. Do not widen into riskguard cutover or legacy-surface deletion.
