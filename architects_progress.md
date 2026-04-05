@@ -417,6 +417,49 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-04 23:25 America/Chicago] P7.2-M2-PARITY-REPORTING post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.2-M2-PARITY-REPORTING`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed, but only if supported by actual parity evidence
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `2 passed, 78 deselected`, `work packet grammar ok`, `kernel manifests ok`
+  - actual `python3 scripts/replay_parity.py` output on current repo state -> `status = staged_missing_canonical_tables`, `missing_tables = [position_current]`
+- Decisions frozen:
+  - P7.2 acceptance stands without reopen
+  - the next migration step is blocked by a concrete runtime/schema contradiction rather than by missing reporting
+  - a bounded DELTA-05 repair/bootstrap packet is allowed
+- Open uncertainties:
+  - none on the accepted P7.2 boundary beyond preserving packet scope
+- Next required action:
+  - freeze a bounded packet that resolves DELTA-05 (`position_current` absent in runtime reality)
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:28 America/Chicago] P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from reporting-only P7.2 into the bounded runtime/schema repair packet implied by parity evidence
+- Basis / evidence:
+  - parity output still reports `position_current` missing in current runtime DB reality
+  - freezing a DB-first/cutover-prep packet here would still be dishonest
+  - DELTA-05 already records that `position_current` is absent from current runtime reality and requires a migration packet later
+- Decisions frozen:
+  - keep this packet on runtime/bootstrap substrate only
+  - do not claim DB-first reads, cutover, or legacy-surface deletion in this packet
+- Open uncertainties:
+  - exact migration/bootstrap shape needed to coexist with the legacy runtime DB still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP` and run targeted schema/bootstrap tests
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`

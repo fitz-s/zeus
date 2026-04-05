@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 post-close stop boundary`
+- Last updated by: `Codex P7R freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7 parity reporting complete / next migration step blocked by parity evidence`
-- Active packet: `none`
-- Active packet state: `P7.2 accepted and post-close gate passed / awaiting parity-supported next freeze`
+- Stage: `P7R DELTA-05 runtime position_current bootstrap`
+- Active packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7.2-M2-PARITY-REPORTING`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Stop at the completed `P7.2` boundary.
-2. Do not freeze a DB-first/cutover-prep packet until parity evidence supports it.
+1. Implement `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP` inside its frozen boundary.
+2. Run targeted schema/bootstrap evidence plus pre-close critic + verifier before any acceptance claim.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. then the next explicitly frozen packet, if parity evidence later supports one
+5. current active packet

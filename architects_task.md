@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 post-close stop boundary`
+- Last updated by: `Codex P7R freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,18 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `P7.2 COMPLETE / AWAITING PARITY-SUPPORTED NEXT FREEZE`
+- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. `P7.2-M2-PARITY-REPORTING` is complete and its post-close gate passed, but actual parity evidence does not yet support freezing a DB-first/cutover-prep packet.
+Resolve DELTA-05 by making the canonical projection substrate (`position_current` and compatible runtime bootstrap path) actually present in current runtime DB reality, without pretending DB-first reads or cutover are already authorized.
 
 ## Allowed files
 
-- future packet surfaces only after a new parity-supported freeze
+- `work_packets/P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP.md`
+- `migrations/**`
+- `tests/test_architecture_contracts.py`
+- `architects_progress.md`
+- `architects_task.md`
+- `architects_state_index.md`
 
 ## Forbidden files
 
@@ -36,37 +41,40 @@ No live packet. `P7.2-M2-PARITY-REPORTING` is complete and its post-close gate p
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `migrations/**`
 - `src/**`
-- `tests/**`
+- `tests/test_pnl_flow_and_audit.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_riskguard.py`
+- `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
 - `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
-- no DB-first/cutover-prep freeze until parity evidence supports it
-- no ad hoc migration leap beyond the current reporting truth
+- no DB-first cutover yet
+- no dual-write widening yet
+- no deletion of legacy surfaces
 - no team launch
 
 ## Current blocker state
 
-- actual current-state parity output reports `staged_missing_canonical_tables`
-- specifically: `position_current` is missing in the local repo state targeted by the parity report
+- current parity evidence says `position_current` is absent in the local runtime DB reality
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7.2 packet frozen
-- [x] parity/reporting surface upgraded from placeholder output
-- [x] targeted parity/reporting tests green
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P7.2 accepted and pushed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] P7R packet frozen
+- [ ] runtime/bootstrap path can produce `position_current`
+- [ ] targeted schema/bootstrap tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P7R accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Stop at the completed `P7.2` boundary.
-2. Reassess parity evidence before freezing any later P7 packet.
+1. Implement `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`.
+2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
+3. Do not freeze the next packet until this packet’s post-close gate passes.
