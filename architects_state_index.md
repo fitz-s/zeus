@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.5 close`
+- Last updated by: `Codex P7.5 post-close + P7.6 freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7.5 load_portfolio DB-first`
-- Active packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7.6 RiskGuard DB-first`
+- Active packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Active packet state: `frozen / ready for execution`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Last accepted packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`.
-2. Do not freeze any later P7 packet unless the post-close gate passes and the next seam is still justified by repo truth.
+1. Implement `P7.6-M3-RISKGUARD-DB-FIRST`.
+2. Keep the packet bounded to the RiskGuard reader seam only; do not mix in broader cutover or deletion work.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

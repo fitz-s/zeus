@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.5 close`
+- Last updated by: `Codex P7.5 post-close + P7.6 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7.5 load_portfolio DB-first`
+- Mainline stage: `P7.6 RiskGuard DB-first`
 - Last accepted packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- Current active packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Current active packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
+  - RiskGuard still depends on working-state portfolio reads as primary input after the loader seam has moved DB-first
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -185,8 +185,8 @@ Archive policy:
   - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
   - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
   - `.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio or stale_order_cleanup_cancels_orphan_open_orders'` -> `5 passed, 73 deselected`
-  - pre-close critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p75-preclose-critic-20260405T000000Z.md`)
-  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p75-preclose-verifier-20260405T000000Z.md`)
+  - pre-close critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p75-preclose-critic-20260405T032006Z.md`)
+  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p75-preclose-verifier-20260405T032006Z.md`)
   - root runtime proof: `ZEUS_MODE=paper load_portfolio()` now returns 12 positions from current repo truth with compatibility token ids preserved from `positions-paper.json`
 - Decisions frozen:
   - `load_portfolio()` is now DB-first on the touched seam
@@ -196,6 +196,48 @@ Archive policy:
   - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
 - Next required action:
   - run the post-close critic + verifier on accepted `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:25 America/Chicago] P7.5-M3-LOAD-PORTFOLIO-DB-FIRST post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed
+- Basis / evidence:
+  - accepted-boundary critic via `claude -p` -> `PASS` (`.omx/artifacts/claude-p75-postclose-critic-20260405T032618Z.md`)
+  - accepted-boundary verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p75-postclose-verifier-20260405T032618Z.md`)
+  - accepted-boundary checks stayed green: `work packet grammar ok`, `kernel manifests ok`, targeted runtime-guards pytest `5 passed, 73 deselected`
+  - root runtime `ZEUS_MODE=paper load_portfolio()` still returns 12 positions with compatibility token ids preserved
+- Decisions frozen:
+  - P7.5 acceptance stands without reopen
+  - the loader seam is no longer the active DB-first migration blocker
+  - freezing a bounded RiskGuard DB-first packet is now lawful
+- Open uncertainties:
+  - none on the accepted P7.5 boundary beyond preserving packet scope and not overclaiming broader cutover
+- Next required action:
+  - freeze a bounded RiskGuard DB-first packet
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:26 America/Chicago] P7.6-M3-RISKGUARD-DB-FIRST frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.6-M3-RISKGUARD-DB-FIRST`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P7.5 boundary plus passed post-close gate now permit the next freeze
+  - the next concrete M3 reader still on working-state primary truth is RiskGuard
+  - status-summary and loader seams are already DB-first enough that RiskGuard is now the next bounded migration surface
+- Decisions frozen:
+  - keep this packet on the RiskGuard reader seam only
+  - do not widen into broader cutover or legacy-surface deletion
+- Open uncertainties:
+  - exact fallback trigger shape for RiskGuard still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7.6-M3-RISKGUARD-DB-FIRST` and run targeted RiskGuard tests
 - Owner:
   - Architects mainline lead
 
