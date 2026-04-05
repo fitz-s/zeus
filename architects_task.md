@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.6 post-close boundary`
+- Last updated by: `Codex P7.7 freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,17 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `NO LIVE PACKET / AWAITING NEXT LAWFUL FREEZE`
+- Packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- State: `FROZEN / READY FOR EXECUTION`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. Hold at the post-P7.6 boundary until the next bounded non-destructive packet is explicitly justified.
+Bring the persisted strategy-tracker compatibility surface into explicit alignment with repo law by hardening tracker metadata and compatibility semantics, without deleting the tracker or widening into M4 retirement work.
 
 ## Allowed files
 
+- `work_packets/P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING.md`
+- `src/state/strategy_tracker.py`
+- `scripts/rebuild_strategy_tracker_current_regime.py`
+- `tests/test_strategy_tracker_regime.py`
+- `tests/test_truth_layer.py`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
@@ -58,27 +63,27 @@ No live packet. Hold at the post-P7.6 boundary until the next bounded non-destru
 
 - no broad DB-first cutover yet
 - no legacy-surface deletion yet
-- no M4 retirement/delete freeze without a new explicit packet
+- no M4 retirement/delete work
 - no team launch
 
 ## Current blocker state
 
-- obvious next work sits near retirement/cutover territory and is not auto-frozen by this boundary alone
+- current runtime tracker metadata still advertises `tracker_role = attribution_surface`, which contradicts compatibility-only repo law
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7.6 packet frozen
-- [x] RiskGuard becomes DB-first on the touched seam
-- [x] targeted RiskGuard tests green
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P7.6 accepted and pushed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] P7.7 packet frozen
+- [ ] tracker compatibility metadata aligns with compatibility-only law
+- [ ] targeted tracker compatibility tests green
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] P7.7 accepted and pushed
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Hold at the post-P7.6 boundary until the next bounded packet is explicitly justified.
-2. Do not invent a fake next freeze just to preserve momentum.
-3. Treat destructive/retirement transitions as out of the current autonomous stop boundary.
+1. Implement the bounded tracker compatibility-hardening seam.
+2. Prove tracker metadata and rebuild/save helpers align with compatibility-only law.
+3. Do not widen into M4 retirement/delete work.

@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.6 post-close boundary`
+- Last updated by: `Codex P7.7 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,14 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7 reader seams complete`
+- Mainline stage: `P7.7 tracker compatibility hardening`
 - Last accepted packet: `P7.6-M3-RISKGUARD-DB-FIRST`
-- Current active packet: `none`
-- Current packet status: `no live packet / awaiting next lawful freeze`
+- Current active packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no later bounded non-destructive packet has been frozen yet
-  - obvious next work trends toward M4 retirement/cutover territory, which is not auto-authorized by momentum alone
+  - persisted tracker metadata still contradicts compatibility-only repo law
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -283,6 +282,25 @@ Archive policy:
   - the next truthful move sits near M4 retirement/cutover territory and needs fresh bounded justification before freezing
 - Next required action:
   - stop at this boundary until a new bounded non-destructive packet is explicitly justified
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:36 America/Chicago] P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted P7.6 boundary plus passed post-close gate now permit a new freeze
+  - current runtime `state/strategy_tracker-paper.json` still advertises `tracker_role = attribution_surface`
+  - repo code/tests define tracker as `compatibility_surface` / `non_authority_compatibility`, so the remaining contradiction is concrete and non-destructive
+- Decisions frozen:
+  - keep this packet on tracker metadata/compatibility semantics only
+  - do not widen into harvester/riskguard redesign or M4 retirement/delete work
+- Open uncertainties:
+  - whether runtime tracker normalization can stay entirely inside save/rebuild paths still needs implementation-time evidence
+- Next required action:
+  - implement `P7.7-M3-STRATEGY-TRACKER-COMPATIBILITY-HARDENING` and run targeted tracker compatibility tests
 - Owner:
   - Architects mainline lead
 
