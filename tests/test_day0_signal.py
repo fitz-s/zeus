@@ -212,7 +212,7 @@ class TestDay0Signal:
         assert backbone["nowcast"]["trusted_source"] is False
         assert backbone["nowcast"]["blend_weight"] == 0.0
 
-    def test_ens_dominance_strengthens_observation_weight(self):
+    def test_obs_exceeds_ens_fraction_strengthens_observation_weight(self):
         dominated = Day0Signal(
             observed_high_so_far=50.0,
             current_temp=48.0,

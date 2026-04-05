@@ -191,7 +191,7 @@ class Day0Signal:
             hours_remaining=self.hours_remaining,
             peak_confidence=self._peak_confidence,
             daylight_progress=self._daylight_progress,
-            ens_dominance=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
+            obs_exceeds_ens_fraction=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
             pre_sunrise=pre_sunrise,
             post_sunset=post_sunset,
             observation_source=self._observation_source,
@@ -200,12 +200,12 @@ class Day0Signal:
         )
 
     def _temporal_closure_weight(self) -> float:
-        """Monotone fusion of residual-time, diurnal, solar, and ENS-dominance evidence."""
+        """Monotone fusion of residual-time, diurnal, solar, and obs-exceeds-ensemble evidence."""
         return day0_temporal_closure_weight(
             hours_remaining=self.hours_remaining,
             peak_confidence=self._peak_confidence,
             daylight_progress=self._daylight_progress,
-            ens_dominance=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
+            obs_exceeds_ens_fraction=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
         )
 
     def obs_dominates(self) -> bool:

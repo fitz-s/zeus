@@ -30,7 +30,7 @@ All P0/P1/P2 math validation packets have been completed, including code changes
 | MATH-005 | ✅ IMPL | Freshness-sigma connection implemented |
 | MATH-006 | ✅ PASS | Coefficients acceptable, renamed in MATH-010 |
 | MATH-007 | ✅ PASS | Lead multiplier is conservative and safe |
-| MATH-008 | DEFER | Cosmetic rename, low priority |
+| MATH-008 | ✅ IMPL | Renamed ens_dominance → obs_exceeds_ens_fraction |
 | MATH-009 | ✅ PASS | Bayesian model promising but not urgent |
 | MATH-010 | ✅ IMPL | Quantization noise floor + named constants |
 
@@ -55,7 +55,7 @@ All packets are validation-first: measure before changing.
 | MATH-005 | P0 | Freshness-to-sigma connection | **IMPL** | MATH-003 | Connect freshness_factor to distribution width | ✅ Implemented, 1.5x max expansion |
 | MATH-006 | P1 | temporal_closure coefficients calibration | **PASS** | MATH-002 | Data-driven 0.75/0.50/0.35 evaluation | ✅ 6 tests, constants renamed in MATH-010 |
 | MATH-007 | P2 | lead_sigma_multiplier dynamic calculation | **PASS** | MATH-002 | MAE vs lead_days curve extraction from model_bias | ✅ 5 tests, verdict: current is conservative and safe |
-| MATH-008 | P2 | ens_dominance rename + documentation | DEFERRED | - | Rename to obs_exceeds_ens_fraction + docstring clarification | Low priority, cosmetic |
+| MATH-008 | P2 | ens_dominance rename + documentation | **IMPL** | - | Rename to obs_exceeds_ens_fraction + docstring clarification | ✅ Implemented with full docstrings |
 | MATH-009 | P2 | Bayesian sigma synthesis evaluation | **PASS** | MATH-004 | Prototype Bayesian sigma merge vs current linear floor | ✅ 5 tests, verdict: promising but not urgent |
 | MATH-010 | P0 | Quantization noise floor + named constants | **IMPL** | MATH-004,third-party | Implement floor and rename magic constants | ✅ Implemented per third-party review |
 

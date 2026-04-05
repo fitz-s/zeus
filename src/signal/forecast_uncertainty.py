@@ -279,7 +279,7 @@ def day0_temporal_closure_weight(
     hours_remaining: float,
     peak_confidence: float,
     daylight_progress: float | None,
-    ens_dominance: float,
+    obs_exceeds_ens_fraction: float,
 ) -> float:
     """Bounded day0 closure policy driven by the strongest active signal.
     
@@ -287,7 +287,15 @@ def day0_temporal_closure_weight(
     - TIME_CLOSURE_HORIZON_HOURS: hours for linear time decay
     - TEMPORAL_CLOSURE_PEAK_COEFF: peak confidence weight (0.75)
     - TEMPORAL_CLOSURE_DAYLIGHT_COEFF: daylight progress weight (0.50)
-    - TEMPORAL_CLOSURE_ENS_COEFF: ensemble dominance weight (0.35)
+    - TEMPORAL_CLOSURE_ENS_COEFF: observation-exceeds-ensemble weight (0.35)
+    
+    Args:
+        hours_remaining: Hours until settlement window closes.
+        peak_confidence: Confidence that peak temperature has been observed (0-1).
+        daylight_progress: Fraction of daylight hours elapsed (0-1), or None.
+        obs_exceeds_ens_fraction: Fraction of ensemble members whose forecast
+            is at or below the current observed high. Higher values indicate
+            observation is dominating the ensemble, increasing closure confidence.
     """
     time_closure = min(1.0, max(0.0, 1.0 - float(hours_remaining) / TIME_CLOSURE_HORIZON_HOURS))
     peak_signal = min(1.0, max(0.0, float(peak_confidence)))
@@ -296,7 +304,7 @@ def day0_temporal_closure_weight(
         if daylight_progress is not None
         else time_closure
     )
-    ens_signal = min(1.0, max(0.0, float(ens_dominance)))
+    ens_signal = min(1.0, max(0.0, float(obs_exceeds_ens_fraction)))
     return max(
         time_closure,
         TEMPORAL_CLOSURE_PEAK_COEFF * peak_signal,
@@ -310,19 +318,32 @@ def day0_observation_weight(
     hours_remaining: float,
     peak_confidence: float,
     daylight_progress: float | None,
-    ens_dominance: float,
+    obs_exceeds_ens_fraction: float,
     pre_sunrise: bool,
     post_sunset: bool,
     observation_source: str = "",
     observation_time: str | None = None,
     current_utc_timestamp: str | None = None,
 ) -> float:
-    """Current Phase-0 day0 observation dominance policy, extracted behind a seam."""
+    """Current Phase-0 day0 observation dominance policy, extracted behind a seam.
+    
+    Args:
+        hours_remaining: Hours until settlement window closes.
+        peak_confidence: Confidence that peak temperature has been observed (0-1).
+        daylight_progress: Fraction of daylight hours elapsed (0-1), or None.
+        obs_exceeds_ens_fraction: Fraction of ensemble members whose forecast
+            is at or below the current observed high (0-1).
+        pre_sunrise: True if before sunrise.
+        post_sunset: True if after sunset.
+        observation_source: Source identifier for current observation.
+        observation_time: ISO timestamp of observation.
+        current_utc_timestamp: Current time for freshness calculation.
+    """
     base = day0_temporal_closure_weight(
         hours_remaining=hours_remaining,
         peak_confidence=peak_confidence,
         daylight_progress=daylight_progress,
-        ens_dominance=ens_dominance,
+        obs_exceeds_ens_fraction=obs_exceeds_ens_fraction,
     )
     if pre_sunrise:
         return min(base, 0.05)

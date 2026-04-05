@@ -46,7 +46,7 @@ class TestTemporalClosureCoefficients:
                 hours_remaining=hrs,
                 peak_confidence=peak,
                 daylight_progress=prog,
-                ens_dominance=0.0,  # Ignore for this test
+                obs_exceeds_ens_fraction=0.0,  # Ignore for this test
             )
 
             # Determine dominant
@@ -70,7 +70,7 @@ class TestTemporalClosureCoefficients:
             hours_remaining=base_hrs,
             peak_confidence=base_peak,
             daylight_progress=base_prog,
-            ens_dominance=0.0,
+            obs_exceeds_ens_fraction=0.0,
         )
 
         print(f"\nBase scenario: hrs={base_hrs}, peak={base_peak}, progress={base_prog}")
@@ -132,7 +132,7 @@ class TestTemporalClosureCoefficients:
                 hours_remaining=hrs,
                 peak_confidence=peak,
                 daylight_progress=prog,
-                ens_dominance=0.0,
+                obs_exceeds_ens_fraction=0.0,
             )
 
             # Alternative 1: max of raw factors
@@ -179,7 +179,7 @@ class TestTemporalClosureEdgeCases:
                 hours_remaining=hrs,
                 peak_confidence=peak,
                 daylight_progress=prog,
-                ens_dominance=0.0,
+                obs_exceeds_ens_fraction=0.0,
             )
 
             # Calculate expected: time has NO coefficient

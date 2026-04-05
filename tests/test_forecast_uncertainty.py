@@ -384,13 +384,13 @@ def test_day0_temporal_closure_weight_matches_existing_endpoints():
         hours_remaining=12.0,
         peak_confidence=0.0,
         daylight_progress=None,
-        ens_dominance=0.0,
+        obs_exceeds_ens_fraction=0.0,
     ) == 0.0
     assert day0_temporal_closure_weight(
         hours_remaining=0.0,
         peak_confidence=1.0,
         daylight_progress=1.0,
-        ens_dominance=1.0,
+        obs_exceeds_ens_fraction=1.0,
     ) == 1.0
 
 
@@ -399,7 +399,7 @@ def test_day0_temporal_closure_weight_uses_strongest_signal_instead_of_correlate
         hours_remaining=6.0,
         peak_confidence=0.4,
         daylight_progress=0.5,
-        ens_dominance=0.5,
+        obs_exceeds_ens_fraction=0.5,
     )
     assert weight == 0.5
 
@@ -409,7 +409,7 @@ def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior(
         hours_remaining=10.0,
         peak_confidence=0.1,
         daylight_progress=0.0,
-        ens_dominance=0.2,
+        obs_exceeds_ens_fraction=0.2,
         pre_sunrise=True,
         post_sunset=False,
         observation_source="wu_api",
@@ -420,7 +420,7 @@ def test_day0_observation_weight_preserves_pre_sunrise_and_post_sunset_behavior(
         hours_remaining=3.0,
         peak_confidence=0.8,
         daylight_progress=1.0,
-        ens_dominance=0.9,
+        obs_exceeds_ens_fraction=0.9,
         pre_sunrise=False,
         post_sunset=True,
         observation_source="wu_api",
@@ -434,13 +434,13 @@ def test_day0_observation_weight_does_not_force_full_finality_for_stale_post_sun
         hours_remaining=3.0,
         peak_confidence=0.8,
         daylight_progress=1.0,
-        ens_dominance=0.9,
+        obs_exceeds_ens_fraction=0.9,
     )
     weight = day0_observation_weight(
         hours_remaining=3.0,
         peak_confidence=0.8,
         daylight_progress=1.0,
-        ens_dominance=0.9,
+        obs_exceeds_ens_fraction=0.9,
         pre_sunrise=False,
         post_sunset=True,
         observation_source="wu_api",
