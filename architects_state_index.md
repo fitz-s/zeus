@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 close`
+- Last updated by: `Codex P7.2 post-close stop boundary`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7.2 parity reporting`
-- Active packet: `P7.2-M2-PARITY-REPORTING`
-- Active packet state: `accepted and pushed / post-close gate pending`
+- Stage: `P7 parity reporting complete / next migration step blocked by parity evidence`
+- Active packet: `none`
+- Active packet state: `P7.2 accepted and post-close gate passed / awaiting parity-supported next freeze`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Last accepted packet: `P7.2-M2-PARITY-REPORTING`
 - Execution mode default: `solo`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the post-close critic + verifier gate for accepted `P7.2-M2-PARITY-REPORTING`.
-2. Do not freeze any later P7 packet unless the post-close gate passes and parity evidence supports the next move.
+1. Stop at the completed `P7.2` boundary.
+2. Do not freeze a DB-first/cutover-prep packet until parity evidence supports it.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. current active packet
+5. then the next explicitly frozen packet, if parity evidence later supports one

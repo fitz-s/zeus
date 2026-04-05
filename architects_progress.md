@@ -394,6 +394,29 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-04 23:05 America/Chicago] P7.2-M2-PARITY-REPORTING post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.2-M2-PARITY-REPORTING`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - no further packet freeze authorized yet because parity evidence itself remains staged on current repo state
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `2 passed, 78 deselected`, `work packet grammar ok`, `kernel manifests ok`
+  - actual `python3 scripts/replay_parity.py` output on current repo state -> `status = staged_missing_canonical_tables`, `missing_tables = [position_current]`
+- Decisions frozen:
+  - P7.2 acceptance stands without reopen
+  - the reporting surface is truthful enough to stop advancement when parity evidence is not yet sufficient
+  - no DB-first/cutover-prep packet is frozen at this boundary
+- Open uncertainties:
+  - later P7 advancement depends on parity evidence becoming materially stronger than the current staged-missing-canonical-tables result
+- Next required action:
+  - stop at this boundary and reassess parity evidence before freezing any later P7 packet
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
