@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 freeze`
+- Last updated by: `Codex P7.2 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P7.2 parity reporting`
 - Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
 - Current active packet: `P7.2-M2-PARITY-REPORTING`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P7.2 boundary yet
+  - no blocker inside the accepted P7.2 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -367,6 +367,30 @@ Archive policy:
   - exact parity comparison shape still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P7.2-M2-PARITY-REPORTING` and run targeted parity/reporting tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:45 America/Chicago] P7.2-M2-PARITY-REPORTING accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7.2-M2-PARITY-REPORTING`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'replay_parity or advisory_gates'` -> `2 passed, 78 deselected in 0.17s`
+  - lsp diagnostics on `scripts/replay_parity.py` and `tests/test_architecture_contracts.py` -> `0 errors`
+  - pre-close critic clean lane via `gemini -p` -> `PASS`
+  - pre-close verifier clean lane via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - parity/reporting output is no longer placeholder-only on the touched migration seams
+  - no DB-first cutover, dual-write widening, or deletion work is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before any later P7 packet may be frozen
+  - whether parity evidence is strong enough to support a later cutover-prep packet remains a separate question from accepting this reporting surface
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7.2-M2-PARITY-REPORTING`
 - Owner:
   - Architects mainline lead
 

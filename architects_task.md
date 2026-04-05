@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 freeze`
+- Last updated by: `Codex P7.2 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7.2-M2-PARITY-REPORTING`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -66,16 +66,16 @@ Replace the placeholder replay/parity reporting with a truthful parity surface t
 ## Immediate checklist
 
 - [x] P7.2 packet frozen
-- [ ] placeholder parity surface replaced with truthful compare output
-- [ ] targeted parity/reporting tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P7.2 accepted and pushed
+- [x] placeholder parity surface replaced with truthful compare output
+- [x] targeted parity/reporting tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P7.2 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement `P7.2-M2-PARITY-REPORTING`.
-2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
+1. Finish the post-close critic + verifier on the accepted `P7.2` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
 3. Do not freeze the next packet until P7.2 post-close gate passes.

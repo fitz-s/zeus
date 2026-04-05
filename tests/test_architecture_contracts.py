@@ -425,6 +425,101 @@ def test_db_exposes_canonical_transaction_boundary_helpers():
     assert hasattr(state_projection, "upsert_position_current")
 
 
+def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    legacy_path = tmp_path / "positions-paper.json"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    conn.executescript(sql)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'pos-1', 'active', 'trade-1', 'm1', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 10.0, 20.0, 10.0, 0.5, NULL, NULL, NULL, NULL,
+            'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'update_reaction',
+            'unknown', NULL, NULL, '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'pos-2', 'pending_exit', 'trade-2', 'm2', 'NYC', 'US-Northeast', '2026-04-01', '41-42°F',
+            'buy_yes', 'F', 12.0, 24.0, 12.0, 0.5, NULL, NULL, NULL, NULL,
+            'snap-2', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'update_reaction',
+            'unknown', NULL, NULL, '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    legacy_path.write_text(json.dumps({
+        "positions": [
+            {"trade_id": "trade-1", "strategy": "center_buy", "state": "holding"},
+            {"trade_id": "legacy-only", "strategy": "opening_inertia", "state": "holding"},
+        ]
+    }))
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "replay_parity.py"),
+            "--db",
+            str(db_path),
+            "--legacy-export",
+            str(legacy_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 0
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "mismatch"
+    assert payload["canonical"]["open_positions"] == 2
+    assert payload["legacy_exports"][0]["comparison"]["missing_in_canonical"] == ["legacy-only"]
+    assert payload["legacy_exports"][0]["comparison"]["missing_in_legacy"] == ["trade-2"]
+
+
+def test_replay_parity_reports_staged_missing_tables(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    sqlite3.connect(str(db_path)).close()
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "replay_parity.py"),
+            "--db",
+            str(db_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 0
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "staged_missing_canonical_tables"
+    assert "position_events" in payload["missing_tables"]
+    assert "position_current" in payload["missing_tables"]
+
+
 def test_db_no_longer_owns_canonical_append_project_bodies():
     text = (ROOT / "src/state/db.py").read_text()
     assert "from src.state.ledger import (" in text
