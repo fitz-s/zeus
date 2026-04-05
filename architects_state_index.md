@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-05 America/Chicago`
-- Last updated by: `Codex P7R3 freeze`
+- Last updated by: `Codex P7R3 close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P7R3 legacy position_events collision repair`
 - Active packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR` inside its frozen boundary.
-2. Run targeted schema/bootstrap evidence plus pre-close critic + verifier before any acceptance claim.
+1. Run the post-close critic + verifier gate for accepted `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`.
+2. Do not freeze any later P7 packet unless the post-close gate passes and the new parity output supports it.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

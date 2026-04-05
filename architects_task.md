@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-05 America/Chicago`
-- Last updated by: `Codex P7R3 freeze`
+- Last updated by: `Codex P7R3 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -68,22 +68,22 @@ Resolve the legacy `position_events` schema collision that blocks append-first c
 
 ## Current blocker state
 
-- canonical append-first seeding is blocked by the legacy `position_events` schema shape
+- append-first canonical seeding had been blocked by the legacy `position_events` schema shape
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
 - [x] P7R3 packet frozen
-- [ ] event-authority collision repaired on the touched seam
-- [ ] targeted schema/bootstrap tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P7R3 accepted and pushed
+- [x] event-authority collision repaired on the touched seam
+- [x] targeted schema/bootstrap tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P7R3 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`.
-2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
+1. Finish the post-close critic + verifier on the accepted `P7R3` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
 3. Do not freeze the next packet until P7R3 post-close gate passes.

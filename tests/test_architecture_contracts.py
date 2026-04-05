@@ -221,12 +221,14 @@ def test_transaction_boundary_helper_rejects_legacy_init_schema():
     conn.row_factory = sqlite3.Row
     init_schema(conn)
 
-    try:
-        append_event_and_project(conn, _canonical_event(), _canonical_projection())
-    except RuntimeError as exc:
-        assert "canonical" in str(exc)
-    else:
-        raise AssertionError("expected legacy init schema to be rejected")
+    append_event_and_project(conn, _canonical_event(), _canonical_projection())
+    event_count = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
+    projection_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+    legacy_count = conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0]
+
+    assert event_count == 1
+    assert projection_count == 1
+    assert legacy_count == 0
 
     conn.close()
 
@@ -338,24 +340,24 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
     conn.close()
 
 
-def test_apply_architecture_kernel_schema_rejects_legacy_runtime_position_events():
+def test_apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events():
     from src.state.db import apply_architecture_kernel_schema, init_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
 
-    try:
-        apply_architecture_kernel_schema(conn)
-    except RuntimeError as exc:
-        assert "legacy position_events table blocks canonical schema bootstrap" in str(exc)
-    else:
-        raise AssertionError("expected legacy runtime schema collision to be rejected")
+    apply_architecture_kernel_schema(conn)
 
-    current_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    legacy_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
     }
-    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
+    canonical_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+    }
+
+    assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
+    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(canonical_columns)
     conn.close()
 
 
@@ -572,6 +574,30 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(t
     payload = json.loads(run.stdout)
     assert payload["status"] == "ok"
     assert payload["canonical"]["open_positions"] == 0
+
+
+def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    tables = {
+        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert "position_events" in tables
+    assert "position_events_legacy" in tables
+
+    legacy_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
+    }
+    canonical_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+    }
+    assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
+    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(canonical_columns)
+    conn.close()
 
 
 def test_db_no_longer_owns_canonical_append_project_bodies():

@@ -95,3 +95,23 @@ evidence_required:
 ## Closeout readiness notes
 
 - P7.4-readiness note: if this packet lands cleanly and its post-close gate passes, the next lawful move is reassessing a bounded canonical open-position backfill packet.
+
+## Evidence log
+
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema or replay_parity or apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events'` -> `7 passed, 76 deselected in 0.25s`
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- runtime coexistence evidence: plain SQLite inspection of `state/zeus.db` shows `position_events` (canonical), `position_events_legacy` (legacy), and `position_current` all present side by side
+- replay/parity output after repair: `python3 scripts/replay_parity.py` still reports `status = mismatch`, but no longer because canonical event authority is blocked at the event-schema collision
+- rollback note: revert the P7R3 event-collision repair edits and paired slim control-surface updates together; repo returns to the accepted P7R2 boundary with canonical open-side parity still blocked at the event schema
+- p7.4-readiness note: the next lawful move after a clean P7R3 closeout is reassessing a bounded canonical open-position backfill packet
+
+## Evidence log
+
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema or replay_parity or apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events'` -> `7 passed, 76 deselected in 0.25s`
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- runtime bootstrap evidence: plain SQLite inspection of `state/zeus.db` now shows both `position_events` (canonical) and `position_events_legacy` (legacy) tables present side by side, with `position_current` also present
+- replay/parity output after repair: `python3 scripts/replay_parity.py` still reports `status = mismatch`, but no longer because of event-table schema collision or missing canonical tables
+- rollback note: revert the P7R3 event-collision repair edits and paired slim control-surface updates together; repo returns to the accepted P7R2 boundary with canonical open-side parity still blocked at the event schema
+- p7.4-readiness note: the next lawful move after a clean P7R3 closeout is reassessing a bounded canonical open-position backfill packet

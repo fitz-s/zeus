@@ -555,210 +555,34 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
 
-    _ensure_additive_canonical_support_tables(conn)
+    _ensure_runtime_bootstrap_support_tables(conn)
 
     if own_conn:
         conn.commit()
         conn.close()
 
 
-def _ensure_additive_canonical_support_tables(conn: sqlite3.Connection) -> None:
-    """Add canonical-support tables without replacing the legacy runtime bootstrap."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT NOT NULL CHECK (phase IN (
-                'pending_entry',
-                'active',
-                'day0_window',
-                'pending_exit',
-                'economically_closed',
-                'settled',
-                'voided',
-                'quarantined',
-                'admin_closed'
-            )),
-            trade_id TEXT,
-            market_id TEXT,
-            city TEXT,
-            cluster TEXT,
-            target_date TEXT,
-            bin_label TEXT,
-            direction TEXT CHECK (direction IS NULL OR direction IN ('buy_yes', 'buy_no', 'unknown')),
-            unit TEXT CHECK (unit IS NULL OR unit IN ('F', 'C')),
-            size_usd REAL,
-            shares REAL,
-            cost_basis_usd REAL,
-            entry_price REAL,
-            p_posterior REAL,
-            last_monitor_prob REAL,
-            last_monitor_edge REAL,
-            last_monitor_market_price REAL,
-            decision_snapshot_id TEXT,
-            entry_method TEXT,
-            strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            edge_source TEXT,
-            discovery_mode TEXT,
-            chain_state TEXT,
-            order_id TEXT,
-            order_status TEXT,
-            updated_at TEXT NOT NULL
-        );
+def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
+    """Ensure legacy runtime bootstrap can coexist with canonical support tables."""
+    event_columns = _table_columns(conn, "position_events")
+    legacy_present = bool(event_columns) and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
+    canonical_present = bool(event_columns) and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
 
-        CREATE TABLE IF NOT EXISTS strategy_health (
-            strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            as_of TEXT NOT NULL,
-            open_exposure_usd REAL NOT NULL DEFAULT 0,
-            settled_trades_30d INTEGER NOT NULL DEFAULT 0,
-            realized_pnl_30d REAL NOT NULL DEFAULT 0,
-            unrealized_pnl REAL NOT NULL DEFAULT 0,
-            win_rate_30d REAL,
-            brier_30d REAL,
-            fill_rate_14d REAL,
-            edge_trend_30d REAL,
-            risk_level TEXT,
-            execution_decay_flag INTEGER NOT NULL DEFAULT 0 CHECK (execution_decay_flag IN (0, 1)),
-            edge_compression_flag INTEGER NOT NULL DEFAULT 0 CHECK (edge_compression_flag IN (0, 1)),
-            PRIMARY KEY (strategy_key, as_of)
-        );
+    if legacy_present and not canonical_present:
+        if not _table_exists(conn, "position_events_legacy"):
+            conn.execute("ALTER TABLE position_events RENAME TO position_events_legacy")
+        else:
+            raise RuntimeError(
+                "legacy position_events collision unresolved: both legacy and alternate legacy tables exist"
+            )
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_position_events_legacy_trade_ts ON position_events_legacy(runtime_trade_id, timestamp)"
+            )
+        except sqlite3.OperationalError:
+            pass
 
-        CREATE TABLE IF NOT EXISTS risk_actions (
-            action_id TEXT PRIMARY KEY,
-            strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            action_type TEXT NOT NULL CHECK (action_type IN (
-                'gate',
-                'allocation_multiplier',
-                'threshold_multiplier',
-                'exit_only'
-            )),
-            value TEXT NOT NULL,
-            issued_at TEXT NOT NULL,
-            effective_until TEXT,
-            reason TEXT NOT NULL,
-            source TEXT NOT NULL CHECK (source IN ('riskguard', 'manual', 'system')),
-            precedence INTEGER NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked'))
-        );
-
-        CREATE TABLE IF NOT EXISTS control_overrides (
-            override_id TEXT PRIMARY KEY,
-            target_type TEXT NOT NULL CHECK (target_type IN ('strategy', 'global', 'position')),
-            target_key TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            value TEXT NOT NULL,
-            issued_by TEXT NOT NULL,
-            issued_at TEXT NOT NULL,
-            effective_until TEXT,
-            reason TEXT NOT NULL,
-            precedence INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS opportunity_fact (
-            decision_id TEXT PRIMARY KEY,
-            candidate_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            range_label TEXT,
-            direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
-            strategy_key TEXT CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            discovery_mode TEXT,
-            entry_method TEXT,
-            snapshot_id TEXT,
-            p_raw REAL,
-            p_cal REAL,
-            p_market REAL,
-            alpha REAL,
-            best_edge REAL,
-            ci_width REAL,
-            rejection_stage TEXT,
-            rejection_reason_json TEXT,
-            availability_status TEXT CHECK (availability_status IN (
-                'ok',
-                'missing',
-                'stale',
-                'rate_limited',
-                'unavailable',
-                'chain_unavailable'
-            )),
-            should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
-            recorded_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS execution_fact (
-            intent_id TEXT PRIMARY KEY,
-            position_id TEXT,
-            decision_id TEXT,
-            order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
-            strategy_key TEXT CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            posted_at TEXT,
-            filled_at TEXT,
-            voided_at TEXT,
-            submitted_price REAL,
-            fill_price REAL,
-            shares REAL,
-            fill_quality REAL,
-            latency_seconds REAL,
-            venue_status TEXT,
-            terminal_exec_status TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS outcome_fact (
-            position_id TEXT PRIMARY KEY,
-            strategy_key TEXT CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
-            entered_at TEXT,
-            exited_at TEXT,
-            settled_at TEXT,
-            exit_reason TEXT,
-            admin_exit_reason TEXT,
-            decision_snapshot_id TEXT,
-            pnl REAL,
-            outcome INTEGER CHECK (outcome IN (0, 1)),
-            hold_duration_hours REAL,
-            monitor_count INTEGER,
-            chain_corrections_count INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS availability_fact (
-            availability_id TEXT PRIMARY KEY,
-            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
-            scope_key TEXT NOT NULL,
-            failure_type TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
-            details_json TEXT NOT NULL
-        );
-    """)
+    apply_architecture_kernel_schema(conn)
 
 LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
     "runtime_trade_id",
@@ -769,6 +593,14 @@ LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
     "timestamp",
     "env",
 )
+
+
+def _legacy_position_events_table(conn: sqlite3.Connection) -> str:
+    for table in ("position_events_legacy", "position_events"):
+        columns = _table_columns(conn, table)
+        if columns and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns):
+            return table
+    return ""
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -796,23 +628,19 @@ def _canonical_position_surface_available(conn: sqlite3.Connection) -> bool:
 
 
 def _legacy_runtime_position_event_schema_available(conn: sqlite3.Connection) -> bool:
-    event_columns = _table_columns(conn, "position_events")
+    legacy_table = _legacy_position_events_table(conn)
+    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
     return (
         bool(event_columns)
-        and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
         and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
     )
 
 
 def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
-    event_columns = _table_columns(conn, "position_events")
+    legacy_table = _legacy_position_events_table(conn)
+    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
     if not event_columns:
         raise RuntimeError("legacy runtime position_events schema not installed")
-    if set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
-        raise RuntimeError(
-            "legacy runtime position_events helpers do not support canonically bootstrapped databases; "
-            "this Stage-2 bootstrap path is not runtime-ready until a later migration/cutover packet lands"
-        )
     if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
         raise RuntimeError("legacy runtime position_events schema not installed")
 
@@ -1876,12 +1704,13 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
 def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
     """Load recent durable position events for one runtime trade."""
     _assert_legacy_runtime_position_event_schema(conn)
+    legacy_table = _legacy_position_events_table(conn)
     rows = conn.execute(
-        """
+        f"""
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
                city, target_date, market_id, bin_label, direction, strategy, edge_source,
                source, details_json, timestamp, env
-        FROM position_events
+        FROM {legacy_table}
         WHERE runtime_trade_id = ?
         ORDER BY id ASC
         LIMIT ?
@@ -1902,6 +1731,7 @@ def query_settlement_events(
 ) -> list[dict]:
     """Load recent canonical settlement stage events from the durable event spine."""
     _assert_legacy_runtime_position_event_schema(conn)
+    legacy_table = _legacy_position_events_table(conn)
     filters = ["event_type = 'POSITION_SETTLED'"]
     query_env = settings.mode if env is None else env
     params: list[object] = []
@@ -1921,7 +1751,7 @@ def query_settlement_events(
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
                city, target_date, market_id, bin_label, direction, strategy, edge_source,
                source, details_json, timestamp, env
-        FROM position_events
+        FROM {legacy_table}
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         """
@@ -2529,15 +2359,16 @@ def _query_transitional_position_hints(
     conn: sqlite3.Connection,
     trade_ids: list[str],
 ) -> dict[str, dict]:
-    if not trade_ids or not _table_exists(conn, "position_events"):
+    if not trade_ids:
         return {}
     columns = _table_columns(conn, "position_events")
     placeholders = ", ".join("?" for _ in trade_ids)
     if {"runtime_trade_id", "details_json", "timestamp"}.issubset(columns):
+        legacy_table = _legacy_position_events_table(conn) or "position_events"
         rows = conn.execute(
             f"""
             SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload
-            FROM position_events
+            FROM {legacy_table}
             WHERE runtime_trade_id IN ({placeholders})
             ORDER BY timestamp DESC, id DESC
             """,
@@ -2674,6 +2505,7 @@ def query_execution_event_summary(
     not_before: str | None = None,
 ) -> dict:
     _assert_legacy_runtime_position_event_schema(conn)
+    legacy_table = _legacy_position_events_table(conn)
     query_env = settings.mode if env is None else env
     filters = [
         "env = ?",
@@ -2691,7 +2523,7 @@ def query_execution_event_summary(
         params.append(not_before)
     query = f"""
         SELECT event_type, strategy
-        FROM position_events
+        FROM {legacy_table}
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         """
@@ -2762,6 +2594,7 @@ def log_position_event(
 ) -> None:
     """Append a stage-level position event without changing open-position authority."""
     _assert_legacy_runtime_position_event_schema(conn)
+    legacy_table = _legacy_position_events_table(conn)
     runtime_trade_id = getattr(pos, "trade_id", "")
     if not runtime_trade_id:
         return
@@ -2783,8 +2616,8 @@ def log_position_event(
         or None
     )
     conn.execute(
-        """
-        INSERT INTO position_events (
+        f"""
+        INSERT INTO {legacy_table} (
             event_type,
             runtime_trade_id,
             position_state,

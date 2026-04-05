@@ -697,6 +697,28 @@ Archive policy:
 - Owner:
   - Architects mainline lead
 
+## [2026-04-05 01:10 America/Chicago] P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'init_schema or replay_parity or apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events'` -> `7 passed, 76 deselected in 0.25s`
+  - plain SQLite inspection confirms `position_events` and `position_events_legacy` now coexist in `state/zeus.db`
+  - pre-close clean-lane PASS via `gemini -p`
+- Decisions frozen:
+  - canonical append-first seeding is no longer blocked solely by the event-table collision
+  - no DB-first cutover or legacy-surface deletion is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before any later P7 packet may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR`
+- Owner:
+  - Architects mainline lead
+
 ## [2026-04-04 15:05 America/Chicago] P5.1-LIFECYCLE-PHASE-KERNEL frozen
 - Author: `Architects mainline lead`
 - Packet: `P5.1-LIFECYCLE-PHASE-KERNEL`
