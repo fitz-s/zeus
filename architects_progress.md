@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.1 freeze`
+- Last updated by: `Codex P7.2 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7.1 M0 schema add only`
+- Mainline stage: `P7.2 parity reporting`
 - Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
-- Current active packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Current active packet: `P7.2-M2-PARITY-REPORTING`
 - Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P7.1 boundary yet
+  - no blocker inside the frozen P7.2 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -327,6 +327,46 @@ Archive policy:
   - implementation-time evidence must still prove whether any further M0 schema is actually needed beyond the current installed surfaces
 - Next required action:
   - implement `P7.1-M0-SCHEMA-ADD-ONLY` and run targeted schema smoke tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:20 America/Chicago] P7.1-M0-SCHEMA-ADD-ONLY superseded before implementation
+- Author: `Architects mainline lead`
+- Packet: `P7.1-M0-SCHEMA-ADD-ONLY`
+- Status delta:
+  - frozen packet superseded before implementation
+  - active packet moved off the no-op M0 freeze
+- Basis / evidence:
+  - `migrations/2026_04_02_architecture_kernel.sql` already contains the additive canonical schema substrate
+  - `tests/test_architecture_contracts.py` already proves canonical schema bootstrap for fresh DBs
+  - no further additive-only schema need was found that could be landed honestly inside P7.1 without overclaiming a no-op packet
+- Decisions frozen:
+  - P7.1 is not accepted as implemented work
+  - the next still-open migration obligation is parity reporting, not further additive schema prep
+- Open uncertainties:
+  - none on the superseded P7.1 boundary beyond preserving the supersession note
+- Next required action:
+  - freeze `P7.2-M2-PARITY-REPORTING`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:22 America/Chicago] P7.2-M2-PARITY-REPORTING frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.2-M2-PARITY-REPORTING`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the superseded no-op M0 freeze into the first still-open P7 migration obligation
+- Basis / evidence:
+  - repo truth showed P7 M0 schema prep was already satisfied
+  - `scripts/replay_parity.py` still exposes only placeholder count output rather than truthful parity comparison
+  - the next honest migration obligation is parity reporting before any DB-first cutover claim
+- Decisions frozen:
+  - keep this packet on parity/reporting only
+  - do not claim cutover, deletion, or dual-write widening inside P7.2
+- Open uncertainties:
+  - exact parity comparison shape still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7.2-M2-PARITY-REPORTING` and run targeted parity/reporting tests
 - Owner:
   - Architects mainline lead
 
