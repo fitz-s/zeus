@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R2 close`
+- Last updated by: `Codex P7.3 freeze`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,10 +30,10 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7R2 DELTA-05 init_schema additive canonical tables`
-- Last accepted packet: `P7.2-M2-PARITY-REPORTING`
-- Current active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Mainline stage: `P7.3 open-position canonical backfill`
+- Last accepted packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Current active packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Current packet status: `frozen / ready for execution`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no blocker inside the implemented P7R2 boundary yet
@@ -592,6 +592,48 @@ Archive policy:
   - parity still reports real data mismatches, so later migration advancement remains evidence-gated
 - Next required action:
   - run the post-close critic + verifier on accepted `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-05 00:25 America/Chicago] P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next packet freeze became allowed, but only if supported by the new parity evidence
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - accepted-boundary tests/checks stayed green: `5 passed, 77 deselected`, `work packet grammar ok`, `kernel manifests ok`
+  - actual `python3 scripts/replay_parity.py` output advanced to `status = mismatch`
+- Decisions frozen:
+  - P7R2 acceptance stands without reopen
+  - DELTA-05 is no longer a missing-table blocker on the touched runtime bootstrap path
+  - the next honest blocker is empty canonical open-side parity against non-empty legacy paper positions
+- Open uncertainties:
+  - none on the accepted P7R2 boundary beyond preserving packet scope
+- Next required action:
+  - freeze a bounded packet that backfills canonical authority for currently open legacy positions
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-05 00:28 America/Chicago] P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL frozen
+- Author: `Architects mainline lead`
+- Packet: `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the DELTA-05 bootstrap repair into the first real parity-mismatch repair packet
+- Basis / evidence:
+  - current parity now shows canonical open side empty while legacy paper state still reports 12 open positions, all under `opening_inertia`
+  - cutover remains unjustified until those positions gain canonical representation
+- Decisions frozen:
+  - keep this packet on open-position canonical seeding/backfill only
+  - do not claim DB-first read cutover or legacy-surface deletion in this packet
+- Open uncertainties:
+  - exact canonical event shape for existing open legacy positions still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7.3-M1-OPEN-POSITION-CANONICAL-BACKFILL` and run targeted backfill/parity tests
 - Owner:
   - Architects mainline lead
 
