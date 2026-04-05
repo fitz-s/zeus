@@ -68,7 +68,7 @@ Seed canonical event+projection state for currently open legacy paper positions 
 
 ## Current blocker state
 
-- parity on current runtime truth still reports canonical open side empty while `positions-paper.json` reports 12 open `opening_inertia` positions
+- accepted P7R4 boundary still needs the post-close critic + verifier gate before any later P7 freeze may be recorded
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist

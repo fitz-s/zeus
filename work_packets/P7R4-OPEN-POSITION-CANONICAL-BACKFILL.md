@@ -104,7 +104,7 @@ evidence_required:
 
 ## Evidence log
 
-- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'replay_parity or open_position_canonical_backfill or init_schema_creates_legacy_and_canonical_event_tables_side_by_side'` -> `7 passed, 79 deselected`
+- targeted pytest output: `.venv/bin/pytest -q tests/test_architecture_contracts.py -k 'replay_parity or open_position_canonical_backfill or init_schema_creates_legacy_and_canonical_event_tables_side_by_side'` -> `8 passed, 79 deselected`
 - work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
 - kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
 - capability-absent proof: on a blank SQLite DB, `scripts/backfill_open_positions_canonical.py` reports `skipped_missing_canonical_tables` and `scripts/replay_parity.py` reports `staged_missing_canonical_tables`
