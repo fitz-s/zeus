@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.1 freeze`
+- Last updated by: `Codex P6.1 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -76,17 +76,17 @@ Move `status_summary.py` off JSON/state-object primary truth and onto DB-backed 
 ## Immediate checklist
 
 - [x] P6.1 packet frozen
-- [ ] status summary primary truth switched to DB-backed surfaces
-- [ ] explicit degraded-state handling proven on missing/stale DB substrate paths
-- [ ] targeted status-summary and healthcheck tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P6.1 accepted and pushed
+- [x] status summary primary truth switched to DB-backed surfaces
+- [x] explicit degraded-state handling proven on missing/stale DB substrate paths
+- [x] targeted status-summary and healthcheck tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P6.1 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement `P6.1-STATUS-SUMMARY-DB-DERIVED`.
-2. Run targeted tests plus pre-close critic + verifier before any acceptance claim.
+1. Finish the post-close critic + verifier on the accepted `P6.1` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
 3. Do not freeze `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES` until P6.1 post-close gate passes.

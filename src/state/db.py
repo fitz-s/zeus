@@ -2060,11 +2060,183 @@ def query_strategy_health_snapshot(
     }
 
 
+def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "table": "position_current",
+            "positions": [],
+            "strategy_open_counts": {},
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        }
+    if not _table_exists(conn, "position_current"):
+        return {
+            "status": "missing_table",
+            "table": "position_current",
+            "positions": [],
+            "strategy_open_counts": {},
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        }
+
+    rows = conn.execute(
+        """
+        SELECT position_id, phase, trade_id, city, bin_label, direction,
+               size_usd, shares, cost_basis_usd, entry_price,
+               strategy_key, chain_state, order_status,
+               decision_snapshot_id, last_monitor_market_price
+        FROM position_current
+        ORDER BY updated_at DESC, position_id
+        """
+    ).fetchall()
+    trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
+    transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+
+    positions: list[dict] = []
+    strategy_open_counts: dict[str, int] = {}
+    chain_state_counts: dict[str, int] = {}
+    exit_state_counts: dict[str, int] = {}
+    total_exposure_usd = 0.0
+    total_unrealized_pnl = 0.0
+    unverified_entries = 0
+    day0_positions = 0
+
+    for row in rows:
+        phase = str(row["phase"] or "")
+        if phase not in OPEN_EXPOSURE_PHASES:
+            continue
+        trade_id = str(row["trade_id"] or row["position_id"] or "")
+        hints = transitional_hints.get(trade_id, {})
+        chain_state = str(row["chain_state"] or "unknown")
+        exit_state = str(hints.get("exit_state") or "none")
+        entry_fill_verified = bool(hints.get("entry_fill_verified", False))
+        admin_exit_reason = str(hints.get("admin_exit_reason") or "")
+        day0_entered_at = str(hints.get("day0_entered_at") or "")
+        shares = float(row["shares"] or 0.0)
+        mark_price = row["last_monitor_market_price"]
+        cost_basis_usd = row["cost_basis_usd"]
+        unrealized_pnl = 0.0
+        if shares and mark_price is not None and cost_basis_usd is not None:
+            unrealized_pnl = round((shares * float(mark_price)) - float(cost_basis_usd), 2)
+
+        positions.append(
+            {
+                "trade_id": trade_id,
+                "city": str(row["city"] or ""),
+                "direction": str(row["direction"] or ""),
+                "strategy": str(row["strategy_key"] or ""),
+                "state": phase,
+                "chain_state": chain_state,
+                "exit_state": exit_state,
+                "entry_fill_verified": entry_fill_verified,
+                "admin_exit_reason": admin_exit_reason,
+                "size_usd": float(row["size_usd"] or 0.0),
+                "shares": shares,
+                "entry_price": row["entry_price"],
+                "edge": None,
+                "bin_label": str(row["bin_label"] or ""),
+                "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
+                "day0_entered_at": day0_entered_at,
+                "mark_price": mark_price,
+                "unrealized_pnl": unrealized_pnl,
+            }
+        )
+
+        strategy_key = str(row["strategy_key"] or "unclassified")
+        strategy_open_counts[strategy_key] = strategy_open_counts.get(strategy_key, 0) + 1
+        chain_state_counts[chain_state] = chain_state_counts.get(chain_state, 0) + 1
+        exit_state_counts[exit_state] = exit_state_counts.get(exit_state, 0) + 1
+        total_exposure_usd += float(row["size_usd"] or 0.0)
+        total_unrealized_pnl += unrealized_pnl
+        if not entry_fill_verified:
+            unverified_entries += 1
+        if phase == "day0_window":
+            day0_positions += 1
+
+    return {
+        "status": "ok",
+        "table": "position_current",
+        "positions": positions,
+        "strategy_open_counts": strategy_open_counts,
+        "open_positions": len(positions),
+        "total_exposure_usd": round(total_exposure_usd, 2),
+        "unrealized_pnl": round(total_unrealized_pnl, 2),
+        "chain_state_counts": chain_state_counts,
+        "exit_state_counts": exit_state_counts,
+        "unverified_entries": unverified_entries,
+        "day0_positions": day0_positions,
+    }
+
+
 def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
     parsed = _parse_iso_timestamp(timestamp)
     if parsed is None:
         return timestamp
     return (parsed - timedelta(days=days)).isoformat()
+
+
+def _query_transitional_position_hints(
+    conn: sqlite3.Connection,
+    trade_ids: list[str],
+) -> dict[str, dict]:
+    if not trade_ids or not _table_exists(conn, "position_events"):
+        return {}
+    columns = _table_columns(conn, "position_events")
+    placeholders = ", ".join("?" for _ in trade_ids)
+    if {"runtime_trade_id", "details_json", "timestamp"}.issubset(columns):
+        rows = conn.execute(
+            f"""
+            SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload
+            FROM position_events
+            WHERE runtime_trade_id IN ({placeholders})
+            ORDER BY timestamp DESC, id DESC
+            """,
+            trade_ids,
+        ).fetchall()
+    elif {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+        rows = conn.execute(
+            f"""
+            SELECT position_id AS trade_key, event_type, payload_json AS payload
+            FROM position_events
+            WHERE position_id IN ({placeholders})
+            ORDER BY occurred_at DESC, sequence_no DESC
+            """,
+            trade_ids,
+        ).fetchall()
+    else:
+        return {}
+    hints: dict[str, dict] = {}
+    for row in rows:
+        trade_id = str(row["trade_key"] or "")
+        if not trade_id:
+            continue
+        bucket = hints.setdefault(trade_id, {})
+        try:
+            details = json.loads(row["payload"] or "{}")
+        except Exception:
+            details = {}
+        if "entry_fill_verified" not in bucket and "entry_fill_verified" in details:
+            bucket["entry_fill_verified"] = bool(details.get("entry_fill_verified"))
+        if "admin_exit_reason" not in bucket and details.get("admin_exit_reason"):
+            bucket["admin_exit_reason"] = str(details.get("admin_exit_reason"))
+        if "day0_entered_at" not in bucket and details.get("day0_entered_at"):
+            bucket["day0_entered_at"] = str(details.get("day0_entered_at"))
+        if "exit_state" not in bucket:
+            status = details.get("status")
+            if status not in (None, ""):
+                bucket["exit_state"] = str(status)
+    return hints
 
 
 def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:

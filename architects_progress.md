@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.1 freeze`
+- Last updated by: `Codex P6.1 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P6.1 status-summary DB derived`
 - Last accepted packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
 - Current active packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P6.1 boundary yet
+  - no blocker inside the accepted P6.1 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -127,6 +127,31 @@ Archive policy:
   - exact contract-preserving shape for any remaining transitional detail fields still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P6.1-STATUS-SUMMARY-DB-DERIVED` and run targeted status-summary/healthcheck tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 19:55 America/Chicago] P6.1-STATUS-SUMMARY-DB-DERIVED accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status or healthcheck'` -> `10 passed, 38 deselected in 1.18s`
+  - `.venv/bin/pytest -q tests/test_healthcheck.py` -> `7 passed in 0.70s`
+  - lsp diagnostics on `src/observability/status_summary.py`, `src/state/db.py`, `tests/test_pnl_flow_and_audit.py`, and `tests/test_healthcheck.py` -> `0 errors`
+  - pre-close critic clean lane via `gemini -p` -> `PASS`
+  - pre-close verifier clean lane via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - `status_summary.py` now uses DB-backed `position_current` and `strategy_health` as its primary portfolio/strategy/runtime truth path
+  - degraded substrate state is explicit in `consistency_check` and `truth.db_primary_inputs` rather than hidden behind silent JSON fallback
+  - no control-plane durability conversion or `strategy_tracker` deletion is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before `P6.2` may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P6.1-STATUS-SUMMARY-DB-DERIVED`
 - Owner:
   - Architects mainline lead
 

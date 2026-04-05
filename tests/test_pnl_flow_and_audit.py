@@ -121,6 +121,90 @@ def _insert_risk_action_row(
     )
 
 
+def _insert_position_current_row(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    strategy_key: str,
+    phase: str = "active",
+    size_usd: float = 0.0,
+    shares: float = 0.0,
+    cost_basis_usd: float = 0.0,
+    entry_price: float | None = None,
+    mark_price: float | None = None,
+    city: str = "NYC",
+    direction: str = "buy_yes",
+    bin_label: str = "39-40°F",
+    chain_state: str = "unknown",
+    decision_snapshot_id: str = "",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+        """,
+        (
+            position_id,
+            phase,
+            position_id,
+            city,
+            bin_label,
+            direction,
+            size_usd,
+            shares,
+            cost_basis_usd,
+            entry_price,
+            mark_price,
+            decision_snapshot_id,
+            strategy_key,
+            chain_state,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
+def _insert_strategy_health_row(
+    conn: sqlite3.Connection,
+    *,
+    strategy_key: str,
+    as_of: str,
+    open_exposure_usd: float = 0.0,
+    settled_trades_30d: int = 0,
+    realized_pnl_30d: float = 0.0,
+    unrealized_pnl: float = 0.0,
+    win_rate_30d: float | None = None,
+    fill_rate_14d: float | None = None,
+    execution_decay_flag: int = 0,
+    edge_compression_flag: int = 0,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO strategy_health (
+            strategy_key, as_of, open_exposure_usd, settled_trades_30d, realized_pnl_30d,
+            unrealized_pnl, win_rate_30d, brier_30d, fill_rate_14d, edge_trend_30d,
+            risk_level, execution_decay_flag, edge_compression_flag
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)
+        """,
+        (
+            strategy_key,
+            as_of,
+            open_exposure_usd,
+            settled_trades_30d,
+            realized_pnl_30d,
+            unrealized_pnl,
+            win_rate_30d,
+            fill_rate_14d,
+            execution_decay_flag,
+            edge_compression_flag,
+        ),
+    )
+
+
 def _insert_control_override_row(
     conn: sqlite3.Connection,
     *,
@@ -363,39 +447,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
-    init_schema(conn)
+    apply_architecture_kernel_schema(conn)
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            "opening_hunt",
-            now,
-            now,
-            json.dumps(
-                {
-                    "no_trade_cases": [
-                        {
-                            "decision_id": "nt1",
-                            "city": "NYC",
-                            "target_date": "2026-04-01",
-                            "range_label": "39-40°F",
-                            "direction": "buy_yes",
-                            "rejection_stage": "EDGE_INSUFFICIENT",
-                            "rejection_reasons": ["small"],
-                        }
-                    ]
-                }
-            ),
-            now,
-            "paper",
-        ),
-    )
-    conn.commit()
-    conn.close()
-    portfolio = PortfolioState(
-        bankroll=150.0,
-        recent_exits=[_recent_exit(-2.3)],
-    )
     open_pos = _position()
     open_pos.strategy = "center_buy"
     open_pos.last_monitor_market_price = 0.13
@@ -403,16 +456,68 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     open_pos.exit_state = "retry_pending"
     open_pos.entry_fill_verified = False
     open_pos.state = "day0_window"
-    portfolio.positions.append(open_pos)
-    portfolio.recent_exits[0]["strategy"] = "opening_inertia"
+    _insert_position_current_row(
+        conn,
+        position_id=open_pos.trade_id,
+        strategy_key="center_buy",
+        phase="day0_window",
+        size_usd=open_pos.size_usd,
+        shares=open_pos.shares,
+        cost_basis_usd=open_pos.cost_basis_usd,
+        entry_price=open_pos.entry_price,
+        mark_price=open_pos.last_monitor_market_price,
+        city=open_pos.city,
+        direction=open_pos.direction,
+        bin_label=open_pos.bin_label,
+        chain_state=open_pos.chain_state,
+        decision_snapshot_id=open_pos.decision_snapshot_id,
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
+        ) VALUES (?, ?, 1, 1, ?, ?, 'day0_window', 'pending_exit', ?, NULL, ?, NULL, NULL, ?, ?, NULL, 'tests', ?)
+        """,
+        (
+            f"{open_pos.trade_id}:retry",
+            open_pos.trade_id,
+            "EXIT_ORDER_REJECTED",
+            now,
+            "center_buy",
+            open_pos.decision_snapshot_id,
+            "retry_pending",
+            f"{open_pos.trade_id}:retry",
+            json.dumps({"status": "retry_pending", "entry_fill_verified": False}),
+        ),
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="center_buy",
+        as_of=now,
+        open_exposure_usd=open_pos.size_usd,
+        unrealized_pnl=1.5,
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="opening_inertia",
+        as_of=now,
+        realized_pnl_30d=-2.3,
+    )
+    conn.commit()
+    conn.close()
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(
         status_summary_module,
         "_get_risk_details",
         lambda: {
+            "effective_bankroll": 149.2,
+            "realized_pnl": -2.3,
+            "unrealized_pnl": 1.5,
+            "total_pnl": -0.8,
             "execution_quality_level": "YELLOW",
             "recommended_strategy_gates": ["center_buy"],
             "recommended_strategy_gate_reasons": {"center_buy": ["execution_decay(fill_rate=0.2, observed=12)"]},
@@ -424,6 +529,9 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
     monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": False})
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [{"rejection_stage": "EDGE_INSUFFICIENT"}])
 
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
@@ -485,8 +593,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["runtime"]["day0_positions"] == 1
     assert "overall" in status["execution"]
     assert status["no_trade"]["recent_stage_counts"]["EDGE_INSUFFICIENT"] == 1
-    assert status["learning"]["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 1
-    assert status["learning"]["by_strategy"] == {}
+    assert status["learning"] == {"by_strategy": {}}
     assert status["strategy"]["center_buy"]["open_positions"] == 1
     assert status["strategy"]["center_buy"]["unrealized_pnl"] == pytest.approx(1.5)
     assert status["strategy"]["center_buy"]["gated"] is False
@@ -521,18 +628,36 @@ def test_inv_run_mode_writes_failure_status(monkeypatch):
 
 def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
-    portfolio = PortfolioState(bankroll=150.0)
 
     class BrokenConn:
         def close(self):
             return None
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: BrokenConn())
-    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: type("T", (), {"accounting": {}})())
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_position_current_status_view",
+        lambda conn: {
+            "status": "missing_table",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        },
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_strategy_health_snapshot",
+        lambda conn, now=None: {"status": "stale", "by_strategy": {}, "stale_strategy_keys": ["center_buy"]},
+    )
 
     def _boom(_conn):
         raise RuntimeError("db unavailable")
@@ -553,18 +678,52 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
     assert "cycle_risk_level_mismatch:ORANGE->GREEN" in status["risk"]["consistency_check"]["issues"]
     assert "cycle_failed" in status["risk"]["consistency_check"]["issues"]
     assert "execution_summary_unavailable" in status["risk"]["consistency_check"]["issues"]
+    assert "position_current_missing_table" in status["risk"]["consistency_check"]["issues"]
+    assert "strategy_health_stale" in status["risk"]["consistency_check"]["issues"]
+    assert status["truth"]["db_primary_inputs"] == {
+        "position_current": "missing_table",
+        "strategy_health": "stale",
+    }
 
 
 def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
-    portfolio = PortfolioState(bankroll=150.0, positions=[_position(strategy="center_buy")])
-
-    class DummyConn:
-        def close(self):
-            return None
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    as_of = datetime.now(timezone.utc).isoformat()
+    _insert_position_current_row(
+        conn,
+        position_id="t1",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        shares=50.0,
+        cost_basis_usd=5.0,
+        entry_price=0.1,
+        mark_price=0.13,
+        decision_snapshot_id="snap-1",
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="center_buy",
+        as_of=as_of,
+        open_exposure_usd=5.0,
+        unrealized_pnl=1.5,
+        settled_trades_30d=2,
+        realized_pnl_30d=1.25,
+        win_rate_30d=0.5,
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="opening_inertia",
+        as_of=as_of,
+        settled_trades_30d=0,
+        realized_pnl_30d=0.0,
+    )
+    conn.commit()
+    conn.close()
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(
         status_summary_module,
@@ -574,7 +733,7 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
             "recommended_strategy_gate_reasons": {"center_buy": ["edge_compression"]},
         },
     )
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(
         status_summary_module,
@@ -626,21 +785,35 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
 
 def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
-    portfolio = PortfolioState(
-        bankroll=150.0,
-        positions=[_position(chain_state="unknown", exit_state="")],
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    as_of = datetime.now(timezone.utc).isoformat()
+    _insert_position_current_row(
+        conn,
+        position_id="t1",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        shares=50.0,
+        cost_basis_usd=5.0,
+        entry_price=0.1,
+        mark_price=0.13,
+        chain_state="unknown",
     )
-
-    class DummyConn:
-        def close(self):
-            return None
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="center_buy",
+        as_of=as_of,
+        open_exposure_usd=5.0,
+        unrealized_pnl=1.5,
+    )
+    conn.commit()
+    conn.close()
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
-    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: type("T", (), {"accounting": {}})())
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
@@ -658,22 +831,23 @@ def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
 
 def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
-    portfolio = PortfolioState(bankroll=150.0)
     captured: dict[str, object] = {}
-
-    class DummyConn:
-        def close(self):
-            return None
-
-    class DummyTracker:
-        accounting = {"current_regime_started_at": "2026-04-03T00:00:00+00:00"}
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
+    conn.commit()
+    conn.close()
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
-    monkeypatch.setattr(status_summary_module, "load_tracker", lambda: DummyTracker())
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_risk_details",
+        lambda: {"strategy_tracker_accounting": {"current_regime_started_at": "2026-04-03T00:00:00+00:00"}},
+    )
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
     def _fake_execution_summary(conn, not_before=None):
         captured["execution_not_before"] = not_before
         return {}
@@ -706,7 +880,9 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
     status_path = tmp_path / "status_summary.json"
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
-    init_schema(conn)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
     conn.close()
     status_path.write_text(
         json.dumps(
@@ -721,14 +897,67 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
     )
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
 
     status_summary_module.write_status()
     refreshed = json.loads(status_path.read_text())
 
     assert refreshed["cycle"]["entries_blocked_reason"] == "risk_level=ORANGE"
+
+
+def test_inv_status_surfaces_db_substrate_degradation(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_position_current_status_view",
+        lambda conn: {
+            "status": "missing_table",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        },
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_strategy_health_snapshot",
+        lambda conn, now=None: {"status": "stale", "by_strategy": {}, "stale_strategy_keys": ["center_buy"]},
+    )
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert status["risk"]["level"] == "RED"
+    assert "position_current_missing_table" in status["risk"]["consistency_check"]["issues"]
+    assert "strategy_health_stale" in status["risk"]["consistency_check"]["issues"]
+    assert status["truth"]["db_primary_inputs"] == {
+        "position_current": "missing_table",
+        "strategy_health": "stale",
+    }
 
 
 def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):

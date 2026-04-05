@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.1 freeze`
+- Last updated by: `Codex P6.1 close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P6.1 status-summary DB derived`
 - Active packet: `P6.1-STATUS-SUMMARY-DB-DERIVED`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P6.0-STATUS-SUMMARY-INPUT-READINESS`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P6.1-STATUS-SUMMARY-DB-DERIVED` inside its frozen boundary.
-2. Run targeted status-summary/healthcheck evidence plus pre-close critic + verifier before any acceptance claim.
+1. Run the post-close critic + verifier gate for accepted `P6.1-STATUS-SUMMARY-DB-DERIVED`.
+2. Do not freeze `P6.2` unless the post-close gate passes on the accepted boundary.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
