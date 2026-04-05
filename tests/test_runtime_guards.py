@@ -1138,6 +1138,155 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
     assert state.positions[0].strategy == "center_buy"
 
 
+def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-t1', 'active', 'db-t1', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "db-t1",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2026-04-01",
+            "bin_label": "41-42°F",
+            "direction": "buy_no",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+            "token_id": "json-yes",
+            "no_token_id": "json-no",
+        }],
+        "bankroll": 99.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-t1"]
+    assert state.positions[0].strategy_key == "opening_inertia"
+    assert state.positions[0].state == "entered"
+    assert state.positions[0].token_id == "json-yes"
+    assert state.bankroll == pytest.approx(99.0)
+
+
+def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "json-t1",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2026-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+        }],
+        "bankroll": 111.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["json-t1"]
+    assert state.positions[0].strategy_key == "center_buy"
+    assert state.bankroll == pytest.approx(111.0)
+
+
+def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_projection(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            't1', 'active', 't1', 'm1', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 10.0, 20.0, 10.0, 0.4, 0.6,
+            NULL, NULL, NULL,
+            'snap-1', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'CHAIN_SYNCED', 't1', 'entered', '', 'snap-1',
+            'NYC', '2026-04-01', 'm1', '39-40°F', 'buy_yes', 'opening_inertia', 'opening_inertia',
+            'test', '{}', '2026-04-04T01:00:00Z', 'paper'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "t1",
+            "market_id": "m1",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2026-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "shares": 25.0,
+            "cost_basis_usd": 5.0,
+            "token_id": "yes123",
+        }],
+        "bankroll": 111.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["t1"]
+    assert state.positions[0].shares == pytest.approx(25.0)
+    assert state.positions[0].token_id == "yes123"
+
+
 def test_lead_days_use_city_local_reference_time():
     lead_days = lead_days_to_target(
         "2026-04-01",

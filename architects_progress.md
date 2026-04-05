@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R4 post-close + P7.5 freeze`
+- Last updated by: `Codex P7.5 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -31,12 +31,12 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7.5 load_portfolio DB-first`
-- Last accepted packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
+- Last accepted packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
 - Current active packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - `load_portfolio()` still reads legacy JSON as primary truth even though current paper open-position parity is now available through canonical projection
+  - accepted boundary still needs post-close critic + verifier before any next P7 freeze
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -172,6 +172,30 @@ Archive policy:
   - exact emergency-fallback trigger shape still needs implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST` and run targeted DB-first loader tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 22:10 America/Chicago] P7.5-M3-LOAD-PORTFOLIO-DB-FIRST accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio or stale_order_cleanup_cancels_orphan_open_orders'` -> `5 passed, 73 deselected`
+  - pre-close critic via `gemini -p` -> `PASS` (`.omx/artifacts/gemini-p75-preclose-critic-20260405T000000Z.md`)
+  - pre-close verifier via `claude -p` -> `PASS` (`.omx/artifacts/claude-p75-preclose-verifier-20260405T000000Z.md`)
+  - root runtime proof: `ZEUS_MODE=paper load_portfolio()` now returns 12 positions from current repo truth with compatibility token ids preserved from `positions-paper.json`
+- Decisions frozen:
+  - `load_portfolio()` is now DB-first on the touched seam
+  - JSON fallback remains explicit when canonical projection is empty or stale relative to legacy event timestamps
+  - this packet does not claim riskguard DB-first cutover or legacy-surface deletion
+- Open uncertainties:
+  - the accepted boundary still requires post-close critic + verifier before any later P7 freeze may be recorded
+- Next required action:
+  - run the post-close critic + verifier on accepted `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
 - Owner:
   - Architects mainline lead
 

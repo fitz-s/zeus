@@ -674,15 +674,9 @@ class DeprecatedStateFileError(RuntimeError):
     pass
 
 
-def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
-    """Load portfolio from JSON file. Returns empty state if file missing.
-
-    Includes contamination guard: refuses to load positions from wrong env.
-    """
-    path = path or POSITIONS_PATH
+def _load_portfolio_json_payload(path: Path) -> dict:
     if not path.exists():
-        return PortfolioState(audit_logging_enabled=True)
-
+        return {}
     with open(path) as f:
         data = json.load(f)
     if data.get("truth", {}).get("deprecated") is True:
@@ -690,10 +684,10 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             f"{path} is a deprecated legacy truth file. "
             "Use the mode-suffixed positions file instead."
         )
+    return data
 
-    import os
-    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
 
+def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> PortfolioState:
     position_fields = {f.name for f in fields(Position)}
     positions = []
     for p in data.get("positions", []):
@@ -710,7 +704,6 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             )
         positions.append(pos)
 
-    # Contamination guard: every position's env must match current mode
     for pos in positions:
         if pos.env and pos.env != current_mode:
             raise PortfolioModeError(
@@ -729,6 +722,167 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
         recent_exits=data.get("recent_exits", []),
         ignored_tokens=data.get("ignored_tokens", []),
+    )
+
+
+def _runtime_state_for_portfolio_phase(phase: str) -> str:
+    if phase == "pending_entry":
+        return "pending_tracked"
+    if phase == "day0_window":
+        return "day0_window"
+    if phase == "pending_exit":
+        return "pending_exit"
+    if phase == "active":
+        return "entered"
+    raise ValueError(f"unsupported canonical phase for portfolio loader: {phase!r}")
+
+
+def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
+    state = str(row.get("state") or "")
+    if not state:
+        state = _runtime_state_for_portfolio_phase(str(row.get("phase") or ""))
+    entered_at = str(row.get("entered_at") or row.get("updated_at") or "")
+    order_posted_at = str(row.get("order_posted_at") or entered_at or "")
+    day0_entered_at = str(row.get("day0_entered_at") or "") if state == "day0_window" else ""
+    payload = dict(
+        trade_id=str(row.get("trade_id") or row.get("position_id") or ""),
+        market_id=str(row.get("market_id") or ""),
+        city=str(row.get("city") or ""),
+        cluster=str(row.get("cluster") or ""),
+        target_date=str(row.get("target_date") or ""),
+        bin_label=str(row.get("bin_label") or ""),
+        direction=str(row.get("direction") or "unknown"),
+        unit=str(row.get("unit") or "F"),
+        env=current_mode,
+        size_usd=float(row.get("size_usd") or 0.0),
+        shares=float(row.get("shares") or 0.0),
+        cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
+        entry_price=float(row.get("entry_price") or 0.0),
+        p_posterior=float(row.get("p_posterior") or 0.0),
+        entered_at=entered_at if state != "pending_tracked" else "",
+        day0_entered_at=day0_entered_at,
+        decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
+        entry_method=str(row.get("entry_method") or ""),
+        strategy_key=str(row.get("strategy_key") or ""),
+        strategy=str(row.get("strategy_key") or ""),
+        edge_source=str(row.get("edge_source") or ""),
+        discovery_mode=str(row.get("discovery_mode") or ""),
+        state=state,
+        order_id=str(row.get("order_id") or ""),
+        order_status=str(row.get("order_status") or ""),
+        order_posted_at=order_posted_at,
+        chain_state=str(row.get("chain_state") or ""),
+        exit_state=str(row.get("exit_state") or ""),
+        last_monitor_prob=row.get("last_monitor_prob"),
+        last_monitor_edge=row.get("last_monitor_edge"),
+        last_monitor_market_price=row.get("last_monitor_market_price"),
+        admin_exit_reason=str(row.get("admin_exit_reason") or ""),
+        entry_fill_verified=bool(row.get("entry_fill_verified", False)),
+    )
+    for field_name in {f.name for f in fields(Position)}:
+        if field_name in payload:
+            continue
+        value = row.get(field_name)
+        if value not in (None, "", [], {}, 0, 0.0):
+            payload[field_name] = value
+    return Position(**payload)
+
+
+def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
+    """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
+    path = path or POSITIONS_PATH
+
+    import os
+    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
+    json_data = _load_portfolio_json_payload(path)
+
+    from src.state.db import get_connection, query_portfolio_loader_view
+
+    db_path = path.parent / "zeus.db"
+    try:
+        conn = get_connection(db_path)
+    except Exception:
+        logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
+        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+
+    try:
+        snapshot = query_portfolio_loader_view(conn)
+    finally:
+        conn.close()
+
+    if snapshot.get("status") != "ok":
+        logger.warning(
+            "load_portfolio falling back to JSON because canonical projection is unavailable: %s",
+            snapshot.get("status"),
+        )
+        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+
+    bankroll = json_data.get("bankroll", 150.0)
+    compatibility_by_trade_id: dict[str, dict] = {}
+    for payload in json_data.get("positions", []):
+        trade_id = str(payload.get("trade_id") or "")
+        if trade_id:
+            compatibility_by_trade_id[trade_id] = payload
+    position_fields = {f.name for f in fields(Position)}
+    authoritative_fields = {
+        "trade_id",
+        "market_id",
+        "city",
+        "cluster",
+        "target_date",
+        "bin_label",
+        "direction",
+        "unit",
+        "size_usd",
+        "shares",
+        "cost_basis_usd",
+        "entry_price",
+        "p_posterior",
+        "last_monitor_prob",
+        "last_monitor_edge",
+        "last_monitor_market_price",
+        "decision_snapshot_id",
+        "entry_method",
+        "strategy_key",
+        "strategy",
+        "edge_source",
+        "discovery_mode",
+        "chain_state",
+        "order_id",
+        "order_status",
+        "state",
+        "env",
+        "entered_at",
+        "day0_entered_at",
+        "exit_state",
+        "admin_exit_reason",
+        "entry_fill_verified",
+    }
+    positions = [
+        _position_from_projection_row(
+            {
+                **row,
+                **{
+                    key: compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key)
+                    for key in position_fields
+                    if key not in authoritative_fields
+                    and row.get(key) in (None, "", [], 0, 0.0)
+                    and compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key) not in (None, "", [], 0, 0.0)
+                },
+            },
+            current_mode=current_mode,
+        )
+        for row in snapshot.get("positions", [])
+    ]
+    return PortfolioState(
+        positions=positions,
+        bankroll=bankroll,
+        updated_at=json_data.get("updated_at", ""),
+        audit_logging_enabled=True,
+        daily_baseline_total=json_data.get("daily_baseline_total", bankroll),
+        weekly_baseline_total=json_data.get("weekly_baseline_total", bankroll),
+        recent_exits=json_data.get("recent_exits", []),
+        ignored_tokens=json_data.get("ignored_tokens", []),
     )
 
 

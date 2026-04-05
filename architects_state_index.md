@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R4 post-close + P7.5 freeze`
+- Last updated by: `Codex P7.5 close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `P7.5 load_portfolio DB-first`
 - Active packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- Active packet state: `frozen / ready for execution`
+- Active packet state: `accepted and pushed / post-close gate pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7R4-OPEN-POSITION-CANONICAL-BACKFILL`
 - Execution mode default: `solo`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`.
-2. Keep the packet bounded to the loader seam only; do not mix in riskguard cutover or legacy deletion.
+1. Run the post-close critic + verifier gate for accepted `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`.
+2. Do not freeze any later P7 packet unless the post-close gate passes and the next seam is still justified by repo truth.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt

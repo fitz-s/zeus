@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R4 post-close + P7.5 freeze`
+- Last updated by: `Codex P7.5 close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `P7.5-M3-LOAD-PORTFOLIO-DB-FIRST`
-- State: `FROZEN / READY FOR EXECUTION`
+- State: `ACCEPTED AND PUSHED / POST-CLOSE GATE PENDING`
 - Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
 - Current owner: `Architects mainline lead`
 
@@ -73,16 +73,16 @@ Make `load_portfolio()` read canonical `position_current` first while keeping JS
 ## Immediate checklist
 
 - [x] P7.5 packet frozen
-- [ ] `load_portfolio()` becomes DB-first on the touched seam
-- [ ] targeted DB-first loader tests green
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] P7.5 accepted and pushed
+- [x] `load_portfolio()` becomes DB-first on the touched seam
+- [x] targeted DB-first loader tests green
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] P7.5 accepted and pushed
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Implement the bounded `load_portfolio()` DB-first seam.
-2. Prove the explicit JSON fallback path still works only when canonical projection is unavailable.
-3. Do not widen into riskguard cutover or legacy-surface deletion.
+1. Finish the post-close critic + verifier on the accepted `P7.5` boundary.
+2. Keep the slim control surfaces honest while the post-close gate is pending.
+3. Do not freeze the next packet until P7.5 post-close gate passes.

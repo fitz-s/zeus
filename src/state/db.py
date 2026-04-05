@@ -6,6 +6,7 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,17 @@ OPEN_EXPOSURE_PHASES = (
     "day0_window",
     "pending_exit",
 )
+PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
+    "pending_entry": "pending_tracked",
+    "active": "entered",
+    "day0_window": "day0_window",
+    "pending_exit": "pending_exit",
+    "economically_closed": "economically_closed",
+    "settled": "settled",
+    "voided": "voided",
+    "quarantined": "quarantined",
+    "admin_closed": "admin_closed",
+}
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 
 
@@ -2310,6 +2322,131 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     }
 
 
+def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "table": "position_current",
+            "positions": [],
+        }
+    if not _table_exists(conn, "position_current"):
+        return {
+            "status": "missing_table",
+            "table": "position_current",
+            "positions": [],
+        }
+
+    rows = conn.execute(
+        """
+        SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+               direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+               last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+               decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+               chain_state, order_id, order_status, updated_at
+        FROM position_current
+        ORDER BY updated_at DESC, position_id
+        """
+    ).fetchall()
+    if not rows:
+        return {
+            "status": "empty",
+            "table": "position_current",
+            "positions": [],
+        }
+
+    trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
+    transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    legacy_latest_by_trade: dict[str, datetime] = {}
+    legacy_table = _legacy_position_events_table(conn)
+    if legacy_table:
+        placeholders = ", ".join("?" for _ in trade_ids)
+        legacy_rows = conn.execute(
+            f"""
+            SELECT runtime_trade_id, MAX(timestamp) AS latest_timestamp
+            FROM {legacy_table}
+            WHERE runtime_trade_id IN ({placeholders})
+            GROUP BY runtime_trade_id
+            """,
+            trade_ids,
+        ).fetchall()
+        for legacy_row in legacy_rows:
+            trade_id = str(legacy_row["runtime_trade_id"] or "")
+            parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
+            if trade_id and parsed is not None:
+                legacy_latest_by_trade[trade_id] = parsed
+
+    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
+    positions: list[dict] = []
+    stale_trade_ids: list[str] = []
+    for row in rows:
+        trade_id = str(row["trade_id"] or row["position_id"] or "")
+        phase = str(row["phase"] or "")
+        hints = transitional_hints.get(trade_id, {})
+        position_env = str(hints.get("env") or current_mode)
+        if position_env != current_mode:
+            continue
+        projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
+        latest_legacy = legacy_latest_by_trade.get(trade_id)
+        if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
+            stale_trade_ids.append(trade_id)
+            continue
+        positions.append(
+            {
+                "trade_id": trade_id,
+                "market_id": str(row["market_id"] or ""),
+                "city": str(row["city"] or ""),
+                "cluster": str(row["cluster"] or ""),
+                "target_date": str(row["target_date"] or ""),
+                "bin_label": str(row["bin_label"] or ""),
+                "direction": str(row["direction"] or "unknown"),
+                "unit": str(row["unit"] or "F"),
+                "size_usd": float(row["size_usd"] or 0.0),
+                "shares": float(row["shares"] or 0.0),
+                "cost_basis_usd": float(row["cost_basis_usd"] or 0.0),
+                "entry_price": float(row["entry_price"] or 0.0),
+                "p_posterior": float(row["p_posterior"] or 0.0),
+                "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
+                "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
+                "last_monitor_market_price": row["last_monitor_market_price"],
+                "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
+                "entry_method": str(row["entry_method"] or ""),
+                "strategy_key": str(row["strategy_key"] or ""),
+                "strategy": str(row["strategy_key"] or ""),
+                "edge_source": str(row["edge_source"] or row["strategy_key"] or ""),
+                "discovery_mode": str(row["discovery_mode"] or ""),
+                "chain_state": str(row["chain_state"] or "unknown"),
+                "order_id": str(row["order_id"] or ""),
+                "order_status": str(row["order_status"] or ""),
+                "state": PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase),
+                "env": position_env,
+                "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
+                "day0_entered_at": str(hints.get("day0_entered_at") or ""),
+                "exit_state": str(hints.get("exit_state") or ""),
+                "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
+                "entry_fill_verified": bool(hints.get("entry_fill_verified", False)),
+            }
+        )
+    if not positions:
+        return {
+            "status": "stale_legacy_fallback" if stale_trade_ids else "empty",
+            "table": "position_current",
+            "positions": [],
+            "stale_trade_ids": stale_trade_ids,
+        }
+    if stale_trade_ids:
+        return {
+            "status": "stale_legacy_fallback",
+            "table": "position_current",
+            "positions": [],
+            "stale_trade_ids": stale_trade_ids,
+        }
+    return {
+        "status": "ok",
+        "table": "position_current",
+        "positions": positions,
+    }
+
+
 def upsert_control_override(
     conn: sqlite3.Connection | None,
     *,
@@ -2466,7 +2603,7 @@ def _query_transitional_position_hints(
         legacy_table = _legacy_position_events_table(conn) or "position_events"
         rows = conn.execute(
             f"""
-            SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload
+            SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload, env, timestamp AS occurred_at
             FROM {legacy_table}
             WHERE runtime_trade_id IN ({placeholders})
             ORDER BY timestamp DESC, id DESC
@@ -2476,7 +2613,7 @@ def _query_transitional_position_hints(
     elif {"position_id", "payload_json", "occurred_at"}.issubset(columns):
         rows = conn.execute(
             f"""
-            SELECT position_id AS trade_key, event_type, payload_json AS payload
+            SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
             FROM position_events
             WHERE position_id IN ({placeholders})
             ORDER BY occurred_at DESC, sequence_no DESC
@@ -2501,10 +2638,29 @@ def _query_transitional_position_hints(
             bucket["admin_exit_reason"] = str(details.get("admin_exit_reason"))
         if "day0_entered_at" not in bucket and details.get("day0_entered_at"):
             bucket["day0_entered_at"] = str(details.get("day0_entered_at"))
+        occurred_at = str(row["occurred_at"] or "")
+        if (
+            "order_posted_at" not in bucket
+            and row["event_type"] in {"POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"}
+            and occurred_at
+        ):
+            bucket["order_posted_at"] = occurred_at
+        if (
+            "entered_at" not in bucket
+            and row["event_type"] == "ENTRY_ORDER_FILLED"
+            and occurred_at
+        ):
+            bucket["entered_at"] = occurred_at
         if "exit_state" not in bucket:
             status = details.get("status")
             if status not in (None, ""):
                 bucket["exit_state"] = str(status)
+        if "env" not in bucket:
+            env_value = None
+            if "env" in row.keys():
+                env_value = row["env"]
+            if env_value not in (None, ""):
+                bucket["env"] = str(env_value)
     return hints
 
 
