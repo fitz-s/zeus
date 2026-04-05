@@ -231,6 +231,29 @@ def test_transaction_boundary_helper_rejects_legacy_init_schema():
     conn.close()
 
 
+def test_init_schema_bootstraps_additive_canonical_support_tables():
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    current_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    strategy_health_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
+    }
+    control_override_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
+    }
+
+    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
+    assert {"strategy_key", "as_of", "execution_decay_flag", "edge_compression_flag"}.issubset(strategy_health_columns)
+    assert {"override_id", "target_type", "target_key", "action_type", "precedence"}.issubset(control_override_columns)
+    conn.close()
+
+
 def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
     from src.state.db import apply_architecture_kernel_schema, append_event_and_project
 
@@ -332,7 +355,7 @@ def test_apply_architecture_kernel_schema_rejects_legacy_runtime_position_events
     current_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
     }
-    assert not current_columns
+    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
     conn.close()
 
 
@@ -518,6 +541,37 @@ def test_replay_parity_reports_staged_missing_tables(tmp_path):
     assert payload["status"] == "staged_missing_canonical_tables"
     assert "position_events" in payload["missing_tables"]
     assert "position_current" in payload["missing_tables"]
+
+
+def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(tmp_path):
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "zeus.db"
+    legacy_path = tmp_path / "positions-paper.json"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.close()
+    legacy_path.write_text(json.dumps({"positions": []}))
+
+    run = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "replay_parity.py"),
+            "--db",
+            str(db_path),
+            "--legacy-export",
+            str(legacy_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 0
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "ok"
+    assert payload["canonical"]["open_positions"] == 0
 
 
 def test_db_no_longer_owns_canonical_append_project_bodies():

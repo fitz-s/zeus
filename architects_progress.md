@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7.2 close`
+- Last updated by: `Codex P7R2 implementation`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -30,13 +30,13 @@ Archive policy:
 
 ## Current snapshot
 
-- Mainline stage: `P7.2 parity reporting`
-- Last accepted packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
-- Current active packet: `P7.2-M2-PARITY-REPORTING`
-- Current packet status: `accepted and pushed / post-close gate pending`
+- Mainline stage: `P7R2 DELTA-05 init_schema additive canonical tables`
+- Last accepted packet: `P7.2-M2-PARITY-REPORTING`
+- Current active packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Current packet status: `implemented / pre-close review pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the accepted P7.2 boundary yet
+  - no blocker inside the implemented P7R2 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -488,6 +488,78 @@ Archive policy:
 - Basis / evidence:
   - actual parity blocker is `position_current` absent in runtime DB reality
   - `src/state/db.py::init_schema()` is the seam that currently provisions the runtime DB shape
+  - freezing a packet that cannot touch that seam would be dishonest
+- Decisions frozen:
+  - keep this packet on additive runtime bootstrap support only
+  - do not claim DB-first reads, cutover, or legacy-surface deletion in this packet
+- Open uncertainties:
+  - exact additive bootstrap shape that avoids breaking legacy runtime helpers still needs implementation-time evidence inside the frozen boundary
+- Next required action:
+  - implement `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES` and run targeted schema/bootstrap tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:05 America/Chicago] P7.2-M2-PARITY-REPORTING post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `P7.2-M2-PARITY-REPORTING`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - parity reporting lane completed cleanly
+- Basis / evidence:
+  - accepted-boundary clean-lane critic via `gemini -p` -> `PASS`
+  - accepted-boundary clean-lane verifier via `gemini -p` -> `PASS`
+  - actual `python3 scripts/replay_parity.py` output on current repo state advanced from placeholder counts to truthful output and exposed `missing_tables = [position_current]`
+- Decisions frozen:
+  - P7.2 acceptance stands without reopen
+  - a later DB-first/cutover-prep packet is still not justified by the current parity evidence
+- Open uncertainties:
+  - later P7 advancement depends on resolving the concrete DELTA-05 runtime/bootstrap contradiction
+- Next required action:
+  - freeze a bounded repair packet that can touch the real DELTA-05 fix seam
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:28 America/Chicago] P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - parity output still reported `position_current` missing in current runtime DB reality
+- Decisions frozen:
+  - packet intended to repair DELTA-05 as a bounded runtime/schema repair
+- Open uncertainties:
+  - actual implementation seam still needed confirmation
+- Next required action:
+  - inspect the concrete bootstrap seam and verify packet fit before implementation
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:40 America/Chicago] P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP superseded before implementation
+- Author: `Architects mainline lead`
+- Packet: `P7R-DELTA-05-RUNTIME-POSITION-CURRENT-BOOTSTRAP`
+- Status delta:
+  - frozen packet superseded before implementation
+- Basis / evidence:
+  - implementation evidence showed the actual DELTA-05 repair seam is `src/state/db.py::init_schema()` rather than migration SQL alone
+- Decisions frozen:
+  - the next honest packet must allow the runtime bootstrap seam itself to change
+- Open uncertainties:
+  - none on the superseded boundary beyond preserving the supersession note
+- Next required action:
+  - freeze `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 23:43 America/Chicago] P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES frozen
+- Author: `Architects mainline lead`
+- Packet: `P7R2-DELTA-05-INIT-SCHEMA-ADDITIVE-CANONICAL-TABLES`
+- Status delta:
+  - current active packet frozen
+  - mainline moves from the superseded migration-only repair packet into the bootstrap-seam repair packet
+- Basis / evidence:
+  - `src/state/db.py::init_schema()` is the seam that currently provisions the local runtime DB shape
   - freezing a packet that cannot touch that seam would be dishonest
 - Decisions frozen:
   - keep this packet on additive runtime bootstrap support only
