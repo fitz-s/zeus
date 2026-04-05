@@ -30,7 +30,8 @@ def _default_accounting(path: Path | None = None) -> dict[str, Any]:
     return {
         "accounting_scope": "current_regime",
         "performance_headline_authority": str(status_path),
-        "tracker_role": "attribution_surface",
+        "tracker_role": "compatibility_surface",
+        "authority_mode": "non_authority_compatibility",
         "includes_legacy_history": False,
         "current_regime_started_at": "",
         "history_archive_path": "",

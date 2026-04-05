@@ -253,16 +253,12 @@ def write_status(cycle_summary: dict = None) -> None:
         )
         status["execution"] = query_execution_event_summary(
             conn,
-            not_before=current_regime_started_at or None,
+            not_before=None,
         )
-        if current_regime_started_at:
-            status["execution"]["current_regime_started_at"] = current_regime_started_at
         status["learning"] = query_learning_surface_summary(
             conn,
-            not_before=current_regime_started_at or None,
+            not_before=None,
         )
-        if current_regime_started_at:
-            status["learning"]["current_regime_started_at"] = current_regime_started_at
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
         for case in recent_no_trades:
@@ -335,6 +331,10 @@ def write_status(cycle_summary: dict = None) -> None:
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",
     }
+    if current_regime_started_at:
+        status["truth"]["compatibility_inputs"] = {
+            "strategy_tracker_current_regime_started_at": current_regime_started_at,
+        }
 
     # Atomic write
     import tempfile

@@ -64,7 +64,8 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
     assert report["includes_legacy_history"] is False
     assert report["current_regime_started_at"] == "2026-03-31T16:49:28.503175+00:00"
     assert rebuilt["accounting"]["performance_headline_authority"].endswith("status_summary-paper.json")
-    assert rebuilt["accounting"]["tracker_role"] == "attribution_surface"
+    assert rebuilt["accounting"]["tracker_role"] == "compatibility_surface"
+    assert rebuilt["accounting"]["authority_mode"] == "non_authority_compatibility"
     assert rebuilt["accounting"]["includes_legacy_history"] is False
     assert history["accounting"]["includes_legacy_history"] is True
     assert history["accounting"]["accounting_scope"] == "full_history_archive"

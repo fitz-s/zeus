@@ -870,10 +870,9 @@ def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch,
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
 
-    assert captured["not_before"] == "2026-04-03T00:00:00+00:00"
-    assert captured["execution_not_before"] == "2026-04-03T00:00:00+00:00"
-    assert status["execution"]["current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
-    assert status["learning"]["current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
+    assert captured["not_before"] is None
+    assert captured["execution_not_before"] is None
+    assert status["truth"]["compatibility_inputs"]["strategy_tracker_current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):

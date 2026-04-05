@@ -7,7 +7,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P6.3 freeze`
+- Last updated by: `Codex P6.3 close`
 - Authority scope: `durable packet-level state only`
 
 Do not use this file for:
@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P6.3 strategy-tracker deletion path`
 - Last accepted packet: `P6.2-CONTROL-PLANE-DURABLE-OVERRIDE-WRITES`
 - Current active packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
-- Current packet status: `frozen / ready for execution`
+- Current packet status: `accepted and pushed / post-close gate pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker inside the frozen P6.3 boundary yet
+  - no blocker inside the accepted P6.3 boundary yet
   - out-of-scope local dirt must remain excluded from packet commits
 
 ## Durable timeline
@@ -260,6 +260,31 @@ Archive policy:
   - exact remaining authority-bearing tracker consumers still need implementation-time evidence inside the frozen boundary
 - Next required action:
   - implement `P6.3-STRATEGY-TRACKER-DELETION-PATH` and run targeted demotion tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-04 21:35 America/Chicago] P6.3-STRATEGY-TRACKER-DELETION-PATH accepted and pushed
+- Author: `Architects mainline lead`
+- Packet: `P6.3-STRATEGY-TRACKER-DELETION-PATH`
+- Status delta:
+  - packet accepted
+  - packet pushed
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k 'status or tracker'` -> `11 passed, 38 deselected in 1.20s`
+  - `.venv/bin/pytest -q tests/test_strategy_tracker_regime.py` -> `5 passed in 0.07s`
+  - lsp diagnostics on `src/observability/status_summary.py`, `src/state/strategy_tracker.py`, `tests/test_pnl_flow_and_audit.py`, and `tests/test_strategy_tracker_regime.py` -> `0 errors`
+  - pre-close critic clean lane via `gemini -p` -> `PASS`
+  - pre-close verifier clean lane via `gemini -p` -> `PASS`
+- Decisions frozen:
+  - `strategy_tracker` no longer serves as an authority-bearing input on the touched operator surfaces
+  - surviving tracker metadata is now explicit compatibility-only output
+  - no control-plane, schema, or broader migration widening is claimed in this packet
+- Open uncertainties:
+  - the accepted boundary still needs the post-close critic + verifier gate before any P7 packet may be frozen
+- Next required action:
+  - run the post-close critic + verifier on accepted `P6.3-STRATEGY-TRACKER-DELETION-PATH`
 - Owner:
   - Architects mainline lead
 
