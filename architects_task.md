@@ -5,8 +5,8 @@ Purpose:
 - exactly one live packet at a time
 
 Metadata:
-- Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R7 post-close boundary`
+- Last updated: `2026-04-07 America/Chicago`
+- Last updated by: `Codex BUG-MONITOR-SHARED-CONNECTION-REPAIR freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,20 +17,28 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `NO LIVE PACKET / AWAITING NEXT LAWFUL FREEZE`
-- Execution mode: `SOLO_EXECUTE / NO_TEAM_DEFAULT`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- State: `FROZEN / IMPLEMENTATION_VERIFIED`
+- Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet. Hold at the post-P7R7 boundary until the next bounded non-destructive packet is explicitly justified.
+Repair the monitoring / exit-context seam so runtime can read trade truth plus shared world truth through an explicit attached connection instead of the legacy monolithic seam.
 
 ## Allowed files
 
+- `work_packets/BUG-MONITOR-SHARED-CONNECTION-REPAIR.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
+- `src/engine/cycle_runner.py`
+- `src/engine/cycle_runtime.py`
+- `src/engine/monitor_refresh.py`
+- `src/state/db.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_live_safety_invariants.py`
+- `tests/test_pnl_flow_and_audit.py`
 
 ## Forbidden files
 
@@ -39,16 +47,13 @@ No live packet. Hold at the post-P7R7 boundary until the next bounded non-destru
 - `docs/architecture/**`
 - `architecture/**`
 - `src/control/**`
-- `src/observability/**`
-- `src/engine/**`
 - `src/execution/**`
 - `src/supervisor_api/**`
 - `src/state/portfolio.py`
 - `src/state/ledger.py`
 - `src/state/projection.py`
-- `tests/test_runtime_guards.py`
+- `migrations/**`
 - `tests/test_architecture_contracts.py`
-- `tests/test_pnl_flow_and_audit.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -56,30 +61,31 @@ No live packet. Hold at the post-P7R7 boundary until the next bounded non-destru
 
 ## Non-goals
 
-- no broad DB-first cutover yet
-- no legacy-surface deletion yet
-- no M4 retirement/delete freeze without a new explicit packet
-- no team launch
+- no RiskGuard packet work in this packet
+- no migration-script execution or daemon cutover claim
+- no bankroll semantics redesign
+- no team runtime launch
 
 ## Current blocker state
 
-- no later bounded non-destructive packet has been frozen yet
-- obvious next work trends toward M4 retirement/delete territory, which is not auto-authorized by momentum alone
+- current runtime monitoring seam has been repaired and targeted tests passed
+- pre-close critic + verifier review still needs to run before local acceptance
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] P7R7 packet frozen
-- [x] live runtime tracker file normalized to compatibility-only metadata
-- [x] packet-bounded evidence recorded
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] P7R7 accepted and pushed
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] `BUG-MONITOR-SHARED-CONNECTION-REPAIR` frozen
+- [ ] architecture/code-review/test map captured for the packet
+- [x] runtime seam repaired in code
+- [x] targeted tests pass
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] packet accepted locally
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Hold at the post-P7R7 boundary until a new bounded packet is explicitly justified.
-2. Do not invent a fake next freeze just to preserve momentum.
-3. Treat destructive/retirement transitions as out of the current autonomous stop boundary.
+1. Map the packet into bounded architecture / code-review / adversarial-test slices.
+2. Repair the runtime monitoring connection seam and targeted test contract only.
+3. Do not widen into migration, retirement, or bankroll work without a new packet.

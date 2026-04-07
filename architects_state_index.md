@@ -5,26 +5,26 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-04 America/Chicago`
-- Last updated by: `Codex P7R7 post-close boundary`
+- Last updated: `2026-04-07 America/Chicago`
+- Last updated by: `Codex BUG-MONITOR-SHARED-CONNECTION-REPAIR freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
-- Stage: `P7 pre-retirement seams complete`
-- Active packet: `none`
-- Active packet state: `no live packet / awaiting next lawful freeze`
+- Stage: `post-P7R7 bounded bugfix`
+- Active packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Active packet state: `frozen / implementation verified`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
-- Execution mode default: `solo`
+- Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
-  - no team is active
+  - no team runtime is active; bounded subagents allowed inside the frozen packet
 
 ## Current next action
 
-1. Do not freeze any later P7 packet until a new bounded non-destructive seam is explicitly justified.
-2. Treat obvious next work near M4 retirement/delete territory as outside the current autonomous stop boundary.
+1. Hold the repaired runtime monitoring / exit-context packet boundary while pre-close review runs.
+2. Keep the packet bounded to `src/engine/**`, `src/state/db.py`, targeted tests, and the packet/control surfaces.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. current active packet
+5. `work_packets/BUG-MONITOR-SHARED-CONNECTION-REPAIR.md`

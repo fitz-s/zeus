@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import types
@@ -28,6 +29,7 @@ from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
+import src.state.db as db_module
 from src.state.db import get_connection, init_schema, query_position_events
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -149,6 +151,57 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     assert pos.cost_basis_usd == pytest.approx(5.0)
     assert pos.chain_state == "synced"
     assert pos.condition_id == "cond-1"
+
+
+def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    shared_db = tmp_path / "zeus-shared.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    conn.close()
+
+    shared_conn = sqlite3.connect(str(shared_db))
+    shared_conn.execute("CREATE TABLE shared_sentinel (id INTEGER PRIMARY KEY)")
+    shared_conn.commit()
+    shared_conn.close()
+
+    monkeypatch.setattr(db_module, "ZEUS_DB_PATH", zeus_db)
+    monkeypatch.setattr(db_module, "ZEUS_SHARED_DB_PATH", shared_db)
+    monkeypatch.setattr(cycle_runner, "get_connection", db_module.get_trade_connection_with_shared)
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "_reconcile_pending_positions", lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False})
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
+    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (100.0, {"config_cap_usd": 100.0, "effective_bankroll_usd": 100.0, "dynamic_cap_usd": 100.0}))
+    monkeypatch.setattr(cycle_runner, "_execute_discovery_phase", lambda *args, **kwargs: (False, False))
+
+    def fake_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=None):
+        assert conn.execute("SELECT name FROM shared.sqlite_master WHERE type = 'table' AND name = 'shared_sentinel'").fetchone() is not None
+        summary["monitor_incomplete_exit_context"] = 0
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", fake_monitoring_phase)
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", lambda paper_mode: type("DummyClob", (), {"paper_mode": paper_mode, "get_balance": lambda self: 100.0})())
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["monitor_incomplete_exit_context"] == 0
+
+
+def test_run_cycle_monitoring_fails_loudly_when_shared_seam_unavailable(monkeypatch):
+    def broken_get_connection(*args, **kwargs):
+        raise RuntimeError("shared unavailable")
+
+    monkeypatch.setattr(cycle_runner, "get_connection", broken_get_connection)
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
+
+    with pytest.raises(RuntimeError, match="shared unavailable"):
+        cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
 
 def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):

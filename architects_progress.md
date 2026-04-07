@@ -3806,3 +3806,51 @@ Archive policy:
   - stop at the P4 family boundary until a new non-P4 packet is frozen
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 09:35 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `docs/session_2026_04_07_final_state.md` flagged `monitor_incomplete_exit_context=11` as an unresolved blocker candidate
+  - current repo truth still routes the monitoring seam through a legacy single-DB connection pattern
+  - the runtime question explicitly asks whether monitoring uses `get_trade_connection_with_shared()` or only the older seam
+- Decisions frozen:
+  - start with the highest-signal bounded runtime seam: shared-connected monitoring / exit-context repair
+  - keep bankroll redesign and migration/cutover work out of this packet
+  - allow bounded subagents for architecture/code-review/test lanes, but keep one owner and no team-runtime launch
+- Open uncertainties:
+  - whether the minimal fix can stay inside `cycle_runner.py` or needs a small helper addition in `src/state/db.py`
+  - the exact minimal tests needed to prove shared-present and shared-absent behavior
+- Next required action:
+  - map the packet into read-review / implementation / verification slices and repair the seam
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 10:05 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR implementation verified
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - runtime monitoring seam repaired in code
+  - targeted tests passed
+- Basis / evidence:
+  - `src/state/db.py` now exposes an explicit trade+shared attached-connection helper
+  - `src/engine/cycle_runner.py` now uses the shared-attached connection seam for monitoring/runtime cycle work
+  - `tests/test_runtime_guards.py` added shared-present and shared-absent regression coverage
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "exit_context or monitor"` -> `12 passed, 68 deselected`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py -k incomplete_context` -> `2 passed, 52 deselected`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k monitor` -> `1 passed, 48 deselected`
+- Decisions frozen:
+  - preserve the old `cycle_runner.get_connection` monkeypatch surface while routing it to the new shared-attached helper
+  - keep the packet bounded to monitoring / exit-context seam work, not bankroll or migration redesign
+- Open uncertainties:
+  - none inside the packet boundary before pre-close review
+- Next required action:
+  - run pre-close critic and verifier review on the repaired seam
+- Owner:
+  - Architects mainline lead
