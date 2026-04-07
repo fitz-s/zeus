@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"

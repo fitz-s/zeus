@@ -174,7 +174,7 @@ class EnsembleSignal:
         test_calibration_pairs_use_same_bias_correction_as_live enforces this.
         """
         try:
-            from src.state.db import get_connection
+            from src.state.db import get_shared_connection
 
             month = target_date.month
             if month in (12, 1, 2):
@@ -186,7 +186,7 @@ class EnsembleSignal:
             else:
                 season = "SON"
 
-            conn = get_connection()
+            conn = get_shared_connection()
             row = conn.execute(
                 "SELECT bias, discount_factor, n_samples FROM model_bias "
                 "WHERE city = ? AND season = ? AND source = 'ecmwf'",

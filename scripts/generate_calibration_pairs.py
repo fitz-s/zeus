@@ -23,7 +23,7 @@ from src.calibration.manager import season_from_date
 from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import cities_by_name
 from src.data.market_scanner import _parse_temp_range
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 
 
 def generate_pairs() -> dict:

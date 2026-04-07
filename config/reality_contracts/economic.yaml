@@ -1,0 +1,48 @@
+# Economic reality contracts — §P10.4 / §P10.7
+#
+# FEE_RATE_WEATHER: Polymarket taker fee rate for weather markets.
+#   p10-adversarial finding (2026-04-06): Weather fees only went live 2026-03-30.
+#   Markets created before that date have feesEnabled=false and feeRate=0.0.
+#   The 0.05 default is correct for NEW weather markets, but each market must
+#   be checked individually via GET /fee-rate?token_id={token_id} feeSchedule object.
+#   P9 implemented the correct price-dependent formula: fee = feeRate × p × (1-p)
+#
+# MAKER_REBATE_RATE: Polymarket maker rebate (25% of taker fee collected).
+#   Zeus currently posts limit orders only; rebate offsets round-trip cost.
+#   Verification: docs.polymarket.com/trading/fees or same fee-rate endpoint.
+
+- contract_id: FEE_RATE_WEATHER
+  assumption: >
+    Polymarket taker fee rate for weather markets (created after 2026-03-30) is
+    5% (feeRate=0.05). Actual per-share fee is price-dependent: fee = 0.05 × p × (1-p).
+    IMPORTANT: Markets created BEFORE 2026-03-30 have feesEnabled=false (feeRate=0.0).
+    Zeus must check the per-market feeSchedule object, not assume a global rate.
+    The 0.05 here is the default for new weather markets only.
+  current_value: 0.05
+  verification_method: >
+    GET https://clob.polymarket.com/fee-rate?token_id={token_id}
+    Parse response.feeSchedule.feeRate — confirm it equals 0.05 for weather markets
+    created after 2026-03-30. Check feesEnabled field; if false, effective rate is 0.0.
+    Do NOT assume 0.05 globally — query per market at order time.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 86400   # 24 hours — fee changes are rare but high-impact
+  criticality: blocking
+  on_change_handlers:
+    - update_polymarket_fee_rate
+    - halt_until_reverified
+
+- contract_id: MAKER_REBATE_RATE
+  assumption: >
+    Polymarket maker rebate is 25% of the taker fee collected on the matched
+    order. Zeus benefits from this when limit orders are filled as maker.
+    Assumed rebate fraction: 0.25.
+  current_value: 0.25
+  verification_method: >
+    docs.polymarket.com/trading/fees — confirm maker rebate fraction;
+    or GET https://clob.polymarket.com/fee-rate?token_id={token_id} and inspect
+    makerRebateRate or equivalent field in feeSchedule.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 604800  # 7 days
+  criticality: degraded
+  on_change_handlers:
+    - update_maker_rebate_rate

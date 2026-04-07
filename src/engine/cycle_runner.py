@@ -23,7 +23,10 @@ from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
-from src.state.db import get_connection
+from src.state.db import get_trade_connection
+
+# Alias for dependency injection: fill_tracker.py accesses deps.get_connection
+get_connection = get_trade_connection
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (
     Position,

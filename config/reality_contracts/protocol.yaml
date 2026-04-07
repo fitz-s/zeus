@@ -1,0 +1,89 @@
+# Protocol reality contracts — §P10.4 / §P10.7
+#
+# p10-adversarial updates (2026-04-06):
+# - WEBSOCKET_REQUIRED: NOT required for trading (confirmed). 4 channels available.
+#   Subscription limit removed May 2025. Market channel includes tick_size_change events.
+# - RATE_LIMIT_BEHAVIOR: /order endpoint: 3000 req / 10-min window (py-clob-client #147).
+#   Rejected orders likely count. Builder program members get higher limits.
+#   General non-trading queries: ~1000/hour.
+# - RESOLUTION_TIMELINE: Challenge period confirmed 2 hours. DVM dispute 48-96h.
+#   NEW: Since Aug 2025, resolution uses WHITELISTED proposers only.
+
+- contract_id: WEBSOCKET_REQUIRED
+  assumption: >
+    Polymarket CLOB provides WebSocket for real-time order book updates.
+    WebSocket is NOT required for trading — REST is fully functional.
+    Zeus uses WS for lower-latency price feeds when available, falling back
+    to REST polling every 5 seconds if WS is unavailable.
+    4 WS channels: market (no auth), user (auth), sports, RTDS.
+    Subscription limit was removed May 2025.
+    Market channel streams: book, price_change, tick_size_change, last_trade_price.
+  current_value:
+    endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    required_for_trading: false
+    fallback: "REST_5s_poll"
+    channels: ["market", "user", "sports", "rtds"]
+    subscription_limit: null
+  verification_method: >
+    Attempt WebSocket connection to wss://ws-subscriptions-clob.polymarket.com/ws/market;
+    confirm connection upgrade and heartbeat messages received.
+    If unavailable, REST fallback must activate automatically.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 86400   # 24 hours
+  criticality: degraded
+  on_change_handlers:
+    - update_websocket_endpoint
+    - activate_rest_fallback
+
+- contract_id: RATE_LIMIT_BEHAVIOR
+  assumption: >
+    Polymarket CLOB rate limits (from py-clob-client issue #147, 2026-04-06):
+    - /order endpoint: 3000 requests per 10-minute rolling window
+    - Rejected orders likely count toward the limit
+    - HTTP 429 on exceeded, with Retry-After header
+    - Builder program members receive higher limits
+    - General non-trading queries (book, price): ~1000/hour
+    Zeus backs off for the Retry-After duration before retrying.
+  current_value:
+    order_endpoint_per_10min: 3000
+    general_queries_per_hour: 1000
+    response_on_breach: 429
+    retry_after_header: true
+    builder_program_higher_limits: true
+  verification_method: >
+    Monitor HTTP 429 responses in zeus logs with endpoint-level tracking.
+    Check py-clob-client issue #147 and docs.polymarket.com/trading/clob
+    for any updated published rate-limit documentation.
+    Builder program enrollment: verify via account settings if higher limits needed.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 604800  # 7 days
+  criticality: degraded
+  on_change_handlers:
+    - update_rate_limit_config
+
+- contract_id: RESOLUTION_TIMELINE
+  assumption: >
+    Polymarket weather markets resolved via UMA (as of 2026-04-06):
+    - Challenge period: 2 hours (confirmed)
+    - DVM dispute (if challenged): 48-96 hours
+    - NEW since Aug 2025: resolution uses WHITELISTED proposers only
+      (not open to any token holder). proposer_model: "whitelisted"
+    Typical settlement: within 3 hours of market expiry (if unchallenged).
+    If pending resolution > 48h, position valuation is unreliable.
+  current_value:
+    challenge_period_hours: 2
+    dvm_dispute_hours_min: 48
+    dvm_dispute_hours_max: 96
+    proposer_model: "whitelisted"
+    max_tolerated_pending_hours: 48
+  verification_method: >
+    Review recent market resolution timestamps on Polymarket; check
+    docs.polymarket.com/trading/resolution for UMA timeline updates.
+    Verify proposer model still uses whitelist (may revert to open at any time).
+    Flag any open position pending resolution > 48h for manual review.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 604800  # 7 days
+  criticality: advisory
+  on_change_handlers:
+    - log_resolution_timeline_change
+    - flag_positions_pending_resolution

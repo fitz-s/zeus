@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.engine.replay import ReplayContext
-from src.state.db import get_connection, init_schema
+from src.state.db import get_trade_connection_with_shared as get_connection, init_schema
 from src.data.market_scanner import _parse_temp_range
 
 
@@ -24,16 +24,16 @@ def run_audit() -> dict:
     init_schema(conn)
 
     total_settlements = conn.execute(
-        "SELECT COUNT(*) FROM settlements WHERE settlement_value IS NOT NULL"
+        "SELECT COUNT(*) FROM shared.settlements WHERE settlement_value IS NOT NULL"
     ).fetchone()[0]
     snapshot_pairs = conn.execute(
-        "SELECT COUNT(DISTINCT city || '|' || target_date) FROM ensemble_snapshots WHERE p_raw_json IS NOT NULL"
+        "SELECT COUNT(DISTINCT city || '|' || target_date) FROM shared.ensemble_snapshots WHERE p_raw_json IS NOT NULL"
     ).fetchone()[0]
     settlement_snapshot_overlap = conn.execute(
         """
         SELECT COUNT(DISTINCT s.city || '|' || s.target_date)
-        FROM settlements s
-        JOIN ensemble_snapshots es
+        FROM shared.settlements s
+        JOIN shared.ensemble_snapshots es
           ON s.city = es.city AND s.target_date = es.target_date
         WHERE s.settlement_value IS NOT NULL
           AND es.p_raw_json IS NOT NULL
@@ -43,7 +43,7 @@ def run_audit() -> dict:
         """
         SELECT COUNT(DISTINCT es.city || '|' || es.target_date)
         FROM trade_decisions td
-        JOIN ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
+        JOIN shared.ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
         WHERE td.forecast_snapshot_id IS NOT NULL
           AND datetime(es.available_at) <= datetime(td.timestamp)
         """
@@ -53,7 +53,7 @@ def run_audit() -> dict:
         """
         SELECT COUNT(*)
         FROM trade_decisions td
-        JOIN ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
+        JOIN shared.ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
         WHERE td.forecast_snapshot_id IS NOT NULL
           AND datetime(es.available_at) > datetime(td.timestamp)
         """
@@ -70,8 +70,8 @@ def run_audit() -> dict:
     overlap_rows = conn.execute(
         """
         SELECT DISTINCT s.city, s.target_date, es.p_raw_json
-        FROM settlements s
-        JOIN ensemble_snapshots es
+        FROM shared.settlements s
+        JOIN shared.ensemble_snapshots es
           ON s.city = es.city AND s.target_date = es.target_date
         WHERE s.settlement_value IS NOT NULL
           AND es.p_raw_json IS NOT NULL
@@ -89,9 +89,9 @@ def run_audit() -> dict:
             """
             SELECT DISTINCT range_label
             FROM (
-              SELECT range_label FROM calibration_pairs WHERE city = ? AND target_date = ?
+              SELECT range_label FROM shared.calibration_pairs WHERE city = ? AND target_date = ?
               UNION
-              SELECT range_label FROM market_events WHERE city = ? AND target_date = ? AND range_label IS NOT NULL AND range_label != ''
+              SELECT range_label FROM shared.market_events WHERE city = ? AND target_date = ? AND range_label IS NOT NULL AND range_label != ''
             )
             ORDER BY range_label
             """,
@@ -107,7 +107,7 @@ def run_audit() -> dict:
     rows = conn.execute(
         """
         SELECT city, target_date
-        FROM settlements
+        FROM shared.settlements
         WHERE settlement_value IS NOT NULL
         ORDER BY target_date DESC, city
         LIMIT 10
@@ -117,7 +117,7 @@ def run_audit() -> dict:
     all_rows = conn.execute(
         """
         SELECT city, target_date
-        FROM settlements
+        FROM shared.settlements
         WHERE settlement_value IS NOT NULL
         ORDER BY target_date DESC, city
         """
@@ -140,7 +140,7 @@ def run_audit() -> dict:
         )
 
     decision_log_rows = conn.execute("SELECT artifact_json FROM decision_log").fetchall()
-    shadow_signal_rows = conn.execute("SELECT COUNT(*) FROM shadow_signals").fetchone()[0]
+    shadow_signal_rows = conn.execute("SELECT COUNT(*) FROM shared.shadow_signals").fetchone()[0]
     trade_cases = 0
     trade_cases_with_vectors = 0
     no_trade_cases = 0

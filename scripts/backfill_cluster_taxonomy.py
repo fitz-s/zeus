@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import cities_by_name
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 
 
 STATE_DIR = PROJECT_ROOT / "state"

@@ -1,0 +1,205 @@
+# Data reality contracts — §P10.4 / §P10.7
+#
+# SETTLEMENT_SOURCE_{CITY}: Settlement data comes from Weather Underground (WU)
+#   for all 16 cities. Contract IDs use the city code from config/cities.json.
+#   If WU changes its data source or rounding behaviour for a city, Zeus
+#   miscalculates settlement probability.
+#
+# GAMMA_CLOB_PRICE_CONSISTENCY: Gamma API prices should match CLOB prices.
+#   Discrepancies indicate latency or data-source divergence.
+#   Advisory only — Zeus uses CLOB as authoritative.
+#
+# NOAA_TIME_SCALE: NOAA ensemble forecasts are indexed in UTC.
+#   Zeus converts to local time before probability calculations.
+#   If the time-scale assumption is wrong, all DST-sensitive cities drift.
+
+# --- Settlement source per city ---
+# Fahrenheit cities
+
+- contract_id: SETTLEMENT_SOURCE_NYC
+  assumption: Settlement temperature for NYC markets comes from Weather Underground (WU), integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled NYC weather market; confirm WU is cited as settlement source"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000  # 30 days — settlement source changes are infrequent
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_NYC]
+
+- contract_id: SETTLEMENT_SOURCE_CHICAGO
+  assumption: Settlement temperature for Chicago markets comes from Weather Underground (WU), integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Chicago weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_CHICAGO]
+
+- contract_id: SETTLEMENT_SOURCE_ATLANTA
+  assumption: Settlement temperature for Atlanta markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Atlanta weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_ATLANTA]
+
+- contract_id: SETTLEMENT_SOURCE_MIAMI
+  assumption: Settlement temperature for Miami markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Miami weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_MIAMI]
+
+- contract_id: SETTLEMENT_SOURCE_DALLAS
+  assumption: Settlement temperature for Dallas markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Dallas weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_DALLAS]
+
+- contract_id: SETTLEMENT_SOURCE_AUSTIN
+  assumption: Settlement temperature for Austin markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Austin weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_AUSTIN]
+
+- contract_id: SETTLEMENT_SOURCE_HOUSTON
+  assumption: Settlement temperature for Houston markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Houston weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_HOUSTON]
+
+- contract_id: SETTLEMENT_SOURCE_SEATTLE
+  assumption: Settlement temperature for Seattle markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Seattle weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_SEATTLE]
+
+- contract_id: SETTLEMENT_SOURCE_LOS_ANGELES
+  assumption: Settlement temperature for Los Angeles markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Los Angeles weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_LOS_ANGELES]
+
+- contract_id: SETTLEMENT_SOURCE_SAN_FRANCISCO
+  assumption: Settlement temperature for San Francisco markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled San Francisco weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_SAN_FRANCISCO]
+
+- contract_id: SETTLEMENT_SOURCE_DENVER
+  assumption: Settlement temperature for Denver markets comes from WU, integer Fahrenheit, round_half_to_even.
+  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Denver weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_DENVER]
+
+# Celsius cities
+
+- contract_id: SETTLEMENT_SOURCE_LONDON
+  assumption: Settlement temperature for London markets comes from WU, integer Celsius, round_half_to_even.
+  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled London weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_LONDON]
+
+- contract_id: SETTLEMENT_SOURCE_PARIS
+  assumption: Settlement temperature for Paris markets comes from WU, integer Celsius, round_half_to_even.
+  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Paris weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_PARIS]
+
+- contract_id: SETTLEMENT_SOURCE_SEOUL
+  assumption: Settlement temperature for Seoul markets comes from WU, integer Celsius, round_half_to_even.
+  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Seoul weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_SEOUL]
+
+- contract_id: SETTLEMENT_SOURCE_SHANGHAI
+  assumption: Settlement temperature for Shanghai markets comes from WU, integer Celsius, round_half_to_even.
+  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Shanghai weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_SHANGHAI]
+
+- contract_id: SETTLEMENT_SOURCE_TOKYO
+  assumption: Settlement temperature for Tokyo markets comes from WU, integer Celsius, round_half_to_even.
+  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
+  verification_method: "Check Polymarket market resolution details for a settled Tokyo weather market"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 2592000
+  criticality: blocking
+  on_change_handlers: [update_settlement_source_TOKYO]
+
+# --- Consistency and time-scale contracts ---
+
+- contract_id: GAMMA_CLOB_PRICE_CONSISTENCY
+  assumption: >
+    Gamma API prices for weather market tokens should match CLOB best-ask/bid
+    prices within a 0.005 tolerance. Larger discrepancies indicate latency
+    or data-source divergence. Zeus uses CLOB as authoritative.
+  current_value: {tolerance: 0.005, authority: "CLOB"}
+  verification_method: "Compare Gamma API token price with GET https://clob.polymarket.com/book?token_id={token_id} best ask; flag if |delta| > 0.005"
+  last_verified: "2026-04-03T00:00:00+00:00"
+  ttl_seconds: 3600   # 1 hour — advisory, checked frequently
+  criticality: advisory
+  on_change_handlers: [log_gamma_clob_divergence]
+
+- contract_id: NOAA_TIME_SCALE
+  assumption: >
+    Open-Meteo ensemble forecast timestamps are in UTC.
+    Zeus converts UTC ensemble times to city local time before computing
+    probability distributions. If the API changes to local-time output,
+    all DST-sensitive cities will drift by 1 hour during DST transitions.
+    p10-adversarial (2026-04-06): forecast update frequency is variable /
+    lifecycle-driven (NOT a fixed interval). Observations may be delayed
+    up to 20 minutes due to MADIS QC. Hourly forecasts available for 7 days.
+    Rate limits: undocumented but described as "generous."
+  current_value:
+    time_scale: "UTC"
+    update_frequency: "variable_lifecycle_driven"
+    observation_delay_minutes_max: 20
+    hourly_forecast_days: 7
+    rate_limits: "undocumented_generous"
+  verification_method: >
+    Inspect Open-Meteo API response: check that 'timezone' field is 'UTC' or 'GMT'
+    and that 'time' array values end in 'Z' or '+00:00'.
+    Do NOT assume fixed update frequency — check forecast run timestamps.
+    If observation data seems stale (> 20 min), treat as expected MADIS QC delay.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 2592000  # 30 days
+  criticality: blocking
+  on_change_handlers:
+    - update_noaa_time_scale
+    - audit_dst_conversion_logic

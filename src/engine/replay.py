@@ -56,7 +56,7 @@ from typing import Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
-from src.state.db import get_connection
+from src.state.db import get_trade_connection_with_shared
 from src.types import Bin
 from src.types.temperature import TemperatureDelta
 
@@ -146,6 +146,12 @@ class ReplayContext:
         self.allow_snapshot_only_reference = allow_snapshot_only_reference
         self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
         self._decision_ref_cache: dict[tuple[str, str], Optional[dict]] = {}
+        # Detect whether shared DB is attached (production) or monolithic (tests)
+        try:
+            self.conn.execute("SELECT 1 FROM shared.ensemble_snapshots LIMIT 0")
+            self._sp = "shared."  # shared DB attached
+        except Exception:
+            self._sp = ""  # monolithic DB (tests)
 
     def get_decision_reference_for(self, city_name: str, target_date: str) -> Optional[dict]:
         """Get an actual decision-time reference for replay.
@@ -159,10 +165,10 @@ class ReplayContext:
             return self._decision_ref_cache[key]
 
         row = self.conn.execute(
-            """
+            f"""
             SELECT td.trade_id, td.timestamp AS decision_time, td.forecast_snapshot_id AS snapshot_id
             FROM trade_decisions td
-            JOIN ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
+            JOIN {self._sp}ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
             WHERE es.city = ? AND es.target_date = ?
               AND td.forecast_snapshot_id IS NOT NULL
             ORDER BY datetime(td.timestamp) ASC, td.trade_id ASC
@@ -241,9 +247,9 @@ class ReplayContext:
         if best is None and self.allow_snapshot_only_reference:
             try:
                 shadow = self.conn.execute(
-                    """
+                    f"""
                     SELECT timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json
-                    FROM shadow_signals
+                    FROM {self._sp}shadow_signals
                     WHERE city = ? AND target_date = ?
                     ORDER BY datetime(timestamp) ASC
                     LIMIT 1
@@ -271,9 +277,9 @@ class ReplayContext:
 
         if best is None and self.allow_snapshot_only_reference:
             row = self.conn.execute(
-                """
+                f"""
                 SELECT snapshot_id, available_at
-                FROM ensemble_snapshots
+                FROM {self._sp}ensemble_snapshots
                 WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
                 ORDER BY datetime(available_at) ASC
                 LIMIT 1
@@ -307,10 +313,10 @@ class ReplayContext:
 
         if snapshot_id is not None:
             row = self.conn.execute(
-                """
+                f"""
                 SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
                        model_version, issue_time, valid_time, available_at, fetch_time, data_version
-                FROM ensemble_snapshots
+                FROM {self._sp}ensemble_snapshots
                 WHERE snapshot_id = ?
                   AND city = ?
                   AND target_date = ?
@@ -321,10 +327,10 @@ class ReplayContext:
             ).fetchone()
         else:
             row = self.conn.execute(
-                """
+                f"""
                 SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
                        model_version, issue_time, valid_time, available_at, fetch_time, data_version
-                FROM ensemble_snapshots
+                FROM {self._sp}ensemble_snapshots
                 WHERE city = ?
                   AND target_date = ?
                   AND datetime(available_at) <= datetime(?)
@@ -371,7 +377,7 @@ class ReplayContext:
     def get_settlement(self, city_name: str, target_date: str) -> Optional[dict]:
         """Get settlement outcome for scoring."""
         row = self.conn.execute(
-            "SELECT settlement_value, winning_bin FROM settlements "
+            f"SELECT settlement_value, winning_bin FROM {self._sp}settlements "
             "WHERE city = ? AND target_date = ?",
             (city_name, target_date),
         ).fetchone()
@@ -449,11 +455,11 @@ def _replay_one_settlement(
         return labels
 
     cp_labels = _fetch_labels(
-        "SELECT DISTINCT range_label FROM calibration_pairs WHERE city = ? AND target_date = ? ORDER BY range_label",
+        f"SELECT DISTINCT range_label FROM {ctx._sp}calibration_pairs WHERE city = ? AND target_date = ? ORDER BY range_label",
         (city.name, target_date),
     )
     me_labels = _fetch_labels(
-        "SELECT DISTINCT range_label FROM market_events WHERE city = ? AND target_date = ? AND range_label IS NOT NULL AND range_label != '' ORDER BY range_label",
+        f"SELECT DISTINCT range_label FROM {ctx._sp}market_events WHERE city = ? AND target_date = ? AND range_label IS NOT NULL AND range_label != '' ORDER BY range_label",
         (city.name, target_date),
     )
     ref_labels = [label for label in (decision_ref.get("bin_labels") or []) if _parse_temp_range(label) != (None, None)]
@@ -660,7 +666,7 @@ def run_replay(
         ReplaySummary with per-city breakdown and PnL
     """
     run_id = str(uuid.uuid4())[:12]
-    conn = get_connection()
+    conn = get_trade_connection_with_shared()
     ctx = ReplayContext(
         conn,
         overrides=overrides,
@@ -668,9 +674,9 @@ def run_replay(
     )
 
     # Get all settlements in date range
-    settlements = conn.execute("""
+    settlements = conn.execute(f"""
         SELECT city, target_date, settlement_value, winning_bin
-        FROM settlements
+        FROM {ctx._sp}settlements
         WHERE target_date >= ? AND target_date <= ?
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city

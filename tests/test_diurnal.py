@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch, MagicMock
 from src.signal.diurnal import get_peak_hour_context, build_day0_temporal_context
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_diurnal_returns_correct_tuple(mock_get_conn):
     # Mock connection and rows returned by DB
     mock_conn = MagicMock()
@@ -38,7 +38,7 @@ def test_diurnal_returns_correct_tuple(mock_get_conn):
     assert conf == 0.875
     assert reason == "heuristic_slope"
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_diurnal_handles_missing_data(mock_get_conn):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -53,7 +53,7 @@ def test_diurnal_handles_missing_data(mock_get_conn):
     assert reason == "insufficient_diurnal_data_rows"
 
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_diurnal_uses_solar_heuristic_when_empirical_confidence_missing(mock_get_conn):
     class FakeConn:
         def execute(self, query, params=()):
@@ -95,7 +95,7 @@ def test_diurnal_uses_solar_heuristic_when_empirical_confidence_missing(mock_get
     assert reason == "solar_heuristic"
 
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_build_day0_temporal_context_returns_typed_context(mock_get_conn):
     class FakeConn:
         def execute(self, query, params=()):
@@ -136,7 +136,7 @@ def test_build_day0_temporal_context_returns_typed_context(mock_get_conn):
     assert ctx.confidence_source in {"solar_heuristic", "seasonal_empirical", "monthly_empirical", "heuristic_slope"}
 
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_build_day0_temporal_context_prefers_observation_timestamp(mock_get_conn):
     class FakeConn:
         def execute(self, query, params=()):
@@ -183,7 +183,7 @@ def test_build_day0_temporal_context_prefers_observation_timestamp(mock_get_conn
     assert ctx.current_local_hour == 9.75
 
 
-@patch('src.state.db.get_connection')
+@patch('src.state.db.get_shared_connection')
 def test_build_day0_temporal_context_handles_cross_timezone_target_date(mock_get_conn):
     class FakeConn:
         def execute(self, query, params=()):

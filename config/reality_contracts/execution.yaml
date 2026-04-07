@@ -1,0 +1,46 @@
+# Execution reality contracts — §P10.4 / §P10.7
+#
+# TICK_SIZE_STANDARD: Default tick size is 0.01.
+#   p10-adversarial: tick_size is returned PER MARKET from get-book endpoint.
+#   Market channel streams tick_size_change events — Zeus should subscribe.
+#
+# MIN_ORDER_SIZE_SHARES: p10-adversarial (2026-04-06): Polymarket help center says
+#   "does not have trading size limits." Since 2025-07-23, get-book returns
+#   min_order_size per market as metadata. Use per-market value, not global hardcode.
+#   current_value set to null (no global minimum); verification_method updated.
+
+- contract_id: TICK_SIZE_STANDARD
+  assumption: >
+    Default CLOB tick size is 0.01 (prices quoted to 2 decimal places).
+    This value is market-specific and returned by the get-book endpoint.
+    The WS market channel streams tick_size_change events when it changes.
+    Zeus rounds all limit prices to the nearest tick_size for the market.
+  current_value: 0.01
+  verification_method: >
+    GET https://clob.polymarket.com/book?token_id={token_id} — inspect tick_size field.
+    Also subscribe to WS market channel for tick_size_change events per market.
+    Do not assume 0.01 globally; read per-market value at order construction time.
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 604800  # 7 days — tick size rarely changes; per-market value read at order time from get-book
+  criticality: degraded  # Downgraded from blocking: tick_size is validated per-order by py-clob-client
+  on_change_handlers:
+    - update_tick_size
+    - audit_order_rounding
+
+- contract_id: MIN_ORDER_SIZE_SHARES
+  assumption: >
+    Polymarket does not have a global minimum order size.
+    Since 2025-07-23, the get-book endpoint returns min_order_size per market
+    as metadata. Zeus must read this value per market and enforce it at order
+    construction time. If the field is absent, assume no minimum (0).
+  current_value: null  # no global minimum; check per-market via get-book
+  verification_method: >
+    GET https://clob.polymarket.com/book?token_id={token_id} — inspect
+    min_order_size field (available since 2025-07-23). If absent, minimum is 0.
+    Polymarket help center: "does not have trading size limits" (as of 2026-04-06).
+  last_verified: "2026-04-06T00:00:00+00:00"
+  ttl_seconds: 604800  # 7 days
+  criticality: degraded  # Per-market value read at order time; retry logic handles rejection
+  on_change_handlers:
+    - update_min_order_size
+    - audit_order_size_validation

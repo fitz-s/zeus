@@ -1,0 +1,515 @@
+# Provenance Registry — INV-13 enforcement
+#
+# Every numeric constant participating in a sizing/edge/probability cascade
+# must have an entry here with declared_target, data_basis, validated_at, and
+# replacement_criteria. Constants without entries raise UnregisteredConstantError
+# at runtime when require_provenance() is called.
+#
+# See: docs/zeus_FINAL_spec.md §P9.5
+# Schema: src/contracts/provenance_registry.py::ProvenanceRecord
+#
+# declared_target must be one of:
+#   "brier_score"         — value was fit to minimize Brier score (calibration)
+#   "ev"                  — value was fit to maximize expected value / profit
+#   "risk_cap"            — value enforces a risk/exposure constraint
+#   "physical_constraint" — value reflects a physical/protocol limit (not data-fit)
+#
+# cascade_bound: [min, max] multiplicative contribution to Kelly cascade.
+#   null if constant is not in a multiplicative cascade.
+
+constants:
+
+  # ---------------------------------------------------------------------------
+  # kelly.py constants
+  # ---------------------------------------------------------------------------
+
+  - constant_name: kelly_mult
+    file_location: "src/strategy/kelly.py::kelly_size.kelly_mult (default=0.25); config/settings.json::sizing.kelly_multiplier"
+    declared_target: risk_cap
+    data_basis: >
+      Conservative fractional Kelly default. Full Kelly is theoretically optimal
+      but requires perfectly estimated edge; empirical edge-estimation error
+      justifies 0.25x. Not yet fit to Zeus settlement data — replace after 500+
+      settlements with empirical edge-estimation error measurement.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements with empirical edge-estimation error measurement; fit optimal fraction via Kelly-fraction optimization on historical P&L"
+    cascade_bound: [0.01, 1.0]
+
+  - constant_name: kelly_ci_width_threshold_narrow
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult ci_width > 0.10 → m *= 0.7"
+    declared_target: risk_cap
+    data_basis: >
+      Threshold at which CI width indicates insufficient edge confidence.
+      Value 0.10 is a heuristic: a CI spanning ±5% probability units suggests
+      the edge estimate is borderline. Not empirically fit to Zeus data.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; measure empirical Brier vs CI width distribution and re-fit threshold via ROC on edge-reliability"
+    cascade_bound: null
+
+  - constant_name: kelly_ci_width_multiplier_narrow
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult ci_width > 0.10 → m *= 0.7"
+    declared_target: risk_cap
+    data_basis: >
+      30% reduction when CI is moderately wide. Heuristic chosen conservatively;
+      not fit to empirical edge-error distribution.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; calibrate via P&L attribution by CI-width bucket"
+    cascade_bound: [0.5, 1.0]
+
+  - constant_name: kelly_ci_width_threshold_wide
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult ci_width > 0.15 → m *= 0.5 (cumulative)"
+    declared_target: risk_cap
+    data_basis: >
+      Threshold for severely uncertain edge. CI > 0.15 spans ±7.5% probability
+      units — too wide to trust. Cumulative with narrow threshold: effective
+      multiplier = 0.25 × 0.7 × 0.5 = 0.0875.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; measure false-edge rate by CI-width bucket"
+    cascade_bound: null
+
+  - constant_name: kelly_ci_width_multiplier_wide
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult ci_width > 0.15 → m *= 0.5"
+    declared_target: risk_cap
+    data_basis: >
+      Additional 50% reduction for very wide CI. Applied cumulatively with the
+      narrow-CI multiplier. Heuristic.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; calibrate via P&L attribution by CI-width bucket"
+    cascade_bound: [0.1, 1.0]
+
+  - constant_name: kelly_lead_days_threshold_long
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult lead_days >= 5 → m *= 0.6"
+    declared_target: risk_cap
+    data_basis: >
+      At >= 5 days lead, forecast reliability degrades. Threshold is based on
+      typical ENS forecast skill horizon (skill drops sharply beyond day 5).
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; measure Brier score degradation by lead day and re-fit threshold"
+    cascade_bound: null
+
+  - constant_name: kelly_lead_days_multiplier_long
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult lead_days >= 5 → m *= 0.6"
+    declared_target: risk_cap
+    data_basis: "40% reduction at 5+ days lead. Heuristic based on NWP skill degradation pattern."
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; re-fit via lead-day-stratified P&L attribution"
+    cascade_bound: [0.3, 1.0]
+
+  - constant_name: kelly_lead_days_threshold_medium
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult lead_days >= 3 → m *= 0.8"
+    declared_target: risk_cap
+    data_basis: >
+      At 3–4 days lead, some skill degradation but still within reliable ENS
+      range. 20% reduction is a moderate precaution.
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; re-fit via lead-day-stratified P&L attribution"
+    cascade_bound: null
+
+  - constant_name: kelly_lead_days_multiplier_medium
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult lead_days >= 3 → m *= 0.8"
+    declared_target: risk_cap
+    data_basis: "20% reduction at 3–4 days lead. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; re-fit via lead-day-stratified P&L attribution"
+    cascade_bound: [0.5, 1.0]
+
+  - constant_name: kelly_win_rate_threshold_low
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult rolling_win_rate_20 < 0.40 → m *= 0.5"
+    declared_target: risk_cap
+    data_basis: >
+      Win rate < 40% over last 20 trades signals consistent underperformance.
+      Below random chance (50%) by enough to suggest model/market drift.
+      50% reduction is a significant drawdown protection.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ trades; calibrate via win-rate-stratified P&L and optimal reduction factor"
+    cascade_bound: null
+
+  - constant_name: kelly_win_rate_multiplier_low
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult rolling_win_rate_20 < 0.40 → m *= 0.5"
+    declared_target: risk_cap
+    data_basis: "Halve sizing when win rate falls below 40%. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ trades; calibrate via win-rate-stratified P&L attribution"
+    cascade_bound: [0.1, 1.0]
+
+  - constant_name: kelly_win_rate_threshold_medium
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult rolling_win_rate_20 < 0.45 → m *= 0.7"
+    declared_target: risk_cap
+    data_basis: "Win rate 40–45% is borderline. 30% reduction as early warning."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ trades; re-fit threshold and multiplier via win-rate-stratified P&L"
+    cascade_bound: null
+
+  - constant_name: kelly_win_rate_multiplier_medium
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult rolling_win_rate_20 < 0.45 → m *= 0.7"
+    declared_target: risk_cap
+    data_basis: "30% reduction at borderline win rate. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ trades; re-fit via win-rate-stratified P&L attribution"
+    cascade_bound: [0.3, 1.0]
+
+  - constant_name: kelly_portfolio_heat_threshold
+    file_location: "src/strategy/kelly.py::dynamic_kelly_mult portfolio_heat > 0.40 → m *= max(0.1, 1 - portfolio_heat)"
+    declared_target: risk_cap
+    data_basis: >
+      Portfolio heat > 40% means more than 40% of bankroll is deployed.
+      Marginal sizing reduction proportional to heat prevents overconcentration.
+      0.40 threshold is a standard portfolio management constraint, not data-fit.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ cycles; calibrate via portfolio-heat-stratified drawdown analysis"
+    cascade_bound: null
+
+  # ---------------------------------------------------------------------------
+  # Fee formula constant (P9-D3)
+  # ---------------------------------------------------------------------------
+
+  - constant_name: fee_rate_weather
+    file_location: "src/contracts/execution_price.py::polymarket_fee(fee_rate=0.05)"
+    declared_target: physical_constraint
+    data_basis: >
+      Polymarket taker fee rate for weather markets. From docs.polymarket.com/trading/fees:
+      fee_per_share = fee_rate × p × (1 - p), where fee_rate = 0.05 for weather.
+      This is a protocol parameter, not a data-fit value.
+    validated_at: "2026-04-06"
+    replacement_criteria: "Polymarket fee schedule change; monitor docs.polymarket.com/trading/fees"
+    cascade_bound: null
+
+  # ---------------------------------------------------------------------------
+  # market_fusion.py constants
+  # ---------------------------------------------------------------------------
+
+  - constant_name: market_fusion.SPREAD_TIGHT
+    file_location: "src/strategy/market_fusion.py::SPREAD_TIGHT (loaded from settings edge.spread_tight_f=2.0 °F)"
+    declared_target: brier_score
+    data_basis: >
+      D4 analysis (2026-03-31): ENS spread < 2°F predicts per-decision accuracy
+      improvement (r=+0.214, tight Brier 0.114 vs wide 0.269). 2°F is the tight
+      threshold from a sweep of percentile cutoffs on the 2026-03 dataset.
+      Per CLAUDE.md: wrapped as TemperatureDelta to prevent °C/°F confusion
+      (the Rainstorm DST bug category).
+    validated_at: "2026-03-31"
+    replacement_criteria: "1000+ ENS snapshots per city; re-fit using per-city ensemble spread percentiles"
+    cascade_bound: null
+
+  - constant_name: market_fusion.SPREAD_WIDE
+    file_location: "src/strategy/market_fusion.py::SPREAD_WIDE (loaded from settings edge.spread_wide_f=5.0 °F)"
+    declared_target: brier_score
+    data_basis: >
+      ENS spread > 5°F predicts lower accuracy (wide Brier 0.269). 5°F is the
+      wide threshold from the same D4 sweep as SPREAD_TIGHT. Wrapped as
+      TemperatureDelta.
+    validated_at: "2026-03-31"
+    replacement_criteria: "1000+ ENS snapshots per city; re-fit using per-city ensemble spread percentiles"
+    cascade_bound: null
+
+  - constant_name: market_fusion.BASE_ALPHA_LEVEL1
+    file_location: "src/strategy/market_fusion.py::BASE_ALPHA_BY_LEVEL[1] (settings edge.base_alpha.level1=0.65)"
+    declared_target: brier_score
+    data_basis: >
+      High-maturity calibration (level 1, 150+ settlements). Trust model 65%,
+      market 35%. Initial heuristic — not yet fit to settlement outcomes.
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ settlements at level 1; compare Model Brier vs Market Brier and fit optimal α per level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.BASE_ALPHA_LEVEL2
+    file_location: "src/strategy/market_fusion.py::BASE_ALPHA_BY_LEVEL[2] (settings edge.base_alpha.level2=0.55)"
+    declared_target: brier_score
+    data_basis: "Medium-high maturity (50–149 settlements). Trust model 55%. Heuristic — not data-fit."
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ settlements at level 2; compare Model Brier vs Market Brier per level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.BASE_ALPHA_LEVEL3
+    file_location: "src/strategy/market_fusion.py::BASE_ALPHA_BY_LEVEL[3] (settings edge.base_alpha.level3=0.40)"
+    declared_target: brier_score
+    data_basis: "Medium maturity (15–49 settlements). Trust model 40%. Heuristic — not data-fit."
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ settlements at level 3; compare Model Brier vs Market Brier per level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.BASE_ALPHA_LEVEL4
+    file_location: "src/strategy/market_fusion.py::BASE_ALPHA_BY_LEVEL[4] (settings edge.base_alpha.level4=0.25)"
+    declared_target: brier_score
+    data_basis: "Low maturity (< 15 settlements). Minimal model trust 25%. Heuristic — not data-fit."
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ settlements at level 4; compare Model Brier vs Market Brier per level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_spread_tight_bonus
+    file_location: "src/strategy/market_fusion.py::compute_alpha ensemble_spread < SPREAD_TIGHT → a += 0.10"
+    declared_target: brier_score
+    data_basis: >
+      D4 sweep (2026-03-31): bonus=0.10 gives Brier improvement of −0.00825
+      vs −0.00460 at the old bonus=0.05. Increased from 0.05 to 0.10 per D4 analysis.
+    validated_at: "2026-03-31"
+    replacement_criteria: "1000+ ENS snapshots; re-sweep bonus value by Brier improvement"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_spread_wide_penalty
+    file_location: "src/strategy/market_fusion.py::compute_alpha ensemble_spread > SPREAD_WIDE → a -= 0.15"
+    declared_target: brier_score
+    data_basis: "D4 sweep (2026-03-31): −0.15 penalty for wide spread. Increased from −0.10 per D4 analysis."
+    validated_at: "2026-03-31"
+    replacement_criteria: "1000+ ENS snapshots; re-sweep penalty value by Brier improvement"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_model_soft_disagree
+    file_location: "src/strategy/market_fusion.py::compute_alpha model_agreement == 'SOFT_DISAGREE' → a -= 0.10"
+    declared_target: brier_score
+    data_basis: "Heuristic: soft disagreement between ensemble models reduces model trust by 0.10."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ cycles with model agreement labels; measure Brier stratified by agreement level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_model_conflict
+    file_location: "src/strategy/market_fusion.py::compute_alpha model_agreement == 'CONFLICT' → a -= 0.20"
+    declared_target: brier_score
+    data_basis: "Heuristic: hard model conflict reduces model trust by 0.20."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ cycles with model conflict labels; measure Brier stratified by agreement level"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_short_lead_bonus
+    file_location: "src/strategy/market_fusion.py::compute_alpha lead_days <= 1 → a += 0.05"
+    declared_target: brier_score
+    data_basis: "Heuristic: short lead time (<=1 day) increases model reliability; +0.05 bonus."
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; measure Brier by lead day and re-fit adjustment"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_long_lead_penalty
+    file_location: "src/strategy/market_fusion.py::compute_alpha lead_days >= 5 → a -= 0.05"
+    declared_target: brier_score
+    data_basis: "Heuristic: long lead time (>=5 days) reduces model reliability; −0.05 penalty."
+    validated_at: "2026-04-05"
+    replacement_criteria: "1000+ forecasts; measure Brier by lead day and re-fit adjustment"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_fresh_market_bonus_1
+    file_location: "src/strategy/market_fusion.py::compute_alpha hours_since_open < 12 → a += 0.10"
+    declared_target: brier_score
+    data_basis: "Heuristic: recently-opened markets have unreliable prices. Trust model more. +0.10."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ markets; measure Brier by hours_since_open and re-fit threshold and bonus"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_adj_fresh_market_bonus_2
+    file_location: "src/strategy/market_fusion.py::compute_alpha hours_since_open < 6 → a += 0.05 (cumulative)"
+    declared_target: brier_score
+    data_basis: "Heuristic: very fresh markets (<6h) get additional +0.05. Cumulative with <12h bonus."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ markets; measure Brier by hours_since_open and re-fit threshold and bonus"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_clamp_min
+    file_location: "src/strategy/market_fusion.py::compute_alpha return max(0.20, min(0.85, a))"
+    declared_target: risk_cap
+    data_basis: >
+      Floor of 0.20 ensures minimum model contribution even in adverse conditions.
+      Below 0.20, the system is essentially tracking the market (no edge).
+      Physical constraint on the blending parameter, not data-fit.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; verify no profitable scenario exists at alpha < 0.20"
+    cascade_bound: null
+
+  - constant_name: market_fusion.alpha_clamp_max
+    file_location: "src/strategy/market_fusion.py::compute_alpha return max(0.20, min(0.85, a))"
+    declared_target: risk_cap
+    data_basis: >
+      Ceiling of 0.85 ensures minimum market information is always incorporated.
+      At 0.85, the market still contributes 15%. Pure model forecasts ignore
+      real-time liquidity information. Physical/design constraint.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ settlements; verify no profitable scenario exists at alpha > 0.85"
+    cascade_bound: null
+
+  - constant_name: market_fusion.TAIL_ALPHA_SCALE
+    file_location: "src/strategy/market_fusion.py::compute_posterior TAIL_ALPHA_SCALE=0.5"
+    declared_target: brier_score
+    data_basis: >
+      D3 sweep (2026-03-31): sweep [0.5, 0.6, ..., 1.0] on tail bins,
+      TAIL_ALPHA_SCALE=0.5 gives Brier improvement of −0.042 over uniform α.
+      CAUTION (D2): validated against Brier, not buy_no P&L. This constant
+      halves the edge that buy_no depends on (market tail overpricing).
+      Must be re-validated against buy_no P&L before treating as profit-safe.
+    validated_at: "2026-03-31"
+    replacement_criteria: "200+ buy_no settlements; validate against buy_no P&L (not Brier) and re-fit or remove if edge is destroyed"
+    cascade_bound: null
+
+  # ---------------------------------------------------------------------------
+  # fdr_filter.py constants
+  # ---------------------------------------------------------------------------
+
+  - constant_name: fdr_filter.FDR_ALPHA
+    file_location: "src/strategy/fdr_filter.py::DEFAULT_FDR_ALPHA=0.10 (settings edge.fdr_alpha=0.10)"
+    declared_target: risk_cap
+    data_basis: >
+      Benjamini-Hochberg FDR target of 10% means at most 10% of accepted edges
+      are expected false positives. 0.10 is a standard FDR threshold in
+      multiple-testing literature; not yet re-fit to Zeus empirical false-positive rate.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ candidate evaluations; measure observed false positive rate vs target FDR and re-fit α"
+    cascade_bound: null
+
+  # ---------------------------------------------------------------------------
+  # exit trigger constants (from settings.json exit section)
+  # ---------------------------------------------------------------------------
+
+  - constant_name: exit.consecutive_confirmations
+    file_location: "config/settings.json::exit.consecutive_confirmations=2"
+    declared_target: risk_cap
+    data_basis: >
+      Require 2 consecutive negative cycles before firing EDGE_REVERSAL exit.
+      Single-cycle exits were too noisy in early paper trading.
+      2 cycles is a minimum smoothing heuristic, not statistically validated.
+      This is the D4 asymmetry constant: entry uses bootstrap + FDR, exit uses
+      2-cycle observation. Documented here to flag the asymmetry explicitly.
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ exit events; compare 1/2/3-cycle false-positive rates and fit via ROC on EDGE_REVERSAL accuracy"
+    cascade_bound: null
+
+  - constant_name: exit.near_settlement_hours
+    file_location: "config/settings.json::exit.near_settlement_hours=4.0"
+    declared_target: risk_cap
+    data_basis: "Hold until 4 hours before settlement to capture final market convergence. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ near-settlement trades per city; fit per-city optimal hold window"
+    cascade_bound: null
+
+  - constant_name: exit.buy_no_scaling_factor
+    file_location: "config/settings.json::exit.buy_no_scaling_factor=0.5"
+    declared_target: risk_cap
+    data_basis: "Scale buy_no exit threshold by 0.5 to account for higher noise in no-side edge. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ buy_no settlements; re-fit via historical edge noise distribution"
+    cascade_bound: null
+
+  - constant_name: exit.buy_yes_scaling_factor
+    file_location: "config/settings.json::exit.buy_yes_scaling_factor=0.3"
+    declared_target: risk_cap
+    data_basis: "Scale buy_yes exit threshold by 0.3. Heuristic — yes-side edges are less noisy."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ buy_yes settlements; re-fit via historical edge noise distribution"
+    cascade_bound: null
+
+  - constant_name: exit.buy_no_floor
+    file_location: "config/settings.json::exit.buy_no_floor=-0.02"
+    declared_target: risk_cap
+    data_basis: "Forward edge floor for buy_no exits. Edge must drop below -2% before considering reversal. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ buy_no exit events; measure false-hold rate at various floor values"
+    cascade_bound: null
+
+  - constant_name: exit.buy_no_ceiling
+    file_location: "config/settings.json::exit.buy_no_ceiling=-0.15"
+    declared_target: risk_cap
+    data_basis: "Panic exit ceiling for buy_no: edge below -15% triggers immediate exit. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ deep buy_no reversals; measure false-hold rate at ceiling"
+    cascade_bound: null
+
+  - constant_name: exit.buy_yes_floor
+    file_location: "config/settings.json::exit.buy_yes_floor=-0.01"
+    declared_target: risk_cap
+    data_basis: "Forward edge floor for buy_yes exits: -1%. Yes-side is less noisy, tighter floor. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ buy_yes exit events; measure false-hold rate at various floor values"
+    cascade_bound: null
+
+  - constant_name: exit.buy_yes_ceiling
+    file_location: "config/settings.json::exit.buy_yes_ceiling=-0.10"
+    declared_target: risk_cap
+    data_basis: "Panic exit ceiling for buy_yes: edge below -10% triggers immediate exit. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ deep buy_yes reversals; measure false-hold rate at ceiling"
+    cascade_bound: null
+
+  - constant_name: exit.divergence_soft_threshold
+    file_location: "config/settings.json::exit.divergence_soft_threshold=0.20"
+    declared_target: risk_cap
+    data_basis: "Soft divergence trigger at 0.20 between posterior and market. Requires adverse velocity confirmation. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ cycles; re-fit via replay + live divergence audit"
+    cascade_bound: null
+
+  - constant_name: exit.divergence_hard_threshold
+    file_location: "config/settings.json::exit.divergence_hard_threshold=0.30"
+    declared_target: risk_cap
+    data_basis: "Hard divergence panic threshold at 0.30. Immediate exit without velocity confirmation. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ cycles; re-fit via replay + live divergence audit"
+    cascade_bound: null
+
+  - constant_name: exit.divergence_velocity_confirm
+    file_location: "config/settings.json::exit.divergence_velocity_confirm=-0.05"
+    declared_target: risk_cap
+    data_basis: "1h adverse market velocity <= -0.05 required to confirm soft divergence. Heuristic."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ soft-divergence events; measure false-panic rate by velocity threshold"
+    cascade_bound: null
+
+  - constant_name: exit.flash_crash_velocity
+    file_location: "config/settings.json::exit.flash_crash_velocity=-0.15; src/execution/exit_triggers.py"
+    declared_target: physical_constraint
+    data_basis: >
+      P9/INV-13: Was bare literal -0.15 in exit_triggers.py. Flash-crash panic
+      fires when 1h market velocity <= -15%/hr. This is the one exit constant
+      NOT previously routed through ExpiringAssumption or settings. Now in config.
+    validated_at: "2026-04-05"
+    replacement_criteria: "50+ flash-crash events; measure false-panic rate by velocity threshold"
+    cascade_bound: null
+
+  # ---------------------------------------------------------------------------
+  # executor.py constants (P9/INV-13 — routed through settings.json)
+  # ---------------------------------------------------------------------------
+
+  - constant_name: execution.toxicity_budget
+    file_location: "config/settings.json::execution.toxicity_budget=0.05; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: >
+      P9/INV-13: Was bare literal 0.05. Maximum acceptable toxicity budget for
+      whale sweep detection. Polymarket-specific protocol constraint.
+    validated_at: "2026-04-05"
+    replacement_criteria: "100+ whale sweep events; fit optimal budget via historical toxicity P&L impact"
+    cascade_bound: null
+
+  - constant_name: execution.max_slippage
+    file_location: "config/settings.json::execution.max_slippage=0.02; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: "P9/INV-13: Was bare literal 0.02. Maximum acceptable slippage for entry orders."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ fills; measure realized slippage distribution and re-fit threshold"
+    cascade_bound: null
+
+  - constant_name: execution.iceberg_threshold_usd
+    file_location: "config/settings.json::execution.iceberg_threshold_usd=100; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: "P9/INV-13: Was bare literal 100. Orders > $100 use iceberg slicing to reduce market impact."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ large orders; measure fill quality by order size and re-fit threshold"
+    cascade_bound: null
+
+  - constant_name: execution.dynamic_limit_gap_pct
+    file_location: "config/settings.json::execution.dynamic_limit_gap_pct=0.05; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: "P9/INV-13: Was bare literal 0.05. If limit price gap to best_ask is <= 5%, jump to ask for guaranteed fill."
+    validated_at: "2026-04-05"
+    replacement_criteria: "500+ fills; measure fill rate by gap percentage and re-fit threshold"
+    cascade_bound: null
+
+  - constant_name: execution.exit_base_offset
+    file_location: "config/settings.json::execution.exit_base_offset=0.01; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: "P9/INV-13: Was bare literal 0.01. Exit limit price = current_price - offset for faster fills."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ exit fills; measure exit fill rate by offset and re-fit"
+    cascade_bound: null
+
+  - constant_name: execution.exit_max_slippage
+    file_location: "config/settings.json::execution.exit_max_slippage=0.03; src/execution/executor.py"
+    declared_target: physical_constraint
+    data_basis: "P9/INV-13: Was bare literal 0.03. Maximum slippage tolerance for exit orders when using best_bid."
+    validated_at: "2026-04-05"
+    replacement_criteria: "200+ exit fills; measure realized exit slippage and re-fit threshold"
+    cascade_bound: null

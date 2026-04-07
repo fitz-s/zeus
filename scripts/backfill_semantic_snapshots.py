@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
-from src.state.db import get_connection, init_schema
+from src.state.db import get_trade_connection_with_shared as get_connection, init_schema
 
 POSITIONS_PATH = PROJECT_ROOT / "state" / "positions-paper.json"
 
@@ -107,15 +107,21 @@ def run_backfill(positions_path: Path = POSITIONS_PATH) -> dict:
     conn = get_connection()
     init_schema(conn)
 
+    try:
+        conn.execute("SELECT 1 FROM shared.ensemble_snapshots LIMIT 0")
+        _sp = "shared."
+    except Exception:
+        _sp = ""
+
     rows = conn.execute(
-        """
+        f"""
         SELECT td.trade_id, td.market_id, td.bin_label, td.direction, td.timestamp, td.status,
                td.forecast_snapshot_id, td.entry_method, td.selected_method,
                td.p_raw, td.p_posterior, td.edge, td.ci_lower, td.ci_upper,
                td.settlement_semantics_json, td.epistemic_context_json, td.edge_context_json,
                es.city, es.target_date, es.available_at, es.fetch_time, es.data_version
         FROM trade_decisions td
-        LEFT JOIN ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
+        LEFT JOIN {_sp}ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
         """
     ).fetchall()
 

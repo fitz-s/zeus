@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from src.config import PROJECT_ROOT, cities
-from src.state.db import get_connection
+from src.state.db import get_shared_connection as get_connection
 
 logger = logging.getLogger(__name__)
 

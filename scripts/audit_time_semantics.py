@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.signal.diurnal import build_day0_temporal_context
-from src.state.db import get_connection
+from src.state.db import get_shared_connection as get_connection
 
 
 def run_audit() -> dict:

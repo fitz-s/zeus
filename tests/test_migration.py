@@ -10,7 +10,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.state.db import get_connection, init_schema, ZEUS_DB_PATH
+from src.state.db import get_connection, get_shared_connection, init_schema, ZEUS_DB_PATH
 
 
 def _create_mock_rainstorm_db(path: Path) -> None:
@@ -99,7 +99,9 @@ def test_migration_with_mock_data(tmp_path, monkeypatch):
     _create_mock_rainstorm_db(mock_rs)
 
     zeus_db = tmp_path / "zeus.db"
+    zeus_shared_db = tmp_path / "zeus-shared.db"
     monkeypatch.setattr("src.state.db.ZEUS_DB_PATH", zeus_db)
+    monkeypatch.setattr("src.state.db.ZEUS_SHARED_DB_PATH", zeus_shared_db)
     monkeypatch.setattr("src.config.STATE_DIR", tmp_path)
 
     from scripts.migrate_rainstorm_data import migrate
@@ -112,8 +114,8 @@ def test_migration_with_mock_data(tmp_path, monkeypatch):
     # test-token-123 excluded
     assert counts["token_price_log"] == 1
 
-    # Verify data correctness
-    conn = get_connection(zeus_db)
+    # Verify data correctness — migration now writes to shared DB (zeus-shared.db)
+    conn = get_shared_connection()
 
     settlement = conn.execute(
         "SELECT * FROM settlements WHERE city='NYC'"

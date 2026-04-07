@@ -27,7 +27,8 @@ from src.state.decision_chain import (
     store_settlement_records,
 )
 from src.state.db import (
-    get_connection,
+    get_shared_connection,
+    get_trade_connection,
     log_settlement_event,
     query_authoritative_settlement_rows,
     query_settlement_events,
@@ -115,7 +116,10 @@ def run_harvester() -> dict:
 
     Returns: {"settlements_found": int, "pairs_created": int, "positions_settled": int}
     """
-    conn = get_connection()
+    # Split connections: trade DB for position/settlement events, shared DB for
+    # ensemble snapshots and calibration pairs.
+    trade_conn = get_trade_connection()
+    shared_conn = get_shared_connection()
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()
@@ -146,11 +150,14 @@ def run_harvester() -> dict:
 
             # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
+            # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
+            # and position_events via query_settlement_events — pass trade_conn for event
+            # spine queries, shared_conn for snapshot lookups.
             snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
-                conn, portfolio, city.name, target_date
+                trade_conn, shared_conn, portfolio, city.name, target_date
             )
             _log_snapshot_context_resolution(
-                conn,
+                trade_conn,
                 city=city.name,
                 target_date=target_date,
                 snapshot_contexts=snapshot_contexts,
@@ -165,7 +172,7 @@ def run_harvester() -> dict:
             event_pairs = 0
             for context in learning_contexts:
                 event_pairs += harvest_settlement(
-                    conn,
+                    shared_conn,
                     city,
                     target_date,
                     winning_label,
@@ -176,11 +183,11 @@ def run_harvester() -> dict:
                 )
             total_pairs += event_pairs
             if event_pairs > 0:
-                maybe_refit_bucket(conn, city, target_date)
+                maybe_refit_bucket(shared_conn, city, target_date)
 
             # Settle held positions in this market
             n_settled = _settle_positions(
-                conn,
+                trade_conn,
                 portfolio,
                 city.name,
                 target_date,
@@ -197,15 +204,17 @@ def run_harvester() -> dict:
                          event.get("slug", "?"), e)
 
     if settlement_records:
-        store_settlement_records(conn, settlement_records, source="harvester")
+        store_settlement_records(trade_conn, settlement_records, source="harvester")
 
     if positions_settled > 0:
         save_portfolio(portfolio)
     if tracker_dirty:
         save_tracker(tracker)
 
-    conn.commit()
-    conn.close()
+    trade_conn.commit()
+    shared_conn.commit()
+    trade_conn.close()
+    shared_conn.close()
 
     return {
         "settlements_found": len(settled_events),
@@ -381,25 +390,30 @@ def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
 
 
 def _snapshot_contexts_for_market(
-    conn,
+    trade_conn,
+    shared_conn,
     portfolio: PortfolioState,
     city: str,
     target_date: str,
 ) -> tuple[list[dict], list[dict]]:
-    """Resolve decision-time snapshots, preferring durable settlement truth over open portfolio."""
+    """Resolve decision-time snapshots, preferring durable settlement truth over open portfolio.
+
+    trade_conn: for event-spine queries (position_events, decision_log).
+    shared_conn: for snapshot lookups (ensemble_snapshots).
+    """
     stage_events = query_settlement_events(
-        conn,
+        trade_conn,
         limit=200,
         city=city,
         target_date=target_date,
     )
     authoritative_rows = query_authoritative_settlement_rows(
-        conn,
+        trade_conn,
         limit=200,
         city=city,
         target_date=target_date,
     )
-    contexts, dropped_rows = _snapshot_contexts_from_rows(conn, authoritative_rows)
+    contexts, dropped_rows = _snapshot_contexts_from_rows(trade_conn, shared_conn, authoritative_rows)
     if contexts:
         for context in contexts:
             context["partial_context_resolution"] = bool(dropped_rows)
@@ -408,12 +422,12 @@ def _snapshot_contexts_for_market(
     legacy_rows: list[dict] = []
     if authoritative_rows and authoritative_rows[0].get("source") != "decision_log":
         legacy_rows = query_legacy_settlement_records(
-            conn,
+            trade_conn,
             limit=200,
             city=city,
             target_date=target_date,
         )
-        contexts, dropped_rows = _snapshot_contexts_from_rows(conn, legacy_rows)
+        contexts, dropped_rows = _snapshot_contexts_from_rows(trade_conn, shared_conn, legacy_rows)
         if contexts:
             for context in contexts:
                 context["partial_context_resolution"] = bool(dropped_rows)
@@ -435,7 +449,7 @@ def _snapshot_contexts_for_market(
 
     fallback_contexts: list[dict] = []
     for snapshot_id in snapshot_ids:
-        context = get_snapshot_context(conn, snapshot_id)
+        context = get_snapshot_context(shared_conn, snapshot_id)
         if context is None:
             continue
         fallback_contexts.append({
@@ -450,7 +464,7 @@ def _snapshot_contexts_for_market(
     return fallback_contexts, dropped_rows
 
 
-def _snapshot_contexts_from_rows(conn, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+def _snapshot_contexts_from_rows(trade_conn, shared_conn, rows: list[dict]) -> tuple[list[dict], list[dict]]:
     contexts: list[dict] = []
     dropped_rows: list[dict] = []
     seen_snapshot_ids: set[str] = set()
@@ -465,7 +479,7 @@ def _snapshot_contexts_from_rows(conn, rows: list[dict]) -> tuple[list[dict], li
                     "degraded_reason": str(row.get("degraded_reason") or ""),
                 })
             continue
-        context = get_snapshot_context(conn, snapshot_id)
+        context = get_snapshot_context(shared_conn, snapshot_id)
         if context is None:
             dropped_rows.append({
                 "source": str(row.get("source") or "unknown"),
@@ -684,6 +698,24 @@ def _settle_positions(
             outcome=outcome,
             phase_before=phase_before,
         )
+
+        # SD-1: write settlement outcome back to trade_decisions
+        try:
+            rtid = getattr(pos, 'trade_id', '')
+            if rtid:
+                conn.execute(
+                    """UPDATE trade_decisions
+                       SET settlement_edge_usd = ?,
+                           exit_reason = COALESCE(exit_reason, 'SETTLEMENT'),
+                           status = CASE WHEN status IN ('entered', 'day0_window') THEN 'settled' ELSE status END
+                       WHERE runtime_trade_id = ?
+                         AND status NOT IN ('exited', 'unresolved_ghost', 'settled')""",
+                    (round(pnl, 4), rtid),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning('SD-1: failed to update trade_decisions for %s: %s', pos.trade_id, exc)
+
         settled += 1
 
         logger.info("SETTLED %s: %s %s %s — PnL=$%.2f",

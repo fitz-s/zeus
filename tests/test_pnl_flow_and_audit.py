@@ -525,7 +525,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
             "recommended_control_reasons": {"tighten_risk": ["execution_decay(fill_rate=0.2, observed=12)"]},
         },
     )
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
     monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": False})
@@ -636,7 +636,7 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: BrokenConn())
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: BrokenConn())
     monkeypatch.setattr(
         status_summary_module,
         "query_position_current_status_view",
@@ -733,7 +733,7 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
             "recommended_strategy_gate_reasons": {"center_buy": ["edge_compression"]},
         },
     )
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(
         status_summary_module,
@@ -813,7 +813,7 @@ def test_inv_status_normalizes_enum_backed_runtime_keys(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
@@ -847,7 +847,7 @@ def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch,
         "_get_risk_details",
         lambda: {"strategy_tracker_accounting": {"current_regime_started_at": "2026-04-03T00:00:00+00:00"}},
     )
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
     def _fake_execution_summary(conn, not_before=None):
         captured["execution_not_before"] = not_before
         return {}
@@ -897,7 +897,7 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
     monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
@@ -918,7 +918,7 @@ def test_inv_status_surfaces_db_substrate_degradation(monkeypatch, tmp_path):
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
     monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
-    monkeypatch.setattr(status_summary_module, "get_connection", lambda: DummyConn())
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: DummyConn())
     monkeypatch.setattr(
         status_summary_module,
         "query_position_current_status_view",
@@ -996,7 +996,7 @@ def test_inv_control_strategy_gate_persists_and_is_readable(monkeypatch, tmp_pat
     apply_architecture_kernel_schema(conn)
     conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
-    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(control_plane_module, "get_shared_connection", lambda: get_connection(db_path))
     control_path.write_text(
         json.dumps(
             {
@@ -1028,7 +1028,7 @@ def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path)
     apply_architecture_kernel_schema(conn)
     conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
-    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(control_plane_module, "get_shared_connection", lambda: get_connection(db_path))
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
 
@@ -1055,7 +1055,7 @@ def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatc
     apply_architecture_kernel_schema(conn)
     conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
-    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(control_plane_module, "get_shared_connection", lambda: get_connection(db_path))
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "tighten_risk"}], "acks": []}))
 
@@ -1102,7 +1102,7 @@ def test_inv_control_plane_records_explicit_skip_when_control_overrides_table_mi
     conn = get_connection(db_path)
     conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
-    monkeypatch.setattr(control_plane_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(control_plane_module, "get_shared_connection", lambda: get_connection(db_path))
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
 
@@ -2723,7 +2723,9 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         ],
     }
 
-    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    _hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_shared_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -2774,7 +2776,9 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
         ],
     }
 
-    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    _hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_shared_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -2872,7 +2876,9 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
         ],
     }
 
-    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    _hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_shared_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -2973,7 +2979,9 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
         ],
     }
 
-    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    _hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_shared_connection", lambda: _hconn)
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
@@ -3071,7 +3079,9 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
         ],
     }
 
-    monkeypatch.setattr(harvester_module, "get_connection", lambda: get_connection(db_path))
+    _hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
+    monkeypatch.setattr(harvester_module, "get_shared_connection", lambda: _hconn)
     monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0, positions=[]))
     monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())

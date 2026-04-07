@@ -486,7 +486,9 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     city.timezone,
                     deps._utcnow(),
                 )
-                if hours_to_settlement <= 6.0 and pos.state in {"entered", "holding"}:
+                if (hours_to_settlement <= 6.0
+                        and pos.state in {"entered", "holding"}
+                        and not getattr(pos, "exit_state", "")):
                     pos.state = enter_day0_window_runtime_state(
                         pos.state,
                         exit_state=getattr(pos, "exit_state", ""),

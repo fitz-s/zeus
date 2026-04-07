@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.state.db import get_connection
+from src.state.db import get_shared_connection
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:

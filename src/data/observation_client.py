@@ -327,7 +327,7 @@ def _fetch_openmeteo_hourly(
 
 def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> float:
     try:
-        from src.state.db import get_connection
+        from src.state.db import get_shared_connection as get_connection
 
         if target_date is None:
             raise ValueError("target_date must be explicit for ASOS→WU offset lookup")

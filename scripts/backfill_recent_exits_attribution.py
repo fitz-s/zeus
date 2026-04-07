@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_connection
+from src.state.db import get_trade_connection as get_connection
 
 POSITIONS_PATH = PROJECT_ROOT / "state" / "positions-paper.json"
 

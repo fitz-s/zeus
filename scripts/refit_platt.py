@@ -15,7 +15,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 from src.config import calibration_n_bootstrap
 from src.calibration.manager import maturity_level, regularization_for_level
 from src.calibration.platt import ExtendedPlattCalibrator

@@ -22,7 +22,7 @@ from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import calibration_clusters, calibration_seasons, cities_by_name
 from src.contracts import SettlementSemantics
 from src.data.market_scanner import _parse_temp_range
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 
 
 TIGGE_ROOT = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"

@@ -24,7 +24,7 @@ from src.engine.cycle_runner import _classify_edge_source, _classify_strategy
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import MarketCandidate, evaluate_candidate
 from src.riskguard.riskguard import get_current_level
-from src.state.db import get_connection, log_shadow_signal
+from src.state.db import get_shared_connection as get_connection, log_shadow_signal
 from src.state.decision_chain import CycleArtifact, NoTradeCase, store_artifact
 from src.state.portfolio import load_portfolio
 from src.strategy.risk_limits import RiskLimits

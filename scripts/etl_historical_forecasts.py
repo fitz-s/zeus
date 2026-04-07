@@ -34,7 +34,7 @@ def season_from_date(date_str: str) -> str:
     return "SON"
 
 
-from src.state.db import get_connection, init_schema
+from src.state.db import get_shared_connection as get_connection, init_schema
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
 

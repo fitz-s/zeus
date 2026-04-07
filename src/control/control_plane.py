@@ -12,7 +12,7 @@ from src.config import state_path
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
-    get_connection,
+    get_shared_connection,
     query_control_override_state,
     upsert_control_override,
 )
@@ -107,7 +107,7 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_connection()
+        conn = get_shared_connection()
         durable_state = query_control_override_state(conn)
     except Exception:
         durable_state = {"status": "query_error"}
@@ -188,7 +188,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
     effective_until = cmd.get("effective_until")
     precedence = int(cmd.get("precedence") or DEFAULT_CONTROL_OVERRIDE_PRECEDENCE)
     try:
-        conn = get_connection()
+        conn = get_shared_connection()
     except Exception:
         conn = None
     try:

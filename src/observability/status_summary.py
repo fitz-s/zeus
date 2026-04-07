@@ -20,7 +20,7 @@ from src.control.control_plane import (
 )
 from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import (
-    get_connection,
+    get_trade_connection_with_shared,
     query_execution_event_summary,
     query_position_current_status_view,
     query_strategy_health_snapshot,
@@ -106,7 +106,7 @@ def write_status(cycle_summary: dict = None) -> None:
         recommended_controls_not_applied.append("review_strategy_gates")
     conn = None
     try:
-        conn = get_connection()
+        conn = get_trade_connection_with_shared()
         position_view = query_position_current_status_view(conn)
         strategy_health = query_strategy_health_snapshot(conn, now=generated_at)
     except Exception:
