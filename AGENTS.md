@@ -381,7 +381,21 @@ Waiver rule:
 - A waived gate is **not** acceptable when the real reason is convenience, impatience, or difficulty.
 - High-sensitivity architecture/governance/schema packets must not self-waive required gates by prose alone.
 
-## 11. Write style for agents
+## 11. Commit discipline
+
+**Agents must commit after each verified batch of changes.** Uncommitted work is one `git checkout .` away from total loss.
+
+Rules:
+- After completing and verifying a batch of related edits (e.g., all P9 contracts, all migration call sites), commit immediately.
+- Never leave more than ~10 files uncommitted at once.
+- Never run `git checkout .`, `git restore .`, `git reset --hard`, or `git stash pop` without explicit human approval.
+- When multiple agents edit files in parallel, serialize writes to the same file (one agent per file, or coordinate via SendMessage).
+- After every Edit tool call, verify the edit persisted with a grep or Read before proceeding.
+- If an edit appears to have been lost (file doesn't contain expected content), investigate before re-applying u2014 another agent may have overwritten it.
+
+This rule exists because a 2026-04-07 session lost multiple edits across 50+ files due to zero commits over 12+ hours of work.
+
+## 12. Write style for agents
 
 Keep edits delta-shaped.
 Patch authority drift instead of rewriting everything.
