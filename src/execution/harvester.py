@@ -194,6 +194,7 @@ def run_harvester() -> dict:
                 winning_label,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
+                paper_mode=(settings.mode == "paper"),  # Live redemption requires paper_mode=False
             )
             positions_settled += n_settled
             if n_settled > 0:
