@@ -3,7 +3,42 @@
 **Replaces:** All previous session notes for this date.  
 **Authors:** pnl-tracer, pnl-auditor, isolation-architect, isolation-researcher, market-verifier  
 **Branch:** `Architects`  
-**WARNING:** As of session end, 50+ files are modified but UNCOMMITTED. Commit before any git operations.
+**Commits:** `cdc473f` (153 files, 33K insertions) + `48ef200` (AGENTS.md commit discipline rule)
+
+## For Zero-Context Readers
+
+Before reading this document, read in order:
+1. `docs/zeus_FINAL_spec.md` u2014 the terminal architecture spec (P0-P11 + Endgame)
+2. `AGENTS.md` u2014 repo governance and agent rules
+3. `docs/isolation_design.md` u2014 the physical DB separation design
+4. `docs/ground_truth_pnl.md` u2014 the verified P&L with full evidence chain
+5. `docs/pipeline_trace.md` u2014 complete data flow for one trade lifecycle
+
+Key concepts:
+- **zeus.db** = LEGACY shared database (being replaced)
+- **zeus-paper.db** = paper-mode trade data (physically isolated)
+- **zeus-shared.db** = world data shared by both modes (weather, calibration)
+- **FINAL spec** = `docs/zeus_FINAL_spec.md` u2014 the terminal architecture document
+- **P7 Phase 2** = wiring exit/settlement events to canonical position_events (72 events missing)
+- **K=1** = exit/settlement lifecycle was never connected to canonical data path
+
+## Open u7591u70b9 (Uninvestigated, from end of session)
+
+**These were discovered in the last hour and NOT investigated. Next session must check these FIRST.**
+
+1. **`monitor_incomplete_exit_context=11`** u2014 11 positions can't get complete exit context. May be caused by DB isolation breaking cross-table reads (exit context needs both trade and shared data). Check: does the monitoring phase use `get_trade_connection_with_shared()` or just `get_trade_connection()`?
+
+2. **`effective_bankroll=$579.58` vs `wallet=$93.68`** u2014 Paper bankroll includes unrealized gains from Atlanta tail trades. Is this correct (paper has no real wallet) or a calculation error? Check: `src/engine/cycle_runtime.py:entry_bankroll_for_cycle()` u2014 does paper mode use wallet balance or config_cap + portfolio value?
+
+3. **`riskguard.py` reverted to `get_connection()`** u2014 isolation-researcher's subagent reverted it to make tests pass. This re-opens the contamination vector. Need to re-apply `get_trade_connection()` and fix the test mocking to work with the new function name.
+
+4. **38 test failures mix our truth-surface tests with pre-existing failures** u2014 `test_portfolio_truth_source_is_canonical` and `test_settlement_freshness` are OUR tests correctly detecting known issues. But they're counted alongside actual pre-existing failures. Need to separate "correctly failing antibody tests" from "broken tests".
+
+5. **`etl_recalibrate` subprocess chain untested after DB migration** u2014 daemon runs `etl_observation_instants.py`, `etl_diurnal_curves.py`, etc. as subprocesses. These now import `get_shared_connection as get_connection`. But were they tested? Does the subprocess inherit the correct Python path?
+
+6. **Position count: 26 in DB vs 24 expected** u2014 `position_current` has 26 rows but earlier counts showed 24. Where did 2 extra positions come from? Check: are these from the Atlanta exits that got zombie-reactivated?
+
+7. **`at` job for auto_pause still scheduled** u2014 `atq` shows job #2 at 01:49 CDT Apr 7. LIVE_LOCK already exists so it's redundant, but should be cleaned up.
 
 ---
 
@@ -79,7 +114,7 @@ All 47 `get_connection()` call sites classified and migrated:
 - **SHARED (migrated):** replay.py, diurnal.py x3, control_plane.py x2, market_fusion.py, ensemble_signal.py, all ETL scripts (20+ files)
 - **BOTH (migrated):** harvester.py, replay.py, backfill_semantic_snapshots.py, audit_replay_fidelity.py, force_lifecycle.py
 - **SKIP:** db.py init_schema, fill_tracker.py deps.get_connection() (dependency injection)
-- **UNCOMMITTED** u2014 see WARNING at top
+- **COMMITTED (cdc473f)** u2014 see WARNING at top
 
 ---
 
@@ -105,7 +140,7 @@ All 47 `get_connection()` call sites classified and migrated:
 
 ### CRITICAL (blocking live)
 
-1. **All code changes uncommitted.** 50+ modified files. One `git checkout` loses everything. Commit immediately.
+1. ~~All code changes uncommitted.~~ **COMMITTED** as `cdc473f` (153 files) + `48ef200` (AGENTS.md).
 2. **Migration script not run.** `scripts/migrate_to_isolated_dbs.py` exists but the actual data migration (moving rows from zeus.db to zeus-paper.db / zeus-shared.db) has not been executed.
 3. **Live daemon still uses zeus.db.** Until migration script runs and daemon restarts with new DB paths, the physical separation exists in code but not in runtime.
 
@@ -119,7 +154,7 @@ All 47 `get_connection()` call sites classified and migrated:
 
 7. **zeus.db legacy.** `get_connection()` still exists. Phase 4 removes it. Currently 3 call sites remain: db.py init_schema (infra), fill_tracker.py x2 (deps injection).
 8. **No cross-mode position check.** Risk limits check only local portfolio. Live daemon can still enter a market paper already occupies (until promote_to_live gate is enforced).
-9. **stash@{0} trap.** `git stash list` shows `On pre-live: temp-clean-workspace`. Any stash pop reverts files.
+9. ~~stash@{0} trap.~~ **RESOLVED** u2014 stash dropped in this session.
 
 ---
 
@@ -161,7 +196,7 @@ All 47 `get_connection()` call sites classified and migrated:
 ## 7. Next Session Priorities
 
 1. **COMMIT current changes.** `git add -p && git commit -m "feat: Phase 2 get_connection() migration complete"`
-2. **Drop the stash.** `git stash drop stash@{0}`
+2. ~~Drop the stash.~~ **DONE** u2014 stash dropped in this session.
 3. **Run migration script.** `python scripts/migrate_to_isolated_dbs.py` u2014 moves data from zeus.db to zeus-paper.db / zeus-shared.db
 4. **Verify daemon uses new DB paths.** Restart paper daemon, confirm it connects to zeus-paper.db, not zeus.db
 5. **Run full test suite post-migration.** Expect 3 pre-existing failures; any new failures = regression
