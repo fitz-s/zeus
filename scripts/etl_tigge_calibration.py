@@ -100,102 +100,101 @@ def run_etl() -> dict:
                 lead_days = step_hours / 24.0
                 processed += 1
 
-            # Check if THIS SPECIFIC step already imported
-            dv = f"tigge_cal_v3_step{step_hours:03d}"
-            existing = conn.execute("""
-                SELECT COUNT(*) FROM ensemble_snapshots
-                WHERE city = ? AND target_date = ? AND data_version = ?
-            """, (city_name, target_date, dv)).fetchone()[0]
-            if existing > 0:
-                continue
-
-            # Load members
-            try:
-                with open(member_file) as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-
-            members = data.get("members", [])
-            if len(members) != 51:
-                continue
-
-            values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
-            values_measured = SettlementSemantics.for_city(city).round_values(values)
-
-            # Store ensemble snapshot
-            conn.execute("""
-                INSERT OR IGNORE INTO ensemble_snapshots
-                (city, target_date, issue_time, valid_time, available_at, fetch_time,
-                 lead_hours, members_json, spread, is_bimodal,
-                 model_version, data_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                city_name, target_date,
-                f"{target_date}T00:00:00Z",
-                f"{target_date}T00:00:00Z",
-                f"{target_date}T08:00:00Z",
-                data.get("generated_at", ""),
-                24.0,
-                json.dumps(values.tolist()),
-                float(np.std(values)),
-                0,
-                "ecmwf_tigge",
-                f"tigge_cal_v3_step{step_hours:03d}",
-            ))
-
-            # Match settlement
-            settlement = conn.execute("""
-                SELECT winning_bin FROM settlements
-                WHERE city = ? AND target_date = ?
-            """, (city_name, target_date)).fetchone()
-
-            if settlement is None:
-                skipped_no_settlement += 1
-                continue
-
-            winning_bin = settlement["winning_bin"]
-            matched += 1
-
-            # Get bin structure: try market_events first, then synthesize from ENS
-            bins = _get_bins(conn, city_name, target_date)
-            if not bins:
-                # No market_events → synthesize standard 11-bin structure from ENS
-                bins = _synthesize_bins(values, city.settlement_unit)
-
-            # Generate calibration pairs
-            season = season_from_date(target_date)
-            n_bins = len(bins)
-            for i, (label, low, high) in enumerate(bins):
-                # Compute P_raw for this bin
-                if low is None and high is not None:
-                    p_raw = float(np.sum(values_measured <= high)) / 51
-                elif high is None and low is not None:
-                    p_raw = float(np.sum(values_measured >= low)) / 51
-                elif low is not None and high is not None:
-                    p_raw = float(np.sum((values_measured >= low) & (values_measured <= high))) / 51
-                else:
+                # Check if THIS SPECIFIC step already imported
+                dv = f"tigge_cal_v3_step{step_hours:03d}"
+                existing = conn.execute("""
+                    SELECT COUNT(*) FROM ensemble_snapshots
+                    WHERE city = ? AND target_date = ? AND data_version = ?
+                """, (city_name, target_date, dv)).fetchone()[0]
+                if existing > 0:
                     continue
 
-                # Match outcome: parse winning temp from winning_bin, check if it falls in this bin
-                outcome = 1 if _temp_in_bin(winning_bin, low, high) else 0
-
+                # Load members
                 try:
-                    add_calibration_pair(
-                        conn,
-                        city=city_name,
-                        target_date=target_date,
-                        range_label=label,
-                        p_raw=p_raw,
-                        outcome=outcome,
-                        lead_days=lead_days,
-                        season=season,
-                        cluster=city.cluster,
-                        forecast_available_at=f"{target_date}T08:00:00Z",
-                    )
-                    pairs_added += 1
+                    with open(member_file) as f:
+                        data = json.load(f)
                 except Exception:
-                    pass  # Duplicate — INSERT OR IGNORE handles this
+                    continue
+
+                members = data.get("members", [])
+                if len(members) != 51:
+                    continue
+
+                values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
+                values_measured = SettlementSemantics.for_city(city).round_values(values)
+
+                # Store ensemble snapshot
+                conn.execute("""
+                    INSERT OR IGNORE INTO ensemble_snapshots
+                    (city, target_date, issue_time, valid_time, available_at, fetch_time,
+                     lead_hours, members_json, spread, is_bimodal,
+                     model_version, data_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    city_name, target_date,
+                    f"{target_date}T00:00:00Z",
+                    f"{target_date}T00:00:00Z",
+                    f"{target_date}T08:00:00Z",
+                    data.get("generated_at", ""),
+                    float(step_hours),
+                    json.dumps(values.tolist()),
+                    float(np.std(values)),
+                    0,
+                    "ecmwf_tigge",
+                    f"tigge_cal_v3_step{step_hours:03d}",
+                ))
+
+                # Match settlement
+                settlement = conn.execute("""
+                    SELECT winning_bin FROM settlements
+                    WHERE city = ? AND target_date = ?
+                """, (city_name, target_date)).fetchone()
+
+                if settlement is None:
+                    skipped_no_settlement += 1
+                    continue
+
+                winning_bin = settlement["winning_bin"]
+                matched += 1
+
+                # Get bin structure: try market_events first, then synthesize from ENS
+                bins = _get_bins(conn, city_name, target_date)
+                if not bins:
+                    # No market_events → synthesize standard 11-bin structure from ENS
+                    bins = _synthesize_bins(values, city.settlement_unit)
+
+                # Generate calibration pairs
+                season = season_from_date(target_date)
+                for label, low, high in bins:
+                    # Compute P_raw for this bin
+                    if low is None and high is not None:
+                        p_raw = float(np.sum(values_measured <= high)) / 51
+                    elif high is None and low is not None:
+                        p_raw = float(np.sum(values_measured >= low)) / 51
+                    elif low is not None and high is not None:
+                        p_raw = float(np.sum((values_measured >= low) & (values_measured <= high))) / 51
+                    else:
+                        continue
+
+                    # Match outcome: parse winning temp from winning_bin, check if it falls in this bin
+                    outcome = 1 if _temp_in_bin(winning_bin, low, high) else 0
+
+                    try:
+                        add_calibration_pair(
+                            conn,
+                            city=city_name,
+                            target_date=target_date,
+                            range_label=label,
+                            p_raw=p_raw,
+                            outcome=outcome,
+                            lead_days=lead_days,
+                            season=season,
+                            cluster=city.cluster,
+                            forecast_available_at=f"{target_date}T08:00:00Z",
+                        )
+                        pairs_added += 1
+                    except Exception:
+                        pass  # Duplicate — INSERT OR IGNORE handles this
 
     conn.commit()
 
