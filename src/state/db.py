@@ -1485,10 +1485,10 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
 
 def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: str | None = None) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
-    if not _legacy_runtime_position_event_schema_available(conn):
-        if _canonical_position_surface_available(conn):
-            return
-        _assert_legacy_runtime_position_event_schema(conn)
+    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
+    if not legacy_runtime_events_available:
+        if not _canonical_position_surface_available(conn):
+            _assert_legacy_runtime_position_event_schema(conn)
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
@@ -1553,14 +1553,15 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
     )
-    log_position_event(
-        conn,
-        event_type,
-        pos,
-        details=details,
-        timestamp=event_timestamp,
-        source="execution",
-    )
+    if legacy_runtime_events_available:
+        log_position_event(
+            conn,
+            event_type,
+            pos,
+            details=details,
+            timestamp=event_timestamp,
+            source="execution",
+        )
 
 
 def log_settlement_event(
@@ -1573,10 +1574,10 @@ def log_settlement_event(
     exited_at_override: str | None = None,
 ) -> None:
     """Append a durable settlement event for learning/risk consumers."""
-    if not _legacy_runtime_position_event_schema_available(conn):
-        if _canonical_position_surface_available(conn):
-            return
-        _assert_legacy_runtime_position_event_schema(conn)
+    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
+    if not legacy_runtime_events_available:
+        if not _canonical_position_surface_available(conn):
+            _assert_legacy_runtime_position_event_schema(conn)
     settled_at = getattr(pos, "last_exit_at", None)
     entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
     log_outcome_fact(
@@ -1594,19 +1595,20 @@ def log_settlement_event(
         monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
         chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
     )
-    log_position_event(
-        conn,
-        "POSITION_SETTLED",
-        pos,
-        details=_canonical_position_settled_payload(
+    if legacy_runtime_events_available:
+        log_position_event(
+            conn,
+            "POSITION_SETTLED",
             pos,
-            winning_bin=winning_bin,
-            won=won,
-            outcome=outcome,
-        ),
-        timestamp=settled_at,
-        source="settlement",
-    )
+            details=_canonical_position_settled_payload(
+                pos,
+                winning_bin=winning_bin,
+                won=won,
+                outcome=outcome,
+            ),
+            timestamp=settled_at,
+            source="settlement",
+        )
 
 
 def log_trade_exit(conn: sqlite3.Connection, pos) -> None:

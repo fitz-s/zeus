@@ -3415,6 +3415,11 @@ def test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions():
 
     assert enter_economically_closed_runtime_state("pending_exit", exit_state="sell_pending") == "economically_closed"
     assert enter_settled_runtime_state("economically_closed") == "settled"
+    assert enter_settled_runtime_state(
+        "pending_exit",
+        exit_state="backoff_exhausted",
+        chain_state="exit_pending_missing",
+    ) == "settled"
     assert enter_admin_closed_runtime_state(
         "pending_exit",
         exit_state="retry_pending",
@@ -3424,10 +3429,16 @@ def test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions():
 
 
 def test_lifecycle_kernel_rejects_portfolio_terminal_transition_from_wrong_phase():
-    from src.state.lifecycle_manager import enter_admin_closed_runtime_state
+    from src.state.lifecycle_manager import enter_admin_closed_runtime_state, enter_settled_runtime_state
 
     with pytest.raises(ValueError, match="admin close requires pending_exit runtime phase"):
         enter_admin_closed_runtime_state("entered")
+    with pytest.raises(ValueError, match="pending_exit with backoff_exhausted"):
+        enter_settled_runtime_state(
+            "pending_exit",
+            exit_state="sell_pending",
+            chain_state="exit_pending_missing",
+        )
 
 
 def test_compute_economic_close_routes_pending_exit_through_kernel():
