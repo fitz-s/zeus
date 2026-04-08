@@ -17,14 +17,14 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
-- State: `FROZEN / IMPLEMENTATION_VERIFIED`
-- Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
+- Packet: `none`
+- State: `NO_LIVE_PACKET / STOP_AT_PACKET_BOUNDARY`
+- Execution mode: `SOLO_LEAD / WAITING_FOR_NEXT_FREEZE`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Repair the monitoring / exit-context seam so runtime can read trade truth plus shared world truth through an explicit attached connection instead of the legacy monolithic seam.
+No live packet is open. Stop at the BUG-MONITOR-SHARED-CONNECTION-REPAIR boundary until a new packet is explicitly frozen.
 
 ## Allowed files
 
@@ -68,24 +68,24 @@ Repair the monitoring / exit-context seam so runtime can read trade truth plus s
 
 ## Current blocker state
 
-- current runtime monitoring seam has been repaired and targeted tests passed
-- pre-close critic + verifier review still needs to run before local acceptance
-- out-of-scope local dirt must remain excluded from packet commits
+- BUG-MONITOR-SHARED-CONNECTION-REPAIR passed pre-close and post-close review gates on accepted boundary commit `f5914a8`
+- no live packet remains open
+- out-of-scope local dirt must remain excluded from future packet commits
 
 ## Immediate checklist
 
 - [x] `BUG-MONITOR-SHARED-CONNECTION-REPAIR` frozen
-- [ ] architecture/code-review/test map captured for the packet
+- [x] architecture/code-review/test map captured for the packet
 - [x] runtime seam repaired in code
 - [x] targeted tests pass
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] packet accepted locally
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Map the packet into bounded architecture / code-review / adversarial-test slices.
-2. Repair the runtime monitoring connection seam and targeted test contract only.
-3. Do not widen into migration, retirement, or bankroll work without a new packet.
+1. Do not widen into migration, retirement, or bankroll work without a new packet.
+2. Freeze a new packet before any further implementation work.
+3. Keep the post-close evidence surfaces available for the next cold start.

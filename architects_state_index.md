@@ -12,10 +12,10 @@ Metadata:
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
-- Active packet state: `frozen / implementation verified`
+- Active packet: `none`
+- Active packet state: `no live packet / stop at packet boundary`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
+- Last accepted packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Hold the repaired runtime monitoring / exit-context packet boundary while pre-close review runs.
-2. Keep the packet bounded to `src/engine/**`, `src/state/db.py`, targeted tests, and the packet/control surfaces.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. Stop at the current packet boundary; do not start a new packet until one is explicitly frozen.
+2. Preserve the truthful monitoring-seam evidence and post-close artifacts for future cold starts.
+3. Keep out-of-scope local dirt excluded from any future packet commit.
 
 ## Current out-of-scope dirt
 
