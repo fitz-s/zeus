@@ -3854,3 +3854,32 @@ Archive policy:
   - run pre-close critic and verifier review on the repaired seam
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 20:11 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR truth restored + re-verified
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - repaired packet-truth drift inside allowed files
+  - restored fresh targeted verification evidence for the monitoring shared-connection seam
+- Basis / evidence:
+  - `src/state/db.py` now exports `RISK_DB_PATH` on its own line again, so runtime/test imports no longer fail during collection
+  - removed a duplicate later `get_trade_connection_with_shared()` definition in `src/state/db.py` that had been shadowing the intended trade+shared helper with a legacy-connection variant
+  - `src/engine/cycle_runner.py` now keeps the monkeypatch surface but defaults `get_connection` to `get_trade_connection_with_shared()` so runtime monitoring uses the explicit trade+shared seam by default
+  - `tests/test_runtime_guards.py` now binds the shared-present seam test to the mode-scoped trade DB path rather than the legacy `ZEUS_DB_PATH` path
+  - `python3 -m py_compile src/state/db.py src/engine/cycle_runner.py tests/test_runtime_guards.py` passed
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k 'monitoring_uses_attached_shared_connection or monitoring_fails_loudly_when_shared_seam_unavailable'` -> `2 passed, 78 deselected`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k 'exit_context or monitor'` -> `12 passed, 68 deselected`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py -k incomplete_context` -> `2 passed, 52 deselected`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k monitor` -> `1 passed, 48 deselected`
+- Decisions frozen:
+  - keep the packet bounded to the single-source-of-truth monitoring seam, not bankroll, RiskGuard, migration, or daemon cutover work
+  - preserve `cycle_runner.get_connection` as the injection surface for tests while making the default runtime path truthful
+- Open uncertainties:
+  - pre-close critic and verifier review are still pending before local acceptance
+- Next required action:
+  - run the packet-bounded pre-close critic/verifier review on the restored seam and only then consider local acceptance
+- Owner:
+  - Architects mainline lead
