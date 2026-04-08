@@ -91,3 +91,12 @@ evidence_required:
 - This repair packet supersedes the previous claim that BUG-BANKROLL-TRUTH-CONSISTENCY fully closed the bankroll-truth boundary; the new runtime contradiction reopens the seam explicitly.
 - Degraded-path rule for this packet: current-mode canonical truth beats fallback truth; fallback is allowed only when the current-mode substrate is unavailable and must be labeled as such.
 - If implementation shows the fix requires `src/state/db.py` or lifecycle/projection changes, stop and freeze a new packet instead of widening this repair packet.
+
+
+## Evidence log
+
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted convergence pytest output: `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`; `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_summary_converges_to_current_mode_realized_truth tests/test_pnl_flow_and_audit.py::test_inv_riskguard_prefers_canonical_position_events_settlement_source tests/test_pnl_flow_and_audit.py::test_inv_riskguard_falls_back_to_legacy_settlement_source` -> `5 passed`; `.venv/bin/pytest -q tests/test_cross_module_relationships.py::test_riskguard_realized_pnl_matches_chronicle` -> `1 passed`
+- direct SQL/JSON truth comparison note: after running `riskguard.tick()` and `status_summary.write_status()` in paper mode, `outcome_fact_total = -13.03`, deduped `chronicle_settlement = -13.03`, `risk_state-paper.db realized_pnl = -13.03`, and `status_summary-paper.json realized_pnl = -13.03`
+- realized-truth contract note: `src/riskguard/riskguard.py` now opens the current-mode trade DB instead of the legacy monolith for runtime truth, and it derives realized PnL from `outcome_fact` first, then deduped `chronicle`, before falling back to broader settlement rows; `src/observability/status_summary.py` then reads the corrected current-mode `risk_state` output.

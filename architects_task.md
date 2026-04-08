@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
-- State: `REOPENED CONTRADICTION / FROZEN REPAIR`
+- State: `REOPENED CONTRADICTION / IMPLEMENTATION_VERIFIED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -68,16 +68,17 @@ Reopen and repair the realized-PnL truth seam so current-mode canonical settleme
 
 ## Current blocker state
 
-- fresh runtime evidence disproves the previously closed bankroll/truth boundary: `outcome_fact` and deduped `chronicle` show `-13.03` while `risk_state` and `status_summary` still show realized PnL near `+208.89`
-- this repair packet is frozen to restore one realized-truth seam before any other packet advances
+- realized-truth contract has been repaired in code across `riskguard` and `status_summary`
+- targeted convergence tests now pass, and fresh paper-mode SQL/JSON evidence converges at `-13.03` across canonical facts, `risk_state`, and `status_summary`
+- pre-close critic + verifier still need to run before local acceptance
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
 - [x] `REPAIR-REALIZED-TRUTH-CONVERGENCE` frozen
-- [ ] architecture/code-review/test map captured for the packet
-- [ ] realized-truth contract repaired in code
-- [ ] targeted tests pass
+- [x] architecture/code-review/test map captured for the packet
+- [x] realized-truth contract repaired in code
+- [x] targeted tests pass
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
 - [ ] packet accepted locally
@@ -86,6 +87,6 @@ Reopen and repair the realized-PnL truth seam so current-mode canonical settleme
 
 ## Next required action
 
-1. Map the repair into RiskGuard truth-source and operator-summary convergence slices.
-2. Repair the realized-truth contract only inside `riskguard.py`, `status_summary.py`, and targeted tests.
+1. Run pre-close critic review on the repaired realized-truth seam.
+2. Run pre-close verifier review on the repaired realized-truth seam.
 3. Do not widen into projection-query cleanup, control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.

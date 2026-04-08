@@ -4113,3 +4113,30 @@ Archive policy:
   - implement the minimal realized-truth convergence repair and rerun the direct four-surface comparison plus targeted tests
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 22:58 America/Chicago] REPAIR-REALIZED-TRUTH-CONVERGENCE implementation verified
+- Author: `Architects mainline lead`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Status delta:
+  - realized-truth seam repaired in code
+  - targeted convergence tests passed
+  - fresh paper-mode SQL/JSON truth surfaces now converge
+- Basis / evidence:
+  - `src/riskguard/riskguard.py` now opens the current-mode trade DB for runtime truth and derives realized PnL from `outcome_fact`, then deduped `chronicle`, before broader settlement-row fallback
+  - `src/observability/status_summary.py` continues to read the current-mode `risk_state` output, which now converges with canonical current-mode settlement truth
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_summary_converges_to_current_mode_realized_truth tests/test_pnl_flow_and_audit.py::test_inv_riskguard_prefers_canonical_position_events_settlement_source tests/test_pnl_flow_and_audit.py::test_inv_riskguard_falls_back_to_legacy_settlement_source` -> `5 passed`
+  - `.venv/bin/pytest -q tests/test_cross_module_relationships.py::test_riskguard_realized_pnl_matches_chronicle` -> `1 passed`
+  - live runtime evidence after `riskguard.tick()` + `status_summary.write_status()` in paper mode: `outcome_fact = -13.03`, deduped `chronicle = -13.03`, `risk_state = -13.03`, `status_summary = -13.03`
+- Decisions frozen:
+  - keep this repair on current-mode realized truth convergence only
+  - do not widen into projection-query cleanup, control-plane durability, lifecycle/projection rewrites, or ETL contamination while verifying this seam
+- Open uncertainties:
+  - pre-close critic and verifier review are still pending before local acceptance
+- Next required action:
+  - run pre-close critic + verifier review on the repaired realized-truth seam
+- Owner:
+  - Architects mainline lead

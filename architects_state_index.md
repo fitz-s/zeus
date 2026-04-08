@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
-- Active packet state: `reopened contradiction / frozen repair`
+- Active packet state: `reopened contradiction / implementation verified`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Repair the reopened realized-truth contradiction before any other packet advances.
+1. Run the pre-close critic + verifier on the repaired realized-truth seam.
 2. Keep the repair packet bounded to `riskguard.py`, `status_summary.py`, and targeted convergence tests.
 3. Keep out-of-scope local dirt excluded from packet commits.
 

@@ -2522,6 +2522,77 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
 
     assert row["win_rate"] is None
     assert details["accuracy"] == pytest.approx(0.5)
+    assert details["realized_pnl"] == pytest.approx(4.5)
+    assert details["total_pnl"] == pytest.approx(4.5)
+
+
+def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    status_path = tmp_path / "status_summary.json"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="trade-1",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.70,
+            outcome=1,
+            pnl=3.0,
+            strategy="center_buy",
+        ),
+        SettlementRecord(
+            trade_id="trade-2",
+            city="NYC",
+            target_date="2026-04-02",
+            range_label="41-42°F",
+            direction="buy_yes",
+            p_posterior=0.35,
+            outcome=1,
+            pnl=1.5,
+            strategy="opening_inertia",
+        ),
+    ])
+    conn.close()
+
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "state_path", lambda name: risk_db if name == "risk_state.db" else tmp_path / name)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(zeus_db))
+    monkeypatch.setattr(status_summary_module, "query_position_current_status_view", lambda conn: {
+        "status": "empty",
+        "positions": [],
+        "open_positions": 0,
+        "total_exposure_usd": 0.0,
+        "unrealized_pnl": 0.0,
+        "strategy_open_counts": {},
+        "chain_state_counts": {},
+        "exit_state_counts": {},
+        "unverified_entries": 0,
+        "day0_positions": 0,
+    })
+    monkeypatch.setattr(status_summary_module, "query_strategy_health_snapshot", lambda conn, now=None: {"status": "missing_table", "by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    riskguard_module.tick()
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+
+    assert status["portfolio"]["realized_pnl"] == pytest.approx(4.5)
+    assert status["portfolio"]["total_pnl"] == pytest.approx(4.5)
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(154.5)
 
 
 def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
