@@ -31,15 +31,43 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION` (accepted locally in worktree)
 - Current active packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
-- Current packet status: `pre-close passed / local acceptance ready`
+- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit still needs to be created on this worktree branch
+  - accepted commit `f179cd3` still needs transport back to the live `Architects` branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 04:14 America/Chicago] REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION accepted locally and passed post-close gate in worktree
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Status delta:
+  - bounded residual ghost repair accepted locally in worktree branch `architects-residual-trace-cleanup`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `f179cd3` -> `Stop stale ghost rows from poisoning runtime open views`
+  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/python -m py_compile src/state/db.py tests/test_pnl_flow_and_audit.py` -> success
+  - targeted ghost pytest -> `2 passed, 55 deselected`
+  - pre-close critic artifact -> `.omx/artifacts/claude-repair-residual-stale-ghost-preclose-critic-20260408T090115Z.md`
+  - pre-close verifier artifact -> `.omx/artifacts/claude-repair-residual-stale-ghost-preclose-verifier-20260408T090355Z.md`
+  - post-close critic artifact -> `.omx/artifacts/claude-repair-residual-stale-ghost-postclose-critic-20260408T090700Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-repair-residual-stale-ghost-postclose-verifier-20260408T090901Z.md`
+- Decisions frozen:
+  - past-target open-phase ghost rows no longer count as open runtime exposure
+  - loader view no longer degrades to `stale_legacy_fallback` only because of those ghosts
+  - the bounded residual seam is now covered by adversarial mixed-row tests
+- Open uncertainties:
+  - broader historical cleanup of stale rows in the DB remains out of scope
+- Next required action:
+  - cherry-pick `f179cd3` onto `Architects` and then decide whether the next packet should target deeper stale-row cleanup or strategy diagnosis
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 04:08 America/Chicago] REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION frozen
 - Author: `Architects clean worktree lane`

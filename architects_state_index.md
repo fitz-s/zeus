@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
-- Active packet state: `pre-close passed / local acceptance ready`
+- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Accept the residual ghost-exclusion packet locally and commit the bounded batch.
-2. Keep the packet bounded to read-side past-target ghost exclusion only.
+1. Cherry-pick accepted commit `f179cd3` onto `Architects` cleanly when ready.
+2. Keep the packet bounded to read-side past-target ghost exclusion only until transport is complete.
 3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt
