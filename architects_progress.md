@@ -31,16 +31,35 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY` (accepted locally in worktree)
-- Current active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
+- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Current active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Current packet status: `pre-close passed / local acceptance ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit `89579cb` still needs transport back to the live `Architects` branch
-  - the untracked re-audit note stays out of packet transport unless explicitly requested
-  - no next packet should freeze off this worktree branch before transport is complete
+  - accepted commit still needs to be created on this worktree branch
+  - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 02:20 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION frozen
+- Author: `Architects clean worktree lane`
+- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted BUG-CANONICAL-CLOSURE-TRACEABILITY boundary plus passed post-close gate permit the next packet freeze
+  - `/tmp/zeus_session_note_reaudit/docs/session_2026_04_07_leftovers_reaudit.md` ranks ETL/recalibrate contamination as the top remaining leftover family
+  - read-only subprocess import probes from outside repo cwd succeeded for representative scripts (`etl_observation_instants.py`, `etl_diurnal_curves.py`, `etl_temp_persistence.py`, `refit_platt.py`, `etl_tigge_ens.py`, `etl_tigge_calibration.py`, `run_replay.py`) and reported `get_connection_name = get_shared_connection`
+  - fresh synthetic reproduction against `scripts/etl_tigge_calibration.py` processed `vectors_processed = 2` but stored only one `ensemble_snapshots` row (`tigge_cal_v3_step048`) with `lead_hours = 24.0`, proving the current multi-step collapse bug
+- Decisions frozen:
+  - keep this packet on shared ETL/recalibrate proof plus the concrete TIGGE multi-step seam only
+  - do not widen into trade/lifecycle/risk/status truth repairs or broad migration cleanup
+- Open uncertainties:
+  - whether `_etl_recalibrate()` itself needs code changes or only packet-bounded proof tests remains implementation-time evidence
+- Next required action:
+  - implement bounded ETL/recalibrate tests and repair the TIGGE multi-step collapse inside the frozen packet
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 01:53 America/Chicago] BUG-CANONICAL-CLOSURE-TRACEABILITY accepted locally and passed post-close gate in worktree
 - Author: `Architects worktree lane`

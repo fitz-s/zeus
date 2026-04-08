@@ -24,6 +24,13 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 
 
+def _etl_subprocess_python() -> str:
+    candidate = Path(__file__).parent.parent / ".venv" / "bin" / "python"
+    if candidate.exists():
+        return str(candidate)
+    return sys.executable
+
+
 def _run_mode(mode: DiscoveryMode):
     """Wrapper with error handling and cycle lock for scheduler."""
     acquired = _cycle_lock.acquire(blocking=False)
@@ -85,7 +92,7 @@ def _etl_recalibrate():
     """
     import subprocess
 
-    venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python")
+    venv_python = _etl_subprocess_python()
     scripts_dir = Path(__file__).parent.parent / "scripts"
 
     results = {}
