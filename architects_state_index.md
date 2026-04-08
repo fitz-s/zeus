@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- Active packet state: `pre-close passed / local acceptance ready`
+- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Accept the bounded closure-slice repair locally, commit it, and then run post-close critic + verifier on the accepted boundary.
-2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. Cherry-pick accepted commit `89579cb` back onto `Architects` cleanly when ready.
+2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests until transport is complete.
+3. Keep the untracked re-audit note out of packet transport unless explicitly requested.
 
 ## Current out-of-scope dirt
 
