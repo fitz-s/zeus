@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY freeze`
+- Last updated by: `Codex REPAIR-REALIZED-TRUTH-CONVERGENCE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- Active packet state: `frozen / planning-ready`
+- Active packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Active packet state: `reopened contradiction / frozen repair`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Execute the frozen canonical-closure packet without widening into projection readers, control-plane, or ETL contamination work.
-2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
+1. Repair the reopened realized-truth contradiction before any other packet advances.
+2. Keep the repair packet bounded to `riskguard.py`, `status_summary.py`, and targeted convergence tests.
 3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+5. `work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md`

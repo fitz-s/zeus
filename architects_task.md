@@ -17,27 +17,26 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- State: `REOPENED CONTRADICTION / FROZEN REPAIR`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Restore one truthful close path so execution facts, outcome facts, and settlement legality stay durable and semantically aligned before broader projection cleanup.
+Reopen and repair the realized-PnL truth seam so current-mode canonical settlement facts, RiskGuard, and operator summary converge before any other packet advances.
 
 ## Allowed files
 
-- `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+- `work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/state/db.py`
-- `src/execution/harvester.py`
-- `src/state/lifecycle_manager.py`
-- `tests/test_db.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_runtime_guards.py`
+- `src/riskguard/riskguard.py`
+- `src/observability/status_summary.py`
+- `tests/test_riskguard.py`
+- `tests/test_pnl_flow_and_audit.py`
+- `tests/test_cross_module_relationships.py`
 
 ## Forbidden files
 
@@ -63,20 +62,21 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 - no migration-script execution or daemon cutover claim
 - no projection-query compatibility cleanup
 - no control-plane durability work
+- no lifecycle closure/projection rewrite
 - no ETL/recalibration contamination work
 - no team runtime launch
 
 ## Current blocker state
 
-- close-path truth still diverges between canonical durability and settlement legality
-- this packet is frozen to fix that single K-level seam without widening into other open families
+- fresh runtime evidence disproves the previously closed bankroll/truth boundary: `outcome_fact` and deduped `chronicle` show `-13.03` while `risk_state` and `status_summary` still show realized PnL near `+208.89`
+- this repair packet is frozen to restore one realized-truth seam before any other packet advances
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
+- [x] `REPAIR-REALIZED-TRUTH-CONVERGENCE` frozen
 - [ ] architecture/code-review/test map captured for the packet
-- [ ] closure contract repaired in code
+- [ ] realized-truth contract repaired in code
 - [ ] targeted tests pass
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
@@ -86,6 +86,6 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 
 ## Next required action
 
-1. Map the packet into bounded durable-write / settlement-legality slices.
-2. Repair the closure contract only inside `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
-3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
+1. Map the repair into RiskGuard truth-source and operator-summary convergence slices.
+2. Repair the realized-truth contract only inside `riskguard.py`, `status_summary.py`, and targeted tests.
+3. Do not widen into projection-query cleanup, control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
