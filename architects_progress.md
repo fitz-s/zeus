@@ -4091,3 +4091,25 @@ Archive policy:
   - run packet-bounded critic/verifier review on the frozen scope, then implement the minimal closure-truth repair
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 22:48 America/Chicago] REPAIR-REALIZED-TRUTH-CONVERGENCE frozen after contradiction reopen
+- Author: `Architects mainline lead`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Status delta:
+  - prior bankroll-truth closeout explicitly reopened by later repo-truth contradiction
+  - current repair packet frozen
+- Basis / evidence:
+  - direct current-mode paper truth comparison now shows `outcome_fact_total = -13.03` and deduped `chronicle_settlement = -13.03`, while `risk_state-paper.db` reports `realized_pnl = 208.89` and `status_summary-paper.json` reports `realized_pnl = 208.89`
+  - the latest `risk_state-paper.db` row still reports `portfolio_truth_source = working_state_fallback`, proving the closed packet did not converge runtime truth on the active mode
+  - because later repo truth disproved the earlier closure claim, repo law requires explicit reopen/repair before further packet advancement
+- Decisions frozen:
+  - pause BUG-CANONICAL-CLOSURE-TRACEABILITY advancement; the realized-truth contradiction takes precedence
+  - keep this repair bounded to RiskGuard/status-summary truth convergence only
+  - leave canonical closure traceability, control-plane durability, and ETL/recalibration contamination as later packet families after this repair
+- Open uncertainties:
+  - whether the minimal repair is only current-mode DB routing in RiskGuard or also requires a narrower status-summary truth-source change
+- Next required action:
+  - implement the minimal realized-truth convergence repair and rerun the direct four-surface comparison plus targeted tests
+- Owner:
+  - Architects mainline lead
