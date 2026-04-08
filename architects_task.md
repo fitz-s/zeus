@@ -82,12 +82,12 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 - [x] targeted tests pass
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] packet accepted locally
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Accept the repaired closure slice locally and commit the bounded packet batch.
-2. Run post-close third-party critic + verifier review on the accepted boundary before freezing any next packet.
+1. Cherry-pick accepted commit `89579cb` onto `Architects` cleanly when ready.
+2. Update the live branch control surfaces only after transport is complete.
 3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
