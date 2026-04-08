@@ -276,6 +276,56 @@ def build_settlement_canonical_write(
     return [event], projection
 
 
+def build_economic_close_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    phase_before: str,
+    source_module: str = "src.execution.exit_lifecycle",
+) -> tuple[list[dict], dict]:
+    projection = build_position_current_projection(position)
+    if projection["phase"] != ECONOMICALLY_CLOSED:
+        raise ValueError("economic close canonical builder requires an economically_closed position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "last_exit_at", ""),
+        projection["updated_at"],
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:exit_filled:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "EXIT_ORDER_FILLED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_before,
+        "phase_after": fold_lifecycle_phase(phase_before, ECONOMICALLY_CLOSED).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(
+            getattr(position, "last_exit_order_id", "") or getattr(position, "order_id", "")
+        ),
+        "command_id": None,
+        "caused_by": "exit_order_filled",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:exit_filled:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "payload_json": json.dumps(
+            {
+                "exit_price": getattr(position, "exit_price", None),
+                "pnl": getattr(position, "pnl", None),
+                "exit_reason": getattr(position, "exit_reason", ""),
+                "exit_state": getattr(position, "exit_state", ""),
+                "pre_exit_state": getattr(position, "pre_exit_state", ""),
+            },
+            default=str,
+            sort_keys=True,
+        ),
+    }
+    return [event], projection
+
+
 def build_reconciliation_rescue_canonical_write(
     position: Any,
     *,

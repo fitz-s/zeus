@@ -92,6 +92,15 @@ OPEN_EXPOSURE_PHASES = (
     "day0_window",
     "pending_exit",
 )
+TERMINAL_TRADE_DECISION_STATUSES = frozenset(
+    {
+        "exited",
+        "settled",
+        "voided",
+        "admin_closed",
+        "unresolved_ghost",
+    }
+)
 PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "pending_entry": "pending_tracked",
     "active": "entered",
@@ -2306,6 +2315,7 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
 
     positions: list[dict] = []
     strategy_open_counts: dict[str, int] = {}
@@ -2321,6 +2331,9 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         if phase not in OPEN_EXPOSURE_PHASES:
             continue
         trade_id = str(row["trade_id"] or row["position_id"] or "")
+        latest_trade_status = latest_trade_statuses.get(trade_id, "")
+        if latest_trade_status in TERMINAL_TRADE_DECISION_STATUSES:
+            continue
         hints = transitional_hints.get(trade_id, {})
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
@@ -2417,6 +2430,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
     legacy_latest_by_trade: dict[str, datetime] = {}
     legacy_table = _legacy_position_events_table(conn)
     if legacy_table:
@@ -2442,6 +2456,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     for row in rows:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
+        latest_trade_status = latest_trade_statuses.get(trade_id, "")
         hints = transitional_hints.get(trade_id, {})
         position_env = str(hints.get("env") or current_mode)
         if position_env != current_mode:
@@ -2451,6 +2466,10 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
         if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
             stale_trade_ids.append(trade_id)
             continue
+        runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
+        terminal_runtime_state = _terminal_runtime_state_for_trade_decision_status(latest_trade_status)
+        if terminal_runtime_state:
+            runtime_state = terminal_runtime_state
         positions.append(
             {
                 "trade_id": trade_id,
@@ -2478,7 +2497,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "chain_state": str(row["chain_state"] or "unknown"),
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
-                "state": PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase),
+                "state": runtime_state,
                 "env": position_env,
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
@@ -2650,6 +2669,69 @@ def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
 def _parse_boolish_text(raw: str) -> bool:
     text = str(raw).strip().lower()
     return text in {"1", "true", "yes", "on", "enabled", "gate"}
+
+
+def _latest_trade_decision_status_by_trade_id(
+    conn: sqlite3.Connection,
+    trade_ids: list[str],
+) -> dict[str, str]:
+    if not trade_ids or not _table_exists(conn, "trade_decisions"):
+        return {}
+    placeholders = ", ".join("?" for _ in trade_ids)
+
+    def _query_latest_status_rows(target_conn: sqlite3.Connection) -> dict[str, str]:
+        rows = target_conn.execute(
+            f"""
+            WITH latest AS (
+                SELECT runtime_trade_id, MAX(trade_id) AS latest_trade_id
+                FROM trade_decisions
+                WHERE runtime_trade_id IN ({placeholders})
+                  AND runtime_trade_id IS NOT NULL
+                GROUP BY runtime_trade_id
+            )
+            SELECT td.runtime_trade_id, td.status
+            FROM latest
+            JOIN trade_decisions td ON td.trade_id = latest.latest_trade_id
+            """,
+            trade_ids,
+        ).fetchall()
+        return {
+            str(row["runtime_trade_id"] or ""): str(row["status"] or "")
+            for row in rows
+            if str(row["runtime_trade_id"] or "")
+        }
+
+    statuses = _query_latest_status_rows(conn)
+    try:
+        db_list = conn.execute("PRAGMA database_list").fetchall()
+        main_path = next((str(row[2]) for row in db_list if row[1] == "main"), "")
+    except sqlite3.OperationalError:
+        main_path = ""
+
+    if ZEUS_DB_PATH.exists() and str(ZEUS_DB_PATH) != main_path:
+        legacy_conn = sqlite3.connect(str(ZEUS_DB_PATH))
+        legacy_conn.row_factory = sqlite3.Row
+        try:
+            if _table_exists(legacy_conn, "trade_decisions"):
+                legacy_statuses = _query_latest_status_rows(legacy_conn)
+                for trade_id, legacy_status in legacy_statuses.items():
+                    if statuses.get(trade_id) not in TERMINAL_TRADE_DECISION_STATUSES and legacy_status in TERMINAL_TRADE_DECISION_STATUSES:
+                        statuses[trade_id] = legacy_status
+        finally:
+            legacy_conn.close()
+
+    return statuses
+
+
+def _terminal_runtime_state_for_trade_decision_status(status: str) -> str | None:
+    normalized = str(status or "").strip().lower()
+    if normalized == "exited":
+        return "economically_closed"
+    if normalized in {"settled", "voided", "admin_closed"}:
+        return normalized
+    if normalized == "unresolved_ghost":
+        return "admin_closed"
+    return None
 
 
 def _query_transitional_position_hints(
