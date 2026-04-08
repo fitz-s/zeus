@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
-- Active packet state: `pre-close passed / local acceptance ready`
+- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Accept the ETL/recalibrate packet locally and commit the bounded batch.
-2. Keep the packet bounded to `_etl_recalibrate()`, `etl_tigge_calibration.py`, and packet-bounded tests proving shared-binding/import safety plus multi-step preservation.
-3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+1. Cherry-pick accepted commit `0c9a348` onto `Architects` cleanly when ready.
+2. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+3. Freeze the next leftover-family packet only after transport or an explicit branch-local decision.
 
 ## Current out-of-scope dirt
 

@@ -117,3 +117,5 @@ evidence_required:
 - pre-close verifier note:
   - primary Gemini verifier path failed locally due certificate/auth issues (`.omx/artifacts/gemini-verify-etl-recalibrate-preclose-verifier-20260408T073244Z.md`)
   - fallback verifier artifact: `.omx/artifacts/claude-verify-etl-recalibrate-preclose-verifier-fallback-20260408T073355Z.md` -> `PASS`
+- post-close critic artifact: `.omx/artifacts/claude-verify-etl-recalibrate-postclose-critic-20260408T073947Z.md` -> `PASS`
+- post-close verifier artifact: `.omx/artifacts/claude-verify-etl-recalibrate-postclose-verifier-20260408T074222Z.md` -> `PASS`

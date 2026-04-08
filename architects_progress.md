@@ -31,15 +31,43 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally in worktree)
 - Current active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
-- Current packet status: `pre-close passed / local acceptance ready`
+- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit still needs to be created on this worktree branch
+  - accepted commit `0c9a348` still needs transport back to the live `Architects` branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 02:43 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION accepted locally and passed post-close gate in worktree
+- Author: `Architects clean worktree lane`
+- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Status delta:
+  - bounded ETL/recalibrate repair accepted locally in worktree branch `architects-verify-etl-contamination`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `0c9a348` -> `Prevent ETL recalibration from collapsing shared step truth`
+  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_observation_instants_etl.py tests/test_run_replay_cli.py tests/test_etl_recalibrate_chain.py` -> `15 passed`
+  - `.venv/bin/python -m py_compile src/main.py scripts/etl_tigge_calibration.py tests/test_etl_recalibrate_chain.py` -> success
+  - pre-close critic artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-preclose-critic-20260408T073113Z.md`
+  - pre-close verifier fallback artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-preclose-verifier-fallback-20260408T073355Z.md`
+  - post-close critic artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-postclose-critic-20260408T073947Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-postclose-verifier-20260408T074222Z.md`
+- Decisions frozen:
+  - `_etl_recalibrate()` now chooses repo-local `.venv/bin/python` when present and otherwise falls back to the current interpreter
+  - representative shared scripts now have packet-bounded import-safe/shared-binding proof from outside repo cwd
+  - `etl_tigge_calibration.py` no longer collapses a date directory to the last step file and no longer hardcodes `lead_hours = 24.0`
+- Open uncertainties:
+  - transport back to the live `Architects` branch still needs to happen cleanly
+- Next required action:
+  - cherry-pick `0c9a348` onto `Architects` and then decide whether the next lawful packet should come from position/settlement trace convergence or another leftover family
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 02:20 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION frozen
 - Author: `Architects clean worktree lane`
