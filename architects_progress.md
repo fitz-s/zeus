@@ -3951,3 +3951,30 @@ Archive policy:
   - stop at the current packet boundary until a new packet is explicitly frozen
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 20:40 America/Chicago] BUG-BANKROLL-TRUTH-CONSISTENCY frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `docs/session_2026_04_07_final_state.md` still flags `effective_bankroll=$579.58 vs wallet=$93.68` as unresolved and separately flags RiskGuard/status-summary bankroll semantics drift
+  - `src/engine/cycle_runtime.py::entry_bankroll_for_cycle()` still derives paper entry bankroll from `portfolio.effective_bankroll` alone (`142-153`)
+  - `src/riskguard/riskguard.py::_load_riskguard_portfolio_truth()` still rebuilds a fresh `PortfolioState` with reset bankroll/baseline/recent-exit semantics (`73-97`)
+  - `src/observability/status_summary.py` still fabricates `effective_bankroll` from `total_pnl` when risk details are missing and still drops regime scoping by passing `not_before=None` (`221-259`)
+  - existing tests already expose the touched seams: `test_inv_kelly_uses_effective_bankroll`, `test_inv_riskguard_reads_real_pnl`, RiskGuard portfolio-truth tests, and status-summary regime-scoping tests
+- Decisions frozen:
+  - treat bankroll truth as the next K-level cross-module loss after the monitoring seam, because it directly affects trade sizing, risk interpretation, and operator observability in both paper and live simulation
+  - keep this packet bounded to entry/risk/operator bankroll semantics only
+  - leave control-plane durability, lifecycle closure/projection traceability, and ETL/recalibration contamination as later packet families
+- Open uncertainties:
+  - whether the minimal repair can stay inside consumer semantics or needs one small shared contract helper
+  - whether RiskGuard baselines can be preserved without widening into broader portfolio-truth migration
+- Next required action:
+  - implement the minimal bankroll-truth repair inside the frozen scope
+- Freeze review:
+  - critic artifact: `.omx/artifacts/gemini-bug-bankroll-truth-freeze-critic-20260408T014904Z.md` -> `APPROVE`
+  - verifier artifact: `.omx/artifacts/claude-bug-bankroll-truth-freeze-verifier-20260408T014904Z.md` -> `READY`
+- Owner:
+  - Architects mainline lead

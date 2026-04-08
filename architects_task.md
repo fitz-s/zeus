@@ -17,28 +17,27 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `NO_LIVE_PACKET / STOP_AT_PACKET_BOUNDARY`
-- Execution mode: `SOLO_LEAD / WAITING_FOR_NEXT_FREEZE`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- State: `FROZEN / IMPLEMENTATION_READY`
+- Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet is open. Stop at the BUG-MONITOR-SHARED-CONNECTION-REPAIR boundary until a new packet is explicitly frozen.
+Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summary before touching broader lifecycle or ETL seams.
 
 ## Allowed files
 
-- `work_packets/BUG-MONITOR-SHARED-CONNECTION-REPAIR.md`
+- `work_packets/BUG-BANKROLL-TRUTH-CONSISTENCY.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/engine/cycle_runner.py`
 - `src/engine/cycle_runtime.py`
-- `src/engine/monitor_refresh.py`
-- `src/state/db.py`
-- `tests/test_runtime_guards.py`
-- `tests/test_live_safety_invariants.py`
+- `src/riskguard/riskguard.py`
+- `src/observability/status_summary.py`
 - `tests/test_pnl_flow_and_audit.py`
+- `tests/test_riskguard.py`
+- `tests/test_cross_module_relationships.py`
 
 ## Forbidden files
 
@@ -61,31 +60,32 @@ No live packet is open. Stop at the BUG-MONITOR-SHARED-CONNECTION-REPAIR boundar
 
 ## Non-goals
 
-- no RiskGuard packet work in this packet
 - no migration-script execution or daemon cutover claim
-- no bankroll semantics redesign
+- no control-plane durability work
+- no lifecycle/projection rewrite
+- no ETL/recalibration contamination work
 - no team runtime launch
 
 ## Current blocker state
 
-- BUG-MONITOR-SHARED-CONNECTION-REPAIR passed pre-close and post-close review gates on accepted boundary commit `f5914a8`
-- no live packet remains open
-- out-of-scope local dirt must remain excluded from future packet commits
+- bankroll truth still diverges across `cycle_runtime`, `riskguard`, and `status_summary`
+- this packet is frozen to fix that single K-level seam without widening into other open families
+- out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] `BUG-MONITOR-SHARED-CONNECTION-REPAIR` frozen
-- [x] architecture/code-review/test map captured for the packet
-- [x] runtime seam repaired in code
-- [x] targeted tests pass
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] packet accepted locally
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] `BUG-BANKROLL-TRUTH-CONSISTENCY` frozen
+- [ ] architecture/code-review/test map captured for the packet
+- [ ] bankroll contract repaired in code
+- [ ] targeted tests pass
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] packet accepted locally
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Do not widen into migration, retirement, or bankroll work without a new packet.
-2. Freeze a new packet before any further implementation work.
-3. Keep the post-close evidence surfaces available for the next cold start.
+1. Map the packet into bounded entry / risk / operator truth slices.
+2. Repair the bankroll contract only inside `cycle_runtime`, `riskguard`, `status_summary`, and targeted tests.
+3. Do not widen into control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
