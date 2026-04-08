@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY closure slice`
+- Last updated by: `Codex VERIFY-ETL-RECALIBRATE-CONTAMINATION freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
+- Active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Active packet state: `pre-close passed / local acceptance ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Cherry-pick accepted commit `89579cb` back onto `Architects` cleanly when ready.
-2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests until transport is complete.
-3. Keep the untracked re-audit note out of packet transport unless explicitly requested.
+1. Accept the ETL/recalibrate packet locally and commit the bounded batch.
+2. Keep the packet bounded to `_etl_recalibrate()`, `etl_tigge_calibration.py`, and packet-bounded tests proving shared-binding/import safety plus multi-step preservation.
+3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+5. `work_packets/VERIFY-ETL-RECALIBRATE-CONTAMINATION.md`
