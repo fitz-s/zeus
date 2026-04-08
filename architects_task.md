@@ -17,26 +17,27 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
-- State: `REOPENED CONTRADICTION / IMPLEMENTATION_VERIFIED`
+- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Reopen and repair the realized-PnL truth seam so current-mode canonical settlement facts, RiskGuard, and operator summary converge before any other packet advances.
+Restore one truthful close path so execution facts, outcome facts, and settlement legality stay durable and semantically aligned before broader projection cleanup.
 
 ## Allowed files
 
-- `work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md`
+- `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/riskguard/riskguard.py`
-- `src/observability/status_summary.py`
-- `tests/test_riskguard.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_cross_module_relationships.py`
+- `src/state/db.py`
+- `src/execution/harvester.py`
+- `src/state/lifecycle_manager.py`
+- `tests/test_db.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_runtime_guards.py`
 
 ## Forbidden files
 
@@ -62,7 +63,6 @@ Reopen and repair the realized-PnL truth seam so current-mode canonical settleme
 - no migration-script execution or daemon cutover claim
 - no projection-query compatibility cleanup
 - no control-plane durability work
-- no lifecycle closure/projection rewrite
 - no ETL/recalibration contamination work
 - no team runtime launch
 
@@ -70,15 +70,16 @@ Reopen and repair the realized-PnL truth seam so current-mode canonical settleme
 
 - realized-truth contract has been repaired in code across `riskguard` and `status_summary`
 - targeted convergence tests now pass, and fresh paper-mode SQL/JSON evidence converges at `-13.03` across canonical facts, `risk_state`, and `status_summary`
-- pre-close critic + verifier still need to run before local acceptance
+- pre-close critic + verifier passed on the repaired realized-truth seam
+- post-close third-party critic + verifier still need to run before packet closeout
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] `REPAIR-REALIZED-TRUTH-CONVERGENCE` frozen
-- [x] architecture/code-review/test map captured for the packet
-- [x] realized-truth contract repaired in code
-- [x] targeted tests pass
+- [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
+- [ ] architecture/code-review/test map captured for the packet
+- [ ] closure contract repaired in code
+- [ ] targeted tests pass
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
 - [ ] packet accepted locally
@@ -87,6 +88,6 @@ Reopen and repair the realized-PnL truth seam so current-mode canonical settleme
 
 ## Next required action
 
-1. Run pre-close critic review on the repaired realized-truth seam.
-2. Run pre-close verifier review on the repaired realized-truth seam.
-3. Do not widen into projection-query cleanup, control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
+1. Map the packet into bounded durable-write / settlement-legality slices.
+2. Repair the closure contract only inside `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
+3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.

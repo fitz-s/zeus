@@ -4140,3 +4140,91 @@ Archive policy:
   - run pre-close critic + verifier review on the repaired realized-truth seam
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 23:01 America/Chicago] REPAIR-REALIZED-TRUTH-CONVERGENCE accepted locally
+- Author: `Architects mainline lead`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Status delta:
+  - packet accepted
+  - accepted repair boundary frozen for post-close review
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_summary_converges_to_current_mode_realized_truth tests/test_pnl_flow_and_audit.py::test_inv_riskguard_prefers_canonical_position_events_settlement_source tests/test_pnl_flow_and_audit.py::test_inv_riskguard_falls_back_to_legacy_settlement_source` -> `5 passed`
+  - `.venv/bin/pytest -q tests/test_cross_module_relationships.py::test_riskguard_realized_pnl_matches_chronicle` -> `1 passed`
+  - live paper-mode truth comparison after `riskguard.tick()` + `status_summary.write_status()`: `outcome_fact = -13.03`, deduped `chronicle = -13.03`, `risk_state = -13.03`, `status_summary = -13.03`
+  - independent pre-close critic artifact: `.omx/artifacts/gemini-repair-realized-truth-preclose-critic-20260408T035939Z.md` -> `APPROVE / no blockers`
+  - independent pre-close verifier artifact: `.omx/artifacts/claude-repair-realized-truth-preclose-verifier-20260408T035939Z.md` -> `SUFFICIENT`
+- Decisions frozen:
+  - this acceptance claims only current-mode realized-PnL truth convergence across canonical facts, RiskGuard, and operator summary
+  - it does not claim control-plane, lifecycle/projection, ETL/recalibration, or broader closure-traceability convergence
+- Open uncertainties:
+  - the accepted boundary still requires the user-required post-close third-party critic + verifier gate before packet closeout may be recorded
+- Next required action:
+  - run the post-close third-party critic + verifier on the accepted realized-truth seam
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 23:05 America/Chicago] REPAIR-REALIZED-TRUTH-CONVERGENCE post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - repair closeout became allowed
+- Basis / evidence:
+  - third-party post-close critic artifact: `.omx/artifacts/gemini-repair-realized-truth-postclose-critic-20260408T040100Z.md` -> `PASS`
+  - third-party post-close verifier artifact: `.omx/artifacts/claude-repair-realized-truth-postclose-verifier-20260408T040100Z.md` -> `PASS`
+  - accepted repair boundary `f67f37a` no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - the realized-truth repair may be closed without widening into broader lifecycle or ETL work
+- Open uncertainties:
+  - none inside the completed repair boundary
+- Next required action:
+  - record repair closeout truth and resume the canonical closure traceability roadmap
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 23:05 America/Chicago] REPAIR-REALIZED-TRUTH-CONVERGENCE closeout recorded
+- Author: `Architects mainline lead`
+- Packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Status delta:
+  - repair completion is now recorded under current repo truth
+  - the previously blocked bankroll/truth contradiction is resolved at the current-mode seam
+- Basis / evidence:
+  - accepted repair boundary `f67f37a` passed pre-close review and post-close gate
+  - work packet evidence log now records both pre-close and post-close external review artifacts
+  - fresh paper-mode runtime evidence converged canonical facts, `risk_state`, and `status_summary` at `-13.03`
+- Decisions frozen:
+  - this closeout claims only current-mode realized-truth convergence across canonical facts, RiskGuard, and operator summary
+  - it does not authorize broader lifecycle/projection, control-plane, or ETL contamination claims
+- Open uncertainties:
+  - none inside the closed repair boundary
+- Next required action:
+  - resume the frozen `BUG-CANONICAL-CLOSURE-TRACEABILITY` packet as the next K-level seam
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 23:05 America/Chicago] BUG-CANONICAL-CLOSURE-TRACEABILITY resumed as active packet
+- Author: `Architects mainline lead`
+- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Status delta:
+  - packet restored as current active packet after realized-truth repair closeout
+- Basis / evidence:
+  - the realized-truth contradiction that paused this packet is now closed
+  - the close-path durability / legality seam remains the next highest-leverage unresolved K-level packet under current repo truth
+- Decisions frozen:
+  - keep the packet bounded to `src/state/db.py`, `src/execution/harvester.py`, `src/state/lifecycle_manager.py`, and targeted tests
+  - continue to exclude projection-query cleanup, control-plane durability, and ETL contamination work
+- Open uncertainties:
+  - whether canonical-only close-path writes should emit facts directly or fail-loud until substrate completion
+  - whether `backoff_exhausted` should legalize via `economically_closed` first or via a narrower settlement rule
+- Next required action:
+  - run packet-bounded critic/verifier review on the resumed packet scope, then implement the minimal closure-truth repair
+- Owner:
+  - Architects mainline lead
