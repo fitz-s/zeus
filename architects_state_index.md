@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-BANKROLL-TRUTH-CONSISTENCY closeout`
+- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `none`
-- Active packet state: `no live packet / stop at packet boundary`
+- Active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Active packet state: `frozen / planning-ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Stop at the current packet boundary; do not start a new packet until one is explicitly frozen.
-2. Preserve the bankroll-truth evidence and review artifacts for future cold starts.
-3. Keep out-of-scope local dirt excluded from any future packet commit.
+1. Execute the frozen canonical-closure packet without widening into projection readers, control-plane, or ETL contamination work.
+2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
+3. Keep out-of-scope local dirt excluded from packet commits.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-BANKROLL-TRUTH-CONSISTENCY.md`
+5. `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`

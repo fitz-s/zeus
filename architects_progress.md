@@ -4069,3 +4069,25 @@ Archive policy:
   - stop at the current packet boundary until a new packet is explicitly frozen
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 22:34 America/Chicago] BUG-CANONICAL-CLOSURE-TRACEABILITY frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - `docs/session_2026_04_07_final_state.md` still flags canonical-only short-circuiting in `log_execution_report()` / `log_settlement_event()` before `execution_fact` / `outcome_fact` writes
+  - `src/execution/harvester.py` explicitly permits `pending_exit + backoff_exhausted` positions to settle while `src/state/lifecycle_manager.py::enter_settled_runtime_state()` does not legalize that transition
+  - existing tests already expose the touched seam: durable execution/outcome fact tests in `tests/test_db.py`, canonical bootstrap behavior in `tests/test_architecture_contracts.py`, and `backoff_exhausted` monitor/settlement tests in `tests/test_runtime_guards.py`
+- Decisions frozen:
+  - treat durable close-path truth and settlement legality as the next K-level seam after bankroll truth because they directly affect end-to-end traceability from exit attempt to settlement
+  - keep this packet bounded to durable close-path writes and lifecycle legality only
+  - leave projection-query compatibility cleanup, control-plane durability, and ETL/recalibration contamination as later packet families
+- Open uncertainties:
+  - whether the minimal repair should make canonical-only paths emit facts directly or instead fail-loud until the canonical substrate is complete
+  - whether `backoff_exhausted` should legalize via `economically_closed` first or via a narrower settlement rule
+- Next required action:
+  - run packet-bounded critic/verifier review on the frozen scope, then implement the minimal closure-truth repair
+- Owner:
+  - Architects mainline lead
