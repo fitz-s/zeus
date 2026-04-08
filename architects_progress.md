@@ -31,15 +31,45 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE` (accepted locally in worktree)
 - Current active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
-- Current packet status: `pre-close passed / local acceptance ready`
+- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit still needs to be created on this worktree branch
+  - accepted commit `c33ab3f` still needs transport back to the live `Architects` branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 03:57 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE accepted locally and passed post-close gate in worktree
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Status delta:
+  - bounded close-path trace repair accepted locally in worktree branch `architects-position-settlement-trace`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `c33ab3f` -> `Stop terminal positions from masquerading as open runtime truth`
+  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/python -m py_compile src/state/db.py src/engine/lifecycle_events.py src/execution/exit_lifecycle.py src/execution/harvester.py tests/test_architecture_contracts.py tests/test_pnl_flow_and_audit.py tests/test_runtime_guards.py` -> success
+  - architecture subset -> `11 passed, 77 deselected`
+  - runtime subset -> `17 passed, 64 deselected`
+  - pnl/audit subset -> `4 passed, 51 deselected`
+  - pre-close critic artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-preclose-critic-20260408T084208Z.md`
+  - pre-close verifier artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-preclose-verifier-20260408T084558Z.md`
+  - post-close critic artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-postclose-critic-20260408T085520Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-postclose-verifier-20260408T085701Z.md`
+- Decisions frozen:
+  - close-path readers now exclude rows whose latest durable terminal truth already marks them exited/settled, including current mixed-state fallback through legacy `zeus.db`
+  - future economic-close paths now append canonical `EXIT_ORDER_FILLED` and update `position_current` to `economically_closed` when prior canonical history exists
+  - harvester chronicle settlement payloads now carry `exit_price`
+- Open uncertainties:
+  - broad historical cleanup for already-missing chronicle `exit_price` rows remains out of scope
+- Next required action:
+  - cherry-pick `c33ab3f` onto `Architects` and then decide whether the next packet should target the remaining stale-open ghosts or strategy diagnosis
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 03:24 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE frozen
 - Author: `Architects clean worktree lane`
