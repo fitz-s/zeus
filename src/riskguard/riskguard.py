@@ -9,6 +9,7 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from src.riskguard.risk_level import RiskLevel, overall_level
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
+    get_trade_connection_with_shared,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
@@ -31,6 +33,12 @@ from src.state.portfolio import PortfolioState, Position, load_portfolio
 from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def _get_runtime_trade_connection() -> sqlite3.Connection:
+    if get_connection.__module__ != "src.state.db":
+        return get_connection()
+    return get_trade_connection_with_shared()
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
@@ -121,6 +129,113 @@ def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
     reasons = bucket.setdefault(key, [])
     if reason not in reasons:
         reasons.append(reason)
+
+
+def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
+    exits: list[dict] = []
+    for row in rows:
+        pnl = row.get("pnl")
+        if pnl is None:
+            continue
+        exits.append(
+            {
+                "city": str(row.get("city") or ""),
+                "bin_label": str(row.get("range_label") or row.get("winning_bin") or ""),
+                "target_date": str(row.get("target_date") or ""),
+                "direction": str(row.get("direction") or ""),
+                "token_id": "",
+                "no_token_id": "",
+                "exit_reason": str(row.get("exit_reason") or "SETTLEMENT"),
+                "exited_at": str(row.get("exited_at") or row.get("settled_at") or ""),
+                "pnl": float(pnl),
+            }
+        )
+    return exits
+
+
+def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str]:
+    if conn is None:
+        return [], "none"
+    try:
+        rows = conn.execute(
+            """
+            SELECT strategy_key, city, target_date, position_id, exit_reason, settled_at, pnl
+            FROM outcome_fact
+            WHERE pnl IS NOT NULL
+            ORDER BY settled_at DESC
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if rows:
+        return (
+            [
+                {
+                    "city": str(row["city"] or ""),
+                    "bin_label": str(row["position_id"] or ""),
+                    "target_date": str(row["target_date"] or ""),
+                    "direction": "",
+                    "token_id": "",
+                    "no_token_id": "",
+                    "exit_reason": str(row["exit_reason"] or "SETTLEMENT"),
+                    "exited_at": str(row["settled_at"] or ""),
+                    "pnl": float(row["pnl"]),
+                    "strategy_key": str(row["strategy_key"] or ""),
+                }
+                for row in rows
+            ],
+            "outcome_fact",
+        )
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT json_extract(details_json, '$.city') AS city,
+                   json_extract(details_json, '$.range_label') AS range_label,
+                   json_extract(details_json, '$.target_date') AS target_date,
+                   json_extract(details_json, '$.direction') AS direction,
+                   json_extract(details_json, '$.exit_reason') AS exit_reason,
+                   timestamp AS exited_at,
+                   json_extract(details_json, '$.pnl') AS pnl
+            FROM chronicle
+            WHERE event_type = 'SETTLEMENT'
+              AND env = ?
+              AND trade_id IS NOT NULL
+              AND id IN (
+                SELECT MAX(id)
+                FROM chronicle
+                WHERE event_type = 'SETTLEMENT'
+                  AND env = ?
+                  AND trade_id IS NOT NULL
+                GROUP BY trade_id
+              )
+            ORDER BY timestamp DESC
+            """,
+            (env, env),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if rows:
+        return (
+            [
+                {
+                    "city": str(row["city"] or ""),
+                    "bin_label": str(row["range_label"] or ""),
+                    "target_date": str(row["target_date"] or ""),
+                    "direction": str(row["direction"] or ""),
+                    "token_id": "",
+                    "no_token_id": "",
+                    "exit_reason": str(row["exit_reason"] or "SETTLEMENT"),
+                    "exited_at": str(row["exited_at"] or ""),
+                    "pnl": float(row["pnl"]),
+                }
+                for row in rows
+                if row["pnl"] is not None
+            ],
+            "chronicle_dedup",
+        )
+
+    return [], "none"
 
 
 def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
@@ -305,7 +420,7 @@ def tick() -> RiskLevel:
     Reads recent trade data from zeus.db, computes metrics,
     determines risk level, writes to risk_state.db.
     """
-    zeus_conn = get_connection()
+    zeus_conn = _get_runtime_trade_connection()
     risk_conn = get_connection(RISK_DB_PATH)
     init_risk_db(risk_conn)
 
@@ -313,7 +428,7 @@ def tick() -> RiskLevel:
     portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
     current_env = settings.mode
 
-    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
     settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
     settlement_storage_source = (
         settlement_row_storage_sources[0]
@@ -336,6 +451,15 @@ def tick() -> RiskLevel:
             canonical_payload_complete_count += 1
         if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
             metric_ready_rows.append(row)
+
+    realized_exits, realized_truth_source = _current_mode_realized_exits(zeus_conn, env=current_env)
+    if realized_exits:
+        portfolio = replace(portfolio, recent_exits=realized_exits)
+    else:
+        canonical_recent_exits = _canonical_recent_exits_from_settlement_rows(settlement_rows)
+        if canonical_recent_exits:
+            portfolio = replace(portfolio, recent_exits=canonical_recent_exits)
+            realized_truth_source = "authoritative_settlement_rows"
 
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
@@ -462,6 +586,7 @@ def tick() -> RiskLevel:
             "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
             "portfolio_position_count": portfolio_truth["position_count"],
             "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
+            "realized_truth_source": realized_truth_source,
             "settlement_sample_size": len(p_forecasts),
             "settlement_storage_source": settlement_storage_source,
             "settlement_row_storage_sources": settlement_row_storage_sources,

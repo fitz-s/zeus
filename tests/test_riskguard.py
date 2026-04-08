@@ -296,7 +296,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{
+            lambda conn, limit=50, **kwargs: [{
                 "p_posterior": 0.7,
                 "outcome": 1,
                 "source": "position_events",
@@ -346,7 +346,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
         )
 
         riskguard_module.tick()
