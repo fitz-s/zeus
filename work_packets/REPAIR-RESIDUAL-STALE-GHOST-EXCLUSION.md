@@ -100,3 +100,5 @@ evidence_required:
   - post-repair live probe with patched code against the same state shows `status_open_positions = 3`, `status_open_trade_ids = ['52280711-260', 'b33ff595-3cb', 'c25e2bfe-769']`, and `loader_status = ok`
 - independent pre-close critic artifact: `.omx/artifacts/claude-repair-residual-stale-ghost-preclose-critic-20260408T090115Z.md` -> `PASS`
 - pre-close verifier artifact: `.omx/artifacts/claude-repair-residual-stale-ghost-preclose-verifier-20260408T090355Z.md` -> `PASS`
+- post-close critic artifact: `.omx/artifacts/claude-repair-residual-stale-ghost-postclose-critic-20260408T090700Z.md` -> `PASS`
+- post-close verifier artifact: `.omx/artifacts/claude-repair-residual-stale-ghost-postclose-verifier-20260408T090901Z.md` -> `PASS`
