@@ -17,27 +17,27 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `none`
-- State: `NO_LIVE_PACKET / STOP_AT_PACKET_BOUNDARY`
-- Execution mode: `SOLO_LEAD / WAITING_FOR_NEXT_FREEZE`
+- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- State: `FROZEN / IMPLEMENTATION_READY`
+- Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-No live packet is open. Stop at the BUG-BANKROLL-TRUTH-CONSISTENCY boundary until a new packet is explicitly frozen.
+Restore one truthful close path so execution facts, outcome facts, and settlement legality stay durable and semantically aligned before broader projection cleanup.
 
 ## Allowed files
 
-- `work_packets/BUG-BANKROLL-TRUTH-CONSISTENCY.md`
+- `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/engine/cycle_runtime.py`
-- `src/riskguard/riskguard.py`
-- `src/observability/status_summary.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_riskguard.py`
-- `tests/test_cross_module_relationships.py`
+- `src/state/db.py`
+- `src/execution/harvester.py`
+- `src/state/lifecycle_manager.py`
+- `tests/test_db.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_runtime_guards.py`
 
 ## Forbidden files
 
@@ -61,31 +61,31 @@ No live packet is open. Stop at the BUG-BANKROLL-TRUTH-CONSISTENCY boundary unti
 ## Non-goals
 
 - no migration-script execution or daemon cutover claim
+- no projection-query compatibility cleanup
 - no control-plane durability work
-- no lifecycle/projection rewrite
 - no ETL/recalibration contamination work
 - no team runtime launch
 
 ## Current blocker state
 
-- BUG-BANKROLL-TRUTH-CONSISTENCY passed pre-close and post-close review gates on accepted boundary commit `7cde843`
-- no live packet remains open
-- out-of-scope local dirt must remain excluded from future packet commits
+- close-path truth still diverges between canonical durability and settlement legality
+- this packet is frozen to fix that single K-level seam without widening into other open families
+- out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
-- [x] `BUG-BANKROLL-TRUTH-CONSISTENCY` frozen
-- [x] architecture/code-review/test map captured for the packet
-- [x] bankroll contract repaired in code
-- [x] targeted tests pass
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] packet accepted locally
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
+- [ ] architecture/code-review/test map captured for the packet
+- [ ] closure contract repaired in code
+- [ ] targeted tests pass
+- [ ] pre-close critic review passed
+- [ ] pre-close verifier review passed
+- [ ] packet accepted locally
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Do not widen into control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
-2. Freeze a new packet before any further implementation work.
-3. Keep the bankroll-truth evidence surfaces available for the next cold start.
+1. Map the packet into bounded durable-write / settlement-legality slices.
+2. Repair the closure contract only inside `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
+3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
