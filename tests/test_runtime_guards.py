@@ -19,7 +19,7 @@ import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
 import src.execution.exit_lifecycle as exit_lifecycle_module
-from src.config import City
+from src.config import City, settings
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
@@ -154,9 +154,9 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
 
 
 def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_path):
-    zeus_db = tmp_path / "zeus.db"
+    trade_db = tmp_path / "zeus-paper.db"
     shared_db = tmp_path / "zeus-shared.db"
-    conn = get_connection(zeus_db)
+    conn = get_connection(trade_db)
     init_schema(conn)
     conn.close()
 
@@ -165,9 +165,9 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
     shared_conn.commit()
     shared_conn.close()
 
-    monkeypatch.setattr(db_module, "ZEUS_DB_PATH", zeus_db)
     monkeypatch.setattr(db_module, "ZEUS_SHARED_DB_PATH", shared_db)
-    monkeypatch.setattr(cycle_runner, "get_connection", db_module.get_trade_connection_with_shared)
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda mode=None: trade_db)
+    assert cycle_runner.get_connection is db_module.get_trade_connection_with_shared
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
