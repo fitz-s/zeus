@@ -133,6 +133,64 @@ def _canonical_projection() -> dict:
     }
 
 
+def _create_execution_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            decision_id TEXT,
+            order_role TEXT NOT NULL CHECK (order_role IN ('entry', 'exit')),
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            posted_at TEXT,
+            filled_at TEXT,
+            voided_at TEXT,
+            submitted_price REAL,
+            fill_price REAL,
+            shares REAL,
+            fill_quality REAL,
+            latency_seconds REAL,
+            venue_status TEXT,
+            terminal_exec_status TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+def _create_outcome_fact_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outcome_fact (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            entered_at TEXT,
+            exited_at TEXT,
+            settled_at TEXT,
+            exit_reason TEXT,
+            admin_exit_reason TEXT,
+            decision_snapshot_id TEXT,
+            pnl REAL,
+            outcome INTEGER CHECK (outcome IN (0, 1)),
+            hold_duration_hours REAL,
+            monitor_count INTEGER,
+            chain_corrections_count INTEGER
+        )
+        """
+    )
+    conn.commit()
+
+
 def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
     from src.state.db import append_event_and_project
 
@@ -863,6 +921,7 @@ def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
         ("day0_window", "day0_window"),
         ("day0_window", "settled"),
         ("pending_exit", "pending_exit"),
+        ("pending_exit", "settled"),
         ("economically_closed", "economically_closed"),
         ("economically_closed", "settled"),
         ("settled", "settled"),
@@ -1005,7 +1064,7 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
     conn.close()
 
 
-def test_settlement_builder_rejects_illegal_pending_exit_fold():
+def test_settlement_builder_accepts_pending_exit_fold():
     from src.engine.lifecycle_events import build_settlement_canonical_write
 
     settled_pos = _runtime_position(state="settled", chain_state="synced")
@@ -1014,16 +1073,19 @@ def test_settlement_builder_rejects_illegal_pending_exit_fold():
     settled_pos.pnl = 10.0
     settled_pos.exit_reason = "SETTLEMENT"
 
-    with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
-        build_settlement_canonical_write(
-            settled_pos,
-            winning_bin="39-40°F",
-            won=True,
-            outcome=1,
-            sequence_no=4,
-            phase_before="pending_exit",
-            source_module="src.execution.harvester",
-        )
+    events, projection = build_settlement_canonical_write(
+        settled_pos,
+        winning_bin="39-40°F",
+        won=True,
+        outcome=1,
+        sequence_no=4,
+        phase_before="pending_exit",
+        source_module="src.execution.harvester",
+    )
+
+    assert events[0]["phase_before"] == "pending_exit"
+    assert events[0]["phase_after"] == "settled"
+    assert projection["phase"] == "settled"
 
 
 def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_that_append_cleanly():
@@ -1294,10 +1356,24 @@ def test_log_execution_report_degrades_cleanly_on_canonical_bootstrap_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _create_execution_fact_table(conn)
 
     log_execution_report(conn, _runtime_position(state="entered", chain_state="unknown"), _Result())
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    fact_row = conn.execute(
+        """
+        SELECT position_id, order_role, fill_price, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = 'rt-pos-1:entry'
+        """
+    ).fetchone()
+    assert dict(fact_row) == {
+        "position_id": "rt-pos-1",
+        "order_role": "entry",
+        "fill_price": 0.5,
+        "terminal_exec_status": "filled",
+    }
     conn.close()
 
 
@@ -1389,12 +1465,26 @@ def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _create_outcome_fact_table(conn)
 
     pos = _runtime_position(state="settled", chain_state="synced")
     pos.last_exit_at = "2026-04-03T01:00:00Z"
     log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    outcome_row = conn.execute(
+        """
+        SELECT position_id, strategy_key, settled_at, outcome
+        FROM outcome_fact
+        WHERE position_id = 'rt-pos-1'
+        """
+    ).fetchone()
+    assert dict(outcome_row) == {
+        "position_id": "rt-pos-1",
+        "strategy_key": "center_buy",
+        "settled_at": "2026-04-03T01:00:00Z",
+        "outcome": 1,
+    }
     conn.close()
 
 
@@ -2467,8 +2557,9 @@ def test_harvester_settlement_path_skips_pending_exit_positions():
 
 
 def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle():
+    from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.harvester import _settle_positions
-    from src.state.db import apply_architecture_kernel_schema
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -2480,6 +2571,12 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     pos.exit_reason = "forward edge failed"
     pos.exit_price = 0.46
     pos.pnl = 1.5
+    entry_events, entry_projection = build_entry_canonical_write(
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
     portfolio = PortfolioState(positions=[pos])
 
     settled = _settle_positions(
@@ -2494,6 +2591,13 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     )
 
     assert settled == 1
+    event_row = conn.execute(
+        "SELECT phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    assert dict(event_row) == {
+        "phase_before": "pending_exit",
+        "phase_after": "settled",
+    }
     conn.close()
 
 
