@@ -12,8 +12,7 @@ from src.contracts import EdgeContext, EntryMethod
 import numpy as np
 from src.state.portfolio import (
     Position, PortfolioState, load_portfolio, save_portfolio,
-    add_position, remove_position, portfolio_heat,
-    city_exposure, cluster_exposure,
+    add_position, remove_position,
 )
 from src.types import Bin, BinEdge
 
@@ -22,7 +21,6 @@ class TestPortfolio:
     def test_empty_portfolio(self):
         state = PortfolioState()
         assert len(state.positions) == 0
-        assert portfolio_heat(state) == 0.0
 
     def test_add_and_remove_position(self):
         state = PortfolioState(bankroll=100.0)
@@ -35,7 +33,6 @@ class TestPortfolio:
         )
         add_position(state, pos)
         assert len(state.positions) == 1
-        assert portfolio_heat(state) == pytest.approx(0.10)
 
         removed = remove_position(state, "t1")
         assert removed is not None
@@ -45,27 +42,6 @@ class TestPortfolio:
     def test_remove_nonexistent(self):
         state = PortfolioState()
         assert remove_position(state, "nonexistent") is None
-
-    def test_city_exposure(self):
-        state = PortfolioState(bankroll=100.0)
-        add_position(state, Position(
-            trade_id="t1", market_id="m1", city="NYC",
-            cluster="US-Northeast", target_date="2026-01-15",
-            bin_label="39-40", direction="buy_yes",
-            size_usd=10.0, entry_price=0.40, p_posterior=0.60,
-            edge=0.20, entered_at="2026-01-12T00:00:00Z",
-        ))
-        add_position(state, Position(
-            trade_id="t2", market_id="m2", city="Chicago",
-            cluster="US-GreatLakes", target_date="2026-01-15",
-            bin_label="30-32", direction="buy_yes",
-            size_usd=5.0, entry_price=0.30, p_posterior=0.50,
-            edge=0.20, entered_at="2026-01-12T00:00:00Z",
-        ))
-
-        assert city_exposure(state, "NYC") == pytest.approx(0.10)
-        assert city_exposure(state, "Chicago") == pytest.approx(0.05)
-        assert cluster_exposure(state, "US-Northeast") == pytest.approx(0.10)
 
     def test_save_load_roundtrip(self, tmp_path):
         path = tmp_path / "positions.json"

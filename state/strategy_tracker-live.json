@@ -4,7 +4,80 @@
       "trades": []
     },
     "shoulder_sell": {
-      "trades": []
+      "trades": [
+        {
+          "trade_id": "82f6db05-a7b",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:00:28.831664+00:00",
+          "edge": 0.34585987905567495,
+          "direction": "buy_no",
+          "city": "NYC",
+          "target_date": "2026-04-08"
+        },
+        {
+          "trade_id": "04473054-eaa",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:00:39.688479+00:00",
+          "edge": 0.09151644774708956,
+          "direction": "buy_no",
+          "city": "Houston",
+          "target_date": "2026-04-08"
+        },
+        {
+          "trade_id": "1ff91a8f-d2d",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:00:39.689514+00:00",
+          "edge": 0.08763742957717313,
+          "direction": "buy_no",
+          "city": "Houston",
+          "target_date": "2026-04-08"
+        },
+        {
+          "trade_id": "66100ef9-802",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:00:48.944284+00:00",
+          "edge": 0.19216169470541566,
+          "direction": "buy_no",
+          "city": "NYC",
+          "target_date": "2026-04-09"
+        },
+        {
+          "trade_id": "af83329b-3bb",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:00:48.945344+00:00",
+          "edge": 0.17515011370410138,
+          "direction": "buy_no",
+          "city": "NYC",
+          "target_date": "2026-04-09"
+        },
+        {
+          "trade_id": "14ea550e-208",
+          "strategy": "shoulder_sell",
+          "edge_source": "shoulder_sell",
+          "pnl": 0.0,
+          "status": "entered",
+          "entered_at": "2026-04-08T02:01:02.294344+00:00",
+          "edge": 0.06573443780479948,
+          "direction": "buy_no",
+          "city": "Houston",
+          "target_date": "2026-04-09"
+        }
+      ]
     },
     "center_buy": {
       "trades": []
@@ -229,7 +302,7 @@
   },
   "truth": {
     "mode": "live",
-    "generated_at": "2026-04-07T11:14:41.787821+00:00",
+    "generated_at": "2026-04-08T02:01:41.415155+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/strategy_tracker-live.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,

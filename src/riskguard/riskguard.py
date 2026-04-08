@@ -527,14 +527,35 @@ def tick() -> RiskLevel:
         ]
         recommended_control_reasons["review_strategy_gates"] = review_gate_reasons
 
+    # Refresh and query strategy health FIRST to compute canonical PnL
+    now = datetime.now(timezone.utc).isoformat()
+    durable_action_status = _sync_riskguard_strategy_gate_actions(
+        zeus_conn,
+        recommended_strategy_gate_reasons,
+        issued_at=now,
+    )
+    strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
+    strategy_health_snapshot = query_strategy_health_snapshot(
+        zeus_conn,
+        now=now,
+    )
+
+    total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
+    total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
+    total_pnl = total_realized_pnl + total_unrealized_pnl
+
+    current_total_value = portfolio.initial_bankroll + total_pnl
+    daily_loss = max(0.0, portfolio.daily_baseline_total - current_total_value)
+    weekly_loss = max(0.0, portfolio.weekly_baseline_total - current_total_value)
+
     daily_loss_level = (
         RiskLevel.RED
-        if portfolio.daily_loss > portfolio.initial_bankroll * thresholds["max_daily_loss_pct"]
+        if daily_loss > portfolio.initial_bankroll * thresholds["max_daily_loss_pct"]
         else RiskLevel.GREEN
     )
     weekly_loss_level = (
         RiskLevel.RED
-        if portfolio.weekly_loss > portfolio.initial_bankroll * thresholds["max_weekly_loss_pct"]
+        if weekly_loss > portfolio.initial_bankroll * thresholds["max_weekly_loss_pct"]
         else RiskLevel.GREEN
     )
 
@@ -547,18 +568,6 @@ def tick() -> RiskLevel:
         weekly_loss_level,
     )
 
-    # Record
-    now = datetime.now(timezone.utc).isoformat()
-    durable_action_status = _sync_riskguard_strategy_gate_actions(
-        zeus_conn,
-        recommended_strategy_gate_reasons,
-        issued_at=now,
-    )
-    strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
-    strategy_health_snapshot = query_strategy_health_snapshot(
-        zeus_conn,
-        now=now,
-    )
     risk_conn.execute("""
         INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -571,15 +580,15 @@ def tick() -> RiskLevel:
             "strategy_signal_level": strategy_signal_level.value,
             "daily_loss_level": daily_loss_level.value,
             "weekly_loss_level": weekly_loss_level.value,
-            "daily_loss": round(portfolio.daily_loss, 2),
-            "weekly_loss": round(portfolio.weekly_loss, 2),
+            "daily_loss": round(daily_loss, 2),
+            "weekly_loss": round(weekly_loss, 2),
             "initial_bankroll": round(portfolio.initial_bankroll, 2),
             "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
             "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
-            "realized_pnl": round(portfolio.realized_pnl, 2),
-            "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
-            "total_pnl": round(portfolio.total_pnl, 2),
-            "effective_bankroll": round(portfolio.effective_bankroll, 2),
+            "realized_pnl": round(total_realized_pnl, 2),
+            "unrealized_pnl": round(total_unrealized_pnl, 2),
+            "total_pnl": round(total_pnl, 2),
+            "effective_bankroll": round(portfolio.initial_bankroll, 2),
             "portfolio_truth_source": portfolio_truth["source"],
             "portfolio_loader_status": portfolio_truth["loader_status"],
             "portfolio_fallback_active": portfolio_truth["fallback_active"],

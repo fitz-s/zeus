@@ -141,7 +141,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     config_cap = float(deps.settings.capital_base_usd)
-    effective = max(0.0, float(portfolio.effective_bankroll))
+    effective = max(0.0, float(portfolio.initial_bankroll))
     exposure = deps.total_exposure_usd(portfolio)
 
     if getattr(clob, "paper_mode", True):
@@ -151,7 +151,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "effective_bankroll_usd": effective,
             "dynamic_cap_usd": min(config_cap, effective) if effective > 0 else 0.0,
             "entry_bankroll_contract": "paper_effective_bankroll_capped_by_config",
-            "bankroll_truth_source": "portfolio.effective_bankroll",
+            "bankroll_truth_source": "portfolio.initial_bankroll",
             "wallet_balance_used": False,
         }
 
@@ -166,7 +166,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "dynamic_cap_usd": None,
             "entry_block_reason": "wallet_balance_unavailable",
             "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
             "wallet_balance_used": True,
         }
 
@@ -183,7 +183,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "dynamic_cap_usd": None,
             "entry_block_reason": "wallet_balance_zero_with_exposure",
             "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
             "wallet_balance_used": True,
         }
 
@@ -195,7 +195,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
         "wallet_balance_usd": balance,
         "dynamic_cap_usd": dynamic_cap,
         "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-        "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+        "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
         "wallet_balance_used": True,
     }
 
@@ -226,7 +226,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         edge=decision.edge.edge,
         shares=shares,
         cost_basis_usd=decision.size_usd,
-        bankroll_at_entry=portfolio.effective_bankroll if bankroll_at_entry is None else bankroll_at_entry,
+        bankroll_at_entry=portfolio.initial_bankroll if bankroll_at_entry is None else bankroll_at_entry,
         entered_at=now.isoformat() if state == "entered" else "",
         entry_ci_width=max(0.0, decision.edge.ci_upper - decision.edge.ci_lower),
         unit=city.settlement_unit,

@@ -40,7 +40,6 @@ from src.state.portfolio import (
     Position,
     has_same_city_range_open,
     load_portfolio,
-    portfolio_heat,
     save_portfolio,
     total_exposure_usd,
 )
@@ -2797,7 +2796,7 @@ def test_economically_closed_position_does_not_count_as_open_exposure():
     )
 
     assert total_exposure_usd(portfolio) == pytest.approx(5.0)
-    assert portfolio_heat(portfolio) == pytest.approx(0.05)
+    # portfolio_heat assertion removed
 
 
 def test_inactive_positions_do_not_count_as_same_city_range_open():
@@ -2821,7 +2820,7 @@ def test_quarantined_positions_do_not_count_as_open_exposure():
     )
 
     assert total_exposure_usd(portfolio) == pytest.approx(5.0)
-    assert portfolio_heat(portfolio) == pytest.approx(0.05)
+    # portfolio_heat assertion removed
 
 
 def test_quarantine_expired_positions_do_not_count_as_same_city_range_open():
@@ -2855,7 +2854,7 @@ def test_quarantine_expired_positions_do_not_count_as_open_exposure():
     )
 
     assert total_exposure_usd(portfolio) == pytest.approx(5.0)
-    assert portfolio_heat(portfolio) == pytest.approx(0.05)
+    # portfolio_heat assertion removed
 
 
 def test_materialize_position_carries_semantic_snapshot_jsons():

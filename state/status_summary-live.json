@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-04-07T12:00:56.734573+00:00",
+  "timestamp": "2026-04-08T04:24:18.643555+00:00",
   "process": {
-    "pid": 80295,
+    "pid": 38550,
     "mode": "paper",
     "version": "zeus_v2"
   },
@@ -50,48 +50,30 @@
       "weekly_loss_level": "GREEN",
       "daily_loss": 0.0,
       "weekly_loss": 0.0,
-      "realized_pnl": 204.27,
-      "unrealized_pnl": 216.93,
-      "total_pnl": 421.2,
-      "effective_bankroll": 571.2,
+      "initial_bankroll": 150.0,
+      "daily_baseline_total": 150.0,
+      "weekly_baseline_total": 150.0,
+      "realized_pnl": 0,
+      "unrealized_pnl": 0,
+      "total_pnl": 0,
+      "effective_bankroll": 150.0,
       "portfolio_truth_source": "working_state_fallback",
-      "portfolio_loader_status": "stale_legacy_fallback",
+      "portfolio_loader_status": "empty",
       "portfolio_fallback_active": true,
-      "portfolio_fallback_reason": "stale_legacy_fallback",
-      "portfolio_position_count": 24,
-      "settlement_sample_size": 22,
-      "settlement_storage_source": "position_events",
-      "settlement_row_storage_sources": [
-        "position_events"
-      ],
-      "settlement_authority_levels": {
-        "durable_event": 22
-      },
+      "portfolio_fallback_reason": "empty",
+      "portfolio_position_count": 0,
+      "portfolio_capital_source": "settings_capital_base_fallback",
+      "realized_truth_source": "none",
+      "settlement_sample_size": 0,
+      "settlement_storage_source": "none",
+      "settlement_row_storage_sources": [],
+      "settlement_authority_levels": {},
       "settlement_degraded_row_count": 0,
-      "settlement_learning_snapshot_ready_count": 22,
-      "settlement_canonical_payload_complete_count": 22,
-      "settlement_metric_ready_count": 22,
-      "accuracy": 0.9091,
-      "strategy_settlement_summary": {
-        "opening_inertia": {
-          "count": 7,
-          "pnl": 0.66,
-          "wins": 5,
-          "accuracy": 0.7143
-        },
-        "shoulder_sell": {
-          "count": 5,
-          "pnl": -5.94,
-          "wins": 0,
-          "accuracy": 0.0
-        },
-        "center_buy": {
-          "count": 10,
-          "pnl": -11.32,
-          "wins": 0,
-          "accuracy": 0.0
-        }
-      },
+      "settlement_learning_snapshot_ready_count": 0,
+      "settlement_canonical_payload_complete_count": 0,
+      "settlement_metric_ready_count": 0,
+      "accuracy": 0.5,
+      "strategy_settlement_summary": {},
       "entry_execution_summary": {
         "overall": {
           "attempted": 0,
@@ -107,8 +89,8 @@
           "pnl": 0
         },
         "shoulder_sell": {
-          "trades": 0,
-          "pnl": 0
+          "trades": 6,
+          "pnl": 0.0
         },
         "center_buy": {
           "trades": 0,
@@ -136,9 +118,9 @@
       "recommended_control_reasons": {},
       "durable_risk_action_emission_status": "emitted",
       "durable_risk_action_emitted_count": 0,
-      "durable_risk_action_expired_count": 1,
-      "strategy_health_refresh_status": "refreshed",
-      "strategy_health_rows_written": 3,
+      "durable_risk_action_expired_count": 0,
+      "strategy_health_refresh_status": "refreshed_empty",
+      "strategy_health_rows_written": 0,
       "strategy_health_missing_required_tables": [],
       "strategy_health_missing_optional_tables": [],
       "strategy_health_omitted_fields": [
@@ -146,16 +128,16 @@
         "brier_30d",
         "edge_trend_30d"
       ],
-      "strategy_health_snapshot_status": "fresh",
+      "strategy_health_snapshot_status": "empty",
       "strategy_health_stale_strategy_keys": []
     },
     "consistency_check": {
       "ok": false,
       "issues": [
-        "position_current_missing_table",
-        "strategy_health_missing_table"
+        "cycle_failed",
+        "strategy_health_empty"
       ],
-      "cycle_risk_level": "GREEN"
+      "cycle_risk_level": null
     }
   },
   "portfolio": {
@@ -163,11 +145,11 @@
     "total_exposure_usd": 0.0,
     "heat_pct": 0.0,
     "initial_bankroll": 150.0,
-    "realized_pnl": 204.27,
-    "unrealized_pnl": 216.93,
-    "total_pnl": 421.2,
-    "effective_bankroll": 571.2,
-    "bankroll": 571.2,
+    "realized_pnl": 0.0,
+    "unrealized_pnl": 0.0,
+    "total_pnl": 0.0,
+    "effective_bankroll": 150.0,
+    "bankroll": 150.0,
     "positions": []
   },
   "runtime": {
@@ -222,36 +204,20 @@
     "recent_stage_counts": {}
   },
   "cycle": {
-    "mode": "update_reaction",
-    "started_at": "2026-04-07T12:00:00.074603+00:00",
-    "monitors": 12,
-    "exits": 0,
-    "candidates": 54,
-    "trades": 0,
-    "no_trades": 15,
-    "risk_level": "GREEN",
-    "pending_voids": 0,
-    "chain_sync": {
-      "skipped": "paper_mode"
-    },
-    "config_cap_usd": 150.0,
-    "effective_bankroll_usd": 571.2014658193136,
-    "dynamic_cap_usd": 150.0,
-    "monitor_incomplete_exit_context": 12,
-    "monitor_skipped_economic_close": 12,
-    "portfolio_heat_pct": 28.9,
-    "completed_at": "2026-04-07T12:00:56.734569+00:00"
+    "mode": "day0_capture",
+    "failed": true,
+    "failure_reason": "live portfolio contains paper position 04473054-eaa \u2014 refusing to load. Resolve manually: settle or void all paper positions before switching modes."
   },
   "truth": {
     "mode": "paper",
-    "generated_at": "2026-04-07T12:00:56.734573+00:00",
+    "generated_at": "2026-04-08T04:24:18.643555+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,
     "archived_to": null,
     "db_primary_inputs": {
-      "position_current": "missing_table",
-      "strategy_health": "missing_table"
+      "position_current": "ok",
+      "strategy_health": "empty"
     },
     "compatibility_inputs": {
       "strategy_tracker_current_regime_started_at": "2026-04-03T20:13:29.292514+00:00"

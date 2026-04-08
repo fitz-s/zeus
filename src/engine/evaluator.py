@@ -38,14 +38,11 @@ from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import model_agreement
 from src.state.portfolio import (
     PortfolioState,
-    city_exposure,
     city_exposure_for_bankroll,
-    cluster_exposure,
     cluster_exposure_for_bankroll,
     has_same_city_range_open,
     is_reentry_blocked,
     is_token_on_cooldown,
-    portfolio_heat,
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import fdr_filter
@@ -647,10 +644,8 @@ def evaluate_candidate(
             n_edges_after_fdr=0,
         )]
 
-    sizing_bankroll = max(
-        0.0,
-        float(portfolio.effective_bankroll if entry_bankroll is None else entry_bankroll),
-    )
+    bankroll_val = getattr(portfolio, "effective_bankroll", getattr(portfolio, "bankroll", 0.0)) if entry_bankroll is None else entry_bankroll
+    sizing_bankroll = max(0.0, float(bankroll_val))
     current_heat = portfolio_heat_for_bankroll(portfolio, sizing_bankroll)
     projected_total_exposure_usd = current_heat * sizing_bankroll
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)

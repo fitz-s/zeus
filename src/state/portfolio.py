@@ -635,33 +635,7 @@ class PortfolioState:
     def initial_bankroll(self) -> float:
         return self.bankroll
 
-    @property
-    def realized_pnl(self) -> float:
-        return _realized_pnl_value(self, exclude_admin=True)
 
-    @property
-    def total_unrealized_pnl(self) -> float:
-        return sum(p.unrealized_pnl for p in self.positions)
-
-    @property
-    def total_pnl(self) -> float:
-        return self.realized_pnl + self.total_unrealized_pnl
-
-    @property
-    def effective_bankroll(self) -> float:
-        return self.initial_bankroll + self.total_pnl
-
-    @property
-    def current_total_value(self) -> float:
-        return self.initial_bankroll + self.total_pnl
-
-    @property
-    def daily_loss(self) -> float:
-        return max(0.0, self.daily_baseline_total - self.current_total_value)
-
-    @property
-    def weekly_loss(self) -> float:
-        return max(0.0, self.weekly_baseline_total - self.current_total_value)
 
 
 class PortfolioModeError(RuntimeError):
@@ -1141,7 +1115,6 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "exit_forward_edge": pos.exit_forward_edge,
         "exit_price": pos.exit_price,
         "exited_at": pos.last_exit_at,
-        "pnl": pos.pnl,
     })
 
     if state.audit_logging_enabled:
@@ -1154,20 +1127,6 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         except Exception as e:
             logger.warning("Error logging trade exit to db: %s", e)
 
-
-def realized_pnl(state: PortfolioState, exclude_admin: bool = True) -> float:
-    return _realized_pnl_value(state, exclude_admin=exclude_admin)
-
-
-def _realized_pnl_value(state: PortfolioState, exclude_admin: bool = True) -> float:
-    """Total realized P&L from recent exits. L2: excludes admin exits."""
-    total = 0.0
-    for ex in state.recent_exits:
-        pnl = ex.get("pnl", 0.0)
-        if exclude_admin and ex.get("exit_reason") in ADMIN_EXITS:
-            continue
-        total += pnl
-    return total
 
 
 def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
@@ -1230,27 +1189,6 @@ def cluster_exposure_for_bankroll(state: PortfolioState, cluster: str, bankroll:
     return total / bankroll
 
 
-def portfolio_heat(state: PortfolioState) -> float:
-    """Total portfolio exposure as fraction of bankroll."""
-    if state.effective_bankroll <= 0:
-        return 0.0
-    return total_exposure_usd(state) / state.effective_bankroll
-
-
-def city_exposure(state: PortfolioState, city: str) -> float:
-    """Exposure to a specific city as fraction of bankroll."""
-    if state.effective_bankroll <= 0:
-        return 0.0
-    total = sum(p.size_usd for p in state.positions if p.city == city and p.state not in INACTIVE_RUNTIME_STATES)
-    return total / state.effective_bankroll
-
-
-def cluster_exposure(state: PortfolioState, cluster: str) -> float:
-    """Exposure to a cluster/region as fraction of bankroll."""
-    if state.effective_bankroll <= 0:
-        return 0.0
-    total = sum(p.size_usd for p in state.positions if p.cluster == cluster and p.state not in INACTIVE_RUNTIME_STATES)
-    return total / state.effective_bankroll
 
 
 # --- Churn defense: Layers 5, 6, 7 ---

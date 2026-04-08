@@ -330,8 +330,29 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             timestamp TEXT NOT NULL,
             env TEXT NOT NULL DEFAULT 'paper'
         );
-        CREATE INDEX IF NOT EXISTS idx_position_events_trade_ts
-            ON position_events(runtime_trade_id, timestamp);
+
+        -- Derived health view for PnL and edge compression
+        CREATE TABLE IF NOT EXISTS strategy_health (
+            strategy_key TEXT NOT NULL CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            as_of TEXT NOT NULL,
+            open_exposure_usd REAL NOT NULL DEFAULT 0,
+            settled_trades_30d INTEGER NOT NULL DEFAULT 0,
+            realized_pnl_30d REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            win_rate_30d REAL,
+            brier_30d REAL,
+            fill_rate_14d REAL,
+            edge_trend_30d REAL,
+            risk_level TEXT,
+            execution_decay_flag INTEGER NOT NULL DEFAULT 0 CHECK (execution_decay_flag IN (0, 1)),
+            edge_compression_flag INTEGER NOT NULL DEFAULT 0 CHECK (edge_compression_flag IN (0, 1)),
+            PRIMARY KEY (strategy_key, as_of)
+        );
 
         -- Decision chain: every cycle's artifacts (Blueprint v2 §3)
         CREATE TABLE IF NOT EXISTS decision_log (
@@ -2109,7 +2130,7 @@ def refresh_strategy_health(
     strategy_keys.update(execution_metrics)
     strategy_keys.update(risk_action_metrics)
 
-    conn.execute("DELETE FROM strategy_health WHERE as_of = ?", (refresh_time,))
+    conn.execute("DELETE FROM strategy_health")
     rows_written = 0
     for strategy_key in sorted(strategy_keys):
         position_bucket = position_metrics.get(strategy_key, {})
