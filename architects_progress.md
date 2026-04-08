@@ -31,16 +31,45 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `P7R7-RUNTIME-TRACKER-COMPATIBILITY-NORMALIZATION`
-- Current active packet: `none`
-- Current packet status: `no live packet / awaiting next lawful freeze`
+- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY` (accepted locally in worktree)
+- Current active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no later bounded non-destructive packet has been frozen yet
-  - obvious next work trends toward M4 retirement/delete territory, which is not auto-authorized by momentum alone
-  - out-of-scope local dirt must remain excluded from packet commits
+  - accepted commit `89579cb` still needs transport back to the live `Architects` branch
+  - the untracked re-audit note stays out of packet transport unless explicitly requested
+  - no next packet should freeze off this worktree branch before transport is complete
 
 ## Durable timeline
+
+## [2026-04-08 01:53 America/Chicago] BUG-CANONICAL-CLOSURE-TRACEABILITY accepted locally and passed post-close gate in worktree
+- Author: `Architects worktree lane`
+- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Status delta:
+  - bounded closure slice repaired
+  - packet accepted locally in worktree branch `architects-session-note-reaudit`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `89579cb` -> `Keep canonical closure truth alive when legacy runtime events disappear`
+  - `scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - targeted pytest subset -> `11 passed`
+  - broader impacted pytest subset -> `9 passed, 158 deselected`
+  - pre-close critic artifact -> `.omx/artifacts/claude-bug-canonical-closure-preclose-critic-20260408T064633Z.md`
+  - pre-close verifier artifact -> `.omx/artifacts/gemini-bug-canonical-closure-preclose-verifier-20260408T064755Z.md`
+  - post-close critic artifact -> `.omx/artifacts/gemini-bug-canonical-closure-postclose-critic-20260408T065145Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-bug-canonical-closure-postclose-verifier-20260408T065251Z.md`
+- Decisions frozen:
+  - canonical-only close-path writes no longer drop `execution_fact` / `outcome_fact` when legacy runtime events are absent
+  - `pending_exit -> settled` remains a bounded `backoff_exhausted` legality only
+  - canonical harvester settlement now records `phase_before = pending_exit` on the bounded backoff-exhausted seam
+- Open uncertainties:
+  - transport back to the live `Architects` branch still needs to happen cleanly
+- Next required action:
+  - cherry-pick `89579cb` onto `Architects` and then decide whether the next lawful packet should come from the session-note leftovers family
+- Owner:
+  - Architects worktree lane
 
 ## [2026-04-04 21:23 America/Chicago] P7R3-LEGACY-POSITION-EVENTS-COLLISION-REPAIR accepted and pushed
 - Author: `Architects mainline lead`
