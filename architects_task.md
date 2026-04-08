@@ -84,12 +84,12 @@ Eliminate close-path trace loss between `position_current`, `positions-paper.jso
 - [x] targeted tests pass
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] packet accepted locally
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Accept the repaired close-path packet locally and commit the bounded batch.
-2. Run post-close critic + verifier on the accepted boundary before freezing the next packet.
+1. Cherry-pick accepted commit `c33ab3f` onto `Architects` cleanly when ready.
+2. Update the live branch control surfaces only after transport is complete.
 3. Do not widen into ETL, risk/status/operator summary work, or broad historical cleanup without a new packet.

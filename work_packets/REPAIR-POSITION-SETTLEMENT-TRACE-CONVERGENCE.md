@@ -116,3 +116,5 @@ evidence_required:
   - post-repair `load_portfolio()` on the live `positions-paper.json` path returns `12` positions with state counts `{economically_closed: 9, entered: 3}` because `query_portfolio_loader_view()` now returns `stale_legacy_fallback` and cleanly falls back to JSON rather than surfacing contradicted canonical-open rows
 - independent pre-close critic artifact: `.omx/artifacts/claude-repair-position-settlement-trace-preclose-critic-20260408T084208Z.md` -> `PASS`
 - pre-close verifier artifact: `.omx/artifacts/claude-repair-position-settlement-trace-preclose-verifier-20260408T084558Z.md` -> `PASS`
+- post-close critic artifact: `.omx/artifacts/claude-repair-position-settlement-trace-postclose-critic-20260408T085520Z.md` -> `PASS`
+- post-close verifier artifact: `.omx/artifacts/claude-repair-position-settlement-trace-postclose-verifier-20260408T085701Z.md` -> `PASS`
