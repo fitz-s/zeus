@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex VERIFY-ETL-RECALIBRATE-CONTAMINATION freeze`
+- Last updated by: `Codex REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,26 +17,29 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
 - State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Prove the shared ETL/recalibrate chain stays on shared truth surfaces and repair the discovered TIGGE multi-step collapse before advancing into later leftover families.
+Eliminate close-path trace loss between `position_current`, `positions-paper.json`, and `chronicle` so exited/settled positions stop remaining falsely open and settlement history carries durable `exit_price`.
 
 ## Allowed files
 
-- `work_packets/VERIFY-ETL-RECALIBRATE-CONTAMINATION.md`
+- `work_packets/REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/main.py`
-- `scripts/etl_tigge_calibration.py`
-- `tests/test_observation_instants_etl.py`
-- `tests/test_run_replay_cli.py`
-- `tests/test_etl_recalibrate_chain.py`
+- `src/state/db.py`
+- `src/state/portfolio.py`
+- `src/engine/lifecycle_events.py`
+- `src/execution/exit_lifecycle.py`
+- `src/execution/harvester.py`
+- `tests/test_runtime_guards.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_pnl_flow_and_audit.py`
 
 ## Forbidden files
 
@@ -45,13 +48,12 @@ Prove the shared ETL/recalibrate chain stays on shared truth surfaces and repair
 - `docs/architecture/**`
 - `architecture/**`
 - `src/control/**`
-- `src/execution/**`
-- `src/supervisor_api/**`
 - `src/observability/**`
 - `src/riskguard/**`
-- `src/state/db.py`
-- `src/state/portfolio.py`
+- `src/supervisor_api/**`
 - `migrations/**`
+- `src/state/ledger.py`
+- `src/state/projection.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -59,34 +61,35 @@ Prove the shared ETL/recalibrate chain stays on shared truth surfaces and repair
 
 ## Non-goals
 
-- no trade/lifecycle/risk/status truth repair
-- no broad 20-script migration cleanup
-- no schema redesign or replay-engine contract rewrite
-- no daemon cutover or scheduler timing claim
+- no ETL/recalibration work
+- no broad historical migration/backfill cleanup
+- no risk/status/operator summary rewrites
+- no schema redesign
 - no team runtime launch
 
 ## Current blocker state
 
-- session leftovers still rank ETL/recalibrate contamination as the highest-risk open family
-- fresh repo inspection already found one concrete blocker inside that family: `etl_tigge_calibration.py` only preserves the last step file per date directory and stamps `lead_hours = 24.0`
-- representative ETL scripts appear migrated to `get_shared_connection()`, but the weekly subprocess chain still lacks packet-bounded proof
-- packet must stay off trade/lifecycle/risk/status surfaces
+- session leftovers rank position/state/settlement trace convergence as the next highest-value open family
+- fresh live repo truth shows all 14 `recent_exits` trade_ids still remain open in `position_current` (`5 day0_window`, `9 active`)
+- fresh live repo truth also shows all 19 paper `chronicle` settlement rows still missing `exit_price`
+- packet must stay on close-path truth surfaces only
 
 ## Immediate checklist
 
-- [x] `VERIFY-ETL-RECALIBRATE-CONTAMINATION` frozen
-- [x] ETL/recalibrate code-review/test map captured for the packet
-- [x] shared-binding/import proof captured in tests
-- [x] TIGGE multi-step truth repaired
+- [x] `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE` frozen
+- [x] close-path code-review/test map captured for the packet
+- [x] stale-open contradiction reproduced in packet-bounded tests or notes
+- [x] future economic-close canonical update repaired
+- [x] settlement chronicle `exit_price` durability repaired
 - [x] targeted tests pass
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
-- [x] packet accepted locally
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [ ] packet accepted locally
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Cherry-pick accepted commit `0c9a348` onto `Architects` cleanly when ready.
-2. Update the live branch control surfaces only after transport is complete.
-3. Do not widen into trade/lifecycle/risk/status truth work or broader ETL cleanup without a new packet.
+1. Accept the repaired close-path packet locally and commit the bounded batch.
+2. Run post-close critic + verifier on the accepted boundary before freezing the next packet.
+3. Do not widen into ETL, risk/status/operator summary work, or broad historical cleanup without a new packet.
