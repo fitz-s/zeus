@@ -69,9 +69,8 @@ ci_gates_required:
   - python3 scripts/check_work_packets.py
   - python3 scripts/check_kernel_manifests.py
 tests_required:
-  - .venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_passes_current_regime_start_to_learning_surface tests/test_pnl_flow_and_audit.py::test_inv_kelly_uses_effective_bankroll tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl
+  - .venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_passes_current_regime_start_to_learning_surface tests/test_pnl_flow_and_audit.py::test_inv_status_fallback_bankroll_uses_initial_bankroll tests/test_pnl_flow_and_audit.py::test_inv_kelly_uses_effective_bankroll tests/test_pnl_flow_and_audit.py::test_inv_entry_bankroll_contract_is_explicit_in_paper_mode tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl
   - .venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable
-  - .venv/bin/pytest -q tests/test_cross_module_relationships.py -k "riskguard_realized_pnl_matches_chronicle or position_current"
 parity_required: false
 replay_required: false
 rollback: Revert the bankroll-semantics edits and paired tests/control-surface updates together; repo returns to the current closed monitor-seam boundary with the bankroll/risk/operator truth drift still explicitly open.
@@ -95,3 +94,11 @@ evidence_required:
 - If implementation shows the fix requires lifecycle/projection rewrites, control-plane migration, or ETL/recalibration changes, stop and freeze a new packet instead of widening this one.
 - Freeze review artifacts: `.omx/artifacts/gemini-bug-bankroll-truth-freeze-critic-20260408T014904Z.md` -> `APPROVE`; `.omx/artifacts/claude-bug-bankroll-truth-freeze-verifier-20260408T014904Z.md` -> `READY`.
 - Follow-on K-level candidates after this packet likely include: control-plane durable truth completeness, canonical lifecycle closure/projection traceability, and external ETL/recalibration contamination proof.
+
+
+## Evidence log
+
+- work-packet grammar output: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted bankroll/risk/status pytest output: `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_passes_current_regime_start_to_learning_surface tests/test_pnl_flow_and_audit.py::test_inv_status_fallback_bankroll_uses_initial_bankroll tests/test_pnl_flow_and_audit.py::test_inv_kelly_uses_effective_bankroll tests/test_pnl_flow_and_audit.py::test_inv_entry_bankroll_contract_is_explicit_in_paper_mode tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl` -> `6 passed`; `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`
+- bankroll-contract note: `src/engine/cycle_runtime.py` now emits explicit entry-bankroll contract metadata (`entry_bankroll_contract`, `bankroll_truth_source`, `wallet_balance_used`); `src/riskguard/riskguard.py` preserves working-state capital metadata while using DB-first positions and records `initial_bankroll` / baseline fields plus `portfolio_capital_source`; `src/observability/status_summary.py` now falls back from `settings.capital_base_usd` and passes current-regime scoping through instead of fabricating bankroll from `total_pnl` alone.

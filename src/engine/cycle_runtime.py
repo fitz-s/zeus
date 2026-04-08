@@ -150,6 +150,9 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "config_cap_usd": config_cap,
             "effective_bankroll_usd": effective,
             "dynamic_cap_usd": min(config_cap, effective) if effective > 0 else 0.0,
+            "entry_bankroll_contract": "paper_effective_bankroll_capped_by_config",
+            "bankroll_truth_source": "portfolio.effective_bankroll",
+            "wallet_balance_used": False,
         }
 
     try:
@@ -162,6 +165,9 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "wallet_balance_usd": None,
             "dynamic_cap_usd": None,
             "entry_block_reason": "wallet_balance_unavailable",
+            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
+            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+            "wallet_balance_used": True,
         }
 
     if balance <= 0.0 and exposure > 0:
@@ -176,6 +182,9 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "wallet_balance_usd": balance,
             "dynamic_cap_usd": None,
             "entry_block_reason": "wallet_balance_zero_with_exposure",
+            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
+            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+            "wallet_balance_used": True,
         }
 
     dynamic_cap = min(config_cap, balance + exposure)
@@ -185,6 +194,9 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
         "effective_bankroll_usd": effective,
         "wallet_balance_usd": balance,
         "dynamic_cap_usd": dynamic_cap,
+        "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
+        "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.effective_bankroll)",
+        "wallet_balance_used": True,
     }
 
 

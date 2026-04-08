@@ -33,6 +33,14 @@ from src.state.strategy_tracker import load_tracker
 logger = logging.getLogger(__name__)
 
 
+def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
+    try:
+        return load_portfolio(), "working_state_metadata"
+    except Exception:
+        logger.warning("RiskGuard capital metadata fallback to settings.capital_base_usd", exc_info=True)
+        return PortfolioState(bankroll=float(settings.capital_base_usd)), "settings_capital_base_fallback"
+
+
 def _portfolio_position_from_loader_row(row: dict) -> Position:
     return Position(
         trade_id=str(row.get("trade_id") or ""),
@@ -73,20 +81,21 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
     if loader_view.get("status") == "ok":
+        metadata_state, capital_source = _load_riskguard_capital_metadata()
         positions = [
             _portfolio_position_from_loader_row(row)
             for row in loader_view.get("positions", [])
         ]
-        bankroll = float(settings.capital_base_usd)
+        bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
         portfolio = PortfolioState(
             positions=positions,
             bankroll=bankroll,
-            updated_at="",
+            updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
             audit_logging_enabled=True,
-            daily_baseline_total=bankroll,
-            weekly_baseline_total=bankroll,
-            recent_exits=[],
-            ignored_tokens=[],
+            daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
+            weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
+            recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
+            ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
         )
         return portfolio, {
             "source": "position_current",
@@ -94,15 +103,17 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             "fallback_active": False,
             "fallback_reason": "",
             "position_count": len(positions),
+            "capital_source": capital_source,
         }
 
-    portfolio = load_portfolio()
+    portfolio, capital_source = _load_riskguard_capital_metadata()
     return portfolio, {
         "source": "working_state_fallback",
         "loader_status": str(loader_view.get("status") or "unknown"),
         "fallback_active": True,
         "fallback_reason": str(loader_view.get("status") or "unknown"),
         "position_count": len(portfolio.positions),
+        "capital_source": capital_source,
     }
 
 
@@ -438,6 +449,9 @@ def tick() -> RiskLevel:
             "weekly_loss_level": weekly_loss_level.value,
             "daily_loss": round(portfolio.daily_loss, 2),
             "weekly_loss": round(portfolio.weekly_loss, 2),
+            "initial_bankroll": round(portfolio.initial_bankroll, 2),
+            "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
+            "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
             "realized_pnl": round(portfolio.realized_pnl, 2),
             "unrealized_pnl": round(portfolio.total_unrealized_pnl, 2),
             "total_pnl": round(portfolio.total_pnl, 2),
@@ -447,6 +461,7 @@ def tick() -> RiskLevel:
             "portfolio_fallback_active": portfolio_truth["fallback_active"],
             "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
             "portfolio_position_count": portfolio_truth["position_count"],
+            "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
             "settlement_sample_size": len(p_forecasts),
             "settlement_storage_source": settlement_storage_source,
             "settlement_row_storage_sources": settlement_row_storage_sources,

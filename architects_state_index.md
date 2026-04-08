@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
-- Active packet state: `frozen / planning-ready`
+- Active packet state: `frozen / implementation verified`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Execute the frozen bankroll-truth packet without widening into control-plane, lifecycle, or ETL contamination work.
+1. Run the pre-close critic + verifier on the repaired bankroll-truth seam.
 2. Keep the packet bounded to `cycle_runtime`, `riskguard`, `status_summary`, and targeted tests.
 3. Keep out-of-scope local dirt excluded from packet commits.
 

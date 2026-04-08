@@ -3978,3 +3978,28 @@ Archive policy:
   - verifier artifact: `.omx/artifacts/claude-bug-bankroll-truth-freeze-verifier-20260408T014904Z.md` -> `READY`
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 21:07 America/Chicago] BUG-BANKROLL-TRUTH-CONSISTENCY implementation verified
+- Author: `Architects mainline lead`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- Status delta:
+  - bankroll-truth seam repaired in code
+  - targeted packet tests passed
+- Basis / evidence:
+  - `src/engine/cycle_runtime.py` now emits explicit entry-bankroll contract metadata for paper/live sizing (`entry_bankroll_contract`, `bankroll_truth_source`, `wallet_balance_used`)
+  - `src/riskguard/riskguard.py` now preserves working-state bankroll/baseline/recent-exit metadata while consuming DB-first positions, and it records `initial_bankroll`, `daily_baseline_total`, `weekly_baseline_total`, and `portfolio_capital_source` in `risk_state.details_json`
+  - `src/observability/status_summary.py` now falls back from `settings.capital_base_usd` when `initial_bankroll` is absent instead of fabricating bankroll from `total_pnl`, and it passes `current_regime_started_at` through to execution/learning summary queries
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_passes_current_regime_start_to_learning_surface tests/test_pnl_flow_and_audit.py::test_inv_status_fallback_bankroll_uses_initial_bankroll tests/test_pnl_flow_and_audit.py::test_inv_kelly_uses_effective_bankroll tests/test_pnl_flow_and_audit.py::test_inv_entry_bankroll_contract_is_explicit_in_paper_mode tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl` -> `6 passed`
+  - `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`
+- Decisions frozen:
+  - keep this packet on one bankroll truth across entry sizing, RiskGuard, and operator summary only
+  - do not widen into control-plane durability, lifecycle/projection rewrites, or ETL/recalibration contamination while verifying this seam
+- Open uncertainties:
+  - pre-close critic and verifier review are still pending before local acceptance
+- Next required action:
+  - run pre-close critic + verifier review on the repaired bankroll seam
+- Owner:
+  - Architects mainline lead

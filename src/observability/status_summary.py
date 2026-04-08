@@ -231,11 +231,11 @@ def write_status(cycle_summary: dict = None) -> None:
         unrealized_pnl = status["portfolio"]["unrealized_pnl"]
     if total_pnl is None:
         total_pnl = round(float(realized_pnl or 0.0) + float(unrealized_pnl or 0.0), 2)
-    if effective_bankroll is None:
-        effective_bankroll = round(float(total_pnl or 0.0), 2)
     initial_bankroll = risk_details.get("initial_bankroll")
     if initial_bankroll is None:
-        initial_bankroll = round(float(effective_bankroll) - float(total_pnl or 0.0), 2)
+        initial_bankroll = round(float(settings.capital_base_usd), 2)
+    if effective_bankroll is None:
+        effective_bankroll = round(float(initial_bankroll or 0.0) + float(total_pnl or 0.0), 2)
     status["portfolio"]["realized_pnl"] = round(float(realized_pnl or 0.0), 2)
     status["portfolio"]["unrealized_pnl"] = round(float(unrealized_pnl or 0.0), 2)
     status["portfolio"]["total_pnl"] = round(float(total_pnl or 0.0), 2)
@@ -253,11 +253,11 @@ def write_status(cycle_summary: dict = None) -> None:
         )
         status["execution"] = query_execution_event_summary(
             conn,
-            not_before=None,
+            not_before=current_regime_started_at or None,
         )
         status["learning"] = query_learning_surface_summary(
             conn,
-            not_before=None,
+            not_before=current_regime_started_at or None,
         )
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
@@ -331,10 +331,13 @@ def write_status(cycle_summary: dict = None) -> None:
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",
     }
+    compatibility_inputs: dict[str, object] = {}
     if current_regime_started_at:
-        status["truth"]["compatibility_inputs"] = {
-            "strategy_tracker_current_regime_started_at": current_regime_started_at,
-        }
+        compatibility_inputs["strategy_tracker_current_regime_started_at"] = current_regime_started_at
+    if risk_details.get("initial_bankroll") is None:
+        compatibility_inputs["bankroll_fallback_source"] = "settings.capital_base_usd"
+    if compatibility_inputs:
+        status["truth"]["compatibility_inputs"] = compatibility_inputs
 
     # Atomic write
     import tempfile

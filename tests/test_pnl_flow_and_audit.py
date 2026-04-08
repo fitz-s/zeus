@@ -13,6 +13,7 @@ import pytest
 
 import src.control.control_plane as control_plane_module
 import src.engine.cycle_runner as cycle_runner
+import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
 import src.engine.monitor_refresh as monitor_refresh
 import src.main as main_module
@@ -870,9 +871,58 @@ def test_inv_status_passes_current_regime_start_to_learning_surface(monkeypatch,
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
 
-    assert captured["not_before"] is None
-    assert captured["execution_not_before"] is None
+    assert captured["not_before"] == "2026-04-03T00:00:00+00:00"
+    assert captured["execution_not_before"] == "2026-04-03T00:00:00+00:00"
     assert status["truth"]["compatibility_inputs"]["strategy_tracker_current_regime_started_at"] == "2026-04-03T00:00:00+00:00"
+
+
+def test_inv_status_fallback_bankroll_uses_initial_bankroll(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    as_of = datetime.now(timezone.utc).isoformat()
+    _insert_position_current_row(
+        conn,
+        position_id="t1",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        shares=50.0,
+        cost_basis_usd=5.0,
+        entry_price=0.1,
+        mark_price=0.13,
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="center_buy",
+        as_of=as_of,
+        open_exposure_usd=5.0,
+        realized_pnl_30d=1.25,
+        unrealized_pnl=1.5,
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+    expected_initial = float(status_summary_module.settings.capital_base_usd)
+    expected_total = 1.25 + 1.5
+
+    assert status["portfolio"]["initial_bankroll"] == pytest.approx(expected_initial)
+    assert status["portfolio"]["total_pnl"] == pytest.approx(expected_total)
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial + expected_total)
+    assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "settings.capital_base_usd"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):
@@ -1529,6 +1579,28 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     assert epistemic["forecast_context"]["location"]["season"] == "MAM"
     assert epistemic["forecast_context"]["location"]["bias_corrected"] is False
     assert epistemic["forecast_context"]["location"]["offset"] == 0.0
+
+
+def test_inv_entry_bankroll_contract_is_explicit_in_paper_mode():
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        recent_exits=[_recent_exit(3.0)],
+        positions=[_position(last_monitor_market_price=0.08)],
+    )
+
+    class DummyClob:
+        paper_mode = True
+
+    bankroll, summary = cycle_runtime.entry_bankroll_for_cycle(
+        portfolio,
+        DummyClob(),
+        deps=cycle_runner,
+    )
+
+    assert bankroll == pytest.approx(min(float(cycle_runner.settings.capital_base_usd), portfolio.effective_bankroll))
+    assert summary["entry_bankroll_contract"] == "paper_effective_bankroll_capped_by_config"
+    assert summary["bankroll_truth_source"] == "portfolio.effective_bankroll"
+    assert summary["wallet_balance_used"] is False
 
 
 def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):

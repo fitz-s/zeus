@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `FROZEN / IMPLEMENTATION_VERIFIED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -68,16 +68,17 @@ Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summar
 
 ## Current blocker state
 
-- bankroll truth still diverges across `cycle_runtime`, `riskguard`, and `status_summary`
-- this packet is frozen to fix that single K-level seam without widening into other open families
+- bankroll contract has been repaired in code across `cycle_runtime`, `riskguard`, and `status_summary`
+- targeted packet tests now pass on the repaired seam
+- pre-close critic + verifier still need to run before local acceptance
 - out-of-scope local dirt must remain excluded from packet commits
 
 ## Immediate checklist
 
 - [x] `BUG-BANKROLL-TRUTH-CONSISTENCY` frozen
-- [ ] architecture/code-review/test map captured for the packet
-- [ ] bankroll contract repaired in code
-- [ ] targeted tests pass
+- [x] architecture/code-review/test map captured for the packet
+- [x] bankroll contract repaired in code
+- [x] targeted tests pass
 - [ ] pre-close critic review passed
 - [ ] pre-close verifier review passed
 - [ ] packet accepted locally
@@ -86,6 +87,6 @@ Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summar
 
 ## Next required action
 
-1. Map the packet into bounded entry / risk / operator truth slices.
-2. Repair the bankroll contract only inside `cycle_runtime`, `riskguard`, `status_summary`, and targeted tests.
+1. Run pre-close critic review on the repaired bankroll seam.
+2. Run pre-close verifier review on the repaired bankroll seam.
 3. Do not widen into control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.

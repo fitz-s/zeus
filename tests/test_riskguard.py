@@ -274,12 +274,36 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "load_portfolio",
-            lambda: (_ for _ in ()).throw(AssertionError("load_portfolio fallback should not run")),
+            lambda: PortfolioState(
+                bankroll=150.0,
+                daily_baseline_total=151.0,
+                weekly_baseline_total=152.0,
+                recent_exits=[
+                    {
+                        "city": "NYC",
+                        "bin_label": "39-40°F",
+                        "target_date": "2026-04-01",
+                        "direction": "buy_yes",
+                        "token_id": "yes123",
+                        "no_token_id": "no456",
+                        "exit_reason": "SETTLEMENT",
+                        "exited_at": "2026-03-30T00:00:00Z",
+                        "pnl": -3.0,
+                    }
+                ],
+            ),
         )
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50: [{
+                "p_posterior": 0.7,
+                "outcome": 1,
+                "source": "position_events",
+                "metric_ready": True,
+                "strategy": "center_buy",
+                "pnl": -3.0,
+            }],
         )
 
         riskguard_module.tick()
@@ -292,7 +316,13 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 1
+        assert details["portfolio_capital_source"] == "working_state_metadata"
+        assert details["initial_bankroll"] == pytest.approx(150.0)
+        assert details["daily_baseline_total"] == pytest.approx(151.0)
+        assert details["weekly_baseline_total"] == pytest.approx(152.0)
+        assert details["realized_pnl"] == pytest.approx(-3.0)
         assert details["unrealized_pnl"] == pytest.approx(5.0)
+        assert details["effective_bankroll"] == pytest.approx(152.0)
 
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -304,7 +334,15 @@ class TestRiskGuardSettlementSource:
             return get_connection(zeus_db)
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=150.0,
+                daily_baseline_total=149.0,
+                weekly_baseline_total=148.0,
+            ),
+        )
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
@@ -322,6 +360,10 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_fallback_active"] is True
         assert details["portfolio_fallback_reason"] == "missing_table"
         assert details["portfolio_position_count"] == 0
+        assert details["portfolio_capital_source"] == "working_state_metadata"
+        assert details["initial_bankroll"] == pytest.approx(150.0)
+        assert details["daily_baseline_total"] == pytest.approx(149.0)
+        assert details["weekly_baseline_total"] == pytest.approx(148.0)
 
     def test_get_current_level_fails_closed_when_risk_state_has_no_rows(self, monkeypatch, tmp_path):
         risk_db = tmp_path / "risk_state.db"
