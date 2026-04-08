@@ -68,8 +68,24 @@ def _has_canonical_position_history(conn, position_id: str) -> bool:
 
 
 def _canonical_phase_before_for_settlement(pos) -> str:
-    if getattr(pos, "state", "") == "economically_closed":
-        return "economically_closed"
+    from src.state.lifecycle_manager import LifecyclePhase, phase_for_runtime_position
+
+    try:
+        phase = phase_for_runtime_position(
+            state=getattr(pos, "state", ""),
+            exit_state=getattr(pos, "exit_state", ""),
+            chain_state=getattr(pos, "chain_state", ""),
+        )
+    except ValueError:
+        phase = None
+
+    if phase in {
+        LifecyclePhase.PENDING_EXIT,
+        LifecyclePhase.ECONOMICALLY_CLOSED,
+        LifecyclePhase.DAY0_WINDOW,
+        LifecyclePhase.ACTIVE,
+    }:
+        return phase.value
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 

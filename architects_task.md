@@ -5,8 +5,8 @@ Purpose:
 - exactly one live packet at a time
 
 Metadata:
-- Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-MONITOR-SHARED-CONNECTION-REPAIR freeze`
+- Last updated: `2026-04-08 America/Chicago`
+- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY closure slice`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -77,17 +77,17 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 ## Immediate checklist
 
 - [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
-- [ ] architecture/code-review/test map captured for the packet
-- [ ] closure contract repaired in code
-- [ ] targeted tests pass
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
+- [x] architecture/code-review/test map captured for the packet
+- [x] closure contract repaired in code
+- [x] targeted tests pass
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
 - [ ] packet accepted locally
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Map the packet into bounded durable-write / settlement-legality slices.
-2. Repair the closure contract only inside `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
+1. Accept the repaired closure slice locally and commit the bounded packet batch.
+2. Run post-close third-party critic + verifier review on the accepted boundary before freezing any next packet.
 3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
