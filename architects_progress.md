@@ -31,15 +31,36 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally in worktree)
-- Current active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
-- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
+- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Current active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Current packet status: `pre-close passed / local acceptance ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit `0c9a348` still needs transport back to the live `Architects` branch
+  - accepted commit still needs to be created on this worktree branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 03:24 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE frozen
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted VERIFY-ETL-RECALIBRATE-CONTAMINATION boundary plus passed post-close gate permit the next packet freeze
+  - session leftovers rank position/state/settlement trace convergence as the next family after ETL
+  - direct live SQL/JSON inspection on `/Users/leofitz/.openclaw/workspace-venus/zeus/state` shows all 14 `positions-paper.json` `recent_exits` trade_ids still present in `position_current` on both `zeus.db` and `zeus-paper.db` (`9 active`, `5 day0_window`)
+  - direct live SQL/JSON inspection also shows all 19 paper `chronicle` settlement rows still missing `json_extract(details_json, '$.exit_price')`
+  - per-trade inspection confirms recent exited trade_ids still have only entry canonical events (`POSITION_OPEN_INTENT`, `ENTRY_ORDER_POSTED`, `ENTRY_ORDER_FILLED`) and no terminal canonical event
+- Decisions frozen:
+  - keep this packet on stale-open close-path repair plus settlement `exit_price` durability only
+  - do not widen into ETL, risk/status/operator summary rewrites, or broad historical migration cleanup
+- Open uncertainties:
+  - whether the bounded repair should combine read-side stale-open exclusion with future write-side economic-close dual-write, or whether one of those alone is sufficient, still needs implementation-time proof
+- Next required action:
+  - inspect close-path writers/readers and implement the smallest repair that restores runtime trace convergence on the touched seam
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 02:43 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION accepted locally and passed post-close gate in worktree
 - Author: `Architects clean worktree lane`
