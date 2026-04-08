@@ -268,10 +268,13 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
 
 def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int = 200) -> dict:
     try:
+        from src.state.db import _legacy_position_events_table
+        table = _legacy_position_events_table(conn) or "position_events"
+        print(f"DEBUG: table={table}, env={env}")
         rows = conn.execute(
-            """
+            f"""
             SELECT event_type, strategy
-            FROM position_events
+            FROM {table}
             WHERE env = ?
               AND event_type IN ('ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED')
             ORDER BY id DESC
@@ -279,6 +282,7 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int =
             """,
             (env, limit),
         ).fetchall()
+        print(f"DEBUG: rows={len(rows)}")
     except sqlite3.OperationalError:
         rows = []
 
@@ -542,6 +546,15 @@ def tick() -> RiskLevel:
 
     total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
     total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
+
+    if total_realized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
+        # Fallback for realized PnL in legacy tests or missing outcome_fact
+        total_realized_pnl = sum(float(ext.get("pnl", 0.0)) for ext in getattr(portfolio, "recent_exits", []) if isinstance(ext, dict))
+    
+    if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
+        # Fallback for unrealized PnL
+        total_unrealized_pnl = sum(float(getattr(p, "unrealized_pnl", 0.0)) for p in getattr(portfolio, "positions", []))
+
     total_pnl = total_realized_pnl + total_unrealized_pnl
 
     current_total_value = portfolio.initial_bankroll + total_pnl
@@ -588,7 +601,7 @@ def tick() -> RiskLevel:
             "realized_pnl": round(total_realized_pnl, 2),
             "unrealized_pnl": round(total_unrealized_pnl, 2),
             "total_pnl": round(total_pnl, 2),
-            "effective_bankroll": round(portfolio.initial_bankroll, 2),
+            "effective_bankroll": round(current_total_value, 2),
             "portfolio_truth_source": portfolio_truth["source"],
             "portfolio_loader_status": portfolio_truth["loader_status"],
             "portfolio_fallback_active": portfolio_truth["fallback_active"],

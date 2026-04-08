@@ -391,7 +391,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events"}],
         )
 
         riskguard_module.tick()
@@ -419,7 +419,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.4, "outcome": 0, "source": "decision_log"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.4, "outcome": 0, "source": "decision_log"}],
         )
 
         riskguard_module.tick()
@@ -446,7 +446,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [
+            lambda conn, limit=50, **kwargs: [
                 {"p_posterior": 0.7, "outcome": 1, "pnl": 5.0, "strategy": "center_buy", "source": "position_events", "metric_ready": True},
                 {"p_posterior": 0.4, "outcome": 0, "pnl": -2.0, "strategy": "center_buy", "source": "position_events", "metric_ready": True},
                 {"p_posterior": 0.8, "outcome": 1, "pnl": 4.0, "strategy": "opening_inertia", "source": "position_events", "metric_ready": True},
@@ -478,7 +478,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         conn = get_connection(zeus_db)
@@ -548,7 +548,7 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         riskguard_module.tick()
@@ -723,7 +723,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
         )
 
         conn = get_connection(zeus_db)
@@ -782,7 +782,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
         )
 
         level = riskguard_module.tick()
@@ -824,7 +824,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         riskguard_module.tick()
@@ -892,7 +892,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         riskguard_module.tick()
@@ -940,7 +940,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         riskguard_module.tick()
@@ -977,7 +977,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
         )
 
         riskguard_module.tick()
@@ -1007,7 +1007,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
+            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
         )
 
         level = riskguard_module.tick()
@@ -1036,7 +1036,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [
+            lambda conn, limit=50, **kwargs: [
                 {
                     "p_posterior": 0.7,
                     "outcome": 1,
@@ -1089,7 +1089,7 @@ class TestStrategyPolicyResolver:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50: [
+            lambda conn, limit=50, **kwargs: [
                 {
                     "p_posterior": None,
                     "outcome": None,
@@ -1285,7 +1285,7 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(
         riskguard_module,
         "query_authoritative_settlement_rows",
-        lambda conn, limit=50: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
+        lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True, "strategy": "center_buy"}],
     )
 
     riskguard_module.tick()
