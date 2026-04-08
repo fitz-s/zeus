@@ -31,15 +31,36 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE` (accepted locally in worktree)
-- Current active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
-- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
+- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Current active packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Current packet status: `pre-close passed / local acceptance ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit `c33ab3f` still needs transport back to the live `Architects` branch
+  - accepted commit still needs to be created on this worktree branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 04:08 America/Chicago] REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION frozen
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE boundary plus passed post-close gate permit the next packet freeze
+  - fresh live probe with the accepted trace repair applied still shows `status_open_positions = 12` while only 3 future-target positions are legitimate
+  - residual open IDs are `rt1`, `trade-1`, `00e8b187-731`, `19a7116d-36c`, `511c16a6-27d`, `dab0ddb6-e7f`, `e6f0d01d-2a3`, `ea9f44ef-23e`, `f465b107-f88`, plus the 3 real future-target positions
+  - all 9 residual ghost rows have past target dates and are not part of the legitimate future-target open runtime set
+  - `query_portfolio_loader_view()` still reports `stale_legacy_fallback` with `stale_trade_ids = ['rt1', 'trade-1', '75c98026-cd5']`
+- Decisions frozen:
+  - keep this packet on residual read-side ghost exclusion only
+  - do not widen into exit writers, ETL, status/risk summaries, or historical cleanup
+- Open uncertainties:
+  - whether one narrow date-based exclusion rule is enough, or whether separate handling is needed for synthetic `rt1` / `trade-1` rows, still needs implementation-time proof
+- Next required action:
+  - add adversarial tests for past-target ghost exclusion and implement the narrow reader-side repair in `src/state/db.py`
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 03:57 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE accepted locally and passed post-close gate in worktree
 - Author: `Architects clean worktree lane`

@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -2305,7 +2305,7 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
 
     rows = conn.execute(
         """
-        SELECT position_id, phase, trade_id, city, bin_label, direction,
+        SELECT position_id, phase, trade_id, city, target_date, bin_label, direction,
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price
@@ -2333,6 +2333,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         latest_trade_status = latest_trade_statuses.get(trade_id, "")
         if latest_trade_status in TERMINAL_TRADE_DECISION_STATUSES:
+            continue
+        if _is_past_target_open_phase(str(row["target_date"] or ""), phase):
             continue
         hints = transitional_hints.get(trade_id, {})
         chain_state = str(row["chain_state"] or "unknown")
@@ -2457,6 +2459,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
         latest_trade_status = latest_trade_statuses.get(trade_id, "")
+        if _is_past_target_open_phase(str(row["target_date"] or ""), phase):
+            continue
         hints = transitional_hints.get(trade_id, {})
         position_env = str(hints.get("env") or current_mode)
         if position_env != current_mode:
@@ -2669,6 +2673,18 @@ def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
 def _parse_boolish_text(raw: str) -> bool:
     text = str(raw).strip().lower()
     return text in {"1", "true", "yes", "on", "enabled", "gate"}
+
+
+def _is_past_target_open_phase(target_date_text: str, phase: str) -> bool:
+    if phase not in OPEN_EXPOSURE_PHASES:
+        return False
+    if not target_date_text:
+        return False
+    try:
+        target_date = date.fromisoformat(target_date_text)
+    except ValueError:
+        return False
+    return target_date < datetime.now(timezone.utc).date()
 
 
 def _latest_trade_decision_status_by_trade_id(

@@ -135,6 +135,7 @@ def _insert_position_current_row(
     position_id: str,
     strategy_key: str,
     phase: str = "active",
+    target_date: str = "2026-04-01",
     size_usd: float = 0.0,
     shares: float = 0.0,
     cost_basis_usd: float = 0.0,
@@ -154,13 +155,14 @@ def _insert_position_current_row(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', ?, ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
         """,
         (
             position_id,
             phase,
             position_id,
             city,
+            target_date,
             bin_label,
             direction,
             size_usd,
@@ -3381,6 +3383,129 @@ def test_position_current_views_consult_legacy_terminal_trade_status_when_curren
     assert status_view["positions"] == []
     assert loader_view["positions"][0]["trade_id"] == "trade-lagged"
     assert loader_view["positions"][0]["state"] == "economically_closed"
+
+
+def test_query_position_current_status_view_excludes_past_target_ghost_but_keeps_future_position(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    init_schema(conn)
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    _insert_position_current_row(
+        conn,
+        position_id="ghost-past",
+        strategy_key="center_buy",
+        phase="day0_window",
+        target_date=yesterday,
+        size_usd=5.0,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        entry_price=0.5,
+    )
+    _insert_position_current_row(
+        conn,
+        position_id="future-open",
+        strategy_key="center_buy",
+        phase="active",
+        target_date=tomorrow,
+        size_usd=7.0,
+        shares=14.0,
+        cost_basis_usd=7.0,
+        entry_price=0.5,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert status_view["open_positions"] == 1
+    assert [row["trade_id"] for row in status_view["positions"]] == ["future-open"]
+    assert loader_view["status"] == "ok"
+    assert [row["trade_id"] for row in loader_view["positions"]] == ["future-open"]
+
+
+def test_query_portfolio_loader_view_ignores_past_target_stale_legacy_ghost_adversarially(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    init_schema(conn)
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    _insert_position_current_row(
+        conn,
+        position_id="ghost-stale",
+        strategy_key="center_buy",
+        phase="active",
+        target_date=yesterday,
+        size_usd=5.0,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        entry_price=0.5,
+    )
+    _insert_position_current_row(
+        conn,
+        position_id="future-legit",
+        strategy_key="center_buy",
+        phase="active",
+        target_date=tomorrow,
+        size_usd=7.0,
+        shares=14.0,
+        cost_basis_usd=7.0,
+        entry_price=0.5,
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_events_legacy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            runtime_trade_id TEXT,
+            position_state TEXT,
+            order_id TEXT,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            market_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            strategy TEXT,
+            edge_source TEXT,
+            source TEXT,
+            details_json TEXT,
+            timestamp TEXT,
+            env TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'POSITION_LIFECYCLE_UPDATED', 'ghost-stale', 'day0_window', '', 'snap-1',
+            'NYC', ?, 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
+            'test', '{}', ?, 'paper'
+        )
+        """,
+        (yesterday, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    status_view = query_position_current_status_view(conn)
+    conn.close()
+
+    assert loader_view["status"] == "ok"
+    assert loader_view.get("stale_trade_ids") in (None, [])
+    assert [row["trade_id"] for row in loader_view["positions"]] == ["future-legit"]
+    assert [row["trade_id"] for row in status_view["positions"]] == ["future-legit"]
 
 
 def test_harvester_settlement_chronicle_event_carries_exit_price(tmp_path):
