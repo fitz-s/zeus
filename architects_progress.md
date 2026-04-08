@@ -4003,3 +4003,69 @@ Archive policy:
   - run pre-close critic + verifier review on the repaired bankroll seam
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 22:18 America/Chicago] BUG-BANKROLL-TRUTH-CONSISTENCY accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- Status delta:
+  - packet accepted
+  - accepted boundary frozen for post-close review
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile src/engine/cycle_runtime.py src/riskguard/riskguard.py src/observability/status_summary.py tests/test_pnl_flow_and_audit.py tests/test_riskguard.py` -> `passed`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py::test_inv_status_reports_real_pnl tests/test_pnl_flow_and_audit.py::test_inv_status_passes_current_regime_start_to_learning_surface tests/test_pnl_flow_and_audit.py::test_inv_status_fallback_bankroll_uses_initial_bankroll tests/test_pnl_flow_and_audit.py::test_inv_kelly_uses_effective_bankroll tests/test_pnl_flow_and_audit.py::test_inv_entry_bankroll_contract_is_explicit_in_paper_mode tests/test_pnl_flow_and_audit.py::test_inv_riskguard_reads_real_pnl` -> `6 passed`
+  - `.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_prefers_position_current_for_portfolio_truth tests/test_riskguard.py::TestRiskGuardSettlementSource::test_tick_records_explicit_portfolio_fallback_when_projection_unavailable` -> `2 passed`
+  - independent pre-close critic artifact: `.omx/artifacts/gemini-bug-bankroll-truth-preclose-critic-20260408T031530Z.md` -> `APPROVE / no blockers`
+  - independent pre-close verifier artifact: `.omx/artifacts/claude-bug-bankroll-truth-preclose-verifier-20260408T031530Z.md` -> `SUFFICIENT`
+- Decisions frozen:
+  - this acceptance claims only the bankroll-truth seam across entry sizing, RiskGuard, and operator summary
+  - it does not claim control-plane durability, lifecycle/projection convergence, or ETL contamination closure
+- Open uncertainties:
+  - the accepted boundary still requires the user-required post-close third-party critic + verifier gate before packet closeout may be recorded
+- Next required action:
+  - run the post-close third-party critic + verifier on the accepted bankroll seam
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 22:21 America/Chicago] BUG-BANKROLL-TRUTH-CONSISTENCY post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - packet closeout became allowed
+- Basis / evidence:
+  - third-party post-close critic artifact: `.omx/artifacts/gemini-bug-bankroll-truth-postclose-critic-20260408T031906Z.md` -> `PASS`
+  - third-party post-close verifier artifact: `.omx/artifacts/claude-bug-bankroll-truth-postclose-verifier-20260408T031906Z.md` -> `PASS`
+  - accepted packet boundary `7cde843` no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - the current packet may be closed without widening into control-plane durability, lifecycle/projection, or ETL contamination work
+- Open uncertainties:
+  - none inside the completed packet boundary
+- Next required action:
+  - record packet closeout truth and stop until a new packet is frozen
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 22:21 America/Chicago] BUG-BANKROLL-TRUTH-CONSISTENCY closeout recorded
+- Author: `Architects mainline lead`
+- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
+- Status delta:
+  - packet completion is now recorded under current repo truth
+  - no live packet remains open
+- Basis / evidence:
+  - accepted boundary commit `7cde843` passed pre-close review and post-close gate
+  - work packet evidence log now records both pre-close and post-close external review artifacts
+- Decisions frozen:
+  - this closeout claims only the bankroll-truth seam repair across entry sizing, RiskGuard, and operator summary with bounded proof
+  - it does not authorize a new packet or any broader control-plane, lifecycle/projection, or ETL contamination work
+- Open uncertainties:
+  - none inside the closed packet boundary
+- Next required action:
+  - stop at the current packet boundary until a new packet is explicitly frozen
+- Owner:
+  - Architects mainline lead

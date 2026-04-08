@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-MONITOR-SHARED-CONNECTION-REPAIR freeze`
+- Last updated by: `Codex BUG-BANKROLL-TRUTH-CONSISTENCY closeout`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
-- Active packet state: `frozen / implementation verified`
+- Active packet: `none`
+- Active packet state: `no live packet / stop at packet boundary`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Last accepted packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Run the pre-close critic + verifier on the repaired bankroll-truth seam.
-2. Keep the packet bounded to `cycle_runtime`, `riskguard`, `status_summary`, and targeted tests.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. Stop at the current packet boundary; do not start a new packet until one is explicitly frozen.
+2. Preserve the bankroll-truth evidence and review artifacts for future cold starts.
+3. Keep out-of-scope local dirt excluded from any future packet commit.
 
 ## Current out-of-scope dirt
 

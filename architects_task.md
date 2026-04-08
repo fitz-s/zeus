@@ -17,14 +17,14 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-BANKROLL-TRUTH-CONSISTENCY`
-- State: `FROZEN / IMPLEMENTATION_VERIFIED`
-- Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
+- Packet: `none`
+- State: `NO_LIVE_PACKET / STOP_AT_PACKET_BOUNDARY`
+- Execution mode: `SOLO_LEAD / WAITING_FOR_NEXT_FREEZE`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summary before touching broader lifecycle or ETL seams.
+No live packet is open. Stop at the BUG-BANKROLL-TRUTH-CONSISTENCY boundary until a new packet is explicitly frozen.
 
 ## Allowed files
 
@@ -68,10 +68,9 @@ Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summar
 
 ## Current blocker state
 
-- bankroll contract has been repaired in code across `cycle_runtime`, `riskguard`, and `status_summary`
-- targeted packet tests now pass on the repaired seam
-- pre-close critic + verifier still need to run before local acceptance
-- out-of-scope local dirt must remain excluded from packet commits
+- BUG-BANKROLL-TRUTH-CONSISTENCY passed pre-close and post-close review gates on accepted boundary commit `7cde843`
+- no live packet remains open
+- out-of-scope local dirt must remain excluded from future packet commits
 
 ## Immediate checklist
 
@@ -79,14 +78,14 @@ Eliminate bankroll-truth loss between entry sizing, RiskGuard, and status summar
 - [x] architecture/code-review/test map captured for the packet
 - [x] bankroll contract repaired in code
 - [x] targeted tests pass
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] pre-close critic review passed
+- [x] pre-close verifier review passed
+- [x] packet accepted locally
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Run pre-close critic review on the repaired bankroll seam.
-2. Run pre-close verifier review on the repaired bankroll seam.
-3. Do not widen into control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
+1. Do not widen into control-plane durability, lifecycle/projection, or ETL contamination work without a new packet.
+2. Freeze a new packet before any further implementation work.
+3. Keep the bankroll-truth evidence surfaces available for the next cold start.
