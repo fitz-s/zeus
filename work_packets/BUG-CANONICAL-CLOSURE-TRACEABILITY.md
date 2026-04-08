@@ -93,3 +93,7 @@ evidence_required:
 - This packet is the next K-level seam after bankroll truth: durable close-path traceability and lifecycle legality.
 - Degraded-path rule for this packet: if canonical closure substrates are absent, the touched code must surface explicit skip/fail-loud semantics rather than silently implying durable completion.
 - If implementation shows the fix requires projection-query compatibility cleanup, control-plane migration, or ETL/recalibration work, stop and freeze a new packet instead of widening this one.
+- Closure-contract note:
+  - present path: when canonical position tables exist and `execution_fact` / `outcome_fact` are available, `log_execution_report()` and `log_settlement_event()` must keep writing durable facts even if legacy runtime `position_events` is absent; only the legacy event append is skipped
+  - absent path: when both legacy runtime event schema and canonical position surfaces are absent, the touched code still fails loud on missing legacy runtime schema; when fact tables are absent, `log_execution_fact()` / `log_outcome_fact()` continue to return explicit `skipped_missing_table`
+  - settlement legality: `pending_exit` may fold to `settled` only for the bounded `backoff_exhausted` path; the harvester canonical phase-before must reflect that pending-exit truth instead of pretending the position stayed active
