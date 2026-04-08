@@ -3883,3 +3883,71 @@ Archive policy:
   - run the packet-bounded pre-close critic/verifier review on the restored seam and only then consider local acceptance
 - Owner:
   - Architects mainline lead
+
+
+## [2026-04-07 20:18 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - packet accepted
+  - accepted boundary commit `f5914a8` frozen for post-close review
+- Basis / evidence:
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `python3 scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile src/state/db.py src/engine/cycle_runner.py tests/test_runtime_guards.py` -> `passed`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "monitoring_uses_attached_shared_connection or monitoring_fails_loudly_when_shared_seam_unavailable"` -> `2 passed, 78 deselected`
+  - `.venv/bin/pytest -q tests/test_runtime_guards.py -k "exit_context or monitor"` -> `12 passed, 68 deselected`
+  - `.venv/bin/pytest -q tests/test_live_safety_invariants.py -k incomplete_context` -> `2 passed, 52 deselected`
+  - `.venv/bin/pytest -q tests/test_pnl_flow_and_audit.py -k monitor` -> `1 passed, 48 deselected`
+  - independent pre-close critic artifact: `.omx/artifacts/gemini-bug-monitor-shared-connection-preclose-critic-20260408T011600Z.md` -> `APPROVE / no blockers`
+  - independent pre-close verifier artifact: `.omx/artifacts/claude-bug-monitor-shared-connection-preclose-verifier-20260408T011600Z.md` -> `SUFFICIENT`
+- Decisions frozen:
+  - this acceptance claims only the monitoring shared-connection seam restoration inside the current packet boundary
+  - no RiskGuard, bankroll, migration, daemon cutover, or broader isolation claims are accepted here
+- Open uncertainties:
+  - the accepted packet boundary still requires the user-required post-close third-party critic + verifier gate before packet closeout may be recorded
+- Next required action:
+  - run the post-close third-party critic + verifier on accepted commit `f5914a8`
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 20:28 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR post-close gate passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - packet closeout became allowed
+- Basis / evidence:
+  - third-party post-close critic artifact: `.omx/artifacts/gemini-bug-monitor-shared-connection-postclose-critic-20260408T012006Z.md` -> `PASS`
+  - third-party post-close verifier artifact: `.omx/artifacts/claude-bug-monitor-shared-connection-postclose-verifier-20260408T012006Z.md` -> `PASS`
+  - accepted packet boundary `f5914a8` no longer shows blocker-level contradiction in the reviewed files
+- Decisions frozen:
+  - the current packet may be closed without widening into broader isolation or runtime work
+- Open uncertainties:
+  - none inside the completed packet boundary
+- Next required action:
+  - record packet closeout truth and stop until a new packet is frozen
+- Owner:
+  - Architects mainline lead
+
+
+## [2026-04-07 20:28 America/Chicago] BUG-MONITOR-SHARED-CONNECTION-REPAIR closeout recorded
+- Author: `Architects mainline lead`
+- Packet: `BUG-MONITOR-SHARED-CONNECTION-REPAIR`
+- Status delta:
+  - packet completion is now recorded under current repo truth
+  - no live packet remains open
+- Basis / evidence:
+  - accepted boundary commit `f5914a8` passed pre-close review and post-close gate
+  - work packet evidence log now records both pre-close and post-close external review artifacts
+- Decisions frozen:
+  - this closeout claims only the monitoring shared-connection seam repair and its bounded regression proof
+  - it does not authorize a new packet or any broader migration / RiskGuard / bankroll work
+- Open uncertainties:
+  - none inside the closed packet boundary
+- Next required action:
+  - stop at the current packet boundary until a new packet is explicitly frozen
+- Owner:
+  - Architects mainline lead
