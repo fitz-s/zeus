@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW post-close sync`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- Active packet state: `post_close_passed / next_freeze_allowed`
+- Active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next bounded portfolio-truth packet; do not widen this accepted boundary into fallback-reader or output-layer cleanup.
-2. Preserve the distinction between removing false degradation at the comparator seam and claiming full portfolio-truth convergence.
-3. Use the newly surfaced `recent_exits` divergence as follow-up evidence rather than reopening the comparator packet.
+1. Implement the bounded `load_portfolio()` recent-exit truth fix in `src/state/portfolio.py`.
+2. Keep RiskGuard, DB settlement, and status/output parity work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between stopping mixed-source loader truth and claiming full realized-PnL convergence.
 
 ## Current out-of-scope dirt
 

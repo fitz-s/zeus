@@ -32,14 +32,33 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` (accepted locally / post-close passed)
-- Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- Current packet status: `post-close passed / next freeze allowed`
+- Current active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - `load_portfolio()` still mixes canonical positions with JSON `recent_exits` (`14 / +210.35`) while authoritative paper settlements are `19 / -13.03`
-  - unsuffixed `zeus.db` still contains at least one true semantic stale projection (`08d6c939-038`), outside this packet’s accepted boundary
+  - downstream consumers may still read mixed-source `PortfolioState` objects until this loader seam is repaired
 
 ## Durable timeline
+
+## [2026-04-09 15:33 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted comparator/shadow packet completed post-close review without reopening
+  - fresh follow-up probe showed `load_portfolio(state/positions-paper.json)` returning canonical positions (`12`) while preserving contradictory JSON `recent_exits` (`14 / +210.35`)
+  - direct authoritative settlement probe on `zeus-paper.db` returned `19` settlements with `pnl=-13.03`
+- Decisions frozen:
+  - the next bounded seam is loader-level truth mixing in `src/state/portfolio.py`
+  - keep RiskGuard, DB settlement authority, and status/output parity explicitly out of this packet
+- Open uncertainties:
+  - implementation must choose whether DB-first loads clear contradictory `recent_exits` or replace them with canonical settlement exits without widening scope
+- Next required action:
+  - implement the bounded loader recent-exit truth fix and lock it with packet-bounded tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 15:24 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW post-close passed
 - Author: `Architects mainline lead`
