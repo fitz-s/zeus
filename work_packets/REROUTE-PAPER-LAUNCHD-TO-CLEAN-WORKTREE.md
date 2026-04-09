@@ -76,3 +76,5 @@ evidence_required:
 
 - 2026-04-09: stale paper launchd writers were disabled and coherent artifacts remained stable.
 - 2026-04-09: next bounded need is to restore paper runtime from clean code without reactivating the stale checkout.
+- 2026-04-09: stable clean runtime worktree created at `/Users/leofitz/.openclaw/workspace-venus/zeus-paper-runtime-clean` with live-state and venv symlinks.
+- 2026-04-09: paper launchd services now run from the clean worktree and `risk_state-paper` rows `8576-8579` remained coherent across >60s (`position_current / ok / 19 / 0.0`).

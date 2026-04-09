@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE freeze`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE acceptance sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted_local / post_close_pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Prepare a stable clean worktree for runtime use.
-2. Reroute the paper launchd services onto that clean worktree without changing core truth logic.
-3. Verify that paper artifact writes stay coherent after re-enable.
+1. Run post-close critic + verifier on the accepted reroute boundary.
+2. Keep core truth logic and broader parity work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between clean-runtime routing and downstream consumer parity.
 
 ## Current out-of-scope dirt
 

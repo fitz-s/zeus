@@ -33,13 +33,44 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` (accepted locally / post-close passed)
 - Current active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - paper launchd writers are disabled, but paper runtime is not yet rerouted to a clean ownership path
-  - downstream parity work remains unresolved outside the new reroute packet
+  - downstream parity work remains unresolved outside the clean-runtime reroute packet
+  - live paper services are now clean-owned, but future service-management discipline still needs an explicit durable home
 
 ## Durable timeline
+
+## [2026-04-09 19:34 America/Chicago] REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE accepted locally
+- Author: `Architects mainline lead`
+- Packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Status delta:
+  - clean paper launchd reroute packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `47a6043` -> `Freeze the clean paper launchd reroute packet`
+  - stable clean runtime worktree created at `/Users/leofitz/.openclaw/workspace-venus/zeus-paper-runtime-clean`
+  - clean runtime worktree wired with:
+    - `state -> /Users/leofitz/.openclaw/workspace-venus/zeus/state`
+    - `.venv -> /Users/leofitz/.openclaw/workspace-venus/zeus/.venv`
+  - paper launchd plists updated so both services now run from the clean worktree
+  - `launchctl print gui/501/com.zeus.paper-trading` and `.../com.zeus.riskguard` show:
+    - `state = running`
+    - `working directory = /Users/leofitz/.openclaw/workspace-venus/zeus-paper-runtime-clean`
+  - fresh paper DB rows remained coherent across multiple ticks:
+    - `8576`, `8577`, `8578`, `8579`
+    - all = `position_current / ok / 19 / 0.0`
+  - native `critic` subagent `Kant` -> `PASS`
+  - native `verifier` subagent `Heisenberg` -> `PASS`
+- Decisions frozen:
+  - paper runtime is restored on clean code ownership
+  - core truth logic was not widened in this packet
+  - downstream parity remains explicit follow-up work
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 19:26 America/Chicago] REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE frozen
 - Author: `Architects mainline lead`

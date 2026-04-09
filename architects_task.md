@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE freeze`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -73,19 +73,18 @@ Restore paper runtime on a clean code checkout while keeping it attached to the 
 
 ## Current blocker state
 
-- paper runtime is currently disabled on the launchd side
-- stale-writer ownership is fixed, but clean-runtime routing is not yet restored
-- this packet must stay bounded to clean worktree routing and paper launchd ownership only
+- packet-bounded reroute evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
+- paper launchd services now run from the clean worktree and paper risk rows remain coherent across multiple fresh ticks
+- broader downstream parity work remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
 
 - [x] `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` frozen
-- [ ] clean runtime worktree prepared
-- [ ] paper launchd jobs rerouted
-- [ ] paper artifact writes remain coherent after re-enable
+- [x] clean runtime worktree prepared
+- [x] paper launchd jobs rerouted
+- [x] paper artifact writes remain coherent after re-enable
 
 ## Next required action
 
-1. Prepare a stable clean worktree for runtime use.
-2. Reroute the two paper launchd jobs onto that clean worktree.
-3. Verify that refreshed artifacts stay coherent after re-enable.
+1. Run post-close critic + verifier on the accepted reroute boundary.
+2. Freeze the next bounded packet instead of widening this one.
