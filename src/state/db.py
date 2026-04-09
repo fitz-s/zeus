@@ -1940,7 +1940,19 @@ def query_settlement_events(
         query += "\n        LIMIT ?"
         params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    return _decode_position_event_rows(rows)
+    decoded = _decode_position_event_rows(rows)
+    deduped: list[dict] = []
+    seen_trade_ids: set[str] = set()
+    for event in decoded:
+        trade_id = str(event.get("runtime_trade_id") or "")
+        if trade_id and trade_id in seen_trade_ids:
+            continue
+        if trade_id:
+            seen_trade_ids.add(trade_id)
+        deduped.append(event)
+        if limit is not None and len(deduped) >= limit:
+            return deduped[:limit]
+    return deduped[:limit] if limit is not None else deduped
 
 
 def query_authoritative_settlement_rows(
