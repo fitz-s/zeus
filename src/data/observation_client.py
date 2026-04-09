@@ -160,7 +160,7 @@ def _fetch_wu_observation(
             params={
                 "apiKey": WU_API_KEY,
                 "units": unit,
-                "hours": 36,
+                "hours": 23,  # WU timeseries max is 23
             },
             timeout=15.0,
         )
