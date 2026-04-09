@@ -90,4 +90,7 @@ evidence_required:
 
 ## Evidence log
 
-- Pending implementation.
+- 2026-04-09: `e3f5deb` synchronized the packet boundary after comparator verification.
+- 2026-04-09: fresh work-packet and kernel checks passed.
+- 2026-04-09: targeted comparator/shadow tests passed (`3 passed`).
+- 2026-04-09: direct loader probe showed `zeus-paper.db -> ok`, `zeus.db -> stale_legacy_fallback` only for `08d6c939-038`.
