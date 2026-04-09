@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY acceptance`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -80,11 +80,11 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 - [x] exact truth-status / audit-field contract implemented
 - [x] targeted loss-authority tests pass
 - [x] deeper truth drift exposed by the packet recorded explicitly
-- [ ] post-close critic review passed
-- [ ] post-close verifier review passed
+- [x] post-close critic review passed
+- [x] post-close verifier review passed
 
 ## Next required action
 
-1. Run the post-close critic review on the accepted packet boundary.
-2. Run the post-close verifier review on the accepted packet boundary.
-3. Freeze the next truth-unification packet only after post-close passes and the remaining deeper drift is explicitly framed.
+1. Freeze the next truth-unification packet around the deeper portfolio-fallback / mixed settlement authority drift.
+2. Keep this packet’s trailing-loss contract stable unless a later packet explicitly supersedes it.
+3. Do not let the next packet collapse the still-open cross-module truth seams into a single shallow “daily loss” narrative.

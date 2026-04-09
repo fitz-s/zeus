@@ -116,3 +116,5 @@ evidence_required:
   - regression coverage now includes the bad-boundary-row path where an inconsistent row at the cutoff is skipped in favor of an older trustworthy reference
 - pre-close critic review: native `critic` subagent `Darwin` -> `PASS` on `f6a49e4` after confirming degraded history remains visible and wider portfolio/settlement drift stays explicit
 - pre-close verifier review: native `verifier` subagent `Singer` -> `PASS` on `f6a49e4` after confirming trailing-loss contract fields, skip-boundary regression, and targeted evidence
+- post-close critic review: native `critic` subagent `Harvey` -> `PASS` on `78b1cfc` after confirming the accepted boundary stays truthful about unresolved portfolio-fallback / settlement-authority debt
+- post-close verifier review: native `verifier` subagent `Aquinas` -> `PASS` on `78b1cfc` after confirming the control surfaces, packet evidence, and trailing-loss contract match repo truth

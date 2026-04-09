@@ -33,13 +33,33 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` (accepted locally / post-close passed)
 - Current active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted packet still requires the mandatory post-close critic + verifier
   - deeper portfolio-fallback and mixed-settlement authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 10:28 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close passed
+- Author: `Architects mainline lead`
+- Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next truth-unification packet freeze became allowed
+- Basis / evidence:
+  - native `critic` subagent `Harvey` -> `PASS` on accepted HEAD `78b1cfc`
+  - native `verifier` subagent `Aquinas` -> `PASS` on accepted HEAD `78b1cfc`
+  - accepted packet evidence already records grammar, kernel, compile, and targeted pytest proof
+- Decisions frozen:
+  - the trailing-loss contract stands on the accepted boundary
+  - this packet did not solve the deeper portfolio-fallback / mixed settlement authority drift, and that remains explicit
+- Open uncertainties:
+  - the next packet still needs to choose which deeper truth seam to tackle first
+- Next required action:
+  - freeze the next truth-unification packet from the deeper drift revealed here
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 10:05 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY accepted locally
 - Author: `Architects mainline lead`

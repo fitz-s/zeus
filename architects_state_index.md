@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY acceptance`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Active packet state: `accepted locally / post-close pending`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Run the required post-close critic + verifier on accepted `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`.
-2. Keep this packet bounded away from `src/state/db.py`, `src/state/portfolio.py`, and `src/observability/status_summary.py` unless a real consumer mismatch is proven and a new packet is frozen.
-3. Use the accepted packet evidence to freeze the next truth-unification slice only after post-close passes.
+1. Use the accepted packet evidence to freeze the next truth-unification slice around portfolio fallback or mixed settlement authority.
+2. Keep this packet bounded away from `src/state/db.py`, `src/state/portfolio.py`, and `src/observability/status_summary.py`; any consumer mismatch now belongs to the next packet.
+3. Preserve the deeper truth-drift findings from this packet instead of collapsing them into “daily loss fixed = system fixed.”
 
 ## Current out-of-scope dirt
 
