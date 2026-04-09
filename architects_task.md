@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP freeze`
+- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -72,18 +72,18 @@ Isolate and reroute the live paper-mode background writer that keeps overwriting
 
 ## Current blocker state
 
-- the accepted refresh entrypoint can write coherent paper artifacts, but a stale live writer overwrites them again within minutes
-- `launchctl` shows the active paper writers are launchd jobs bound to the stale checkout at `/Users/leofitz/.openclaw/workspace-venus/zeus`
-- this packet must stay bounded to writer ownership/rerouting before any broader parity redesign
+- the stale paper launchd writers are now disabled, and refreshed paper artifacts stay coherent
+- broader runtime rerouting still remains follow-up work outside this accepted boundary
+- post-close critic + verifier are still required before the next packet may freeze
 
 ## Immediate checklist
 
 - [x] `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` frozen
-- [ ] overwrite-after-refresh evidence logged
-- [ ] stale paper writer/owner path isolated
-- [ ] broader runtime redesign remains explicit
+- [x] overwrite-after-refresh evidence logged
+- [x] stale paper writer/owner path isolated
+- [x] broader runtime redesign remains explicit
 
 ## Next required action
 
-1. Isolate and reroute the stale paper writer/owner path.
-2. Freeze a narrower superseding packet only if launchd rerouting alone is insufficient.
+1. Run post-close critic + verifier on the accepted ownership boundary.
+2. Freeze the next bounded packet instead of widening this one.
