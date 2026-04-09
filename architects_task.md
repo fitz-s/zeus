@@ -79,13 +79,13 @@ Produce a reproducible, strategy-isolated diagnosis of why `center_buy` is curre
 - [x] adversarial diagnosis test added
 - [x] targeted tests pass
 - [x] pre-close critic review passed
-- [ ] pre-close verifier review passed
+- [x] pre-close verifier review passed
 - [ ] packet accepted locally
 - [ ] post-close third-party critic review passed
 - [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Complete the pending verifier pass on the diagnosis packet.
-2. Accept locally only after the verifier pass succeeds.
+1. Accept the diagnosis packet locally and commit the bounded batch.
+2. Run post-close critic + verifier on the accepted boundary before freezing the next packet.
 3. Do not widen into strategy behavior changes or runtime logic without a new packet.

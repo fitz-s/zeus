@@ -33,10 +33,10 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
 - Current active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
-- Current packet status: `implementation slice verified / verifier pending`
+- Current packet status: `pre-close passed / local acceptance ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - pre-close verifier pass is still pending on the diagnosis packet
+  - accepted commit still needs to be created on this worktree branch
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
