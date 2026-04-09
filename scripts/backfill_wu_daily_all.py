@@ -23,7 +23,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import requests
+import httpx
 
 from src.state.db import get_shared_connection, init_schema
 
@@ -88,7 +88,7 @@ def _fetch_wu_icao_daily_high(icao: str, cc: str, target_date: date, unit: str) 
     unit_code = "m" if unit == "C" else "e"
 
     try:
-        resp = requests.get(
+        resp = httpx.get(
             url,
             params={"apiKey": WU_API_KEY, "units": unit_code,
                     "startDate": date_str, "endDate": date_str},

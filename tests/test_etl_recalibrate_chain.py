@@ -189,3 +189,14 @@ def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monk
         },
     ]
     assert pair_count == 22
+
+
+def test_tigge_scripts_expose_configured_city_coverage_gap():
+    from scripts import etl_tigge_direct_calibration as direct_cal
+    from scripts import etl_tigge_ens as tigge_ens
+    from src.config import cities_by_name
+
+    expected_gap = sorted(set(cities_by_name) - set(direct_cal.CITY_MAP.values()))
+
+    assert tigge_ens._unsupported_configured_cities() == expected_gap
+    assert direct_cal._unsupported_configured_cities() == expected_gap

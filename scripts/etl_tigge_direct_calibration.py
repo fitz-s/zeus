@@ -48,10 +48,15 @@ CITY_MAP = {
     "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
     "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
 }
+SUPPORTED_TIGGE_CITY_NAMES = frozenset(CITY_MAP.values())
 
 # Cities where T+24h at 00Z is a poor proxy for daily max
 OVERNIGHT_CITIES = {"London", "Paris", "Seoul", "Shanghai", "Tokyo",
                     "Munich", "Wellington", "Buenos Aires", "Hong Kong", "Shenzhen"}
+
+
+def _unsupported_configured_cities() -> list[str]:
+    return sorted(set(cities_by_name) - SUPPORTED_TIGGE_CITY_NAMES)
 
 
 def _synthesize_bins(median_val: float, unit: str) -> list[tuple[str, float | None, float | None]]:
@@ -103,6 +108,10 @@ def _temp_in_bin(temp: float, low: float | None, high: float | None) -> bool:
 def run_etl(dry_run: bool = False) -> dict:
     conn = get_connection()
     init_schema(conn)
+    unsupported_configured_cities = _unsupported_configured_cities()
+
+    if unsupported_configured_cities:
+        print("WARNING unsupported configured TIGGE cities:", ", ".join(unsupported_configured_cities))
 
     # Load all settlements with known settlement_value
     settlements = {}
@@ -277,6 +286,7 @@ def run_etl(dry_run: bool = False) -> dict:
         "skipped_no_json": skipped_no_json,
         "skipped_no_settlement": skipped_no_settlement,
         "skipped_already_exists": skipped_already_exists,
+        "unsupported_configured_cities": unsupported_configured_cities,
     }
 
     print(f"\nDirect TIGGE Calibration ETL complete:")

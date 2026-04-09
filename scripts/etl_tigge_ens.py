@@ -29,6 +29,17 @@ from src.types import Bin
 
 
 TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"
+CITY_MAP = {
+    "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
+    "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
+    "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
+    "london": "London", "paris": "Paris", "austin": "Austin",
+    "denver": "Denver", "houston": "Houston",
+    "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
+    "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
+    "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
+}
+SUPPORTED_TIGGE_CITY_NAMES = frozenset(CITY_MAP.values())
 
 # Cities where T+24h at 00Z is a poor proxy for daily max
 OVERNIGHT_CITIES = {"London", "Paris", "Seoul", "Shanghai", "Tokyo",
@@ -37,17 +48,11 @@ OVERNIGHT_CITIES = {"London", "Paris", "Seoul", "Shanghai", "Tokyo",
 
 def _resolve_city_name(dirname: str) -> str | None:
     """Map TIGGE directory name to Zeus city name."""
-    name_map = {
-        "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
-        "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
-        "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
-        "london": "London", "paris": "Paris", "austin": "Austin",
-        "denver": "Denver", "houston": "Houston",
-        "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
-        "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
-        "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
-    }
-    return name_map.get(dirname)
+    return CITY_MAP.get(dirname)
+
+
+def _unsupported_configured_cities() -> list[str]:
+    return sorted(set(cities_by_name) - SUPPORTED_TIGGE_CITY_NAMES)
 
 
 def run_etl() -> dict:
@@ -57,10 +62,14 @@ def run_etl() -> dict:
     imported = 0
     skipped = 0
     cal_pairs = 0
+    unsupported_configured_cities = _unsupported_configured_cities()
 
     if not TIGGE_BASE.exists():
         print(f"TIGGE base not found: {TIGGE_BASE}")
-        return {"imported": 0}
+        return {"imported": 0, "unsupported_configured_cities": unsupported_configured_cities}
+
+    if unsupported_configured_cities:
+        print("WARNING unsupported configured TIGGE cities:", ", ".join(unsupported_configured_cities))
 
     for city_dir in sorted(TIGGE_BASE.iterdir()):
         if not city_dir.is_dir():
@@ -177,7 +186,12 @@ def run_etl() -> dict:
     print(f"Calibration pairs: {cal_pairs}")
     print(f"Skipped: {skipped}")
 
-    return {"imported": imported, "cal_pairs": cal_pairs, "skipped": skipped}
+    return {
+        "imported": imported,
+        "cal_pairs": cal_pairs,
+        "skipped": skipped,
+        "unsupported_configured_cities": unsupported_configured_cities,
+    }
 
 
 def _get_bins_for_settlement(conn, city: str, target_date: str) -> list[Bin]:
