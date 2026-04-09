@@ -21,6 +21,7 @@ required_reads:
   - AGENTS.md
   - architecture/self_check/authority_index.md
   - docs/README.md
+  - CURRENT_STATE.md
   - WORKSPACE_MAP.md
   - root_progress.md
   - root_task.md
@@ -34,6 +35,7 @@ files_may_change:
   - AGENTS.md
   - architecture/self_check/authority_index.md
   - docs/README.md
+  - CURRENT_STATE.md
   - WORKSPACE_MAP.md
   - root_progress.md
   - root_task.md
@@ -81,3 +83,8 @@ evidence_required:
 
 - This packet supersedes the earlier assumption that either `root_*` or `architects_*` ledgers would remain live control surfaces.
 - It should not create a new long-lived ledger replacement unless implementation proves a minimal shim is unavoidable.
+
+## Evidence log
+
+- Fresh reference inventory showed `root_*` and `architects_*` control ledgers still heavily referenced across work packets and orientation files.
+- The chosen replacement is a single `CURRENT_STATE.md` pointer plus the current work packet itself as the live control surface.

@@ -9,7 +9,7 @@ Fix: day0 positions with only fresh_prob_is_fresh missing are allowed through.
 In _buy_yes_exit, when fresh_prob_is_fresh=False, the EV gate uses
 min(stale_prob, best_bid * 1.1) instead of the stale entry probability.
 
-See: docs/exit_failure_analysis.md
+See: docs/archives/findings/exit_failure_analysis.md
 """
 import pytest
 from src.state.portfolio import ExitContext, Position

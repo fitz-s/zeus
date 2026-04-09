@@ -10,12 +10,9 @@
 | Item | Purpose |
 |------|---------|
 | `AGENTS.md` | Repo-native execution brief and current operating contract |
-| `architects_state_index.md` | Fastest current Architects entrypoint |
-| `architects_task.md` | Current live packet control surface |
-| `architects_progress.md` | Durable Architects ledger |
-| `root_progress.md` | Program-level narrative / backlog context |
-| `root_task.md` | Program-level backlog queue |
-| `WORKSPACE_MAP.md` | This file — directory contract |
+| `CURRENT_STATE.md` | Single live current-state/control-entry pointer |
+| current work packet | Live control surface named from `CURRENT_STATE.md` |
+| `WORKSPACE_MAP.md` | This file — orientation-only map |
 | `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
@@ -100,6 +97,7 @@
 ## Archive boundary
 
 - Historical handoffs, sessions, findings, traces, research, and reports now live under `docs/archives/`.
+- Retired root/architects control ledgers live under `docs/archives/control/`.
 - Do not treat archived files as live control surfaces unless a new packet explicitly promotes them.
 
 ---

@@ -2,7 +2,7 @@
 
 **Author:** boundary-auditor-2  
 **Date:** 2026-04-07  
-**Based on:** docs/boundary_audit_2.md canonical gap analysis
+**Based on:** docs/archives/audits/boundary_audit_2.md canonical gap analysis
 
 ## Problem
 

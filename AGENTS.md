@@ -24,8 +24,10 @@ Before editing anything, read in this order:
 7. `architecture/invariants.yaml`
 8. `architecture/zones.yaml`
 9. `architecture/negative_constraints.yaml`
-10. scoped `AGENTS.md` in the directory you are editing
-11. then the code
+10. `CURRENT_STATE.md`
+11. scoped `AGENTS.md` in the directory you are editing
+12. the current work packet named in `CURRENT_STATE.md`
+13. then the code
 
 If current runtime facts conflict with target-law docs:
 - use runtime code/contracts for present-tense facts
@@ -39,8 +41,9 @@ Imported source-package note:
 
 Current routing note:
 - `docs/archives/**` is historical/archive material and is never principal authority.
-- `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` are the active Architects packet-control surfaces.
-- `root_progress.md` and `root_task.md` remain program/backlog surfaces; they are not live packet-control authority.
+- `CURRENT_STATE.md` is the single live control-entry pointer.
+- The current work packet named in `CURRENT_STATE.md` is the live control surface.
+- `docs/archives/control/**` contains retired root/architects ledgers and is historical-only.
 
 ## 2. Required working posture
 
@@ -101,7 +104,7 @@ Post-closeout gate rules:
 - After a packet is marked accepted/pushed, run one additional independent third-party critic review and one additional verifier pass on the accepted boundary before freezing the next packet.
 - If that post-close review finds a contradiction, stale control-surface snapshot, or evidence gap:
   - reopen or repair explicitly before advancing,
-  - synchronize `architects_state_index.md`, `architects_task.md`, and the top-level `architects_progress.md` snapshot to repo truth,
+  - synchronize `CURRENT_STATE.md` and the current work packet to repo truth,
   - and rerun the post-close gate until it passes.
 - Treat a passed post-close gate as a separate advancement permission, not as a byproduct of acceptance.
 
@@ -121,13 +124,13 @@ Capability-present / capability-absent proof rule:
 
 Micro-event logging rule:
 
-- Do not dump every small attempt into `architects_progress.md`.
+- Do not dump every small attempt into the current work packet.
 - Small events, retries, scout findings, timeout notes, and experiment breadcrumbs belong in `.omx/context/<packet>-worklog.md`.
-- `architects_progress.md` is packet-level durable state only.
-- `architects_task.md` is active control state only.
+- The current work packet is packet-level durable state only.
+- `CURRENT_STATE.md` is the single live control-entry pointer.
 - Spark scouts may draft or append micro-event worklog entries.
-- Spark scouts must not directly edit `architects_progress.md` or `architects_task.md`.
-- The leader is responsible for promoting a worklog fact into `architects_progress.md` only when it becomes a real packet state transition, blocker, or accepted evidence item.
+- Spark scouts must not directly edit the current work packet or `CURRENT_STATE.md`.
+- The leader is responsible for promoting a worklog fact into the current work packet only when it becomes a real packet state transition, blocker, or accepted evidence item.
 
 Preferred micro-event format:
 

@@ -1,3 +1,5 @@
+> Historical archive surface. No longer active control authority; use `CURRENT_STATE.md` and the current work packet for live control entry.
+
 # architects_task.md
 
 Purpose:

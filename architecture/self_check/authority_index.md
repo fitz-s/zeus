@@ -25,18 +25,15 @@ This is the first durable routing file for humans and coding agents.
 10. `AGENTS.md`
 
 ### Active control / execution surfaces
-11. `architects_state_index.md`
-12. `architects_task.md`
-13. `architects_progress.md`
-14. `root_progress.md`
-15. `root_task.md`
-16. `docs/known_gaps.md`
+11. `CURRENT_STATE.md`
+12. current work packet named in `CURRENT_STATE.md`
+13. `docs/known_gaps.md`
 
 ### Historical rationale / archives (non-authoritative)
-17. `docs/architecture/zeus_blueprint_v2.md`
-18. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
-19. `docs/archives/**`
-20. `WORKSPACE_MAP.md`
+14. `docs/architecture/zeus_blueprint_v2.md`
+15. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
+16. `docs/archives/**`
+17. `WORKSPACE_MAP.md`
 
 ## 2. Precedence
 
@@ -59,7 +56,7 @@ If two sources disagree:
 - change-control authority: how changes are allowed to happen
 - manifests: exact semantic atoms, zones, negative permissions, maturity stage
 - repo operating brief: repo-native execution rules and reading discipline
-- active control surfaces: current packet state, packet queue, and live program/backlog context
+- active control surfaces: one live current-state pointer plus the current work packet and antibody register
 - historical docs / archives: reasoning context only
 
 ## 4. Never do this

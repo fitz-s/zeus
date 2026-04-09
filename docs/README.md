@@ -22,6 +22,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 ## Active top-level docs
 - `docs/architecture/zeus_durable_architecture_spec.md` — present-tense principal architecture authority
 - `docs/zeus_FINAL_spec.md` — terminal target-state / endgame authority
+- `CURRENT_STATE.md` — single live control-entry pointer
 - `docs/known_gaps.md` — active operational gap / antibody register
 - `docs/archives/**` — historical only; not principal authority
 

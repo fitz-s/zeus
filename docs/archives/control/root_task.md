@@ -1,3 +1,5 @@
+> Historical archive surface. No longer active control authority; use `CURRENT_STATE.md` and the current work packet for live control entry.
+
 # root_task.md
 
 > Role note: program-level backlog queue. Not principal architecture authority and not live packet-control authority.
