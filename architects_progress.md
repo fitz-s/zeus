@@ -31,15 +31,42 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` (accepted locally / post-close pending)
+- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` (accepted locally / post-close passed)
 - Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `post-close passed / next freeze allowed`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - deeper fallback-reader / recent-exit output drift remain unresolved follow-up work after this packet
+  - `load_portfolio()` still mixes canonical positions with JSON `recent_exits` (`14 / +210.35`) while authoritative paper settlements are `19 / -13.03`
   - unsuffixed `zeus.db` still contains at least one true semantic stale projection (`08d6c939-038`), outside this packet’s accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 15:24 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW post-close passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Status delta:
+  - post-close critic review found no blocker-level contradictions on the accepted boundary
+  - post-close verifier review found no blocker-level evidence gaps
+  - next bounded packet freeze became allowed
+- Basis / evidence:
+  - independent post-close critic lane rechecked accepted HEAD `5a11de9` and found no blocker-level concerns
+  - native `verifier` subagent `Hubble` rechecked accepted HEAD `5a11de9` and found no blocker-level gaps
+  - fresh compile recheck: `python3 -m py_compile src/state/db.py tests/test_truth_surface_health.py` -> success
+  - direct live-state probes remained stable:
+    - `zeus-paper.db` -> `status=ok`, `stale_trade_ids=[]`, `positions=12`
+    - `zeus.db` -> `status=stale_legacy_fallback`, `stale_trade_ids=['08d6c939-038']`, `positions=0`
+  - fresh portfolio-truth follow-up evidence:
+    - `load_portfolio(state/positions-paper.json)` -> `positions=12`, `recent_exits=14`, `recent_exit_pnl=210.35`
+    - authoritative paper settlements -> `19`, `pnl=-13.03`
+- Decisions frozen:
+  - the comparator/shadow packet stands on the accepted boundary and should not be silently reopened
+  - the next packet should target deeper portfolio-truth mixing outside this boundary rather than revisiting same-phase shadow logic
+- Open uncertainties:
+  - the follow-up packet still needs a narrow file boundary and explicit non-goals
+- Next required action:
+  - freeze the next bounded portfolio-truth packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 15:06 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW accepted locally
 - Author: `Architects mainline lead`
