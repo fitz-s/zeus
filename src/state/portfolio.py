@@ -789,7 +789,11 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             else:
                 conn = get_trade_connection_with_shared(mode_override)
         else:
-            conn = get_connection(path.parent / "zeus.db")
+            sibling_mode_db = path.parent / f"zeus-{current_mode}.db"
+            if sibling_mode_db.exists():
+                conn = get_connection(sibling_mode_db)
+            else:
+                conn = get_connection(path.parent / "zeus.db")
     except Exception:
         logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
         return _load_portfolio_from_json_data(json_data, current_mode=current_mode)

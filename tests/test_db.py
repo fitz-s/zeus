@@ -583,6 +583,92 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, monkeypatch):
+    from src.state.portfolio import load_portfolio
+
+    legacy_db = tmp_path / "zeus.db"
+    paper_db = tmp_path / "zeus-paper.db"
+    path = tmp_path / "missing.json"
+
+    legacy_conn = get_connection(legacy_db)
+    init_schema(legacy_conn)
+    legacy_conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'legacy-stale', 'active', 'legacy-stale', 'm-legacy', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'buy_yes', 'F', 10.0, 20.0, 10.0, 0.4, 0.6,
+            'snap-legacy', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+        )
+        """
+    )
+    legacy_conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'POSITION_EXIT_RECORDED', 'legacy-stale', 'economically_closed', '', 'snap-legacy',
+            'NYC', '2099-04-01', 'm-legacy', '39-40°F', 'buy_yes', 'opening_inertia', 'opening_inertia',
+            'test', '{}', '2099-04-04T01:00:00Z', 'paper'
+        )
+        """
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    paper_conn = get_connection(paper_db)
+    init_schema(paper_conn)
+    paper_conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'paper-ok', 'active', 'paper-ok', 'm-paper', 'NYC', 'US-Northeast', '2099-04-01', '41-42°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            'snap-paper', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+        )
+        """
+    )
+    paper_conn.commit()
+    paper_conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "paper-ok",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2099-04-01",
+            "bin_label": "41-42°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+            "token_id": "json-yes",
+        }],
+        "bankroll": 99.0,
+    }))
+
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["paper-ok"]
+    assert state.positions[0].strategy_key == "center_buy"
+    assert state.bankroll == pytest.approx(99.0)
+
+
 def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     from src.state.db import log_trade_entry
     from src.state.portfolio import Position
