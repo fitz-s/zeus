@@ -31,15 +31,42 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `DIAGNOSE-CENTER-BUY-FAILURE` (accepted locally in worktree)
+- Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` (accepted locally in worktree)
 - Current active packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
-- Current packet status: `accepted locally / post-close review pending`
+- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - post-close critic/verifier still need to pass on the accepted center_buy repair boundary
-  - the repair remains hypothesis-driven and must stay bounded to the diagnosed cohort
+  - the accepted diagnosis and repair still need transport back to the live `Architects` branch or an explicit branch-local supersession decision
+  - the repair remains hypothesis-driven and should be checked against fresh runtime truth before widening further
 
 ## Durable timeline
+
+## [2026-04-08 05:40 America/Chicago] REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS accepted locally and passed post-close gate in worktree
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Status delta:
+  - bounded center_buy repair accepted locally in worktree branch `architects-center-buy-diagnose`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `f1d8e51` -> `Block center_buy from the diagnosed ultra-low-price loss cohort`
+  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/python -m py_compile src/engine/evaluator.py tests/test_center_buy_repair.py` -> success
+  - `.venv/bin/pytest -q tests/test_center_buy_repair.py` -> `2 passed`
+  - pre-close critic artifact -> `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-critic-20260408T095000Z.md`
+  - pre-close verifier artifact -> `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-verifier-20260408T095030Z.md`
+  - post-close critic artifact -> `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-postclose-critic-20260408T100200Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-postclose-verifier-20260408T100230Z.md`
+- Decisions frozen:
+  - `center_buy` now rejects `buy_yes` entries in the diagnosed `<= 0.02` price cohort
+  - non-center_buy strategies remain unchanged on the same low-price input
+- Open uncertainties:
+  - fresh runtime truth after transport is still needed before deciding whether this one guard materially fixes the cluster or just reveals the next one
+- Next required action:
+  - decide whether to transport this accepted packet chain back to `Architects` or continue branch-local sequencing
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 05:31 America/Chicago] REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS frozen
 - Author: `Architects clean worktree lane`

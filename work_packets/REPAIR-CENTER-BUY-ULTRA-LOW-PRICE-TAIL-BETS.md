@@ -98,3 +98,17 @@ evidence_required:
   - adversarial test proves `opening_inertia` with the same low entry price still trades
 - independent pre-close critic artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-critic-20260408T095000Z.md` -> `PASS`
 - pre-close verifier artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-verifier-20260408T095030Z.md` -> `PASS`
+- post-close critic artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-postclose-critic-20260408T100200Z.md` -> `PASS`
+- post-close verifier artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-postclose-verifier-20260408T100230Z.md` -> `PASS`
+
+## Evidence log
+
+- work-packet grammar output: `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted repair pytest output: `.venv/bin/pytest -q tests/test_center_buy_repair.py` -> `2 passed`
+- center_buy repair note:
+  - `src/engine/evaluator.py` now applies `CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02`
+  - `center_buy` + `buy_yes` + `entry_price <= 0.02` now rejects with `MARKET_FILTER` and explicit reason `CENTER_BUY_ULTRA_LOW_PRICE(...)`
+  - adversarial test proves `opening_inertia` with the same low entry price still trades
+- independent pre-close critic artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-critic-20260408T095000Z.md` -> `PASS`
+- pre-close verifier artifact: `.omx/artifacts/claude-repair-center-buy-ultra-low-price-tail-bets-preclose-verifier-20260408T095030Z.md` -> `PASS`

@@ -82,11 +82,11 @@ Stop `center_buy` from entering the ultra-low-price `buy_yes` cohort that the ac
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
 - [x] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted boundary.
-2. Freeze no further packet until the post-close gate passes.
-3. Do not widen into other strategy behavior or runtime logic outside the frozen packet.
+1. Decide whether to transport accepted commits back to `Architects` or continue branch-local sequencing.
+2. Freeze no further packet on this branch until that transport/supersession decision is explicit.
+3. Do not widen into other strategy behavior or runtime logic outside a new frozen packet.

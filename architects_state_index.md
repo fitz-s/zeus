@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
-- Active packet state: `accepted locally / post-close review pending`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close critic + verifier on the accepted center_buy repair boundary.
+1. Decide whether to transport the accepted center_buy packet chain back to `Architects` or continue branch-local sequencing.
 2. Keep the packet bounded to the diagnosed ultra-low-price center_buy cohort only.
 3. Keep the diagnosis packet read-only and complete; do not reopen unless new contradiction appears.
 
