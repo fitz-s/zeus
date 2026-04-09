@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-freeze`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -69,20 +69,19 @@ Remove the legacy timestamp shadow that still forces canonical portfolio truth t
 
 ## Current blocker state
 
-- fresh evidence shows the mode-aware probe fix now works and the stage-event dedupe is accepted, but unsuffixed `zeus.db` still reports `stale_legacy_fallback`
-- active stale ids still include `trade-1`, `rt1`, and `75c98026-cd5`, driven by `position_events_legacy.timestamp > position_current.updated_at`
-- this packet must stay bounded to the comparator/shadow seam and expose the wider portfolio-truth drift without silently widening into other modules
+- targeted comparator/shadow evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
+- live probes now show the paper-mode DB is healthy while unsuffixed `zeus.db` still reports one true semantic stale id (`08d6c939-038`)
+- the wider portfolio-truth drift remains open and must be handled by a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
 
 - [x] `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` frozen
-- [ ] comparator/shadow root cause reproduced in packet-bounded tests
-- [ ] `query_portfolio_loader_view()` no longer degrades on the identified stale ids
-- [ ] targeted truth-surface tests pass
-- [ ] wider fallback-reader / output-layer drift remains explicit
+- [x] comparator/shadow root cause reproduced in packet-bounded tests
+- [x] same-phase legacy shadow degradation removed without hiding true later semantic lag
+- [x] targeted truth-surface tests pass
+- [x] wider fallback-reader / output-layer drift remains explicit
 
 ## Next required action
 
-1. Implement the bounded comparator fix in `src/state/db.py`.
-2. Lock the stale-id scenario in `tests/test_truth_surface_health.py`.
-3. If implementation proves a consumer outside `src/state/db.py` must change, stop and freeze that follow-up packet instead of widening silently.
+1. Run post-close critic + verifier on the accepted comparator/shadow boundary.
+2. Freeze the next bounded portfolio-truth packet instead of widening this one.

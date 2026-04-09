@@ -31,15 +31,46 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
+- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` (accepted locally / post-close pending)
 - Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - unsuffixed `zeus.db` still reports `stale_legacy_fallback` because legacy timestamps shadow `position_current.updated_at`
-  - deeper fallback-reader and output-layer parity drift remain unresolved follow-up work
+  - deeper fallback-reader / recent-exit output drift remain unresolved follow-up work after this packet
+  - unsuffixed `zeus.db` still contains at least one true semantic stale projection (`08d6c939-038`), outside this packet’s accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 15:06 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Status delta:
+  - comparator/shadow packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `dd9953b` -> `Refreeze the comparator shadow packet after clearing the earlier seams`
+  - commit `2325080` -> `Stop same-phase legacy shadows from downgrading healthy portfolio truth`
+  - commit `e3f5deb` -> `Keep the packet boundaries honest after comparator verification`
+  - commit `61dd2b8` -> `Ground the comparator packet in fresh evidence before closing it`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile src/state/db.py tests/test_truth_surface_health.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_truth_surface_health.py::test_portfolio_loader_ignores_same_phase_legacy_entry_shadow tests/test_truth_surface_health.py::test_portfolio_loader_marks_semantic_exit_shadow_as_stale tests/test_truth_surface_health.py::test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shadow_event_exists` -> `3 passed`
+  - direct live-state probes with current code:
+    - `zeus-paper.db` -> `status=ok`, `stale_trade_ids=[]`, `positions=12`
+    - `zeus.db` -> `status=stale_legacy_fallback`, `stale_trade_ids=['08d6c939-038']`, `positions=0`
+  - independent bounded critic lane found no blocker-level concerns and confirmed same-phase shadows no longer downgrade healthy projections while true later semantic lag still degrades
+  - native `verifier` subagent `Bacon` -> `PASS`
+- Decisions frozen:
+  - same-phase legacy entry/fill shadows no longer force `stale_legacy_fallback`
+  - the comparator now keys off the latest semantically advancing legacy event instead of the latest raw legacy timestamp
+  - true later semantic lag remains degraded rather than being hidden by a later same-phase shadow row
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+  - `load_portfolio()` still carries JSON `recent_exits` / metadata surfaces that can diverge from canonical positions and remain follow-up work outside this packet
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded portfolio-truth packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 14:05 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-frozen
 - Author: `Architects mainline lead`

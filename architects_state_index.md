@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-freeze`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW acceptance sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted_local / post_close_pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
+- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded comparator/shadow fix in `src/state/db.py` and lock it with truth-surface tests.
-2. Keep `src/state/portfolio.py`, fallback-reader cleanup, and output-layer parity work out of this packet unless a new packet is frozen.
+1. Run post-close critic + verifier on the accepted comparator/shadow boundary.
+2. Freeze the next bounded portfolio-truth packet; do not widen this accepted boundary into fallback-reader or output-layer cleanup.
 3. Preserve the distinction between removing false degradation at the comparator seam and claiming full portfolio-truth convergence.
 
 ## Current out-of-scope dirt
