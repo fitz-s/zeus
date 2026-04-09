@@ -31,15 +31,34 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` (accepted locally / post-close passed)
-- Current active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- Current packet status: `post-close passed / authority baseline ready`
+- Last accepted packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE` (accepted locally / post-close passed)
+- Current active packet: `GOV-PACKET-ENTRY-CONTROL-SURFACE`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker-level issues remain inside the authority-amendment packet boundary
-  - any remaining cleanup work should treat the amended routing surfaces as the new baseline
+  - the user has now directed that the root/architects ledgers themselves should be archived
+  - those ledger paths are still widely referenced, so a replacement live control entry surface is required before archive cleanup can continue safely
 
 ## Durable timeline
+
+## [2026-04-09 20:28 America/Chicago] GOV-PACKET-ENTRY-CONTROL-SURFACE frozen
+- Author: `Architects mainline lead`
+- Packet: `GOV-PACKET-ENTRY-CONTROL-SURFACE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - the authority-amendment packet finished post-close and established the new routing baseline
+  - user explicitly directed that `root_progress.md`, `root_task.md`, `architects_progress.md`, `architects_task.md`, and `architects_state_index.md` should no longer remain active surfaces
+  - fresh reference scans show those ledger paths are still heavily referenced across work packets and docs
+- Decisions frozen:
+  - archive/demote the legacy ledgers only after the replacement live control entry surface is explicit
+  - keep constitutions, runtime logic, and unrelated docs cleanup out of this packet
+- Open uncertainties:
+  - implementation should prefer the current work packet itself as the live control entry surface and avoid creating another long-lived ledger unless unavoidable
+- Next required action:
+  - update routing files and archive/demote the superseded ledgers
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 20:20 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE post-close passed
 - Author: `Architects mainline lead`
