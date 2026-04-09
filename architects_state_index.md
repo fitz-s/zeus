@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close`
+- Last updated by: `Codex BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
+- Active packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Last accepted packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next deeper truth-unification packet around comparator/shadow cleanup or legacy settlement fallback dedupe.
-2. Keep the accepted mode-db probe packet stable unless a later packet explicitly supersedes it.
-3. Preserve the distinction between removing the immediate paper fallback trigger and claiming full portfolio-truth convergence.
+1. Implement the bounded legacy settlement fallback dedupe in `src/state/decision_chain.py` and lock it with targeted DB tests.
+2. Keep `src/state/db.py` comparator/shadow cleanup and RiskGuard output parity work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between deduping fallback rows and claiming full settlement-authority convergence.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-LOAD-PORTFOLIO-MODED-DB-PROBE.md`
+5. `work_packets/BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE.md`

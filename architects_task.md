@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close`
+- Last updated by: `Codex BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,22 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
+- Packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `zeus.db`, so paper-mode canonical loader truth is not shadowed by unrelated stale rows in the mixed legacy file.
+Deduplicate legacy settlement fallback rows before they feed learning/risk summaries, so settlement sample counts and strategy settlement summaries stop disagreeing with headline realized PnL.
 
 ## Allowed files
 
-- `work_packets/BUG-LOAD-PORTFOLIO-MODED-DB-PROBE.md`
+- `work_packets/BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/state/portfolio.py`
-- `tests/test_runtime_guards.py`
+- `src/state/decision_chain.py`
 - `tests/test_db.py`
 
 ## Forbidden files
@@ -43,7 +42,7 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 - `docs/architecture/**`
 - `architecture/**`
 - `src/state/db.py`
-- `src/state/decision_chain.py`
+- `src/state/portfolio.py`
 - `src/riskguard/**`
 - `src/observability/status_summary.py`
 - `src/control/**`
@@ -63,7 +62,7 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 ## Non-goals
 
 - no `src/state/db.py` comparator/shadow cleanup yet
-- no settlement-summary dedupe yet
+- no RiskGuard output-layer parity assertion yet
 - no reporting/dashboard/schema work
 - no schema redesign
 - no data-expansion follow-up work
@@ -71,22 +70,20 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 
 ## Current blocker state
 
-- accepted implementation now prefers the sibling mode DB and removes the immediate paper wrong-path fallback
-- the packet still requires the mandatory post-close critic + verifier before the next freeze
-- deeper `src/state/db.py` comparator/shadow drift and settlement-authority drift remain explicit follow-up work and must not be silently folded into this packet
+- fresh evidence shows headline realized PnL comes from `outcome_fact`, while settlement summaries still flatten duplicate decision-log settlement artifacts
+- direct repro confirmed duplicate fallback artifacts can double summary totals
+- this packet must stay bounded to the fallback reader seam and expose the wider comparator/shadow drift without silently widening into other modules
 
 ## Immediate checklist
 
-- [x] `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE` frozen
-- [x] mode-aware DB probe root cause reproduced in packet-bounded tests
-- [x] `load_portfolio()` no longer falls back when the mode DB is healthy and unsuffixed `zeus.db` is stale
-- [x] targeted load-portfolio tests pass
-- [x] wider comparator/shadow / settlement dedupe drift remains explicit
-- [x] post-close critic review passed
-- [x] post-close verifier review passed
+- [x] `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE` frozen
+- [ ] duplicate legacy settlement artifacts reproduced in packet-bounded tests
+- [ ] fallback reader dedupes duplicate artifacts with deterministic latest-wins behavior
+- [ ] targeted settlement-fallback tests pass
+- [ ] wider comparator/shadow and output-layer drift remain explicit
 
 ## Next required action
 
-1. Freeze the next deeper portfolio-truth / settlement-authority packet.
-2. Keep this packet’s mode-aware DB probe behavior stable unless a later packet explicitly supersedes it.
-3. Do not let the next packet collapse the still-open comparator/shadow and settlement-authority seams into “portfolio truth fixed.”
+1. Implement the bounded fallback-reader dedupe in `src/state/decision_chain.py`.
+2. Lock the duplicate-artifact repro and latest-wins behavior in `tests/test_db.py`.
+3. If implementation proves the RiskGuard output layer also needs a parity assertion, stop and freeze that follow-up packet instead of widening silently.

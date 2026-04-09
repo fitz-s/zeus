@@ -32,13 +32,32 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
-- Current active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
+- Current active packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - deeper comparator/shadow and settlement-authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 12:20 America/Chicago] BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - the accepted mode-db probe packet removed the immediate paper fallback trigger, so the next still-live contradiction is settlement summary duplication
+  - fresh verification confirmed headline `realized_pnl` comes from `outcome_fact`, while settlement summaries still flatten duplicate legacy settlement artifacts from decision_log
+  - direct repro showed duplicate fallback settlement artifacts produced duplicate rows and inflated summary totals
+- Decisions frozen:
+  - keep this packet bounded to legacy settlement fallback dedupe in `src/state/decision_chain.py`
+  - do not widen into `src/state/db.py` comparator cleanup or RiskGuard output-layer parity assertions in this packet
+- Open uncertainties:
+  - implementation may prove the output layer needs a tiny parity assertion packet afterward, but this packet should not assume that yet
+- Next required action:
+  - implement the fallback-reader dedupe and lock it with targeted DB tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 12:05 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close passed
 - Author: `Architects mainline lead`
