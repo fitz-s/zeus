@@ -17,7 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.calibration.manager import season_from_date
+from src.calibration.manager import season_from_date, lat_for_city
 from src.state.db import get_shared_connection as get_connection, init_schema
 
 
@@ -99,7 +99,7 @@ def run_etl() -> dict:
 
         # Map source
         source = SOURCE_MAP.get(r["forecast_source"], r["source_family"])
-        season = season_from_date(r["target_date"])
+        season = season_from_date(r["target_date"], lat=lat_for_city(r["city"]))
 
         # Reconstruct available_at
         basis = r["forecast_basis_date"] or r["target_date"]

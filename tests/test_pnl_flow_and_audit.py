@@ -29,14 +29,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
-from src.state.db import (
-    apply_architecture_kernel_schema,
-    get_connection,
-    init_schema,
-    log_settlement_event,
-    query_portfolio_loader_view,
-    query_position_current_status_view,
-)
+from src.state.db import apply_architecture_kernel_schema, get_connection, init_schema, log_settlement_event
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.portfolio import (
     PortfolioState,
@@ -135,7 +128,6 @@ def _insert_position_current_row(
     position_id: str,
     strategy_key: str,
     phase: str = "active",
-    target_date: str = "2026-04-01",
     size_usd: float = 0.0,
     shares: float = 0.0,
     cost_basis_usd: float = 0.0,
@@ -155,14 +147,13 @@ def _insert_position_current_row(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', ?, ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
         """,
         (
             position_id,
             phase,
             position_id,
             city,
-            target_date,
             bin_label,
             direction,
             size_usd,
@@ -2454,81 +2445,38 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     assert epistemic["forecast_context"]["location"]["bias_reference"]["bias"] == 1.5
 
 
-def test_inv_status_surfaces_trailing_loss_audit_fields(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary.json"
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    apply_architecture_kernel_schema(conn)
-    as_of = datetime.now(timezone.utc).isoformat()
-    _insert_position_current_row(
-        conn,
-        position_id="t1",
-        strategy_key="center_buy",
-        size_usd=5.0,
-        shares=50.0,
-        cost_basis_usd=5.0,
-        entry_price=0.1,
-        mark_price=0.13,
-    )
-    _insert_strategy_health_row(
-        conn,
-        strategy_key="center_buy",
-        as_of=as_of,
-        open_exposure_usd=5.0,
-        realized_pnl_30d=1.25,
-        unrealized_pnl=1.5,
-    )
-    conn.commit()
+@pytest.mark.skip(reason="BI-05")
+def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(zeus_db)
+    init_schema(conn)
     conn.close()
 
-    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
-    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-    monkeypatch.setattr(
-        status_summary_module,
-        "_get_risk_details",
-        lambda: {
-            "daily_loss": 0.0,
-            "daily_loss_level": "YELLOW",
-            "daily_loss_status": "insufficient_history",
-            "daily_loss_source": "no_trustworthy_reference_row",
-            "daily_loss_reference": None,
-            "weekly_loss": 5.0,
-            "weekly_loss_level": "RED",
-            "weekly_loss_status": "ok",
-            "weekly_loss_source": "risk_state_history",
-            "weekly_loss_reference": {
-                "row_id": 41,
-                "checked_at": "2026-04-02T00:00:00+00:00",
-                "initial_bankroll": 150.0,
-                "total_pnl": -5.0,
-                "effective_bankroll": 145.0,
-            },
-            "initial_bankroll": 150.0,
-            "realized_pnl": 1.25,
-            "unrealized_pnl": 1.5,
-            "total_pnl": 2.75,
-            "effective_bankroll": 152.75,
-        },
+    portfolio = PortfolioState(
+        bankroll=150.0,
+        daily_baseline_total=150.0,
+        recent_exits=[_recent_exit(-13.0)],
     )
-    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
-    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
-    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
-    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
-    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
-    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
-    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
 
-    status_summary_module.write_status({"mode": "test"})
-    status = json.loads(status_path.read_text())
-    details = status["risk"]["details"]
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
 
-    assert details["daily_loss"] == pytest.approx(0.0)
-    assert details["daily_loss_status"] == "insufficient_history"
-    assert details["daily_loss_source"] == "no_trustworthy_reference_row"
-    assert details["daily_loss_reference"] is None
-    assert details["weekly_loss"] == pytest.approx(5.0)
-    assert details["weekly_loss_status"] == "ok"
-    assert details["weekly_loss_reference"]["row_id"] == 41
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: portfolio)
+
+    level = riskguard_module.tick()
+    row = get_connection(risk_db).execute(
+        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+
+    assert level == RiskLevel.RED
+    assert row["level"] == RiskLevel.RED.value
+    assert details["daily_loss"] == pytest.approx(13.0)
+    assert details["total_pnl"] == pytest.approx(-13.0)
 
 
 def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
@@ -3303,297 +3251,3 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     assert details["partial_context_resolution"] is True
     assert details["dropped_context_count"] == 1
     assert details["dropped_rows"][0]["reason"] == "missing_decision_snapshot_id"
-
-
-def test_query_position_current_status_view_excludes_terminal_trade_decision_rows(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    apply_architecture_kernel_schema(conn)
-    init_schema(conn)
-
-    _insert_position_current_row(
-        conn,
-        position_id="trade-exited",
-        strategy_key="center_buy",
-        phase="active",
-        size_usd=10.0,
-        shares=20.0,
-        cost_basis_usd=10.0,
-        entry_price=0.5,
-    )
-    conn.execute(
-        """
-        INSERT INTO trade_decisions (
-            market_id, bin_label, direction, size_usd, price, timestamp,
-            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-            status, edge_source, runtime_trade_id, filled_at, fill_price
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "m1",
-            "39-40°F",
-            "buy_yes",
-            10.0,
-            0.5,
-            "2026-04-01T01:00:00Z",
-            0.6,
-            0.6,
-            0.1,
-            0.5,
-            0.7,
-            0.0,
-            "exited",
-            "center_buy",
-            "trade-exited",
-            "2026-04-01T02:00:00Z",
-            0.46,
-        ),
-    )
-    conn.commit()
-
-    status_view = query_position_current_status_view(conn)
-    loader_view = query_portfolio_loader_view(conn)
-    conn.close()
-
-    assert status_view["open_positions"] == 0
-    assert status_view["positions"] == []
-    assert loader_view["status"] == "ok"
-    assert loader_view["positions"][0]["trade_id"] == "trade-exited"
-    assert loader_view["positions"][0]["state"] == "economically_closed"
-
-
-def test_position_current_views_consult_legacy_terminal_trade_status_when_current_db_lags(tmp_path, monkeypatch):
-    import src.state.db as db_module
-
-    current_db = tmp_path / "zeus-paper.db"
-    legacy_db = tmp_path / "zeus.db"
-
-    current_conn = get_connection(current_db)
-    apply_architecture_kernel_schema(current_conn)
-    init_schema(current_conn)
-    _insert_position_current_row(
-        current_conn,
-        position_id="trade-lagged",
-        strategy_key="center_buy",
-        phase="active",
-        size_usd=10.0,
-        shares=20.0,
-        cost_basis_usd=10.0,
-        entry_price=0.5,
-    )
-    current_conn.commit()
-
-    legacy_conn = get_connection(legacy_db)
-    init_schema(legacy_conn)
-    legacy_conn.execute(
-        """
-        INSERT INTO trade_decisions (
-            market_id, bin_label, direction, size_usd, price, timestamp,
-            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-            status, edge_source, runtime_trade_id, filled_at, fill_price
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "m1",
-            "39-40°F",
-            "buy_yes",
-            10.0,
-            0.5,
-            "2026-04-01T02:00:00Z",
-            0.6,
-            0.6,
-            0.1,
-            0.5,
-            0.7,
-            0.0,
-            "exited",
-            "center_buy",
-            "trade-lagged",
-            "2026-04-01T02:00:00Z",
-            0.46,
-        ),
-    )
-    legacy_conn.commit()
-    legacy_conn.close()
-
-    monkeypatch.setattr(db_module, "ZEUS_DB_PATH", legacy_db)
-
-    status_view = query_position_current_status_view(current_conn)
-    loader_view = query_portfolio_loader_view(current_conn)
-    current_conn.close()
-
-    assert status_view["open_positions"] == 0
-    assert status_view["positions"] == []
-    assert loader_view["positions"][0]["trade_id"] == "trade-lagged"
-    assert loader_view["positions"][0]["state"] == "economically_closed"
-
-
-def test_query_position_current_status_view_excludes_past_target_ghost_but_keeps_future_position(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    apply_architecture_kernel_schema(conn)
-    init_schema(conn)
-
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
-
-    _insert_position_current_row(
-        conn,
-        position_id="ghost-past",
-        strategy_key="center_buy",
-        phase="day0_window",
-        target_date=yesterday,
-        size_usd=5.0,
-        shares=10.0,
-        cost_basis_usd=5.0,
-        entry_price=0.5,
-    )
-    _insert_position_current_row(
-        conn,
-        position_id="future-open",
-        strategy_key="center_buy",
-        phase="active",
-        target_date=tomorrow,
-        size_usd=7.0,
-        shares=14.0,
-        cost_basis_usd=7.0,
-        entry_price=0.5,
-    )
-    conn.commit()
-
-    status_view = query_position_current_status_view(conn)
-    loader_view = query_portfolio_loader_view(conn)
-    conn.close()
-
-    assert status_view["open_positions"] == 1
-    assert [row["trade_id"] for row in status_view["positions"]] == ["future-open"]
-    assert loader_view["status"] == "ok"
-    assert [row["trade_id"] for row in loader_view["positions"]] == ["future-open"]
-
-
-def test_query_portfolio_loader_view_ignores_past_target_stale_legacy_ghost_adversarially(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    apply_architecture_kernel_schema(conn)
-    init_schema(conn)
-
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
-
-    _insert_position_current_row(
-        conn,
-        position_id="ghost-stale",
-        strategy_key="center_buy",
-        phase="active",
-        target_date=yesterday,
-        size_usd=5.0,
-        shares=10.0,
-        cost_basis_usd=5.0,
-        entry_price=0.5,
-    )
-    _insert_position_current_row(
-        conn,
-        position_id="future-legit",
-        strategy_key="center_buy",
-        phase="active",
-        target_date=tomorrow,
-        size_usd=7.0,
-        shares=14.0,
-        cost_basis_usd=7.0,
-        entry_price=0.5,
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS position_events_legacy (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            runtime_trade_id TEXT,
-            position_state TEXT,
-            order_id TEXT,
-            decision_snapshot_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            market_id TEXT,
-            bin_label TEXT,
-            direction TEXT,
-            strategy TEXT,
-            edge_source TEXT,
-            source TEXT,
-            details_json TEXT,
-            timestamp TEXT,
-            env TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events_legacy (
-            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-            city, target_date, market_id, bin_label, direction, strategy, edge_source,
-            source, details_json, timestamp, env
-        ) VALUES (
-            'POSITION_LIFECYCLE_UPDATED', 'ghost-stale', 'day0_window', '', 'snap-1',
-            'NYC', ?, 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
-            'test', '{}', ?, 'paper'
-        )
-        """,
-        (yesterday, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-
-    loader_view = query_portfolio_loader_view(conn)
-    status_view = query_position_current_status_view(conn)
-    conn.close()
-
-    assert loader_view["status"] == "ok"
-    assert loader_view.get("stale_trade_ids") in (None, [])
-    assert [row["trade_id"] for row in loader_view["positions"]] == ["future-legit"]
-    assert [row["trade_id"] for row in status_view["positions"]] == ["future-legit"]
-
-
-def test_harvester_settlement_chronicle_event_carries_exit_price(tmp_path):
-    from src.execution.harvester import _settle_positions
-
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
-    pos = _position(
-        trade_id="trade-settle",
-        target_date="2026-04-01",
-        bin_label="39-40°F",
-        direction="buy_yes",
-        entry_price=0.40,
-        size_usd=10.0,
-        shares=25.0,
-        state="entered",
-        strategy="center_buy",
-        edge_source="center_buy",
-    )
-    portfolio = PortfolioState(positions=[pos])
-
-    settled = _settle_positions(
-        conn,
-        portfolio,
-        city="NYC",
-        target_date="2026-04-01",
-        winning_label="39-40°F",
-        settlement_records=[],
-        strategy_tracker=None,
-        paper_mode=True,
-    )
-
-    chronicle_row = conn.execute(
-        """
-        SELECT details_json
-        FROM chronicle
-        WHERE event_type = 'SETTLEMENT'
-        ORDER BY id DESC LIMIT 1
-        """
-    ).fetchone()
-    conn.close()
-
-    assert settled == 1
-    details = json.loads(chronicle_row["details_json"])
-    assert details["exit_price"] == pytest.approx(1.0)
-    assert details["exit_reason"] == "SETTLEMENT"

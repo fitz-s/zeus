@@ -89,7 +89,7 @@ def generate_pairs() -> dict:
             skipped += 1
             continue
 
-        season = season_from_date(target_date)
+        season = season_from_date(target_date, lat=city.lat)
         lead_days = lead_hours / 24.0
         bucket_key = f"{city.cluster}_{season}"
 

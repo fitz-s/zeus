@@ -39,24 +39,31 @@ TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_e
 
 # TIGGE dir name → Zeus canonical name
 CITY_MAP = {
-    "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
-    "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
-    "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
-    "london": "London", "paris": "Paris", "austin": "Austin",
-    "denver": "Denver", "houston": "Houston",
-    "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
-    "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
-    "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
+    "ankara": "Ankara", "atlanta": "Atlanta", "austin": "Austin",
+    "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+    "chengdu": "Chengdu", "chicago": "Chicago", "chongqing": "Chongqing",
+    "dallas": "Dallas", "denver": "Denver",
+    "hong-kong": "Hong Kong", "houston": "Houston", "istanbul": "Istanbul",
+    "london": "London", "los-angeles": "Los Angeles", "lucknow": "Lucknow",
+    "madrid": "Madrid", "mexico-city": "Mexico City", "miami": "Miami",
+    "milan": "Milan", "moscow": "Moscow", "munich": "Munich",
+    "nyc": "NYC", "paris": "Paris",
+    "san-francisco": "San Francisco", "sao-paulo": "Sao Paulo",
+    "seattle": "Seattle", "seoul": "Seoul", "shanghai": "Shanghai",
+    "shenzhen": "Shenzhen", "singapore": "Singapore",
+    "taipei": "Taipei", "tel-aviv": "Tel Aviv", "tokyo": "Tokyo",
+    "toronto": "Toronto", "warsaw": "Warsaw",
+    "wellington": "Wellington", "wuhan": "Wuhan",
 }
-SUPPORTED_TIGGE_CITY_NAMES = frozenset(CITY_MAP.values())
 
 # Cities where T+24h at 00Z is a poor proxy for daily max
-OVERNIGHT_CITIES = {"London", "Paris", "Seoul", "Shanghai", "Tokyo",
-                    "Munich", "Wellington", "Buenos Aires", "Hong Kong", "Shenzhen"}
-
-
-def _unsupported_configured_cities() -> list[str]:
-    return sorted(set(cities_by_name) - SUPPORTED_TIGGE_CITY_NAMES)
+OVERNIGHT_CITIES = {
+    "Ankara", "Beijing", "Buenos Aires", "Chengdu", "Chongqing",
+    "Hong Kong", "Istanbul", "London", "Lucknow", "Madrid",
+    "Mexico City", "Milan", "Moscow", "Munich", "Paris", "Sao Paulo",
+    "Seoul", "Shanghai", "Shenzhen", "Singapore", "Taipei",
+    "Tel Aviv", "Tokyo", "Toronto", "Warsaw", "Wellington", "Wuhan",
+}
 
 
 def _synthesize_bins(median_val: float, unit: str) -> list[tuple[str, float | None, float | None]]:
@@ -108,10 +115,6 @@ def _temp_in_bin(temp: float, low: float | None, high: float | None) -> bool:
 def run_etl(dry_run: bool = False) -> dict:
     conn = get_connection()
     init_schema(conn)
-    unsupported_configured_cities = _unsupported_configured_cities()
-
-    if unsupported_configured_cities:
-        print("WARNING unsupported configured TIGGE cities:", ", ".join(unsupported_configured_cities))
 
     # Load all settlements with known settlement_value
     settlements = {}
@@ -231,7 +234,7 @@ def run_etl(dry_run: bool = False) -> dict:
             # Synthesize bins + generate calibration pairs using settlement_value
             settlement_temp = settlement["value"]
             bins = _synthesize_bins(float(np.median(values)), city.settlement_unit)
-            season = season_from_date(target_date)
+            season = season_from_date(target_date, lat=city.lat)
 
             for label, low, high in bins:
                 # P_raw: member counting
@@ -286,7 +289,6 @@ def run_etl(dry_run: bool = False) -> dict:
         "skipped_no_json": skipped_no_json,
         "skipped_no_settlement": skipped_no_settlement,
         "skipped_already_exists": skipped_already_exists,
-        "unsupported_configured_cities": unsupported_configured_cities,
     }
 
     print(f"\nDirect TIGGE Calibration ETL complete:")

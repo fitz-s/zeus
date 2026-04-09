@@ -31,13 +31,15 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` (accepted locally / post-close passed)
+- Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` (accepted locally / post-close passed)
+- Previous accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally in worktree / transported via merge)
 - Current active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
 - Current packet status: `post-close passed / final audit ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no blocker-level issues remain inside the reroute packet boundary
   - any further work belongs to final audit findings or future follow-up packets
+  - VERIFY-ETL-RECALIBRATE-CONTAMINATION commit `0c9a348` transported via this merge
 
 ## Durable timeline
 

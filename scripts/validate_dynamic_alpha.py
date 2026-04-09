@@ -65,15 +65,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.state.db import get_shared_connection as get_connection
 
 
-def season_from_date(date_str: str) -> str:
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        return "DJF"
-    elif month in (3, 4, 5):
-        return "MAM"
-    elif month in (6, 7, 8):
-        return "JJA"
-    return "SON"
+def season_from_date(date_str: str, city_name: str = "") -> str:
+    from src.calibration.manager import season_from_date as _sfd, lat_for_city
+    lat = lat_for_city(city_name) if city_name else 90.0
+    return _sfd(date_str, lat=lat)
 
 
 BASE_ALPHA = {1: 0.65, 2: 0.55, 3: 0.40, 4: 0.25}

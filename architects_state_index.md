@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync (merged with VERIFY-ETL-RECALIBRATE-CONTAMINATION)`
 - Authority scope: `current-state pointer only`
 
 ## Current state
@@ -16,6 +16,7 @@ Metadata:
 - Active packet state: `post_close_passed / final_audit_ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Previous accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally / post-close passed / cherry-picked via merge)
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -26,6 +27,8 @@ Metadata:
 1. Push this branch for final audit.
 2. Keep core truth logic and broader parity work out of this closed packet unless a new contradiction reopens it.
 3. Preserve the distinction between clean-runtime routing and downstream consumer parity.
+4. VERIFY-ETL-RECALIBRATE-CONTAMINATION commit `0c9a348` has been transported via this merge.
+5. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt
 

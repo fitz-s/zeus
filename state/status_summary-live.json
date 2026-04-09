@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-04-08T04:24:18.643555+00:00",
+  "timestamp": "2026-04-09T19:03:20.479937+00:00",
   "process": {
-    "pid": 38550,
+    "pid": 2276,
     "mode": "paper",
     "version": "zeus_v2"
   },
@@ -210,7 +210,7 @@
   },
   "truth": {
     "mode": "paper",
-    "generated_at": "2026-04-08T04:24:18.643555+00:00",
+    "generated_at": "2026-04-09T19:03:20.479937+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,

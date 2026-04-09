@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -38,7 +38,7 @@ def _zeus_trade_db_path(mode: str | None = None) -> Path:
 def _connect(db_path: Path) -> sqlite3.Connection:
     """Low-level connection with standard pragmas."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=120)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -91,15 +91,6 @@ OPEN_EXPOSURE_PHASES = (
     "active",
     "day0_window",
     "pending_exit",
-)
-TERMINAL_TRADE_DECISION_STATUSES = frozenset(
-    {
-        "exited",
-        "settled",
-        "voided",
-        "admin_closed",
-        "unresolved_ghost",
-    }
 )
 PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "pending_entry": "pending_tracked",
@@ -1936,20 +1927,11 @@ def query_settlement_events(
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         """
+    if limit is not None:
+        query += "\n        LIMIT ?"
+        params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    decoded = _decode_position_event_rows(rows)
-    deduped: list[dict] = []
-    seen_trade_ids: set[str] = set()
-    for event in decoded:
-        trade_id = str(event.get("runtime_trade_id") or "")
-        if trade_id and trade_id in seen_trade_ids:
-            continue
-        if trade_id:
-            seen_trade_ids.add(trade_id)
-        deduped.append(event)
-        if limit is not None and len(deduped) >= limit:
-            return deduped[:limit]
-    return deduped[:limit] if limit is not None else deduped
+    return _decode_position_event_rows(rows)
 
 
 def query_authoritative_settlement_rows(
@@ -2314,7 +2296,7 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
 
     rows = conn.execute(
         """
-        SELECT position_id, phase, trade_id, city, target_date, bin_label, direction,
+        SELECT position_id, phase, trade_id, city, bin_label, direction,
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price
@@ -2324,7 +2306,6 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
 
     positions: list[dict] = []
     strategy_open_counts: dict[str, int] = {}
@@ -2340,11 +2321,6 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         if phase not in OPEN_EXPOSURE_PHASES:
             continue
         trade_id = str(row["trade_id"] or row["position_id"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
-        if latest_trade_status in TERMINAL_TRADE_DECISION_STATUSES:
-            continue
-        if _is_past_target_open_phase(str(row["target_date"] or ""), phase):
-            continue
         hints = transitional_hints.get(trade_id, {})
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
@@ -2441,16 +2417,24 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
-    projection_phase_by_trade = {
-        str(row["trade_id"] or row["position_id"] or ""): str(row["phase"] or "")
-        for row in rows
-        if str(row["trade_id"] or row["position_id"] or "")
-    }
-    legacy_latest_by_trade = _latest_semantically_advancing_legacy_event_by_trade(
-        conn,
-        projection_phase_by_trade,
-    )
+    legacy_latest_by_trade: dict[str, datetime] = {}
+    legacy_table = _legacy_position_events_table(conn)
+    if legacy_table:
+        placeholders = ", ".join("?" for _ in trade_ids)
+        legacy_rows = conn.execute(
+            f"""
+            SELECT runtime_trade_id, MAX(timestamp) AS latest_timestamp
+            FROM {legacy_table}
+            WHERE runtime_trade_id IN ({placeholders})
+            GROUP BY runtime_trade_id
+            """,
+            trade_ids,
+        ).fetchall()
+        for legacy_row in legacy_rows:
+            trade_id = str(legacy_row["runtime_trade_id"] or "")
+            parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
+            if trade_id and parsed is not None:
+                legacy_latest_by_trade[trade_id] = parsed
 
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     positions: list[dict] = []
@@ -2458,29 +2442,15 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     for row in rows:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
-        if _is_past_target_open_phase(str(row["target_date"] or ""), phase):
-            continue
         hints = transitional_hints.get(trade_id, {})
         position_env = str(hints.get("env") or current_mode)
         if position_env != current_mode:
             continue
         projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
         latest_legacy = legacy_latest_by_trade.get(trade_id)
-        latest_legacy_timestamp = _parse_iso_timestamp(
-            str((latest_legacy or {}).get("timestamp") or "")
-        )
-        if (
-            projection_updated_at is not None
-            and latest_legacy_timestamp is not None
-            and latest_legacy_timestamp > projection_updated_at
-        ):
+        if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
             stale_trade_ids.append(trade_id)
             continue
-        runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
-        terminal_runtime_state = _terminal_runtime_state_for_trade_decision_status(latest_trade_status)
-        if terminal_runtime_state:
-            runtime_state = terminal_runtime_state
         positions.append(
             {
                 "trade_id": trade_id,
@@ -2508,7 +2478,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "chain_state": str(row["chain_state"] or "unknown"),
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
-                "state": runtime_state,
+                "state": PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase),
                 "env": position_env,
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
@@ -2682,81 +2652,6 @@ def _parse_boolish_text(raw: str) -> bool:
     return text in {"1", "true", "yes", "on", "enabled", "gate"}
 
 
-def _is_past_target_open_phase(target_date_text: str, phase: str) -> bool:
-    if phase not in OPEN_EXPOSURE_PHASES:
-        return False
-    if not target_date_text:
-        return False
-    try:
-        target_date = date.fromisoformat(target_date_text)
-    except ValueError:
-        return False
-    return target_date < datetime.now(timezone.utc).date()
-
-
-def _latest_trade_decision_status_by_trade_id(
-    conn: sqlite3.Connection,
-    trade_ids: list[str],
-) -> dict[str, str]:
-    if not trade_ids or not _table_exists(conn, "trade_decisions"):
-        return {}
-    placeholders = ", ".join("?" for _ in trade_ids)
-
-    def _query_latest_status_rows(target_conn: sqlite3.Connection) -> dict[str, str]:
-        rows = target_conn.execute(
-            f"""
-            WITH latest AS (
-                SELECT runtime_trade_id, MAX(trade_id) AS latest_trade_id
-                FROM trade_decisions
-                WHERE runtime_trade_id IN ({placeholders})
-                  AND runtime_trade_id IS NOT NULL
-                GROUP BY runtime_trade_id
-            )
-            SELECT td.runtime_trade_id, td.status
-            FROM latest
-            JOIN trade_decisions td ON td.trade_id = latest.latest_trade_id
-            """,
-            trade_ids,
-        ).fetchall()
-        return {
-            str(row["runtime_trade_id"] or ""): str(row["status"] or "")
-            for row in rows
-            if str(row["runtime_trade_id"] or "")
-        }
-
-    statuses = _query_latest_status_rows(conn)
-    try:
-        db_list = conn.execute("PRAGMA database_list").fetchall()
-        main_path = next((str(row[2]) for row in db_list if row[1] == "main"), "")
-    except sqlite3.OperationalError:
-        main_path = ""
-
-    if ZEUS_DB_PATH.exists() and str(ZEUS_DB_PATH) != main_path:
-        legacy_conn = sqlite3.connect(str(ZEUS_DB_PATH))
-        legacy_conn.row_factory = sqlite3.Row
-        try:
-            if _table_exists(legacy_conn, "trade_decisions"):
-                legacy_statuses = _query_latest_status_rows(legacy_conn)
-                for trade_id, legacy_status in legacy_statuses.items():
-                    if statuses.get(trade_id) not in TERMINAL_TRADE_DECISION_STATUSES and legacy_status in TERMINAL_TRADE_DECISION_STATUSES:
-                        statuses[trade_id] = legacy_status
-        finally:
-            legacy_conn.close()
-
-    return statuses
-
-
-def _terminal_runtime_state_for_trade_decision_status(status: str) -> str | None:
-    normalized = str(status or "").strip().lower()
-    if normalized == "exited":
-        return "economically_closed"
-    if normalized in {"settled", "voided", "admin_closed"}:
-        return normalized
-    if normalized == "unresolved_ghost":
-        return "admin_closed"
-    return None
-
-
 def _query_transitional_position_hints(
     conn: sqlite3.Connection,
     trade_ids: list[str],
@@ -2828,92 +2723,6 @@ def _query_transitional_position_hints(
             if env_value not in (None, ""):
                 bucket["env"] = str(env_value)
     return hints
-
-
-def _latest_semantically_advancing_legacy_event_by_trade(
-    conn: sqlite3.Connection,
-    projection_phase_by_trade: dict[str, str],
-) -> dict[str, dict]:
-    trade_ids = list(projection_phase_by_trade)
-    if not trade_ids:
-        return {}
-    legacy_table = _legacy_position_events_table(conn)
-    if not legacy_table:
-        return {}
-    placeholders = ", ".join("?" for _ in trade_ids)
-    rows = conn.execute(
-        f"""
-        SELECT runtime_trade_id, event_type, position_state, timestamp
-        FROM {legacy_table}
-        WHERE runtime_trade_id IN ({placeholders})
-        ORDER BY timestamp DESC, id DESC
-        """,
-        trade_ids,
-    ).fetchall()
-    latest: dict[str, dict] = {}
-    for row in rows:
-        trade_id = str(row["runtime_trade_id"] or "")
-        if not trade_id or trade_id in latest:
-            continue
-        event = {
-            "event_type": str(row["event_type"] or ""),
-            "position_state": str(row["position_state"] or ""),
-            "timestamp": str(row["timestamp"] or ""),
-        }
-        if _legacy_event_semantically_advances_projection(
-            latest_legacy_event=event,
-            projection_phase=projection_phase_by_trade.get(trade_id, ""),
-        ):
-            latest[trade_id] = event
-    return latest
-
-
-def _lifecycle_phase_rank(phase) -> int:
-    from src.state.lifecycle_manager import LifecyclePhase, coerce_lifecycle_phase
-
-    normalized = coerce_lifecycle_phase(phase)
-    if normalized is None:
-        return -1
-    order = {
-        LifecyclePhase.PENDING_ENTRY: 0,
-        LifecyclePhase.ACTIVE: 1,
-        LifecyclePhase.DAY0_WINDOW: 2,
-        LifecyclePhase.PENDING_EXIT: 3,
-        LifecyclePhase.ECONOMICALLY_CLOSED: 4,
-        LifecyclePhase.SETTLED: 5,
-        LifecyclePhase.VOIDED: 5,
-        LifecyclePhase.ADMIN_CLOSED: 5,
-        LifecyclePhase.QUARANTINED: 5,
-    }
-    return order.get(normalized, -1)
-
-
-def _legacy_event_semantically_advances_projection(
-    *,
-    latest_legacy_event: dict | None,
-    projection_phase: str,
-) -> bool:
-    from src.state.lifecycle_manager import phase_for_runtime_position
-
-    if not latest_legacy_event:
-        return False
-    event_type = str(latest_legacy_event.get("event_type") or "")
-    legacy_state = str(latest_legacy_event.get("position_state") or "").strip().lower()
-    semantic_event_types = {
-        "POSITION_ENTRY_RECORDED",
-        "POSITION_LIFECYCLE_UPDATED",
-        "POSITION_EXIT_RECORDED",
-        "POSITION_SETTLED",
-    }
-    if event_type not in semantic_event_types:
-        return False
-    if not legacy_state:
-        return False
-    try:
-        legacy_phase = phase_for_runtime_position(state=legacy_state)
-    except ValueError:
-        return False
-    return _lifecycle_phase_rank(legacy_phase) > _lifecycle_phase_rank(projection_phase)
 
 
 def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:

@@ -86,8 +86,10 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
         print(f"  SKIP {city_name} {target_date_str} — {days_ago} days ago, outside 93-day window")
         return False
 
-    # Fetch ECMWF ensemble with past_days to cover the target date
-    result = fetch_ensemble(city, forecast_days=days_ago + 2, model="ecmwf_ifs025")
+    # Fetch ECMWF ensemble with past_days to reach the target date.
+    # Open-Meteo's forecast_days only covers future hours; use past_days
+    # to include historical forecast data for the target settlement date.
+    result = fetch_ensemble(city, forecast_days=2, past_days=days_ago + 1, model="ecmwf_ifs025")
 
     if result is None or not validate_ensemble(result):
         print(f"  FAIL {city_name} {target_date_str} — ENS fetch failed or < 51 members")
@@ -117,6 +119,8 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
 
     # Store with all 4 mandatory timestamps
     now = datetime.now(timezone.utc)
+    issue_time = result.get("issue_time") or result.get("first_valid_time") or now
+    issue_time_str = issue_time.isoformat() if hasattr(issue_time, 'isoformat') else str(issue_time)
     conn.execute("""
         INSERT OR IGNORE INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
@@ -125,22 +129,24 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         city_name, target_date_str,
-        result["issue_time"].isoformat(),        # issue_time
+        issue_time_str,                          # issue_time
         target_date_str + "T12:00:00Z",          # valid_time (midday target)
-        result["issue_time"].isoformat(),         # available_at = issue_time for backfill
+        issue_time_str,                          # available_at = issue_time for backfill
         result["fetch_time"].isoformat(),         # fetch_time
-        float(max(0.0, lead_hours_to_target(target_date, city.timezone, result["issue_time"]))),
+        float(max(0.0, lead_hours_to_target(target_date, city.timezone, issue_time))),
         json.dumps(ens.member_maxes.tolist()),     # members_json
         p_raw_json,
-        ens.spread(),
+        float(ens.spread().value if hasattr(ens.spread(), 'value') else ens.spread()),
         int(ens.is_bimodal()),
         "ecmwf_ifs025",
         "backfill_v1",
     ))
     conn.commit()
 
+    spread_val = ens.spread()
+    spread_float = float(spread_val.value if hasattr(spread_val, 'value') else spread_val)
     print(f"  OK {city_name} {target_date_str} — {result['n_members']} members, "
-          f"spread={ens.spread():.2f}, bimodal={ens.is_bimodal()}")
+          f"spread={spread_float:.2f}, bimodal={ens.is_bimodal()}")
     return True
 
 
