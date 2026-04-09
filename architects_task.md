@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE acceptance`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE refreshed acceptance`
 - Authority scope: `live packet control only`
 
 Do not use this file for:

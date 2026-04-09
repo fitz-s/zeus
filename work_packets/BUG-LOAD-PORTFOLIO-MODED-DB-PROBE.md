@@ -75,8 +75,8 @@ parity_required: false
 replay_required: false
 rollback: Revert the mode-aware DB probe change, paired tests, and control-surface updates together; repo returns to the accepted trailing-loss boundary with `load_portfolio()` still probing unsuffixed `zeus.db`.
 acceptance:
-  - `load_portfolio()` probes the mode-isolated DB for the current mode rather than the unsuffixed legacy DB
-  - a paper-mode fixture where `zeus-paper.db` is healthy and `zeus.db` is stale no longer forces JSON fallback
+  - `load_portfolio()` prefers a sibling mode-isolated DB for the current mode when one exists, instead of consulting the unsuffixed legacy DB first
+  - both an explicit `positions-paper.json` path and an unqualified current-mode path with sibling `zeus-paper.db` no longer force JSON fallback when `zeus.db` is stale
   - the packet leaves `src/state/db.py` comparator/shadow cleanup explicitly open as follow-up work
 evidence_required:
   - work-packet grammar output
@@ -97,12 +97,12 @@ evidence_required:
 - kernel-manifest check output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
 - targeted load-portfolio/runtime pytest output:
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `5 passed, 77 deselected`
-  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `1 passed, 38 deselected`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `2 passed, 38 deselected`
 - compile proof: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/portfolio.py tests/test_runtime_guards.py tests/test_db.py` -> success
 - direct mode-db probe note:
   - `query_portfolio_loader_view(zeus-paper.db)` -> `ok`
   - `query_portfolio_loader_view(zeus.db)` -> `stale_legacy_fallback` with stale trade `08d6c939-038`
   - direct real-state `load_portfolio(state/positions-paper.json)` no longer emits the stale-fallback warning and now loads the paper positions from the sibling mode DB
-  - route-selection smoke probe confirmed `load_portfolio()` called `get_connection(.../zeus-paper.db)` and did not call `get_connection(.../zeus.db)` for an explicit `positions-paper.json` fixture
-- pre-close critic review: native `critic` subagent `Aristotle` -> `PASS` after confirming the packet removes the immediate wrong-path fallback while keeping the deeper comparator/shadow and settlement-authority drift explicit
-- pre-close verifier review: native `verifier` subagent `Nietzsche` -> `PASS` after confirming scope purity, targeted tests, and the direct mode-db probe evidence
+  - guarded smoke probe on an unqualified `missing.json` path with sibling `zeus-paper.db` loaded the `paper-ok` row from the sibling mode DB and did not consult unsuffixed `zeus.db`
+- pre-close critic review: native `critic` subagent `Bohr` -> `PASS` after confirming the packet removes the immediate wrong-path fallback while keeping the deeper comparator/shadow and settlement-authority drift explicit
+- pre-close verifier review: native `verifier` subagent `Lorentz` -> `PASS` after confirming targeted tests, compile proof, and sibling-mode-db selection for both explicit and unqualified current-mode paths

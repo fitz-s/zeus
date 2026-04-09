@@ -49,15 +49,16 @@ Archive policy:
 - Basis / evidence:
   - commit `de8f716` -> `Supersede the comparator packet with the real mode-db probe fix`
   - commit `7692bbc` -> `Stop paper portfolio loading from consulting the wrong database`
+  - commit `8205b0d` -> `Use the sibling mode database for current-mode portfolio probes`
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/portfolio.py tests/test_runtime_guards.py tests/test_db.py` -> success
   - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `5 passed, 77 deselected`
-  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `1 passed, 38 deselected`
-  - pre-close critic review via native `critic` subagent `Aristotle` -> `PASS`
-  - pre-close verifier review via native `verifier` subagent `Nietzsche` -> `PASS`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `2 passed, 38 deselected`
+  - pre-close critic review via native `critic` subagent `Bohr` -> `PASS`
+  - pre-close verifier review via native `verifier` subagent `Lorentz` -> `PASS`
 - Decisions frozen:
-  - `load_portfolio()` now prefers the sibling mode DB for explicit mode-qualified portfolio files
+  - `load_portfolio()` now prefers the sibling mode DB for current-mode paths when present
   - the immediate paper wrong-path fallback is removed
   - deeper `src/state/db.py` comparator/shadow and settlement-authority seams remain explicit follow-up debt
 - Open uncertainties:

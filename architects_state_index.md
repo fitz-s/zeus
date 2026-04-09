@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE acceptance`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE refreshed acceptance`
 - Authority scope: `current-state pointer only`
 
 ## Current state
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Run the required post-close critic + verifier on accepted `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`.
+1. Run the required post-close critic + verifier on refreshed accepted `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`.
 2. Keep `src/state/db.py` comparator cleanup, settlement dedupe, and status-summary work out of this packet unless a new packet is frozen.
 3. Preserve the distinction between removing the immediate paper fallback trigger and claiming full portfolio-truth convergence.
 
