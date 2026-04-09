@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE acceptance sync`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / FINAL_AUDIT_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -73,9 +73,9 @@ Restore paper runtime on a clean code checkout while keeping it attached to the 
 
 ## Current blocker state
 
-- packet-bounded reroute evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
-- paper launchd services now run from the clean worktree and paper risk rows remain coherent across multiple fresh ticks
-- broader downstream parity work remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
+- packet boundary is post-close passed
+- paper launchd services now run from the clean worktree and coherent paper risk rows persisted across multiple fresh ticks
+- branch is ready for one final audit before merge consideration
 
 ## Immediate checklist
 
@@ -86,5 +86,5 @@ Restore paper runtime on a clean code checkout while keeping it attached to the 
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted reroute boundary.
-2. Freeze the next bounded packet instead of widening this one.
+1. Push this branch for final audit.
+2. Do not widen this packet without a new contradiction.
