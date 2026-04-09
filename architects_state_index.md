@@ -13,7 +13,7 @@ Metadata:
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
-- Active packet state: `pre-close passed / local acceptance ready`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Accept the center_buy diagnosis packet locally and commit the bounded batch.
-2. Keep the packet bounded to read-only diagnosis surfaces only.
+1. Freeze the next lawful center_buy repair packet from the diagnosis evidence.
+2. Keep the diagnosis packet read-only and complete; do not reopen unless new contradiction appears.
 3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt

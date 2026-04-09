@@ -31,15 +31,44 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Last accepted packet: `DIAGNOSE-CENTER-BUY-FAILURE` (accepted locally in worktree)
 - Current active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
-- Current packet status: `pre-close passed / local acceptance ready`
+- Current packet status: `accepted locally / post-close gate passed / ready for next packet freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit still needs to be created on this worktree branch
+  - the accepted diagnosis still needs transport back to the live `Architects` branch or an explicit branch-local supersession decision
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 05:18 America/Chicago] DIAGNOSE-CENTER-BUY-FAILURE accepted locally and passed post-close gate in worktree
+- Author: `Architects clean worktree lane`
+- Packet: `DIAGNOSE-CENTER-BUY-FAILURE`
+- Status delta:
+  - diagnosis packet accepted locally in worktree branch `architects-center-buy-diagnose`
+  - post-close critic review passed
+  - post-close verifier review passed
+- Basis / evidence:
+  - commit `f8748db` -> `Make center_buy losses diagnosable without mixed-surface guesswork`
+  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `.venv/bin/python -m py_compile scripts/diagnose_center_buy_failure.py tests/test_center_buy_diagnosis.py` -> success
+  - `.venv/bin/pytest -q tests/test_center_buy_diagnosis.py` -> `2 passed`
+  - live diagnosis output: `8 settled / -9.0 pnl / all losses buy_yes / all <=0.02 entry-price buckets / ORDER_REJECTED=7`
+  - pre-close critic artifact -> `.omx/artifacts/claude-diagnose-center-buy-failure-preclose-critic-20260408T091000Z.md`
+  - pre-close verifier artifact -> `.omx/artifacts/claude-diagnose-center-buy-failure-preclose-verifier-20260408T093000Z.md`
+  - post-close critic artifact -> `.omx/artifacts/claude-diagnose-center-buy-failure-postclose-critic-20260408T094200Z.md`
+  - post-close verifier artifact -> `.omx/artifacts/claude-diagnose-center-buy-failure-postclose-verifier-20260408T094700Z.md`
+- Decisions frozen:
+  - center_buy settled losses are currently isolated to one reproducible cohort: 8 buy_yes settlements totaling -9.0
+  - all settled losses sit in <=0.02 entry-price buckets
+  - rejected order paths exist and must remain analytically separate from the settled-loss cohort
+- Open uncertainties:
+  - the diagnosis does not yet prove the best repair shape; it only narrows the candidates
+- Next required action:
+  - freeze the next center_buy repair packet from this diagnosis evidence
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 04:28 America/Chicago] DIAGNOSE-CENTER-BUY-FAILURE frozen
 - Author: `Architects clean worktree lane`

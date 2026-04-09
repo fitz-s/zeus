@@ -80,12 +80,12 @@ Produce a reproducible, strategy-isolated diagnosis of why `center_buy` is curre
 - [x] targeted tests pass
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] packet accepted locally
+- [x] post-close third-party critic review passed
+- [x] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Accept the diagnosis packet locally and commit the bounded batch.
-2. Run post-close critic + verifier on the accepted boundary before freezing the next packet.
-3. Do not widen into strategy behavior changes or runtime logic without a new packet.
+1. Freeze the next lawful center_buy repair packet from the diagnosis evidence.
+2. Keep diagnosis artifacts as the authority for why the next repair exists.
+3. Do not widen into strategy behavior changes or runtime logic outside the next frozen packet.

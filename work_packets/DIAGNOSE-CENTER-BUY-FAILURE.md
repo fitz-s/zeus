@@ -103,3 +103,5 @@ evidence_required:
   - the emitted hypotheses are `all_settled_losses_are_ultra_low_price_tail_bets` and `rejection_path_exists_and_should_be_separated_from_settlement_truth`
 - independent pre-close critic artifact: `.omx/artifacts/claude-diagnose-center-buy-failure-preclose-critic-20260408T091000Z.md` -> `PASS`
 - pre-close verifier artifact: `.omx/artifacts/claude-diagnose-center-buy-failure-preclose-verifier-20260408T091530Z.md` -> `PASS`
+- post-close critic artifact: `.omx/artifacts/claude-diagnose-center-buy-failure-postclose-critic-20260408T094200Z.md` -> `PASS`
+- post-close verifier artifact: `.omx/artifacts/claude-diagnose-center-buy-failure-postclose-verifier-20260408T094700Z.md` -> `PASS`
