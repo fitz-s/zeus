@@ -51,7 +51,6 @@ Remove the legacy timestamp shadow that still forces canonical portfolio truth t
 - `src/execution/**`
 - `src/engine/**`
 - `tests/test_architecture_contracts.py`
-- `tests/test_truth_surface_health.py`
 - `tests/test_riskguard.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_healthcheck.py`

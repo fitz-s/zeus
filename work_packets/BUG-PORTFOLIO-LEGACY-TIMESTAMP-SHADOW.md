@@ -67,13 +67,13 @@ ci_gates_required:
   - python3 scripts/check_work_packets.py
   - python3 scripts/check_kernel_manifests.py
 tests_required:
-  - .venv/bin/pytest -q tests/test_truth_surface_health.py -k 'portfolio_truth_source_is_canonical or portfolio_loader'
+  - .venv/bin/pytest -q tests/test_truth_surface_health.py::test_portfolio_loader_ignores_same_phase_legacy_entry_shadow tests/test_truth_surface_health.py::test_portfolio_loader_marks_semantic_exit_shadow_as_stale tests/test_truth_surface_health.py::test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shadow_event_exists
 parity_required: false
 replay_required: false
 rollback: Revert the comparator/shadow fix, paired tests, and control-surface updates together; repo returns to the accepted trailing-loss boundary with the legacy timestamp shadow still forcing fallback.
 acceptance:
   - `query_portfolio_loader_view()` no longer returns `stale_legacy_fallback` for the identified paper-mode shadow ids when the projection is otherwise canonical for the active mode
-  - targeted truth-surface tests pass and directly prove the stale-id shadow no longer forces degraded loader truth
+  - targeted comparator/shadow tests pass and directly prove same-phase legacy shadows are ignored while true later semantic lag still forces degraded loader truth
   - the packet leaves `src/state/portfolio.py` DB-path cleanup and settlement-summary dedupe explicitly open as follow-up work
 evidence_required:
   - work-packet grammar output
