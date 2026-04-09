@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION freeze`
+- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION acceptance`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Active packet state: `frozen / integration in progress`
+- Active packet state: `accepted locally / post-close review pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Integrate the current Architects data-expansion lane onto the accepted truth-repair tip without regressing truth seams.
-2. Keep truth files in `src/state/**`, close-path engine/execution seams, and truth tests on the accepted repair version unless a packet-bounded proof requires adaptation.
-3. Record any remaining data-expansion follow-up gaps explicitly after merge; do not silently overclaim full expansion convergence.
+1. Run the required post-close critic + verifier on accepted `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`.
+2. After post-close passes, hand the explicit data-expansion follow-up gaps to the data-lane owner.
+3. Keep truth files in `src/state/**`, close-path engine/execution seams, and truth tests on the accepted repair version unless a new packet explicitly authorizes change.
 
 ## Current out-of-scope dirt
 

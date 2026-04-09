@@ -33,13 +33,39 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` (accepted locally in worktree)
 - Current active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Current packet status: `frozen / integration in progress`
+- Current packet status: `accepted locally / post-close review pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - the live Architects data-expansion lane exists only as dirty local changes and must be merged without regressing accepted truth files
-  - expansion-follow-up gaps discovered during merge must be recorded explicitly instead of silently accepted
+  - accepted packet still requires the mandatory post-close critic + verifier
+  - explicit expansion follow-up gaps still need handoff to the data-lane owner after post-close
 
 ## Durable timeline
+
+## [2026-04-09 12:55 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION accepted locally
+- Author: `Architects integration lane`
+- Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
+- Status delta:
+  - bounded integration packet accepted locally on branch `architects-truth-data-merge`
+- Basis / evidence:
+  - commit `d0db703` -> `Keep the data-expansion lane while preserving truth repairs`
+  - follow-up commit `8f0a5a1` -> `Make the expansion gaps explicit before packet closeout`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/main.py scripts/etl_tigge_ens.py src/data/observation_client.py scripts/backfill_hourly_openmeteo.py scripts/backfill_wu_daily_all.py scripts/etl_tigge_direct_calibration.py scripts/migrate_rainstorm_full.py src/data/wu_daily_collector.py tests/test_etl_recalibrate_chain.py tests/test_runtime_guards.py` -> success
+  - ETL/runtime targeted pytest -> `17 passed` and `9 passed, 72 deselected`
+  - pre-close critic review via native `critic` subagent `Ramanujan` on `8f0a5a1` -> `PASS`
+  - pre-close verifier review via native `verifier` subagent `Socrates` on `8f0a5a1` -> `PASS`
+- Decisions frozen:
+  - additive data-expansion files now coexist with the accepted truth-repair tip
+  - truth-owned state/close-path files remain on the accepted repair version
+  - TIGGE city coverage gaps and expansion fan-out proof gaps remain explicit follow-up debt, not silent regressions
+- Open uncertainties:
+  - post-close review is still required before the next packet may freeze
+  - TIGGE maps still cover only 21/38 configured cities and the expanded scheduler fan-out still needs broader proof
+- Next required action:
+  - run mandatory post-close critic + verifier and then hand the remaining expansion follow-up gaps to the data-lane owner
+- Owner:
+  - Architects integration lane
 
 ## [2026-04-09 12:10 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION frozen
 - Author: `Architects integration lane`

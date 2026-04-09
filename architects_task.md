@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION freeze`
+- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION acceptance`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -85,14 +85,16 @@ Preserve the accepted truth-repair mainline while integrating the current Archit
 ## Immediate checklist
 
 - [x] `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` frozen
-- [ ] data-expansion files ported onto the accepted truth tip
-- [ ] `src/main.py` integrated without losing truth-safe subprocess behavior
-- [ ] `tests/test_runtime_guards.py` merged without dropping truth economic-close assertions
-- [ ] targeted ETL/runtime tests pass
-- [ ] follow-up data-expansion gaps recorded explicitly
+- [x] data-expansion files ported onto the accepted truth tip
+- [x] `src/main.py` integrated without losing truth-safe subprocess behavior
+- [x] `tests/test_runtime_guards.py` merged without dropping truth economic-close assertions
+- [x] targeted ETL/runtime tests pass
+- [x] follow-up data-expansion gaps recorded explicitly
+- [ ] post-close critic review passed
+- [ ] post-close verifier review passed
 
 ## Next required action
 
-1. Port the additive Architects data-expansion files onto this accepted truth-repair branch.
-2. Merge `src/main.py` and `tests/test_runtime_guards.py` carefully at hunk level.
-3. Run targeted ETL/runtime checks and then record any remaining expansion follow-up gaps instead of widening further.
+1. Run the post-close critic review for this accepted integration packet.
+2. Run the post-close verifier review for this accepted integration packet.
+3. Hand the explicit data-expansion follow-up gaps to the responsible data-lane owner instead of widening this packet.
