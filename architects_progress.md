@@ -32,14 +32,37 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS` (accepted locally / post-close pending)
-- Current active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- Current packet status: `accepted locally / post-close pending`
+- Current active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - persisted paper artifacts still preserve old snapshots even though clean-branch direct truth probes are coherent
-  - downstream parity work remains unresolved outside the new refresh packet
+  - a stale live writer is overwriting refreshed paper artifacts back to fallback-based values
+  - downstream parity work remains unresolved outside the new ownership packet
 
 ## Durable timeline
+
+## [2026-04-09 19:10 America/Chicago] BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - explicit refresh at `18:33:28Z` wrote coherent paper artifacts
+  - by `19:01Z` onward, `risk_state-paper.db` was again being overwritten to `working_state_fallback`, `stale_legacy_fallback`, `settlement_sample_size=22`, `daily_loss=13.26`
+  - `launchctl print` showed active paper launchd jobs:
+    - `com.zeus.paper-trading`
+    - `com.zeus.riskguard`
+    both bound to `/Users/leofitz/.openclaw/workspace-venus/zeus`
+  - `logs/riskguard.err` confirms the running paper riskguard loop is still logging `load_portfolio falling back to JSON because canonical projection is unavailable: stale_legacy_fallback`
+- Decisions frozen:
+  - the next bounded seam is live writer ownership, not another artifact refresh implementation change
+  - keep core truth math and broader runtime redesign explicitly out of this packet
+- Open uncertainties:
+  - the narrowest safe reroute may be launchd plist updates, service restart, or a smaller external-runtime packet if ownership remains ambiguous
+- Next required action:
+  - isolate and reroute the stale paper writer/owner path
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 18:30 America/Chicago] REFRESH-PAPER-RUNTIME-ARTIFACTS accepted locally
 - Author: `Architects mainline lead`

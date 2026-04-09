@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS acceptance sync`
+- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- Active packet state: `accepted_local / post_close_pending`
+- Active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close critic + verifier on the accepted refresh boundary.
+1. Isolate and reroute the stale paper writer/owner path.
 2. Keep core truth math and broader parity redesign out of this packet unless a new packet is frozen.
-3. Preserve the distinction between artifact refresh and deeper consumer/output parity work.
+3. Preserve the distinction between artifact refresh entrypoint correctness and live writer ownership.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/REFRESH-PAPER-RUNTIME-ARTIFACTS.md`
+5. `work_packets/BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP.md`
