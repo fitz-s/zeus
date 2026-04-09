@@ -9,6 +9,7 @@
 
 | Item | Purpose |
 |------|---------|
+| `ZEUS_AUTHORITY.md` | Root authority guide summarizing system foundations and law |
 | `AGENTS.md` | Repo-native execution brief and current operating contract |
 | `CURRENT_STATE.md` | Single live current-state/control-entry pointer |
 | current work packet | Live control surface named from `CURRENT_STATE.md` |
