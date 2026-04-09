@@ -770,11 +770,26 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     json_data = _load_portfolio_json_payload(path)
 
-    from src.state.db import get_connection, query_portfolio_loader_view
+    from src.state.db import get_connection, get_trade_connection_with_shared, query_portfolio_loader_view
 
-    db_path = path.parent / "zeus.db"
+    mode_override = None
+    stem = path.stem
+    if stem.startswith("positions-"):
+        candidate_mode = stem.split("positions-", 1)[1]
+        if candidate_mode in {"paper", "live", "test"}:
+            mode_override = candidate_mode
+    elif path == POSITIONS_PATH:
+        mode_override = current_mode
+
     try:
-        conn = get_connection(db_path)
+        if mode_override is not None:
+            sibling_mode_db = path.parent / f"zeus-{mode_override}.db"
+            if sibling_mode_db.exists():
+                conn = get_connection(sibling_mode_db)
+            else:
+                conn = get_trade_connection_with_shared(mode_override)
+        else:
+            conn = get_connection(path.parent / "zeus.db")
     except Exception:
         logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
         return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
