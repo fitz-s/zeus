@@ -32,5 +32,4 @@ docs/KEY_REFERENCE/*
 !docs/KEY_REFERENCE/quantitative_research.md
 !docs/KEY_REFERENCE/market_microstructure.md
 !docs/KEY_REFERENCE/statistical_methodology.md
-
 state/*.db
