@@ -31,15 +31,41 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` (accepted locally / post-close pending)
+- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` (accepted locally / post-close passed)
 - Current active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `post-close passed / next freeze allowed`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - downstream consumers and output layers may still hold older assumptions about `recent_exits` semantics after this loader repair
   - broader realized-PnL/status parity remains unresolved follow-up work outside this accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 16:16 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING post-close passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Status delta:
+  - post-close critic review found no blocker-level contradictions on the accepted boundary
+  - post-close verifier review found no blocker-level evidence gaps
+  - next bounded packet freeze became allowed
+- Basis / evidence:
+  - native `critic` subagent `Turing` -> `PASS`
+  - native `verifier` subagent `Sartre` -> `PASS`
+  - fresh direct paper-mode probe remained stable:
+    - `load_portfolio(state/positions-paper.json)` -> `positions=12`, `recent_exits=19`, `recent_exit_pnl=-13.03`
+    - authoritative paper settlements -> `19`, `pnl=-13.03`
+  - fresh JSON-fallback probe remained stable:
+    - `positions=1`, `recent_exits=1`, `recent_exit_pnl=1.25`, `first_exit_reason=JSON_FALLBACK`
+- Decisions frozen:
+  - the loader packet stands on the accepted boundary and should not be silently reopened
+  - the next bounded seam is downstream consumer/output parity rather than loader truth mixing itself
+- Open uncertainties:
+  - the next packet still needs a narrow file boundary and explicit non-goals
+- Next required action:
+  - freeze the next bounded portfolio-truth packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 16:04 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING accepted locally
 - Author: `Architects mainline lead`

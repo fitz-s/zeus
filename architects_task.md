@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING acceptance sync`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / NEXT_FREEZE_ALLOWED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -70,9 +70,9 @@ Stop `load_portfolio()` from mixing canonical DB-first positions with stale JSON
 
 ## Current blocker state
 
-- packet-bounded loader evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
-- fresh probes now show DB-first paper loads align `recent_exits` with authoritative settlements (`19 / -13.03`) while JSON fallback still preserves JSON exits
-- downstream consumer/output drift remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
+- post-close review completed with no blocker-level contradictions on the accepted loader boundary
+- fresh probes still show DB-first paper loads align `recent_exits` with authoritative settlements (`19 / -13.03`) while JSON fallback preserves JSON exits
+- the next deeper seam is downstream consumer/output parity, which must be isolated in a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
 
@@ -84,5 +84,5 @@ Stop `load_portfolio()` from mixing canonical DB-first positions with stale JSON
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted loader boundary.
-2. Freeze the next bounded portfolio-truth packet instead of widening this one.
+1. Freeze the next bounded portfolio-truth packet.
+2. Keep `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` closed unless a new contradiction reopens it.
