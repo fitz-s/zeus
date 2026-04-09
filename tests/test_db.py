@@ -1484,6 +1484,237 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
 
 
+def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
+    from src.state.db import query_settlement_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="dup-stage",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.6,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-1.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    log_position_event(
+        conn,
+        "POSITION_SETTLED",
+        pos,
+        details={
+            "contract_version": "position_settled.v1",
+            "winning_bin": "41-42°F",
+            "position_bin": "39-40°F",
+            "won": False,
+            "outcome": 0,
+            "p_posterior": 0.6,
+            "exit_price": 0.0,
+            "pnl": -1.0,
+            "exit_reason": "SETTLEMENT",
+        },
+        timestamp="2026-04-01T23:00:00Z",
+        source="settlement",
+    )
+    log_position_event(
+        conn,
+        "POSITION_SETTLED",
+        pos,
+        details={
+            "contract_version": "position_settled.v1",
+            "winning_bin": "41-42°F",
+            "position_bin": "39-40°F",
+            "won": False,
+            "outcome": 0,
+            "p_posterior": 0.6,
+            "exit_price": 0.0,
+            "pnl": -2.5,
+            "exit_reason": "SETTLEMENT",
+        },
+        timestamp="2026-04-02T00:00:00Z",
+        source="settlement",
+    )
+    conn.commit()
+
+    rows = query_settlement_events(conn, limit=10, env="paper")
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["runtime_trade_id"] == "dup-stage"
+    assert rows[0]["timestamp"] == "2026-04-02T00:00:00Z"
+    assert rows[0]["details"]["pnl"] == pytest.approx(-2.5)
+
+
+def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
+    from src.state.db import query_settlement_events
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    dup = Position(
+        trade_id="dup-stage",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.6,
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-1.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    other = Position(
+        trade_id="other-stage",
+        market_id="m2",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="41-42°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.7,
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        exit_price=1.0,
+        pnl=2.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:30:00Z",
+        state="settled",
+    )
+    for ts, pnl in [("2026-04-01T23:00:00Z", -1.0), ("2026-04-02T00:00:00Z", -2.5)]:
+        dup.pnl = pnl
+        log_position_event(
+            conn,
+            "POSITION_SETTLED",
+            dup,
+            details={
+                "contract_version": "position_settled.v1",
+                "winning_bin": "41-42°F",
+                "position_bin": "39-40°F",
+                "won": False,
+                "outcome": 0,
+                "p_posterior": 0.6,
+                "exit_price": 0.0,
+                "pnl": pnl,
+                "exit_reason": "SETTLEMENT",
+            },
+            timestamp=ts,
+            source="settlement",
+        )
+    log_position_event(
+        conn,
+        "POSITION_SETTLED",
+        other,
+        details={
+            "contract_version": "position_settled.v1",
+            "winning_bin": "41-42°F",
+            "position_bin": "41-42°F",
+            "won": True,
+            "outcome": 1,
+            "p_posterior": 0.7,
+            "exit_price": 1.0,
+            "pnl": 2.0,
+            "exit_reason": "SETTLEMENT",
+        },
+        timestamp="2026-04-02T01:00:00Z",
+        source="settlement",
+    )
+    conn.commit()
+
+    rows = query_settlement_events(conn, limit=10, env="paper")
+    conn.close()
+
+    assert sorted(row["runtime_trade_id"] for row in rows) == ["dup-stage", "other-stage"]
+    latest_dup = next(row for row in rows if row["runtime_trade_id"] == "dup-stage")
+    assert latest_dup["details"]["pnl"] == pytest.approx(-2.5)
+
+
+def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):
+    from src.state.db import log_position_event, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    pos = Position(
+        trade_id="dup-stage-auth",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.4,
+        p_posterior=0.6,
+        decision_snapshot_id="snap1",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-1.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+    for ts, pnl in [("2026-04-01T23:00:00Z", -1.0), ("2026-04-02T00:00:00Z", -2.5)]:
+        pos.pnl = pnl
+        log_position_event(
+            conn,
+            "POSITION_SETTLED",
+            pos,
+            details={
+                "contract_version": "position_settled.v1",
+                "winning_bin": "41-42°F",
+                "position_bin": "39-40°F",
+                "won": False,
+                "outcome": 0,
+                "p_posterior": 0.6,
+                "exit_price": 0.0,
+                "pnl": pnl,
+                "exit_reason": "SETTLEMENT",
+            },
+            timestamp=ts,
+            source="settlement",
+        )
+    conn.commit()
+
+    rows = query_authoritative_settlement_rows(conn, limit=10, env="paper")
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "dup-stage-auth"
+    assert rows[0]["pnl"] == pytest.approx(-2.5)
+    assert rows[0]["settled_at"] == "2026-04-02T00:00:00Z"
+    assert rows[0]["source"] == "position_events"
+
 def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     from src.state.db import log_position_event, query_execution_event_summary
     from src.state.portfolio import Position
