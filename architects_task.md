@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW acceptance sync`
+- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / NEXT_FREEZE_ALLOWED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -68,8 +68,8 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 
 ## Current blocker state
 
-- packet-bounded trailing-loss evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
-- fresh direct probe now shows 24h reference degradation (`insufficient_history`) rather than accepting a row `13.73h` older than the cutoff
+- post-close review completed with no blocker-level contradictions on the accepted trailing-loss boundary
+- fresh direct probe still shows 24h reference degradation (`insufficient_history`) rather than accepting a row `13.73h` older than the cutoff
 - runtime artifact refresh remains explicit follow-up work and must be handled by a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
@@ -82,5 +82,5 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted trailing-loss boundary.
-2. Freeze the next bounded packet instead of widening this one.
+1. Freeze the next bounded packet.
+2. Keep `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` closed unless a new contradiction reopens it.

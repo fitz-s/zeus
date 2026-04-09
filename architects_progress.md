@@ -31,15 +31,39 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` (accepted locally / post-close pending)
+- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` (accepted locally / post-close passed)
 - Current active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `post-close passed / next freeze allowed`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - runtime artifact refresh remains a separate follow-up seam after the strict reference-window repair
   - downstream parity work remains unresolved outside this accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 18:16 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW post-close passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
+- Status delta:
+  - post-close critic review found no blocker-level contradictions on the accepted boundary
+  - post-close verifier review found no blocker-level evidence gaps
+  - next bounded packet freeze became allowed
+- Basis / evidence:
+  - native `critic` subagent `Nash` -> `PASS`
+  - native `verifier` subagent `Zeno` -> `PASS`
+  - fresh direct trailing-reference probe remained stable:
+    - `24h -> insufficient_history`
+    - `7d -> inconsistent_history`
+- Decisions frozen:
+  - the strict trailing-loss packet stands on the accepted boundary and should not be silently reopened
+  - runtime artifact refresh remains the next deeper seam rather than a reason to relitigate trailing-reference semantics
+- Open uncertainties:
+  - the next packet still needs a narrow operational/code boundary
+- Next required action:
+  - freeze the next bounded packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 18:06 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW accepted locally
 - Author: `Architects mainline lead`
