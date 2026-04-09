@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
+- Active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
+- Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Use the accepted packet evidence to freeze the next truth-unification slice around portfolio fallback or mixed settlement authority.
-2. Keep this packet bounded away from `src/state/db.py`, `src/state/portfolio.py`, and `src/observability/status_summary.py`; any consumer mismatch now belongs to the next packet.
-3. Preserve the deeper truth-drift findings from this packet instead of collapsing them into “daily loss fixed = system fixed.”
+1. Implement the bounded comparator/shadow fix in `src/state/db.py` and lock it with truth-surface tests.
+2. Keep `src/state/portfolio.py`, settlement dedupe, and status-summary work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between removing a false fallback trigger and claiming full portfolio-truth convergence.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY.md`
+5. `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
