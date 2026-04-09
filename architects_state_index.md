@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE freeze`
+- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE acceptance`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted locally / post-close pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded legacy stage-event dedupe in `src/state/db.py` and lock it with targeted settlement-query tests.
+1. Run the required post-close critic + verifier on accepted `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`.
 2. Keep `src/state/decision_chain.py` fallback-reader cleanup and RiskGuard output parity work out of this packet unless a new packet is frozen.
 3. Preserve the distinction between deduping stage-event rows and claiming full settlement-authority convergence.
 
