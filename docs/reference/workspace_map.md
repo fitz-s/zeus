@@ -11,9 +11,6 @@
 |------|---------|
 | `ZEUS_AUTHORITY.md` | Root authority guide summarizing system foundations and law |
 | `AGENTS.md` | Repo-native execution brief and current operating contract |
-| `CURRENT_STATE.md` | Single live current-state/control-entry pointer |
-| current work packet | Live control surface named from `CURRENT_STATE.md` |
-| `WORKSPACE_MAP.md` | This file — orientation-only map |
 | `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
@@ -37,6 +34,18 @@
 | `types/` | Temperature, TemperatureDelta (unit safety) |
 
 ## `docs/` — Documentation
+
+## `docs/control/` — Live Control
+
+| Path | Purpose |
+|------|---------|
+| `docs/control/current_state.md` | Single live current-state/control-entry pointer |
+
+## `docs/work_packets/` — Live Packet Surface
+
+| Path | Purpose |
+|------|---------|
+| current packet file | Live control surface named from `docs/control/current_state.md` |
 
 | Path | Purpose | Authority |
 |------|---------|-----------|
@@ -99,7 +108,7 @@
 
 - Historical handoffs, sessions, findings, traces, research, and reports now live under `docs/archives/`.
 - Retired root/architects control ledgers live under `docs/archives/control/`.
-- Completed work packets live under `docs/archives/work_packets/`; only the current live packet remains in `work_packets/`.
+- Completed work packets live under `docs/archives/work_packets/`; only the current live packet remains in `docs/work_packets/`.
 - Retired root artifacts and historical top-level designs/reports live under `docs/archives/artifacts/`, `docs/archives/designs/`, `docs/archives/migration/`, and `docs/archives/reports/`.
 - Do not treat archived files as live control surfaces unless a new packet explicitly promotes them.
 

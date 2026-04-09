@@ -4,6 +4,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Folders
 - `architecture/`: system architecture, invariants, integration designs.
+- `control/`: live control-entry documents.
 - `archives/`: historical handoffs, audits, findings, traces, research, and other non-live records.
 - `specs/`: formal specs and contract definitions.
 - `plans/`: execution plans and release checklists.
@@ -12,6 +13,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - `reviews/`: post-hoc and strategic review artifacts.
 - `reports/`: generated/curated operational reports.
 - `reference/`: workspace maps and domain references.
+- `work_packets/`: current live packet files.
 
 ## Conventions
 - Prefer stable names (no spaces, no all-caps file names).
@@ -23,8 +25,10 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - `../ZEUS_AUTHORITY.md` — root authority guide summarizing foundations, invariants, negative constraints, and boundary rules
 - `docs/architecture/zeus_durable_architecture_spec.md` — present-tense principal architecture authority
 - `docs/zeus_FINAL_spec.md` — terminal target-state / endgame authority
-- `CURRENT_STATE.md` — single live control-entry pointer
+- `docs/control/current_state.md` — single live control-entry pointer
 - `docs/known_gaps.md` — active operational gap / antibody register
+- `docs/reference/repo_overview.md` — repo overview and technical/runtime orientation
+- `docs/reference/workspace_map.md` — orientation-only workspace map
 - `docs/archives/**` — historical only; not principal authority
 
 ## Naming Rules (Mandatory)

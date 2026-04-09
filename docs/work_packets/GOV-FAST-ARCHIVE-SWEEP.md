@@ -21,16 +21,26 @@ required_reads:
   - ZEUS_AUTHORITY.md
   - architecture/self_check/authority_index.md
   - docs/README.md
-  - CURRENT_STATE.md
-  - WORKSPACE_MAP.md
-  - work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md
-  - work_packets/GOV-ROOT-AUTHORITY-GUIDE.md
+  - docs/control/current_state.md
+  - docs/reference/workspace_map.md
+  - docs/archives/work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md
+  - docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md
 files_may_change:
-  - work_packets/GOV-FAST-ARCHIVE-SWEEP.md
-  - WORKSPACE_MAP.md
+  - docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md
+  - AGENTS.md
+  - architecture/self_check/authority_index.md
+  - docs/reference/workspace_map.md
+  - .github/workflows/architecture_advisory_gates.yml
   - docs/README.md
-  - CURRENT_STATE.md
-  - work_packets/*.md
+  - docs/control/current_state.md
+  - docs/reference/repo_overview.md
+  - docs/control/**
+  - docs/reference/**
+  - docs/work_packets/**
+  - scripts/check_work_packets.py
+  - scripts/check_advisory_gates.py
+  - tests/test_architecture_contracts.py
+  - docs/work_packets/*.md
   - docs/archives/**
   - docs/ground_truth_pnl.md
   - docs/isolation_design.md
@@ -51,9 +61,7 @@ files_may_not_change:
   - docs/architecture/zeus_durable_architecture_spec.md
   - docs/zeus_FINAL_spec.md
   - src/**
-  - scripts/**
   - migrations/**
-  - .github/workflows/**
 schema_changes: false
 ci_gates_required:
   - python3 scripts/check_work_packets.py
@@ -65,7 +73,9 @@ rollback: Revert the archive sweep commit as one batch to restore the historical
 acceptance:
   - the remaining clearly historical top-level docs are moved under `docs/archives/**`
   - the retired root artifacts moved by this packet are no longer scattered in the repo root
-  - completed work packets are archived out of the active `work_packets/` surface, leaving only the current live packet in place
+  - completed work packets are archived out of the active `work_packets/` surface, leaving only the current live packet in `docs/work_packets/`
+  - root markdown is reduced to the minimal special set needed for authority (`AGENTS.md`, `ZEUS_AUTHORITY.md`)
+  - live control/orientation markdown is classified under `docs/control/`, `docs/reference/`, and `docs/work_packets/` instead of remaining in the repo root
   - only the minimal special root files remain visible as live authority/runtime entry points
   - any remaining references to moved files point to archive paths or are compatibility-only
 evidence_required:
@@ -84,7 +94,8 @@ evidence_required:
 
 - Before the sweep, the live root surface still contained historical artifacts (`fix_linter.py`, `risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`, `zeus_data_inventory.xlsx`) alongside the true live authority/runtime entry files.
 - Before the sweep, top-level `docs/` still contained historical designs/reports (`ground_truth_pnl.md`, `isolation_design.md`, `isolation_migration_map.md`, `venus_sensing_design.md`) outside `docs/archives/**`.
-- After the sweep, root files are reduced to the minimal special set: `AGENTS.md`, `CURRENT_STATE.md`, `README.md`, `WORKSPACE_MAP.md`, `ZEUS_AUTHORITY.md`, `pytest.ini`, `requirements.txt`, and git metadata files.
+- After the sweep, root markdown is reduced to the minimal special set: `AGENTS.md` and `ZEUS_AUTHORITY.md`; live control/orientation markdown moved under `docs/control/`, `docs/reference/`, and `docs/work_packets/`.
 - After the sweep, top-level `docs/` is reduced to `docs/README.md`, `docs/known_gaps.md`, and `docs/zeus_FINAL_spec.md`.
-- Completed work packets were archived under `docs/archives/work_packets/`, leaving only `work_packets/GOV-FAST-ARCHIVE-SWEEP.md` live.
+- Completed work packets were archived under `docs/archives/work_packets/`, leaving only `docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md` live.
 - Targeted reference scan after the moves found no remaining live-surface references to the moved top-level docs or root artifacts outside `docs/archives/**`.
+- Packet/tooling compatibility was preserved by repointing `scripts/check_work_packets.py`, `scripts/check_advisory_gates.py`, `.github/workflows/architecture_advisory_gates.yml`, and `tests/test_architecture_contracts.py` to `docs/work_packets/**`.

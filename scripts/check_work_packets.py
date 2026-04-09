@@ -24,10 +24,13 @@ REQUIRED_KEYS = [
 ]
 
 def find_packets() -> list[Path]:
-    work_packets = ROOT / "work_packets"
-    if not work_packets.exists():
-        return []
-    return sorted(work_packets.rglob("*.md"))
+    live_packets = ROOT / "docs" / "work_packets"
+    if live_packets.exists():
+        return sorted(live_packets.rglob("*.md"))
+    legacy_packets = ROOT / "work_packets"
+    if legacy_packets.exists():
+        return sorted(legacy_packets.rglob("*.md"))
+    return []
 
 def check_packet(path: Path) -> list[str]:
     text = path.read_text()
@@ -44,7 +47,7 @@ def check_packet(path: Path) -> list[str]:
 def main() -> int:
     packets = find_packets()
     if not packets:
-        print("no work_packets directory present; packet grammar check skipped")
+        print("no work packet directory present; packet grammar check skipped")
         return 0
     errors = []
     for packet in packets:

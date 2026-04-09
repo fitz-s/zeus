@@ -28,15 +28,15 @@ This is the first durable routing file for humans and coding agents.
 11. `AGENTS.md`
 
 ### Active control / execution surfaces
-12. `CURRENT_STATE.md`
-13. current work packet named in `CURRENT_STATE.md`
+12. `docs/control/current_state.md`
+13. current work packet named in `docs/control/current_state.md`
 14. `docs/known_gaps.md`
 
 ### Historical rationale / archives (non-authoritative)
 15. `docs/architecture/zeus_blueprint_v2.md`
 16. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
 17. `docs/archives/**`
-18. `WORKSPACE_MAP.md`
+18. `docs/reference/workspace_map.md`
 
 ## 2. Precedence
 
@@ -65,7 +65,7 @@ If two sources disagree:
 
 ## 4. Never do this
 
-- Never treat `docs/archives/**` or `WORKSPACE_MAP.md` as principal authority.
+- Never treat `docs/archives/**` or `docs/reference/workspace_map.md` as principal authority.
 - Never let `ZEUS_AUTHORITY.md` compete with the exact precedence or machine-checkable authority files it summarizes.
 - Never treat `status_summary.json` or `positions.json` as canonical truth.
 - Never let a coding agent infer authority order from retrieval similarity.

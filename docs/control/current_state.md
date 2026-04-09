@@ -6,12 +6,12 @@
 ## Read order for active work
 1. `AGENTS.md`
 2. `architecture/self_check/authority_index.md`
-3. `CURRENT_STATE.md`
-4. `work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
+3. `docs/control/current_state.md`
+4. `docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
 5. `docs/known_gaps.md` when current runtime gap context matters
 
 ## Current active packet
-- `work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
+- `docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
 - State: `IMPLEMENTING`
 - Branch: `architects-fast-archive-sweep`
 
@@ -28,4 +28,4 @@ The following are archived and are no longer active control authority:
 
 ## Historical work packets
 
-Completed work packets are archived under `docs/archives/work_packets/`. Only the current live packet remains in `work_packets/`.
+Completed work packets are archived under `docs/archives/work_packets/`. Only the current live packet remains in `docs/work_packets/`.
