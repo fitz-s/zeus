@@ -169,7 +169,7 @@ def build_climatology(conn: sqlite3.Connection) -> dict[str, list[float]]:
         seen.add(key)
 
         city = r["city"]
-        season = _season_from_date(r["target_date"])
+        season = _season_from_date(r["target_date"], city_name=city)
         bucket = f"{city}_{season}"
         clim[bucket].append(float(r["high_temp"]))
 
@@ -285,7 +285,7 @@ def run_baseline() -> dict:
     for s in settlements:
         city = s["city"]
         date = s["target_date"]
-        season = _season_from_date(date)
+        season = _season_from_date(date, city_name=city)
         bucket = f"{city}_{season}"
 
         if bucket not in clim or len(clim[bucket]) < 30:

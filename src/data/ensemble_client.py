@@ -23,16 +23,17 @@ API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
 CACHE_TTL_SECONDS = 15 * 60
-_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str], dict] = {}
+_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str, int], dict] = {}
 
 
-def _cache_key(city: City, model: str) -> tuple[str, float, float, str, str]:
+def _cache_key(city: City, model: str, past_days: int = 0) -> tuple[str, float, float, str, str, int]:
     return (
         city.name,
         float(city.lat),
         float(city.lon),
         city.settlement_unit,
         model,
+        past_days,
     )
 
 
@@ -85,7 +86,7 @@ def fetch_ensemble(
 
     fetch_time = datetime.now(timezone.utc)
     last_error = None
-    cache_key = _cache_key(city, model)
+    cache_key = _cache_key(city, model, past_days)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
         age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()

@@ -114,7 +114,7 @@ def get_calibrator(
 
     Returns: (calibrator_or_None, maturity_level)
     """
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat)
     cluster = city.cluster
 
     # Try primary bucket
@@ -215,6 +215,6 @@ def _fit_from_pairs(
 
 def maybe_refit_bucket(conn, city: City, target_date: str) -> bool:
     """Refit the city's cluster-season bucket if enough fresh pairs now exist."""
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat)
     cal = _fit_from_pairs(conn, city.cluster, season)
     return cal is not None
