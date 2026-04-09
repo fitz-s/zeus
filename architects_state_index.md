@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION freeze`
+- Last updated by: `Codex DIAGNOSE-CENTER-BUY-FAILURE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
-- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
+- Active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
+- Active packet state: `implementation slice verified / verifier pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Cherry-pick accepted commit `f179cd3` onto `Architects` cleanly when ready.
-2. Keep the packet bounded to read-side past-target ghost exclusion only until transport is complete.
+1. Finish the pending verifier pass on the center_buy diagnosis packet.
+2. Keep the packet bounded to read-only diagnosis surfaces only.
 3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION.md`
+5. `work_packets/DIAGNOSE-CENTER-BUY-FAILURE.md`

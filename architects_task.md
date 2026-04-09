@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION freeze`
+- Last updated by: `Codex DIAGNOSE-CENTER-BUY-FAILURE freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Packet: `DIAGNOSE-CENTER-BUY-FAILURE`
 - State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Remove residual stale-open ghost rows from runtime read views so past-target canonical leftovers stop poisoning open exposure and loader truth after the trace-convergence repair.
+Produce a reproducible, strategy-isolated diagnosis of why `center_buy` is currently losing in paper mode, using one truthful aggregation path instead of mixed ad hoc queries.
 
 ## Allowed files
 
-- `work_packets/REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION.md`
+- `work_packets/DIAGNOSE-CENTER-BUY-FAILURE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/state/db.py`
-- `tests/test_pnl_flow_and_audit.py`
+- `scripts/diagnose_center_buy_failure.py`
+- `tests/test_center_buy_diagnosis.py`
 
 ## Forbidden files
 
@@ -46,47 +46,46 @@ Remove residual stale-open ghost rows from runtime read views so past-target can
 - `src/riskguard/**`
 - `src/supervisor_api/**`
 - `migrations/**`
- - `src/state/ledger.py`
- - `src/state/projection.py`
- - `src/state/portfolio.py`
- - `src/execution/**`
- - `src/engine/**`
- - `tests/test_runtime_guards.py`
- - `tests/test_architecture_contracts.py`
- - `tests/test_healthcheck.py`
- - `.github/workflows/**`
- - `.claude/CLAUDE.md`
- - `zeus_final_tribunal_overlay/**`
+- `src/state/**`
+- `src/execution/**`
+- `src/engine/**`
+- `tests/test_runtime_guards.py`
+- `tests/test_architecture_contracts.py`
+- `tests/test_pnl_flow_and_audit.py`
+- `tests/test_healthcheck.py`
+- `.github/workflows/**`
+- `.claude/CLAUDE.md`
+- `zeus_final_tribunal_overlay/**`
 
 ## Non-goals
 
+- no runtime logic changes
 - no ETL/recalibration work
-- no broad historical migration/backfill cleanup
+- no broad reporting/dashboard work
 - no risk/status/operator summary rewrites
-- no exit-writer or settlement-writer changes
 - no schema redesign
 - no team runtime launch
 
 ## Current blocker state
 
-- after the accepted trace packet, live read views still show 12 open rows but only 3 are legitimate future-target positions
-- the remaining 9 rows are residual ghosts with past target dates or synthetic stale rows that still poison open exposure and keep loader status degraded
-- packet must stay on read-side ghost exclusion only
+- lower-layer trace seams are stable enough that strategy diagnosis is now meaningful
+- fresh live truth still reports `center_buy` settled PnL at `8 trades / -9.0`, while other surfaces can disagree unless deduped and filtered carefully
+- packet must stay diagnosis-only and avoid mutating runtime behavior
 
 ## Immediate checklist
 
-- [x] `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION` frozen
-- [x] residual ghost contradiction reproduced in packet-bounded tests or notes
-- [x] adversarial ghost-exclusion test added
+- [x] `DIAGNOSE-CENTER-BUY-FAILURE` frozen
+- [x] diagnosis script created
+- [x] adversarial diagnosis test added
 - [x] targeted tests pass
 - [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] packet accepted locally
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [ ] pre-close verifier review passed
+- [ ] packet accepted locally
+- [ ] post-close third-party critic review passed
+- [ ] post-close third-party verifier review passed
 
 ## Next required action
 
-1. Cherry-pick accepted commit `f179cd3` onto `Architects` cleanly when ready.
-2. Update the live branch control surfaces only after transport is complete.
-3. Do not widen into exit writers, ETL, risk/status/operator summary work, or broad historical cleanup without a new packet.
+1. Complete the pending verifier pass on the diagnosis packet.
+2. Accept locally only after the verifier pass succeeds.
+3. Do not widen into strategy behavior changes or runtime logic without a new packet.

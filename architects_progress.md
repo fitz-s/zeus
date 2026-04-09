@@ -31,15 +31,34 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION` (accepted locally in worktree)
-- Current active packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
-- Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
+- Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
+- Current active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
+- Current packet status: `implementation slice verified / verifier pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit `f179cd3` still needs transport back to the live `Architects` branch
+  - pre-close verifier pass is still pending on the diagnosis packet
   - the historical leftover re-audit note remains external evidence, not repo authority
 
 ## Durable timeline
+
+## [2026-04-08 04:28 America/Chicago] DIAGNOSE-CENTER-BUY-FAILURE frozen
+- Author: `Architects clean worktree lane`
+- Packet: `DIAGNOSE-CENTER-BUY-FAILURE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - lower-layer ETL and trace packets are accepted locally, making strategy diagnosis meaningful enough to freeze
+  - live paper truth currently reports `center_buy` settled performance at `8 trades / -9.0`
+  - direct ad hoc queries already showed surface disagreement risk: `outcome_fact` vs deduped latest `trade_decisions` status context
+- Decisions frozen:
+  - keep this packet diagnosis-only
+  - do not mutate strategy behavior or runtime logic inside this packet
+- Open uncertainties:
+  - the exact failure structure still needs a bounded script and adversarial test before review
+- Next required action:
+  - implement `scripts/diagnose_center_buy_failure.py` and adversarial tests that isolate center_buy truth correctly
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 04:14 America/Chicago] REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION accepted locally and passed post-close gate in worktree
 - Author: `Architects clean worktree lane`
