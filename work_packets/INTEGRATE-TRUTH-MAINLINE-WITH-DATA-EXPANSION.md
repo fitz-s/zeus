@@ -104,4 +104,16 @@ evidence_required:
 
 ## Evidence log
 
-- Pending implementation.
+- work-packet grammar output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted ETL/runtime pytest output:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_observation_instants_etl.py tests/test_run_replay_cli.py tests/test_etl_recalibrate_chain.py` -> `17 passed`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'chain_reconciliation_updates_live_position_from_chain or run_cycle_monitoring_uses_attached_shared_connection or exposure_gate_skips_new_entries_without_forcing_reduction or trade_and_no_trade_artifacts_carry_replay_reference_fields or execute_discovery_phase_logs_rejected_live_entry_telemetry or load_portfolio_prefers_position_current_when_projection_exists or load_portfolio_falls_back_to_json_when_projection_empty or load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_projection or execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present'` -> `9 passed, 72 deselected`
+- compile proof: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/main.py scripts/etl_tigge_ens.py src/data/observation_client.py scripts/backfill_hourly_openmeteo.py scripts/backfill_wu_daily_all.py scripts/etl_tigge_direct_calibration.py scripts/migrate_rainstorm_full.py src/data/wu_daily_collector.py tests/test_etl_recalibrate_chain.py tests/test_runtime_guards.py` -> success
+- integration note:
+  - preserved additive expansion files: `config/cities.json`, `src/main.py`, `scripts/etl_tigge_ens.py`, `src/data/observation_client.py`, `scripts/backfill_hourly_openmeteo.py`, `scripts/backfill_wu_daily_all.py`, `scripts/etl_tigge_direct_calibration.py`, `scripts/migrate_rainstorm_full.py`, `src/data/wu_daily_collector.py`
+  - preserved truth-owned files by leaving accepted versions untouched: `src/state/db.py`, `src/engine/lifecycle_events.py`, `src/execution/exit_lifecycle.py`, `src/execution/harvester.py`, `tests/test_architecture_contracts.py`, `tests/test_pnl_flow_and_audit.py`
+  - merged `tests/test_runtime_guards.py` selectively so runtime-adaptation hunks landed without dropping the economic-close truth test
+  - remaining expansion follow-up gaps are now explicit, not silent: TIGGE maps still cover 21/38 configured cities and the expanded daily fan-out still needs broader runtime proof
+- pre-close critic review: native `critic` subagent `Ramanujan` -> `PASS` on `8f0a5a1` after confirming `httpx` dependency alignment and explicit TIGGE coverage-gap reporting
+- pre-close verifier review: native `verifier` subagent `Socrates` -> `PASS` on `8f0a5a1` after confirming test/compile evidence and non-overclaiming posture
