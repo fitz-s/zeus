@@ -2454,38 +2454,81 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     assert epistemic["forecast_context"]["location"]["bias_reference"]["bias"] == 1.5
 
 
-@pytest.mark.skip(reason="BI-05")
-def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
-    zeus_db = tmp_path / "zeus.db"
-    risk_db = tmp_path / "risk_state.db"
-    conn = get_connection(zeus_db)
-    init_schema(conn)
+def test_inv_status_surfaces_trailing_loss_audit_fields(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    as_of = datetime.now(timezone.utc).isoformat()
+    _insert_position_current_row(
+        conn,
+        position_id="t1",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        shares=50.0,
+        cost_basis_usd=5.0,
+        entry_price=0.1,
+        mark_price=0.13,
+    )
+    _insert_strategy_health_row(
+        conn,
+        strategy_key="center_buy",
+        as_of=as_of,
+        open_exposure_usd=5.0,
+        realized_pnl_30d=1.25,
+        unrealized_pnl=1.5,
+    )
+    conn.commit()
     conn.close()
 
-    portfolio = PortfolioState(
-        bankroll=150.0,
-        daily_baseline_total=150.0,
-        recent_exits=[_recent_exit(-13.0)],
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_risk_details",
+        lambda: {
+            "daily_loss": None,
+            "daily_loss_level": "GREEN",
+            "daily_loss_status": "insufficient_history",
+            "daily_loss_source": "no_trustworthy_reference_row",
+            "daily_loss_reference": None,
+            "weekly_loss": 5.0,
+            "weekly_loss_level": "RED",
+            "weekly_loss_status": "ok",
+            "weekly_loss_source": "risk_state_history",
+            "weekly_loss_reference": {
+                "row_id": 41,
+                "checked_at": "2026-04-02T00:00:00+00:00",
+                "initial_bankroll": 150.0,
+                "total_pnl": -5.0,
+                "effective_bankroll": 145.0,
+            },
+            "initial_bankroll": 150.0,
+            "realized_pnl": 1.25,
+            "unrealized_pnl": 1.5,
+            "total_pnl": 2.75,
+            "effective_bankroll": 152.75,
+        },
     )
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_shared", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
 
-    def _fake_get_connection(path=None):
-        if path == riskguard_module.RISK_DB_PATH:
-            return get_connection(risk_db)
-        return get_connection(zeus_db)
+    status_summary_module.write_status({"mode": "test"})
+    status = json.loads(status_path.read_text())
+    details = status["risk"]["details"]
 
-    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: portfolio)
-
-    level = riskguard_module.tick()
-    row = get_connection(risk_db).execute(
-        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    details = json.loads(row["details_json"])
-
-    assert level == RiskLevel.RED
-    assert row["level"] == RiskLevel.RED.value
-    assert details["daily_loss"] == pytest.approx(13.0)
-    assert details["total_pnl"] == pytest.approx(-13.0)
+    assert details["daily_loss"] is None
+    assert details["daily_loss_status"] == "insufficient_history"
+    assert details["daily_loss_source"] == "no_trustworthy_reference_row"
+    assert details["daily_loss_reference"] is None
+    assert details["weekly_loss"] == pytest.approx(5.0)
+    assert details["weekly_loss_status"] == "ok"
+    assert details["weekly_loss_reference"]["row_id"] == 41
 
 
 def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
