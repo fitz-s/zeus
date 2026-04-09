@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.state.db import get_connection, query_portfolio_loader_view
+from src.state.db import get_connection, init_schema, query_portfolio_loader_view
 
 
 def _now_utc() -> datetime:
@@ -121,3 +121,145 @@ class TestSettlementFreshness:
                     f"Settlement is {age_hours:.1f}h stale (threshold: 48h). "
                     f"Latest: {max_settled}"
                 )
+
+
+def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
+            'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'ORDER_FILLED', 'trade-1', 'entered', '', 'snap-1',
+            'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
+            'test', '{}', '2099-04-01T11:45:45.242861+00:00', 'paper'
+        )
+        """
+    )
+    conn.commit()
+
+    result = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert result["status"] == "ok"
+    assert [row["trade_id"] for row in result["positions"]] == ["trade-1"]
+
+
+def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'US-South', '2099-04-07', '76-77°F',
+            'buy_no', 'F', 1.18, 1.28, 1.18, 0.92, 0.55,
+            'snap-1', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-07T10:58:44.847407+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'POSITION_EXIT_RECORDED', 'shadow-trade', 'economically_closed', '', 'snap-1',
+            'Dallas', '2099-04-07', 'm1', '76-77°F', 'buy_no', 'opening_inertia', 'opening_inertia',
+            'test', '{\"pnl\":0.05}', '2099-04-07T11:14:30.687958+00:00', 'paper'
+        )
+        """
+    )
+    conn.commit()
+
+    result = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert result["status"] == "stale_legacy_fallback"
+    assert result["stale_trade_ids"] == ["shadow-trade"]
+
+
+def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shadow_event_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
+            'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'POSITION_ENTRY_RECORDED', 'pending-trade', 'entered', '', 'snap-1',
+            'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
+            'test', '{}', '2099-04-01T11:45:46.000000+00:00', 'paper'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'ORDER_FILLED', 'pending-trade', 'entered', '', 'snap-1',
+            'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
+            'test', '{}', '2099-04-01T11:45:47.000000+00:00', 'paper'
+        )
+        """
+    )
+    conn.commit()
+
+    result = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert result["status"] == "stale_legacy_fallback"
+    assert result["stale_trade_ids"] == ["pending-trade"]

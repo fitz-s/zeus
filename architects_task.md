@@ -5,8 +5,8 @@ Purpose:
 - exactly one live packet at a time
 
 Metadata:
-- Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-MONITOR-SHARED-CONNECTION-REPAIR freeze`
+- Last updated: `2026-04-09 America/Chicago`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,27 +17,24 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- Packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- State: `POST_CLOSE_PASSED / FINAL_AUDIT_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Restore one truthful close path so execution facts, outcome facts, and settlement legality stay durable and semantically aligned before broader projection cleanup.
+Restore paper runtime on a clean code checkout while keeping it attached to the live paper state directory.
 
 ## Allowed files
 
-- `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+- `work_packets/REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/state/db.py`
-- `src/execution/harvester.py`
-- `src/state/lifecycle_manager.py`
-- `tests/test_db.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_runtime_guards.py`
+- `/Users/leofitz/Library/LaunchAgents/com.zeus.paper-trading.plist`
+- `/Users/leofitz/Library/LaunchAgents/com.zeus.riskguard.plist`
+- `/Users/leofitz/.openclaw/workspace-venus/zeus-paper-runtime-clean/**`
 
 ## Forbidden files
 
@@ -45,14 +42,21 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
+- `src/state/**`
+- `src/observability/**`
+- `src/riskguard/**`
 - `src/control/**`
-- `src/execution/**`
 - `src/supervisor_api/**`
-- `src/state/portfolio.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
 - `migrations/**`
+- `src/execution/**`
+- `src/engine/**`
+- `scripts/**`
+- `tests/**`
 - `tests/test_architecture_contracts.py`
+- `tests/test_truth_surface_health.py`
+ - `tests/test_pnl_flow_and_audit.py`
+ - `tests/test_runtime_guards.py`
+ - `tests/test_riskguard.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -60,34 +64,27 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 
 ## Non-goals
 
-- no migration-script execution or daemon cutover claim
-- no projection-query compatibility cleanup
-- no control-plane durability work
-- no ETL/recalibration contamination work
+- no core truth math changes in this packet
+- no runtime service redesign beyond paper writer ownership/routing
+- no reporting/dashboard/schema work
+- no schema redesign
+- no data-expansion follow-up work
 - no team runtime launch
 
 ## Current blocker state
 
-- realized-truth contract has been repaired in code across `riskguard` and `status_summary`
-- targeted convergence tests now pass, and fresh paper-mode SQL/JSON evidence converges at `-13.03` across canonical facts, `risk_state`, and `status_summary`
-- pre-close critic + verifier passed on the repaired realized-truth seam
-- post-close third-party critic + verifier still need to run before packet closeout
-- out-of-scope local dirt must remain excluded from packet commits
+- packet boundary is post-close passed
+- paper launchd services now run from the clean worktree and coherent paper risk rows persisted across multiple fresh ticks
+- branch is ready for one final audit before merge consideration
 
 ## Immediate checklist
 
-- [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
-- [ ] architecture/code-review/test map captured for the packet
-- [ ] closure contract repaired in code
-- [ ] targeted tests pass
-- [ ] pre-close critic review passed
-- [ ] pre-close verifier review passed
-- [ ] packet accepted locally
-- [ ] post-close third-party critic review passed
-- [ ] post-close third-party verifier review passed
+- [x] `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` frozen
+- [x] clean runtime worktree prepared
+- [x] paper launchd jobs rerouted
+- [x] paper artifact writes remain coherent after re-enable
 
 ## Next required action
 
-1. Map the packet into bounded durable-write / settlement-legality slices.
-2. Repair the closure contract only inside `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
-3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
+1. Push this branch for final audit.
+2. Do not widen this packet without a new contradiction.

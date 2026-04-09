@@ -17,6 +17,7 @@ from src.riskguard.metrics import (
 )
 from src.state.db import (
     get_connection,
+    init_schema,
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
@@ -161,6 +162,37 @@ def _insert_execution_fact(
     )
 
 
+def _insert_risk_state_row(
+    conn: sqlite3.Connection,
+    *,
+    checked_at: str,
+    level: str = "GREEN",
+    initial_bankroll: float = 150.0,
+    total_pnl: float = 0.0,
+    effective_bankroll: float | None = None,
+) -> int:
+    if effective_bankroll is None:
+        effective_bankroll = round(initial_bankroll + total_pnl, 2)
+    cur = conn.execute(
+        """
+        INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
+        VALUES (?, NULL, NULL, NULL, ?, ?)
+        """,
+        (
+            level,
+            json.dumps(
+                {
+                    "initial_bankroll": round(initial_bankroll, 2),
+                    "total_pnl": round(total_pnl, 2),
+                    "effective_bankroll": round(effective_bankroll, 2),
+                }
+            ),
+            checked_at,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
 def _insert_control_override(
     conn: sqlite3.Connection,
     *,
@@ -198,6 +230,56 @@ def _insert_control_override(
 def _neutralize_hard_safety(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
     monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+
+
+def _mock_trailing_loss_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    zeus_db,
+    risk_db,
+    realized_pnl: float,
+    unrealized_pnl: float = 0.0,
+    portfolio: PortfolioState | None = None,
+) -> None:
+    def _fake_get_connection(path=None):
+        if path == riskguard_module.RISK_DB_PATH:
+            return get_connection(risk_db)
+        return get_connection(zeus_db)
+
+    monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(
+        riskguard_module,
+        "load_portfolio",
+        lambda: portfolio or PortfolioState(bankroll=150.0, daily_baseline_total=150.0, weekly_baseline_total=150.0),
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "query_authoritative_settlement_rows",
+        lambda conn, limit=50, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "refresh_strategy_health",
+        lambda conn, as_of=None: {"status": "refreshed", "rows_written": 1},
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "query_strategy_health_snapshot",
+        lambda conn, now=None: {
+            "status": "fresh",
+            "by_strategy": {
+                "center_buy": {
+                    "realized_pnl_30d": realized_pnl,
+                    "unrealized_pnl": unrealized_pnl,
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "load_tracker",
+        lambda: strategy_tracker_module.StrategyTracker(),
+    )
 
 
 class TestRiskLevel:
@@ -561,6 +643,292 @@ class TestRiskGuardSettlementSource:
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
         assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
         assert details["recommended_strategy_gates"] == []
+
+
+class TestRiskGuardTrailingLossSemantics:
+    def test_tick_uses_trailing_24h_loss_not_all_time_loss(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        reference_checked_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        reference_id = _insert_risk_state_row(
+            risk_conn,
+            checked_at=reference_checked_at,
+            total_pnl=-13.26,
+        )
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(days=7, minutes=30)).isoformat(),
+            total_pnl=-13.26,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-13.26,
+            unrealized_pnl=0.0,
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "ok"
+        assert details["daily_loss_source"] == "risk_state_history"
+        assert details["daily_loss_reference"] == {
+            "row_id": reference_id,
+            "checked_at": reference_checked_at,
+            "initial_bankroll": 150.0,
+            "total_pnl": -13.26,
+            "effective_bankroll": 136.74,
+        }
+
+    def test_tick_uses_trailing_7d_loss_when_reference_exists(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            total_pnl=-10.0,
+        )
+        weekly_reference_checked_at = (datetime.now(timezone.utc) - timedelta(days=7, minutes=30)).isoformat()
+        weekly_reference_id = _insert_risk_state_row(
+            risk_conn,
+            checked_at=weekly_reference_checked_at,
+            total_pnl=-5.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-10.0,
+            unrealized_pnl=0.0,
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["weekly_loss"] == pytest.approx(5.0)
+        assert details["weekly_loss_status"] == "ok"
+        assert details["weekly_loss_source"] == "risk_state_history"
+        assert details["weekly_loss_reference"] == {
+            "row_id": weekly_reference_id,
+            "checked_at": weekly_reference_checked_at,
+            "initial_bankroll": 150.0,
+            "total_pnl": -5.0,
+            "effective_bankroll": 145.0,
+        }
+
+    def test_tick_marks_insufficient_history_without_false_trigger(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            total_pnl=-5.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-5.0,
+            unrealized_pnl=0.0,
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "insufficient_history"
+        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_source"] == "no_trustworthy_reference_row"
+        assert details["daily_loss_reference"] is None
+
+    def test_tick_marks_inconsistent_history_without_false_trigger(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            total_pnl=-5.0,
+            effective_bankroll=149.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-5.0,
+            unrealized_pnl=0.0,
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "inconsistent_history"
+        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_reference"] is None
+
+    def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-5.0,
+            unrealized_pnl=0.0,
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "no_reference_row"
+        assert details["daily_loss_source"] == "no_trustworthy_reference_row"
+        assert details["daily_loss_reference"] is None
+
+    def test_tick_marks_inconsistent_when_only_older_out_of_window_row_is_trustworthy(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            total_pnl=-5.0,
+        )
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            total_pnl=-6.0,
+            effective_bankroll=149.0,
+        )
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=27)).isoformat(),
+            total_pnl=-8.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-10.0,
+            unrealized_pnl=0.0,
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "inconsistent_history"
+        assert details["daily_loss_reference"] is None
+
+    def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        trusted_checked_at = (datetime.now(timezone.utc) - timedelta(hours=24, minutes=30)).isoformat()
+        trusted_id = _insert_risk_state_row(
+            risk_conn,
+            checked_at=trusted_checked_at,
+            total_pnl=-8.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-10.0,
+            unrealized_pnl=0.0,
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["daily_loss"] == pytest.approx(2.0)
+        assert details["daily_loss_status"] == "ok"
+        assert details["daily_loss_reference"]["row_id"] == trusted_id
+        assert details["daily_loss_reference"]["checked_at"] == trusted_checked_at
 
 
 class TestStrategyPolicyResolver:

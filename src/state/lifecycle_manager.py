@@ -60,6 +60,7 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.ACTIVE,
             LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.ECONOMICALLY_CLOSED,
+            LifecyclePhase.SETTLED,
             LifecyclePhase.ADMIN_CLOSED,
             LifecyclePhase.VOIDED,
         }
@@ -234,11 +235,20 @@ def enter_settled_runtime_state(
     exit_state: object = "",
     chain_state: object = "",
 ) -> str:
+    normalized_exit_state = _normalized_state(exit_state)
     current_phase = phase_for_runtime_position(
         state=current_state,
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    if current_phase == LifecyclePhase.PENDING_EXIT:
+        if normalized_exit_state != "backoff_exhausted":
+            raise ValueError(
+                "settlement requires active/day0/economically_closed runtime phase, "
+                "or pending_exit with backoff_exhausted"
+            )
+        fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
+        return LifecyclePhase.SETTLED.value
     if current_phase not in {
         LifecyclePhase.ACTIVE,
         LifecyclePhase.DAY0_WINDOW,

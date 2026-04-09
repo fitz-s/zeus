@@ -10,7 +10,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.config import settings, STATE_DIR
@@ -33,6 +33,16 @@ from src.state.portfolio import PortfolioState, Position, load_portfolio
 from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
+TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
+TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE = timedelta(hours=2)
+TRAILING_LOSS_SOURCE_OK = "risk_state_history"
+TRAILING_LOSS_SOURCE_DEGRADED = "no_trustworthy_reference_row"
+TRAILING_LOSS_STATUSES = {
+    "ok",
+    "insufficient_history",
+    "inconsistent_history",
+    "no_reference_row",
+}
 
 
 def _get_runtime_trade_connection() -> sqlite3.Connection:
@@ -122,6 +132,129 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "fallback_reason": str(loader_view.get("status") or "unknown"),
         "position_count": len(portfolio.positions),
         "capital_source": capital_source,
+    }
+
+
+def _coerce_finite_float(value) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
+
+
+def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
+    try:
+        details = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(details, dict):
+        return None
+    initial_bankroll = _coerce_finite_float(details.get("initial_bankroll"))
+    total_pnl = _coerce_finite_float(details.get("total_pnl"))
+    effective_bankroll = _coerce_finite_float(details.get("effective_bankroll"))
+    if initial_bankroll is None or total_pnl is None or effective_bankroll is None:
+        return None
+    expected_equity = round(initial_bankroll + total_pnl, 2)
+    if abs(expected_equity - effective_bankroll) > TRAILING_LOSS_ROW_TOLERANCE_USD:
+        return None
+    return {
+        "row_id": int(row["id"]),
+        "checked_at": str(row["checked_at"] or ""),
+        "initial_bankroll": round(initial_bankroll, 2),
+        "total_pnl": round(total_pnl, 2),
+        "effective_bankroll": round(effective_bankroll, 2),
+    }
+
+
+def _trailing_loss_reference(
+    risk_conn: sqlite3.Connection,
+    *,
+    now: str,
+    lookback: timedelta,
+) -> dict:
+    cutoff_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) - lookback
+    cutoff = cutoff_dt.isoformat()
+    window_start = (cutoff_dt - TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE).isoformat()
+    total_rows = int(
+        risk_conn.execute("SELECT COUNT(*) FROM risk_state").fetchone()[0] or 0
+    )
+    if total_rows == 0:
+        return {
+            "status": "no_reference_row",
+            "source": TRAILING_LOSS_SOURCE_DEGRADED,
+            "reference": None,
+        }
+
+    candidate_rows = risk_conn.execute(
+        """
+        SELECT id, checked_at, details_json
+        FROM risk_state
+        WHERE checked_at <= ?
+          AND checked_at >= ?
+        ORDER BY checked_at DESC, id DESC
+        """,
+        (cutoff, window_start),
+    ).fetchall()
+    if not candidate_rows:
+        return {
+            "status": "insufficient_history",
+            "source": TRAILING_LOSS_SOURCE_DEGRADED,
+            "reference": None,
+        }
+
+    for row in candidate_rows:
+        if reference := _risk_state_reference_from_row(row):
+            return {
+                "status": "ok",
+                "source": TRAILING_LOSS_SOURCE_OK,
+                "reference": reference,
+            }
+
+    return {
+        "status": "inconsistent_history",
+        "source": TRAILING_LOSS_SOURCE_DEGRADED,
+        "reference": None,
+    }
+
+
+def _trailing_loss_snapshot(
+    risk_conn: sqlite3.Connection,
+    *,
+    now: str,
+    lookback: timedelta,
+    current_equity: float,
+    initial_bankroll: float,
+    threshold_pct: float,
+) -> dict:
+    reference_info = _trailing_loss_reference(risk_conn, now=now, lookback=lookback)
+    status = str(reference_info["status"])
+    if status not in TRAILING_LOSS_STATUSES:
+        raise RuntimeError(f"unexpected trailing loss status: {status}")
+    reference = reference_info.get("reference")
+    if status != "ok" or reference is None:
+        return {
+            "loss": 0.0,
+            "level": RiskLevel.YELLOW,
+            "status": status,
+            "source": str(reference_info["source"]),
+            "reference": None,
+        }
+    reference_equity = float(reference["effective_bankroll"])
+    loss = round(max(0.0, reference_equity - current_equity), 2)
+    level = (
+        RiskLevel.RED
+        if loss > float(initial_bankroll) * float(threshold_pct)
+        else RiskLevel.GREEN
+    )
+    return {
+        "loss": loss,
+        "level": level,
+        "status": status,
+        "source": str(reference_info["source"]),
+        "reference": reference,
     }
 
 
@@ -557,20 +690,27 @@ def tick() -> RiskLevel:
 
     total_pnl = total_realized_pnl + total_unrealized_pnl
 
-    current_total_value = portfolio.initial_bankroll + total_pnl
-    daily_loss = max(0.0, portfolio.daily_baseline_total - current_total_value)
-    weekly_loss = max(0.0, portfolio.weekly_baseline_total - current_total_value)
-
-    daily_loss_level = (
-        RiskLevel.RED
-        if daily_loss > portfolio.initial_bankroll * thresholds["max_daily_loss_pct"]
-        else RiskLevel.GREEN
+    current_total_value = round(portfolio.initial_bankroll + total_pnl, 2)
+    daily_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(hours=24),
+        current_equity=current_total_value,
+        initial_bankroll=float(portfolio.initial_bankroll),
+        threshold_pct=float(thresholds["max_daily_loss_pct"]),
     )
-    weekly_loss_level = (
-        RiskLevel.RED
-        if weekly_loss > portfolio.initial_bankroll * thresholds["max_weekly_loss_pct"]
-        else RiskLevel.GREEN
+    weekly_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(days=7),
+        current_equity=current_total_value,
+        initial_bankroll=float(portfolio.initial_bankroll),
+        threshold_pct=float(thresholds["max_weekly_loss_pct"]),
     )
+    daily_loss = daily_loss_snapshot["loss"]
+    weekly_loss = weekly_loss_snapshot["loss"]
+    daily_loss_level = daily_loss_snapshot["level"]
+    weekly_loss_level = weekly_loss_snapshot["level"]
 
     level = overall_level(
         brier_level,
@@ -593,8 +733,14 @@ def tick() -> RiskLevel:
             "strategy_signal_level": strategy_signal_level.value,
             "daily_loss_level": daily_loss_level.value,
             "weekly_loss_level": weekly_loss_level.value,
-            "daily_loss": round(daily_loss, 2),
-            "weekly_loss": round(weekly_loss, 2),
+            "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),
+            "weekly_loss": None if weekly_loss is None else round(float(weekly_loss), 2),
+            "daily_loss_status": daily_loss_snapshot["status"],
+            "weekly_loss_status": weekly_loss_snapshot["status"],
+            "daily_loss_source": daily_loss_snapshot["source"],
+            "weekly_loss_source": weekly_loss_snapshot["source"],
+            "daily_loss_reference": daily_loss_snapshot["reference"],
+            "weekly_loss_reference": weekly_loss_snapshot["reference"],
             "initial_bankroll": round(portfolio.initial_bankroll, 2),
             "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
             "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),

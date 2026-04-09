@@ -762,6 +762,28 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     return Position(**payload)
 
 
+def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
+    exits: list[dict] = []
+    for row in rows:
+        pnl = row.get("pnl")
+        if pnl is None:
+            continue
+        exits.append(
+            {
+                "city": str(row.get("city") or ""),
+                "bin_label": str(row.get("range_label") or row.get("winning_bin") or ""),
+                "target_date": str(row.get("target_date") or ""),
+                "direction": str(row.get("direction") or ""),
+                "token_id": "",
+                "no_token_id": "",
+                "exit_reason": str(row.get("exit_reason") or "SETTLEMENT"),
+                "exited_at": str(row.get("exited_at") or row.get("settled_at") or ""),
+                "pnl": float(pnl),
+            }
+        )
+    return exits
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
     path = path or POSITIONS_PATH
@@ -770,17 +792,56 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     json_data = _load_portfolio_json_payload(path)
 
-    from src.state.db import get_connection, query_portfolio_loader_view
+    from src.state.db import (
+        get_connection,
+        get_trade_connection_with_shared,
+        query_authoritative_settlement_rows,
+        query_portfolio_loader_view,
+    )
 
-    db_path = path.parent / "zeus.db"
+    mode_override = None
+    stem = path.stem
+    if stem.startswith("positions-"):
+        candidate_mode = stem.split("positions-", 1)[1]
+        if candidate_mode in {"paper", "live", "test"}:
+            mode_override = candidate_mode
+    elif path == POSITIONS_PATH:
+        mode_override = current_mode
+
     try:
-        conn = get_connection(db_path)
+        if mode_override is not None:
+            sibling_mode_db = path.parent / f"zeus-{mode_override}.db"
+            if sibling_mode_db.exists():
+                conn = get_connection(sibling_mode_db)
+            else:
+                conn = get_trade_connection_with_shared(mode_override)
+        else:
+            sibling_mode_db = path.parent / f"zeus-{current_mode}.db"
+            if sibling_mode_db.exists():
+                conn = get_connection(sibling_mode_db)
+            else:
+                conn = get_connection(path.parent / "zeus.db")
     except Exception:
         logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
         return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
 
+    settlement_rows: list[dict] = []
     try:
         snapshot = query_portfolio_loader_view(conn)
+        if snapshot.get("status") == "ok":
+            query_env = mode_override or current_mode
+            try:
+                settlement_rows = query_authoritative_settlement_rows(
+                    conn,
+                    limit=None,
+                    env=query_env,
+                )
+            except Exception:
+                logger.warning(
+                    "load_portfolio could not load canonical recent exits; using empty DB-first recent_exits",
+                    exc_info=True,
+                )
+                settlement_rows = []
     finally:
         conn.close()
 
@@ -855,7 +916,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         audit_logging_enabled=True,
         daily_baseline_total=json_data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=json_data.get("weekly_baseline_total", bankroll),
-        recent_exits=json_data.get("recent_exits", []),
+        recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
         ignored_tokens=json_data.get("ignored_tokens", []),
     )
 

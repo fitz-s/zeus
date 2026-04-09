@@ -54,6 +54,7 @@ from src.types import Bin, BinEdge
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
+CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 
 
 @dataclass
@@ -123,6 +124,20 @@ def _default_strategy_policy(strategy_key: str) -> StrategyPolicy:
         exit_only=False,
         sources=sources,
     )
+
+
+def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -> str | None:
+    if strategy_key != "center_buy":
+        return None
+    if edge.direction != "buy_yes":
+        return None
+    try:
+        entry_price = float(edge.entry_price)
+    except (TypeError, ValueError):
+        return None
+    if entry_price <= CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:
+        return f"CENTER_BUY_ULTRA_LOW_PRICE({entry_price:.4f}<={CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:.2f})"
+    return None
 
 
 def _to_jsonable(value):
@@ -665,6 +680,22 @@ def evaluate_candidate(
             else _default_strategy_policy(strategy_key)
         )
         decision_validations.append("strategy_policy")
+
+        ultra_low_price_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
+        if ultra_low_price_reason:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="MARKET_FILTER",
+                rejection_reasons=[ultra_low_price_reason],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "center_buy_ultra_low_price_guard"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
 
         # Anti-churn layers 5, 6, 7
         if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):

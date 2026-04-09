@@ -5,17 +5,17 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-07 America/Chicago`
-- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY refreeze`
+- Last updated: `2026-04-09 America/Chicago`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
-- Active packet state: `frozen / planning-ready`
+- Active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Active packet state: `post_close_passed / final_audit_ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `REPAIR-REALIZED-TRUTH-CONVERGENCE`
+- Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Resume the frozen canonical-closure packet now that the realized-truth repair has closed.
-2. Keep the packet bounded to `db.py`, `harvester.py`, `lifecycle_manager.py`, and targeted tests.
-3. Keep out-of-scope local dirt excluded from packet commits.
+1. Push this branch for final audit.
+2. Keep core truth logic and broader parity work out of this closed packet unless a new contradiction reopens it.
+3. Preserve the distinction between clean-runtime routing and downstream consumer parity.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+5. `work_packets/REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE.md`
