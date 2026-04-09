@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW freeze`
+- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW acceptance sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted_local / post_close_pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded trailing-loss reference-window fix in `src/riskguard/riskguard.py`.
+1. Run post-close critic + verifier on the accepted trailing-loss boundary.
 2. Keep runtime artifact refresh and downstream parity work out of this packet unless a new packet is frozen.
 3. Preserve the distinction between strict 24h/7d reference semantics and broader runtime artifact freshness.
 

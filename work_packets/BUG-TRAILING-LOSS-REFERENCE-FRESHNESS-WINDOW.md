@@ -89,3 +89,8 @@ evidence_required:
 ## Evidence log
 
 - 2026-04-09: direct probe showed `_trailing_loss_reference()` selecting row `6888` at `2026-04-08T04:15:08+00:00` for a 24h cutoff at `2026-04-08T17:58:43+00:00`, i.e. `13.73h` older than the requested daily-loss reference point.
+- 2026-04-09: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- 2026-04-09: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- 2026-04-09: `python3 -m py_compile src/riskguard/riskguard.py tests/test_riskguard.py` -> success
+- 2026-04-09: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py -k 'TrailingLossSemantics'` -> `7 passed, 38 deselected`
+- 2026-04-09: direct live-state probe after the fix returned `24h -> insufficient_history` and `7d -> inconsistent_history`, proving the too-old row is no longer accepted.
