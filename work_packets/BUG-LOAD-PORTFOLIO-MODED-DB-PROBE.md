@@ -4,7 +4,7 @@
 work_packet_id: BUG-LOAD-PORTFOLIO-MODED-DB-PROBE
 packet_type: repair_packet
 objective: Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `zeus.db`, so paper-mode canonical loader truth is not shadowed by unrelated stale rows in the mixed legacy file.
-why_this_now: Fresh verification on the accepted trailing-loss branch changed the immediate diagnosis. `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db`, but `load_portfolio()` still falls back to JSON because it probes `zeus.db`, where an unrelated stale trade keeps the loader in `stale_legacy_fallback`. The comparator-only packet was therefore superseded before implementation.
+why_this_now: This packet was frozen after verification showed the active paper fallback symptom came from `load_portfolio()` probing unsuffixed `zeus.db` even while `zeus-paper.db` returned `ok`. The implementation now removes that wrong-path fallback, while keeping the deeper `src/state/db.py` comparator/shadow seam explicit as follow-up work.
 why_not_other_approach:
   - Continue with the comparator-only packet first | that misses the immediate paper-mode fallback trigger
   - Widen into both `portfolio.py` and `db.py` together | keep the packet narrow; comparator cleanup remains a follow-up seam

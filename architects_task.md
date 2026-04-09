@@ -71,9 +71,9 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 
 ## Current blocker state
 
-- fresh evidence shows `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db` while unsuffixed `zeus.db` still returns `stale_legacy_fallback`
-- `load_portfolio()` still probes unsuffixed `zeus.db`, so paper mode degrades even when the mode-specific paper DB projection is healthy
-- this packet must stay bounded to the mode-aware probe seam and expose the wider comparator/shadow drift without silently widening into other modules
+- accepted implementation now prefers the sibling mode DB and removes the immediate paper wrong-path fallback
+- the packet still requires the mandatory post-close critic + verifier before the next freeze
+- deeper `src/state/db.py` comparator/shadow drift and settlement-authority drift remain explicit follow-up work and must not be silently folded into this packet
 
 ## Immediate checklist
 
