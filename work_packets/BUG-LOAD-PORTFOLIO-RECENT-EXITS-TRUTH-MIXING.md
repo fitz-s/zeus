@@ -92,3 +92,10 @@ evidence_required:
 ## Evidence log
 
 - 2026-04-09: follow-up probe after comparator closeout found `load_portfolio(state/positions-paper.json)` returning `positions=12`, `recent_exits=14`, `recent_exit_pnl=210.35` while authoritative paper settlements were `19 / -13.03`.
+- 2026-04-09: `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- 2026-04-09: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- 2026-04-09: `python3 -m py_compile src/state/portfolio.py tests/test_runtime_guards.py` -> success
+- 2026-04-09: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio and recent_exits'` -> `3 passed, 82 deselected`
+- 2026-04-09: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `8 passed, 77 deselected`
+- 2026-04-09: direct live-state probe after the fix showed `positions=12`, `recent_exits=19`, `recent_exit_pnl=-13.03`, matching authoritative paper settlements.
+- 2026-04-09: JSON-fallback probe preserved `recent_exits=1`, `recent_exit_pnl=1.25`, `first_exit_reason=JSON_FALLBACK`.

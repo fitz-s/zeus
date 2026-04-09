@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING freeze`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -70,20 +70,19 @@ Stop `load_portfolio()` from mixing canonical DB-first positions with stale JSON
 
 ## Current blocker state
 
-- `load_portfolio()` still returns canonical paper positions from DB while carrying contradictory JSON `recent_exits`
-- fresh probe shows `recent_exits=14 / +210.35` while authoritative paper settlements are `19 / -13.03`
-- this packet must stay bounded to the loader boundary and expose broader downstream output drift without silently widening into RiskGuard or DB settlement code
+- packet-bounded loader evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
+- fresh probes now show DB-first paper loads align `recent_exits` with authoritative settlements (`19 / -13.03`) while JSON fallback still preserves JSON exits
+- downstream consumer/output drift remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
 
 - [x] `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` frozen
-- [ ] mixed-source `PortfolioState` reproduced with packet-bounded evidence
-- [ ] DB-first loads stop importing contradictory JSON `recent_exits`
-- [ ] packet-bounded loader tests pass
-- [ ] wider downstream output drift remains explicit
+- [x] mixed-source `PortfolioState` reproduced with packet-bounded evidence
+- [x] DB-first loads stop importing contradictory JSON `recent_exits`
+- [x] packet-bounded loader tests pass
+- [x] wider downstream output drift remains explicit
 
 ## Next required action
 
-1. Implement the bounded loader recent-exit truth fix in `src/state/portfolio.py`.
-2. Lock the mixed-source scenario in `tests/test_runtime_guards.py`.
-3. If implementation proves a consumer outside `src/state/portfolio.py` must change, stop and freeze that follow-up packet instead of widening silently.
+1. Run post-close critic + verifier on the accepted loader boundary.
+2. Freeze the next bounded portfolio-truth packet instead of widening this one.

@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING freeze`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING acceptance sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted_local / post_close_pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded `load_portfolio()` recent-exit truth fix in `src/state/portfolio.py`.
+1. Run post-close critic + verifier on the accepted loader recent-exit boundary.
 2. Keep RiskGuard, DB settlement, and status/output parity work out of this packet unless a new packet is frozen.
 3. Preserve the distinction between stopping mixed-source loader truth and claiming full realized-PnL convergence.
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
+5. `work_packets/BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING.md`

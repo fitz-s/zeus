@@ -31,15 +31,47 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` (accepted locally / post-close passed)
+- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` (accepted locally / post-close pending)
 - Current active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - `load_portfolio()` still mixes canonical positions with JSON `recent_exits` (`14 / +210.35`) while authoritative paper settlements are `19 / -13.03`
-  - downstream consumers may still read mixed-source `PortfolioState` objects until this loader seam is repaired
+  - downstream consumers and output layers may still hold older assumptions about `recent_exits` semantics after this loader repair
+  - broader realized-PnL/status parity remains unresolved follow-up work outside this accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 16:04 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
+- Status delta:
+  - loader recent-exit truth packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `7675b3f` -> `Freeze the mixed recent-exit loader packet`
+  - commit `a3568dc` -> `Stop DB-first portfolio loads from inheriting stale exit history`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile src/state/portfolio.py tests/test_runtime_guards.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio and recent_exits'` -> `3 passed, 82 deselected`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `8 passed, 77 deselected`
+  - direct live-state probe with current code:
+    - `load_portfolio(state/positions-paper.json)` -> `positions=12`, `recent_exits=19`, `recent_exit_pnl=-13.03`
+    - authoritative paper settlements -> `19`, `pnl=-13.03`
+  - JSON-fallback probe:
+    - `positions=1`, `recent_exits=1`, `recent_exit_pnl=1.25`, `first_exit_reason=JSON_FALLBACK`
+  - native `critic` subagent `Sagan` -> `PASS`
+  - native `verifier` subagent `Hegel` -> `PASS`
+- Decisions frozen:
+  - DB-first `PortfolioState` loads no longer mix canonical positions with contradictory JSON `recent_exits`
+  - JSON fallback still preserves JSON `recent_exits` when projection capability is absent
+  - downstream output parity remains explicit follow-up debt rather than being silently folded into this packet
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded portfolio-truth packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 15:33 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING frozen
 - Author: `Architects mainline lead`
