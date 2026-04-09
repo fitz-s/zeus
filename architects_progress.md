@@ -32,7 +32,7 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
-- Current active packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Current active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
 - Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
@@ -40,22 +40,40 @@ Archive policy:
 
 ## Durable timeline
 
-## [2026-04-09 12:20 America/Chicago] BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE frozen
+## [2026-04-09 12:28 America/Chicago] BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE frozen
 - Author: `Architects mainline lead`
-- Packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
 - Status delta:
   - current active packet frozen
 - Basis / evidence:
   - the accepted mode-db probe packet removed the immediate paper fallback trigger, so the next still-live contradiction is settlement summary duplication
-  - fresh verification confirmed headline `realized_pnl` comes from `outcome_fact`, while settlement summaries still flatten duplicate legacy settlement artifacts from decision_log
-  - direct repro showed duplicate fallback settlement artifacts produced duplicate rows and inflated summary totals
+  - fresh verification confirmed headline `realized_pnl` comes from `outcome_fact`, while authoritative settlement rows still prefer duplicated legacy `POSITION_SETTLED` stage events
+  - direct repro showed duplicate stage events for `0c108102-032`, `6f8ce461-902`, and `9e97c78f-2a8`
 - Decisions frozen:
-  - keep this packet bounded to legacy settlement fallback dedupe in `src/state/decision_chain.py`
-  - do not widen into `src/state/db.py` comparator cleanup or RiskGuard output-layer parity assertions in this packet
+  - supersede the fallback-reader dedupe packet as the immediate next slice
+  - keep this packet bounded to stage-event dedupe in `src/state/db.py`
+  - do not widen into `src/state/decision_chain.py` fallback cleanup or RiskGuard output-layer parity assertions in this packet
 - Open uncertainties:
   - implementation may prove the output layer needs a tiny parity assertion packet afterward, but this packet should not assume that yet
 - Next required action:
-  - implement the fallback-reader dedupe and lock it with targeted DB tests
+  - implement the stage-event dedupe and lock it with targeted DB tests
+- Owner:
+  - Architects mainline lead
+
+## [2026-04-09 12:20 America/Chicago] BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Status delta:
+  - superseded before implementation
+- Basis / evidence:
+  - fresh verification on the real paper DB showed authoritative settlement rows still duplicate first through `query_settlement_events()`, so fallback-reader dedupe is not the immediate fix for the live mismatch
+- Decisions frozen:
+  - preserve this packet only as a breadcrumb for a later compatibility cleanup
+  - do not implement it as the immediate next slice
+- Open uncertainties:
+  - none; superseded by `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
+- Next required action:
+  - work the superseding stage-event packet instead
 - Owner:
   - Architects mainline lead
 

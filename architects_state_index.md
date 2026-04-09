@@ -6,13 +6,13 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE freeze`
+- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE`
+- Active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
 - Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded legacy settlement fallback dedupe in `src/state/decision_chain.py` and lock it with targeted DB tests.
-2. Keep `src/state/db.py` comparator/shadow cleanup and RiskGuard output parity work out of this packet unless a new packet is frozen.
-3. Preserve the distinction between deduping fallback rows and claiming full settlement-authority convergence.
+1. Implement the bounded legacy stage-event dedupe in `src/state/db.py` and lock it with targeted settlement-query tests.
+2. Keep `src/state/decision_chain.py` fallback-reader cleanup and RiskGuard output parity work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between deduping stage-event rows and claiming full settlement-authority convergence.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-LEGACY-SETTLEMENT-FALLBACK-DEDUPE.md`
+5. `work_packets/BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE.md`
