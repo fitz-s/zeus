@@ -25,7 +25,7 @@ Read order for a fresh leader:
 5. current active packet
 
 Archive policy:
-- Older detailed ledger history now lives in `architects_progress_archive.md`.
+- Older detailed ledger history now lives in `docs/archives/architects_progress_archive.md`.
 - Micro-event evidence now belongs in `.omx/context/architects_worklog.md`.
 
 ## Current snapshot
