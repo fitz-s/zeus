@@ -67,7 +67,7 @@ ci_gates_required:
   - python3 scripts/check_work_packets.py
   - python3 scripts/check_kernel_manifests.py
 tests_required:
-  - .venv/bin/pytest -q tests/test_db.py -k 'authoritative_settlement or stage_event'
+  - .venv/bin/pytest -q tests/test_db.py -k 'authoritative_settlement or query_settlement_events'
 parity_required: false
 replay_required: false
 rollback: Revert the stage-event dedupe change, paired tests, and control-surface updates together; repo returns to the accepted mode-db-probe boundary with duplicate legacy stage events still inflating authoritative settlement rows.

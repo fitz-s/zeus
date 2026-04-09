@@ -1936,9 +1936,6 @@ def query_settlement_events(
         WHERE {' AND '.join(filters)}
         ORDER BY id DESC
         """
-    if limit is not None:
-        query += "\n        LIMIT ?"
-        params.append(limit)
     rows = conn.execute(query, params).fetchall()
     decoded = _decode_position_event_rows(rows)
     deduped: list[dict] = []

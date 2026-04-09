@@ -1485,7 +1485,7 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
 
 
 def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
-    from src.state.db import query_settlement_events
+    from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
@@ -1560,7 +1560,7 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
 
 
 def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
-    from src.state.db import query_settlement_events
+    from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
 
     db_path = tmp_path / "test.db"
