@@ -97,7 +97,7 @@ Still out of scope unless a future packet explicitly takes them:
 - `docs/governance/zeus_runtime_delta_ledger.md`
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md`
 - `docs/archives/`
-- `architects_progress_archive.md`
+- `docs/archives/architects_progress_archive.md`
 - `root_progress.md`
 - `root_task.md`
 - `tests/test_calibration_quality.py`

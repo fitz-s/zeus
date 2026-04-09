@@ -4,6 +4,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Folders
 - `architecture/`: system architecture, invariants, integration designs.
+- `archives/`: historical handoffs, audits, findings, traces, research, and other non-live records.
 - `specs/`: formal specs and contract definitions.
 - `plans/`: execution plans and release checklists.
 - `progress/`: progress snapshots.
@@ -16,6 +17,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - Prefer stable names (no spaces, no all-caps file names).
 - Use date-prefixed names only for time-bound plans/reports, e.g. `2026-03-31-go-live-readiness.md`.
 - New generated reports should be written into `docs/reports/`.
+- Move historical investigations, audits, findings, and scratch-style research out of top-level `docs/` and into `docs/archives/` subfolders.
 
 ## Naming Rules (Mandatory)
 - `plan` files must include explicit scope/topic in file name.
