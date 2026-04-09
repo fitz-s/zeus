@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE post-close`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Deduplicate legacy `POSITION_SETTLED` stage events before they feed authoritative settlement queries, so settlement sample counts and strategy settlement summaries stop disagreeing with headline realized PnL.
+Remove the legacy timestamp shadow that still forces canonical portfolio truth to degrade to `stale_legacy_fallback` even after the mode-aware DB probe and stage-event dedupe packets have cleared the earlier seams.
 
 ## Allowed files
 
-- `work_packets/BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE.md`
+- `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
 - `src/state/db.py`
-- `tests/test_db.py`
+- `tests/test_truth_surface_health.py`
 
 ## Forbidden files
 
@@ -61,7 +61,7 @@ Deduplicate legacy `POSITION_SETTLED` stage events before they feed authoritativ
 
 ## Non-goals
 
-- no `src/state/decision_chain.py` fallback-reader cleanup yet
+- no `src/state/portfolio.py` DB-path cleanup yet
 - no RiskGuard output-layer parity assertion yet
 - no reporting/dashboard/schema work
 - no schema redesign
@@ -70,22 +70,20 @@ Deduplicate legacy `POSITION_SETTLED` stage events before they feed authoritativ
 
 ## Current blocker state
 
-- fresh evidence shows headline realized PnL comes from `outcome_fact`, while authoritative settlement queries still prefer duplicated legacy `POSITION_SETTLED` stage events
-- direct repro confirmed duplicate stage events for `0c108102-032`, `6f8ce461-902`, and `9e97c78f-2a8`
-- this packet must stay bounded to the stage-event query seam and expose the wider comparator/shadow drift without silently widening into other modules
+- fresh evidence shows the mode-aware probe fix now works and the stage-event dedupe is accepted, but unsuffixed `zeus.db` still reports `stale_legacy_fallback`
+- active stale ids still include `trade-1`, `rt1`, and `75c98026-cd5`, driven by `position_events_legacy.timestamp > position_current.updated_at`
+- this packet must stay bounded to the comparator/shadow seam and expose the wider portfolio-truth drift without silently widening into other modules
 
 ## Immediate checklist
 
-- [x] `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE` frozen
-- [x] duplicate legacy stage events reproduced in packet-bounded tests
-- [x] stage-event query dedupes duplicates with deterministic latest-wins behavior
-- [x] targeted settlement-query tests pass
-- [x] wider comparator/shadow and output-layer drift remain explicit
-- [x] post-close critic review passed
-- [x] post-close verifier review passed
+- [x] `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` frozen
+- [ ] comparator/shadow root cause reproduced in packet-bounded tests
+- [ ] `query_portfolio_loader_view()` no longer degrades on the identified stale ids
+- [ ] targeted truth-surface tests pass
+- [ ] wider fallback-reader / output-layer drift remains explicit
 
 ## Next required action
 
-1. Freeze the next deeper comparator/shadow or output-parity packet.
-2. Keep this packet’s stage-event dedupe behavior stable unless a later packet explicitly supersedes it.
-3. Do not let the next packet collapse the still-open fallback-reader and output-parity seams into “settlement truth fixed.”
+1. Implement the bounded comparator fix in `src/state/db.py`.
+2. Lock the stale-id scenario in `tests/test_truth_surface_health.py`.
+3. If implementation proves a consumer outside `src/state/db.py` must change, stop and freeze that follow-up packet instead of widening silently.

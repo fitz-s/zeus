@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE post-close`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
+- Active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
+- Last accepted packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next deeper truth-unification packet around comparator/shadow cleanup or output-layer parity, whichever is now the tightest live seam.
-2. Keep `src/state/decision_chain.py` fallback-reader cleanup and RiskGuard output parity work out of the accepted stage-event packet unless a later packet explicitly widens it.
-3. Preserve the distinction between fixing the first active counting seam and claiming full settlement-authority convergence.
+1. Implement the bounded comparator/shadow fix in `src/state/db.py` and lock it with truth-surface tests.
+2. Keep `src/state/portfolio.py`, fallback-reader cleanup, and output-layer parity work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between removing false degradation at the comparator seam and claiming full portfolio-truth convergence.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE.md`
+5. `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
