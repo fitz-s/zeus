@@ -2442,24 +2442,15 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
     latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
-    legacy_latest_by_trade: dict[str, datetime] = {}
-    legacy_table = _legacy_position_events_table(conn)
-    if legacy_table:
-        placeholders = ", ".join("?" for _ in trade_ids)
-        legacy_rows = conn.execute(
-            f"""
-            SELECT runtime_trade_id, MAX(timestamp) AS latest_timestamp
-            FROM {legacy_table}
-            WHERE runtime_trade_id IN ({placeholders})
-            GROUP BY runtime_trade_id
-            """,
-            trade_ids,
-        ).fetchall()
-        for legacy_row in legacy_rows:
-            trade_id = str(legacy_row["runtime_trade_id"] or "")
-            parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
-            if trade_id and parsed is not None:
-                legacy_latest_by_trade[trade_id] = parsed
+    projection_phase_by_trade = {
+        str(row["trade_id"] or row["position_id"] or ""): str(row["phase"] or "")
+        for row in rows
+        if str(row["trade_id"] or row["position_id"] or "")
+    }
+    legacy_latest_by_trade = _latest_semantically_advancing_legacy_event_by_trade(
+        conn,
+        projection_phase_by_trade,
+    )
 
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     positions: list[dict] = []
@@ -2476,7 +2467,14 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
             continue
         projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
         latest_legacy = legacy_latest_by_trade.get(trade_id)
-        if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
+        latest_legacy_timestamp = _parse_iso_timestamp(
+            str((latest_legacy or {}).get("timestamp") or "")
+        )
+        if (
+            projection_updated_at is not None
+            and latest_legacy_timestamp is not None
+            and latest_legacy_timestamp > projection_updated_at
+        ):
             stale_trade_ids.append(trade_id)
             continue
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
@@ -2830,6 +2828,92 @@ def _query_transitional_position_hints(
             if env_value not in (None, ""):
                 bucket["env"] = str(env_value)
     return hints
+
+
+def _latest_semantically_advancing_legacy_event_by_trade(
+    conn: sqlite3.Connection,
+    projection_phase_by_trade: dict[str, str],
+) -> dict[str, dict]:
+    trade_ids = list(projection_phase_by_trade)
+    if not trade_ids:
+        return {}
+    legacy_table = _legacy_position_events_table(conn)
+    if not legacy_table:
+        return {}
+    placeholders = ", ".join("?" for _ in trade_ids)
+    rows = conn.execute(
+        f"""
+        SELECT runtime_trade_id, event_type, position_state, timestamp
+        FROM {legacy_table}
+        WHERE runtime_trade_id IN ({placeholders})
+        ORDER BY timestamp DESC, id DESC
+        """,
+        trade_ids,
+    ).fetchall()
+    latest: dict[str, dict] = {}
+    for row in rows:
+        trade_id = str(row["runtime_trade_id"] or "")
+        if not trade_id or trade_id in latest:
+            continue
+        event = {
+            "event_type": str(row["event_type"] or ""),
+            "position_state": str(row["position_state"] or ""),
+            "timestamp": str(row["timestamp"] or ""),
+        }
+        if _legacy_event_semantically_advances_projection(
+            latest_legacy_event=event,
+            projection_phase=projection_phase_by_trade.get(trade_id, ""),
+        ):
+            latest[trade_id] = event
+    return latest
+
+
+def _lifecycle_phase_rank(phase) -> int:
+    from src.state.lifecycle_manager import LifecyclePhase, coerce_lifecycle_phase
+
+    normalized = coerce_lifecycle_phase(phase)
+    if normalized is None:
+        return -1
+    order = {
+        LifecyclePhase.PENDING_ENTRY: 0,
+        LifecyclePhase.ACTIVE: 1,
+        LifecyclePhase.DAY0_WINDOW: 2,
+        LifecyclePhase.PENDING_EXIT: 3,
+        LifecyclePhase.ECONOMICALLY_CLOSED: 4,
+        LifecyclePhase.SETTLED: 5,
+        LifecyclePhase.VOIDED: 5,
+        LifecyclePhase.ADMIN_CLOSED: 5,
+        LifecyclePhase.QUARANTINED: 5,
+    }
+    return order.get(normalized, -1)
+
+
+def _legacy_event_semantically_advances_projection(
+    *,
+    latest_legacy_event: dict | None,
+    projection_phase: str,
+) -> bool:
+    from src.state.lifecycle_manager import phase_for_runtime_position
+
+    if not latest_legacy_event:
+        return False
+    event_type = str(latest_legacy_event.get("event_type") or "")
+    legacy_state = str(latest_legacy_event.get("position_state") or "").strip().lower()
+    semantic_event_types = {
+        "POSITION_ENTRY_RECORDED",
+        "POSITION_LIFECYCLE_UPDATED",
+        "POSITION_EXIT_RECORDED",
+        "POSITION_SETTLED",
+    }
+    if event_type not in semantic_event_types:
+        return False
+    if not legacy_state:
+        return False
+    try:
+        legacy_phase = phase_for_runtime_position(state=legacy_state)
+    except ValueError:
+        return False
+    return _lifecycle_phase_rank(legacy_phase) > _lifecycle_phase_rank(projection_phase)
 
 
 def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict:
