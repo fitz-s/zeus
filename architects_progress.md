@@ -31,15 +31,42 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` (accepted locally / post-close passed)
+- Last accepted packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS` (accepted locally / post-close pending)
 - Current active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - persisted paper artifacts still preserve old snapshots even though clean-branch direct truth probes are coherent
   - downstream parity work remains unresolved outside the new refresh packet
 
 ## Durable timeline
+
+## [2026-04-09 18:30 America/Chicago] REFRESH-PAPER-RUNTIME-ARTIFACTS accepted locally
+- Author: `Architects mainline lead`
+- Packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
+- Status delta:
+  - paper runtime artifact refresh packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `385fac5` -> `Add a reproducible paper artifact refresh entrypoint`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile scripts/refresh_paper_runtime_artifacts.py tests/test_runtime_artifact_refresh.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_artifact_refresh.py` -> `2 passed`
+  - stale-artifact probe continued to show why the packet exists:
+    - `risk_state-paper.db` -> `portfolio_truth_source=working_state_fallback`, `settlement_sample_size=22`, `daily_loss=13.26`
+  - native `critic` lane -> `PASS`
+  - native `verifier` lane -> `PASS`
+- Decisions frozen:
+  - a bounded refresh entrypoint now exists for regenerating persisted paper artifacts from current code truth
+  - the packet does not claim that artifacts have already been refreshed in live paper state
+  - broader downstream parity remains explicit follow-up work
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 18:23 America/Chicago] REFRESH-PAPER-RUNTIME-ARTIFACTS frozen
 - Author: `Architects mainline lead`
