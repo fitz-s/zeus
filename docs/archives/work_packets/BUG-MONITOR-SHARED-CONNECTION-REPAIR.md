@@ -35,7 +35,7 @@ required_reads:
   - src/state/AGENTS.md
   - docs/archives/sessions/session_2026_04_07_final_state.md
   - docs/zeus_FINAL_spec.md
-  - docs/isolation_design.md
+  - docs/archives/designs/isolation_design.md
   - src/engine/cycle_runner.py
   - src/engine/cycle_runtime.py
   - src/engine/monitor_refresh.py

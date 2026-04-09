@@ -4,7 +4,7 @@
 work_packet_id: GOV-FAST-ARCHIVE-SWEEP
 packet_type: governance_packet
 objective: Rapidly archive the remaining clearly historical top-level docs and legacy root artifacts so the live repo surface is reduced to a small set of active authority and runtime-entry files.
-why_this_now: After the root authority guide and control-surface consolidation, the user explicitly directed a much faster cleanup posture: archive almost everything that is not still needed, instead of preserving scattered historical files in the root or top-level docs surface.
+why_this_now: After the root authority guide and control-surface consolidation, the user explicitly directed a much faster cleanup posture: archive almost everything that is not still needed, instead of preserving scattered historical files in the root or top-level docs surface. The user also explicitly directed that completed work packets should stop living in the active `work_packets/` surface and be archived as historical modifications.
 why_not_other_approach:
   - Leave the remaining files where they are | keeps the repo visually noisy and contradicts the user's cleanup directive
   - Reclassify the remaining files one by one over many packets | too slow for this stage and preserves clutter longer than necessary
@@ -30,6 +30,7 @@ files_may_change:
   - WORKSPACE_MAP.md
   - docs/README.md
   - CURRENT_STATE.md
+  - work_packets/*.md
   - docs/archives/**
   - docs/ground_truth_pnl.md
   - docs/isolation_design.md
@@ -64,6 +65,7 @@ rollback: Revert the archive sweep commit as one batch to restore the historical
 acceptance:
   - the remaining clearly historical top-level docs are moved under `docs/archives/**`
   - the retired root artifacts moved by this packet are no longer scattered in the repo root
+  - completed work packets are archived out of the active `work_packets/` surface, leaving only the current live packet in place
   - only the minimal special root files remain visible as live authority/runtime entry points
   - any remaining references to moved files point to archive paths or are compatibility-only
 evidence_required:
@@ -77,3 +79,12 @@ evidence_required:
 
 - This is an intentionally aggressive archive sweep.
 - When a file is clearly historical or an inert root artifact, prefer archival demotion over prolonged case-by-case hesitation.
+
+## Evidence log
+
+- Before the sweep, the live root surface still contained historical artifacts (`fix_linter.py`, `risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`, `zeus_data_inventory.xlsx`) alongside the true live authority/runtime entry files.
+- Before the sweep, top-level `docs/` still contained historical designs/reports (`ground_truth_pnl.md`, `isolation_design.md`, `isolation_migration_map.md`, `venus_sensing_design.md`) outside `docs/archives/**`.
+- After the sweep, root files are reduced to the minimal special set: `AGENTS.md`, `CURRENT_STATE.md`, `README.md`, `WORKSPACE_MAP.md`, `ZEUS_AUTHORITY.md`, `pytest.ini`, `requirements.txt`, and git metadata files.
+- After the sweep, top-level `docs/` is reduced to `docs/README.md`, `docs/known_gaps.md`, and `docs/zeus_FINAL_spec.md`.
+- Completed work packets were archived under `docs/archives/work_packets/`, leaving only `work_packets/GOV-FAST-ARCHIVE-SWEEP.md` live.
+- Targeted reference scan after the moves found no remaining live-surface references to the moved top-level docs or root artifacts outside `docs/archives/**`.
