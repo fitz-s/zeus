@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,24 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Repair the riskguard loss authority surface so `daily_loss` means trailing 24h equity loss and `weekly_loss` means trailing 7d equity loss, with explicit degraded-truth metadata instead of silent fallback to all-time or session baselines.
+Remove the legacy timestamp shadow that still forces canonical portfolio truth to degrade to `stale_legacy_fallback` even when the active paper-mode projection is otherwise usable.
 
 ## Allowed files
 
-- `work_packets/RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY.md`
+- `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/riskguard/riskguard.py`
-- `tests/test_riskguard.py`
-- `tests/test_pnl_flow_and_audit.py`
+- `src/state/db.py`
+- `tests/test_truth_surface_health.py`
 
 ## Forbidden files
 
@@ -42,7 +41,9 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
-- `src/state/**`
+- `src/state/portfolio.py`
+- `src/state/decision_chain.py`
+- `src/riskguard/**`
 - `src/observability/status_summary.py`
 - `src/control/**`
 - `src/supervisor_api/**`
@@ -50,8 +51,8 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 - `src/execution/**`
 - `src/engine/**`
 - `tests/test_architecture_contracts.py`
-- `tests/test_center_buy_diagnosis.py`
-- `tests/test_center_buy_repair.py`
+- `tests/test_riskguard.py`
+- `tests/test_pnl_flow_and_audit.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -59,8 +60,8 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 
 ## Non-goals
 
-- no broad settlement-authority unification yet
-- no portfolio fallback rewrite yet
+- no `src/state/portfolio.py` DB-path cleanup yet
+- no settlement-summary dedupe yet
 - no reporting/dashboard/schema work
 - no schema redesign
 - no data-expansion follow-up work
@@ -68,23 +69,20 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 
 ## Current blocker state
 
-- fresh evidence shows `daily_loss` currently equals all-time loss instead of trailing 24h loss
-- many historical `risk_state` rows are internally inconsistent, so reference-row trust must be explicit
-- this packet must stay bounded to loss authority and expose deeper truth drift rather than quietly widening into portfolio/settlement fixes
+- fresh evidence shows `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db` but `load_portfolio()` still falls back through unsuffixed `zeus.db`
+- the active stale ids (`trade-1`, `rt1`, `75c98026-cd5`) are triggered by legacy timestamps newer than `position_current.updated_at`
+- this packet must stay bounded to the comparator/shadow seam and expose the wider portfolio-truth drift without silently widening into other modules
 
 ## Immediate checklist
 
-- [x] `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` frozen
-- [x] trailing 24h / 7d reference-row helper implemented
-- [x] baseline-driven loss math removed from riskguard
-- [x] exact truth-status / audit-field contract implemented
-- [x] targeted loss-authority tests pass
-- [x] deeper truth drift exposed by the packet recorded explicitly
-- [x] post-close critic review passed
-- [x] post-close verifier review passed
+- [x] `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` frozen
+- [ ] comparator/shadow root cause reproduced in packet-bounded tests
+- [ ] `query_portfolio_loader_view()` no longer degrades on the identified stale ids
+- [ ] targeted truth-surface tests pass
+- [ ] wider portfolio fallback / settlement dedupe drift remains explicit
 
 ## Next required action
 
-1. Freeze the next truth-unification packet around the deeper portfolio-fallback / mixed settlement authority drift.
-2. Keep this packet’s trailing-loss contract stable unless a later packet explicitly supersedes it.
-3. Do not let the next packet collapse the still-open cross-module truth seams into a single shallow “daily loss” narrative.
+1. Implement the bounded loader comparator fix in `src/state/db.py`.
+2. Lock the identified stale-id scenario in `tests/test_truth_surface_health.py`.
+3. If the fix proves `src/state/portfolio.py` or settlement dedupe must change, stop and freeze the follow-up packet instead of widening silently.

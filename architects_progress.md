@@ -31,14 +31,34 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` (accepted locally / post-close passed)
-- Current active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
+- Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
+- Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - deeper portfolio-fallback and mixed-settlement authority drift remain unresolved follow-up work
+  - `load_portfolio()` still falls back through the unsuffixed DB path because the legacy timestamp shadow keeps the loader in `stale_legacy_fallback`
 
 ## Durable timeline
+
+## [2026-04-09 10:40 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - post-close-passed trailing-loss packet exposed that the next deeper drift is portfolio truth still degrading to `working_state_fallback`
+  - fresh verification on current code shows `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db` but `stale_legacy_fallback` on `zeus.db`
+  - `load_portfolio()` still probes the unsuffixed DB path and falls back to JSON with `recent_exits = 14` and `sum_recent_exit_pnl = 210.35`
+  - active stale ids are `trade-1`, `rt1`, and `75c98026-cd5`, all caused by `position_events_legacy.timestamp > position_current.updated_at`
+- Decisions frozen:
+  - keep this packet bounded to the loader comparator / legacy timestamp shadow seam in `src/state/db.py`
+  - do not widen into `src/state/portfolio.py` DB-path cleanup or settlement summary dedupe in this packet
+- Open uncertainties:
+  - implementation may prove that a later `src/state/portfolio.py` cleanup packet is immediately necessary, but this packet should not assume that yet
+- Next required action:
+  - implement the bounded comparator fix and lock it with targeted truth-surface tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 10:28 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY post-close passed
 - Author: `Architects mainline lead`
