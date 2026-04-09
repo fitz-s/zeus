@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP post-close sync`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- Active packet state: `post_close_passed / next_freeze_allowed`
+- Active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next bounded packet.
-2. Keep core truth math and broader parity redesign out of this accepted packet unless a new packet is frozen.
-3. Preserve the distinction between artifact refresh entrypoint correctness and live writer ownership.
+1. Prepare a stable clean worktree for runtime use.
+2. Reroute the paper launchd services onto that clean worktree without changing core truth logic.
+3. Verify that paper artifact writes stay coherent after re-enable.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP.md`
+5. `work_packets/REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE.md`
