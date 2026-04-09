@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW acceptance sync`
+- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / NEXT_FREEZE_ALLOWED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -69,9 +69,9 @@ Remove the legacy timestamp shadow that still forces canonical portfolio truth t
 
 ## Current blocker state
 
-- targeted comparator/shadow evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
-- live probes now show the paper-mode DB is healthy while unsuffixed `zeus.db` still reports one true semantic stale id (`08d6c939-038`)
-- the wider portfolio-truth drift remains open and must be handled by a new packet instead of widening this accepted boundary
+- post-close review completed with no blocker-level contradictions on the accepted comparator/shadow boundary
+- the next visible portfolio-truth seam is outside this packet: `load_portfolio()` still returns JSON `recent_exits` (`14 / +210.35`) while canonical paper settlements are `19 / -13.03`
+- unsuffixed `zeus.db` still holds one true semantic stale projection (`08d6c939-038`), which remains follow-up work rather than a reason to reopen this accepted packet
 
 ## Immediate checklist
 
@@ -83,5 +83,5 @@ Remove the legacy timestamp shadow that still forces canonical portfolio truth t
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted comparator/shadow boundary.
-2. Freeze the next bounded portfolio-truth packet instead of widening this one.
+1. Freeze the next bounded portfolio-truth packet.
+2. Keep `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW` closed unless a new contradiction reopens it.
