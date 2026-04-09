@@ -32,14 +32,32 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` (accepted locally / post-close passed)
-- Current active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- Current packet status: `post-close passed / next freeze allowed`
+- Current active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - paper launchd writers are disabled, but paper runtime is not yet rerouted to a clean ownership path
-  - downstream parity work remains unresolved outside the ownership packet
+  - downstream parity work remains unresolved outside the new reroute packet
 
 ## Durable timeline
+
+## [2026-04-09 19:26 America/Chicago] REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE frozen
+- Author: `Architects mainline lead`
+- Packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - ownership packet completed post-close review with the stale writers disabled
+  - refreshed paper artifacts remain coherent, but paper runtime is currently offline
+- Decisions frozen:
+  - the next bounded seam is restoring paper runtime on clean code ownership
+  - keep core truth logic unchanged while rerouting launchd paper services
+- Open uncertainties:
+  - the clean runtime target must remain stable enough for launchd ownership
+- Next required action:
+  - prepare the stable clean worktree and reroute the paper launchd jobs
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 19:22 America/Chicago] BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP post-close passed
 - Author: `Architects mainline lead`
