@@ -677,7 +677,7 @@ Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces
 ## Current Baton State
 - Active owner: `adversary` on `#20`, reviewing the landed operator-clear acknowledgement slice.
 - Waiting owner: `repair`, to be reactivated after the adversarial verdict or for the next implementation slice.
-- Baton truth, backlog truth, and narrative truth must stay separated: `.claude/baton_state.json` for live ownership, `root_task.md` for queue truth, `root_progress.md` / `next_round_handoff.md` for narrative truth.
+- Baton truth, backlog truth, and narrative truth must stay separated: `.claude/baton_state.json` for live ownership, `root_task.md` for queue truth, `root_progress.md` / `docs/archives/handoffs/next_round_handoff_p4_start.md` for narrative truth.
 - The next live queue question is whether `#20` accepts the narrow operator-clear slice, blocks it, or sharpens one more smallest follow-up.
 - Baton semantics are coherent: two live teammates remain, but only one currently owns an active baton, so team mode is `single-worker`.
 
