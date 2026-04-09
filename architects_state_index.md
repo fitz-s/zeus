@@ -6,13 +6,13 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW freeze`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded comparator/shadow fix in `src/state/db.py` and lock it with truth-surface tests.
-2. Keep `src/state/portfolio.py`, settlement dedupe, and status-summary work out of this packet unless a new packet is frozen.
-3. Preserve the distinction between removing a false fallback trigger and claiming full portfolio-truth convergence.
+1. Implement the bounded mode-aware DB probe fix in `src/state/portfolio.py` and lock it with load-portfolio tests.
+2. Keep `src/state/db.py` comparator cleanup, settlement dedupe, and status-summary work out of this packet unless a new packet is frozen.
+3. Preserve the distinction between removing the immediate paper fallback trigger and claiming full portfolio-truth convergence.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW.md`
+5. `work_packets/BUG-LOAD-PORTFOLIO-MODED-DB-PROBE.md`

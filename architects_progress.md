@@ -32,31 +32,48 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
-- Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Current active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - `load_portfolio()` still falls back through the unsuffixed DB path because the legacy timestamp shadow keeps the loader in `stale_legacy_fallback`
+- `load_portfolio()` still falls back through the unsuffixed DB path even when the paper-mode loader is healthy
 
 ## Durable timeline
+
+## [2026-04-09 10:52 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - post-close-passed trailing-loss packet exposed that the next deeper drift is portfolio truth still degrading to `working_state_fallback`
+  - fresh verification on current code shows `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db` but `stale_legacy_fallback` on unsuffixed `zeus.db`
+  - `load_portfolio()` still probes the unsuffixed DB path and falls back to JSON with `recent_exits = 14` and `sum_recent_exit_pnl = 210.35`
+- Decisions frozen:
+  - supersede the just-frozen comparator-only packet as the immediate next slice
+  - keep this packet on the mode-aware DB probe in `src/state/portfolio.py`
+  - leave comparator cleanup and settlement summary dedupe explicitly open for later packets
+- Open uncertainties:
+  - implementation may prove `src/state/db.py` must still change immediately, in which case the next packet should be frozen explicitly
+- Next required action:
+  - implement the mode-aware DB probe and lock it with targeted load-portfolio tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 10:40 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW frozen
 - Author: `Architects mainline lead`
 - Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
 - Status delta:
-  - current active packet frozen
+  - superseded before implementation
 - Basis / evidence:
-  - post-close-passed trailing-loss packet exposed that the next deeper drift is portfolio truth still degrading to `working_state_fallback`
-  - fresh verification on current code shows `query_portfolio_loader_view()` returns `ok` on `zeus-paper.db` but `stale_legacy_fallback` on `zeus.db`
-  - `load_portfolio()` still probes the unsuffixed DB path and falls back to JSON with `recent_exits = 14` and `sum_recent_exit_pnl = 210.35`
-  - active stale ids are `trade-1`, `rt1`, and `75c98026-cd5`, all caused by `position_events_legacy.timestamp > position_current.updated_at`
+  - fresh verification after freeze proved that the active paper fallback symptom is first triggered by `load_portfolio()` probing unsuffixed `zeus.db`, not by the comparator seam alone
 - Decisions frozen:
-  - keep this packet bounded to the loader comparator / legacy timestamp shadow seam in `src/state/db.py`
-  - do not widen into `src/state/portfolio.py` DB-path cleanup or settlement summary dedupe in this packet
+  - do not implement this packet as the immediate next fix
+  - preserve it only as a breadcrumb for the later comparator cleanup seam
 - Open uncertainties:
-  - implementation may prove that a later `src/state/portfolio.py` cleanup packet is immediately necessary, but this packet should not assume that yet
+  - none; superseded by `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Next required action:
-  - implement the bounded comparator fix and lock it with targeted truth-surface tests
+  - work the superseding packet instead
 - Owner:
   - Architects mainline lead
 
