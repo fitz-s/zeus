@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE refreshed acceptance`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -82,11 +82,11 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 - [x] `load_portfolio()` no longer falls back when the mode DB is healthy and unsuffixed `zeus.db` is stale
 - [x] targeted load-portfolio tests pass
 - [x] wider comparator/shadow / settlement dedupe drift remains explicit
-- [ ] post-close critic review passed
-- [ ] post-close verifier review passed
+- [x] post-close critic review passed
+- [x] post-close verifier review passed
 
 ## Next required action
 
-1. Run the post-close critic review on the accepted packet boundary.
-2. Run the post-close verifier review on the accepted packet boundary.
-3. Freeze the next portfolio-truth / settlement-authority packet only after post-close passes.
+1. Freeze the next deeper portfolio-truth / settlement-authority packet.
+2. Keep this packet’s mode-aware DB probe behavior stable unless a later packet explicitly supersedes it.
+3. Do not let the next packet collapse the still-open comparator/shadow and settlement-authority seams into “portfolio truth fixed.”

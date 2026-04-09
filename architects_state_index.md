@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE refreshed acceptance`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- Active packet state: `accepted locally / post-close pending`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run the required post-close critic + verifier on refreshed accepted `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`.
-2. Keep `src/state/db.py` comparator cleanup, settlement dedupe, and status-summary work out of this packet unless a new packet is frozen.
+1. Freeze the next deeper truth-unification packet around comparator/shadow cleanup or legacy settlement fallback dedupe.
+2. Keep the accepted mode-db probe packet stable unless a later packet explicitly supersedes it.
 3. Preserve the distinction between removing the immediate paper fallback trigger and claiming full portfolio-truth convergence.
 
 ## Current out-of-scope dirt

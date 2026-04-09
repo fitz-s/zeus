@@ -106,3 +106,5 @@ evidence_required:
   - guarded smoke probe on an unqualified `missing.json` path with sibling `zeus-paper.db` loaded the `paper-ok` row from the sibling mode DB and did not consult unsuffixed `zeus.db`
 - pre-close critic review: native `critic` subagent `Bohr` -> `PASS` after confirming the packet removes the immediate wrong-path fallback while keeping the deeper comparator/shadow and settlement-authority drift explicit
 - pre-close verifier review: native `verifier` subagent `Lorentz` -> `PASS` after confirming targeted tests, compile proof, and sibling-mode-db selection for both explicit and unqualified current-mode paths
+- post-close critic review: native `critic` subagent `Chandrasekhar` -> `PASS` after confirming the refreshed accepted boundary no longer contains stale narrative and still keeps deeper comparator/shadow and settlement-authority debt explicit
+- post-close verifier review: native `verifier` subagent `Meitner` -> `PASS` after confirming the accepted control surfaces, packet evidence, and sibling-mode-db behavior match repo truth on `HEAD 4bd9233`
