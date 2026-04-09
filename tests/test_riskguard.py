@@ -662,7 +662,7 @@ class TestRiskGuardTrailingLossSemantics:
         )
         _insert_risk_state_row(
             risk_conn,
-            checked_at=(datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),
+            checked_at=(datetime.now(timezone.utc) - timedelta(days=7, minutes=30)).isoformat(),
             total_pnl=-13.26,
         )
         risk_conn.commit()
@@ -708,7 +708,7 @@ class TestRiskGuardTrailingLossSemantics:
             checked_at=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
             total_pnl=-10.0,
         )
-        weekly_reference_checked_at = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        weekly_reference_checked_at = (datetime.now(timezone.utc) - timedelta(days=7, minutes=30)).isoformat()
         weekly_reference_id = _insert_risk_state_row(
             risk_conn,
             checked_at=weekly_reference_checked_at,
@@ -849,7 +849,7 @@ class TestRiskGuardTrailingLossSemantics:
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
-    def test_tick_skips_inconsistent_boundary_row_and_uses_older_trustworthy_reference(self, monkeypatch, tmp_path):
+    def test_tick_marks_inconsistent_when_only_older_out_of_window_row_is_trustworthy(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
         zeus_conn = get_connection(zeus_db)
@@ -868,7 +868,41 @@ class TestRiskGuardTrailingLossSemantics:
             total_pnl=-6.0,
             effective_bankroll=149.0,
         )
-        trusted_checked_at = (datetime.now(timezone.utc) - timedelta(hours=26)).isoformat()
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=27)).isoformat(),
+            total_pnl=-8.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-10.0,
+            unrealized_pnl=0.0,
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["daily_loss"] == pytest.approx(0.0)
+        assert details["daily_loss_status"] == "inconsistent_history"
+        assert details["daily_loss_reference"] is None
+
+    def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        trusted_checked_at = (datetime.now(timezone.utc) - timedelta(hours=24, minutes=30)).isoformat()
         trusted_id = _insert_risk_state_row(
             risk_conn,
             checked_at=trusted_checked_at,

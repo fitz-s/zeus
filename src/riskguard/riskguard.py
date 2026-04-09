@@ -34,6 +34,7 @@ from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
 TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
+TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE = timedelta(hours=2)
 TRAILING_LOSS_SOURCE_OK = "risk_state_history"
 TRAILING_LOSS_SOURCE_DEGRADED = "no_trustworthy_reference_row"
 TRAILING_LOSS_STATUSES = {
@@ -174,7 +175,9 @@ def _trailing_loss_reference(
     now: str,
     lookback: timedelta,
 ) -> dict:
-    cutoff = (datetime.fromisoformat(now.replace("Z", "+00:00")) - lookback).isoformat()
+    cutoff_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) - lookback
+    cutoff = cutoff_dt.isoformat()
+    window_start = (cutoff_dt - TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE).isoformat()
     total_rows = int(
         risk_conn.execute("SELECT COUNT(*) FROM risk_state").fetchone()[0] or 0
     )
@@ -190,9 +193,10 @@ def _trailing_loss_reference(
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
+          AND checked_at >= ?
         ORDER BY checked_at DESC, id DESC
         """,
-        (cutoff,),
+        (cutoff, window_start),
     ).fetchall()
     if not candidate_rows:
         return {
