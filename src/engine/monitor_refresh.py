@@ -289,15 +289,8 @@ def _check_persistence_anomaly(
     from datetime import timedelta
 
     try:
-        month = target_date.month
-        if month in (12, 1, 2):
-            season = "DJF"
-        elif month in (3, 4, 5):
-            season = "MAM"
-        elif month in (6, 7, 8):
-            season = "JJA"
-        else:
-            season = "SON"
+        from src.calibration.manager import season_from_date, lat_for_city
+        season = season_from_date(target_date.isoformat(), lat=lat_for_city(city_name))
 
         # Average delta over last 3 available settlement days
         deltas = []

@@ -67,6 +67,17 @@ def _harvester_cycle():
         logger.error("Harvester failed: %s", e, exc_info=True)
 
 
+def _wu_daily_collection():
+    """Daily WU observation collection. Must run daily — data is ephemeral (~36h)."""
+    try:
+        from src.data.wu_daily_collector import collect_daily_highs
+        result = collect_daily_highs()
+        logger.info("WU daily collection: collected=%d, skipped=%d, errors=%d",
+                    result["collected"], result["skipped"], result["errors"])
+    except Exception as e:
+        logger.error("WU daily collection failed: %s", e, exc_info=True)
+
+
 def _ecmwf_open_data_cycle():
     try:
         from src.data.ecmwf_open_data import collect_open_ens_cycle
@@ -99,6 +110,7 @@ def _etl_recalibrate():
 
     # 1. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
+        "migrate_rainstorm_full.py",
         "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
@@ -115,7 +127,17 @@ def _etl_recalibrate():
             except Exception as e:
                 results[script] = f"ERROR: {e}"
 
-    # 2. Platt refit — critical for calibration accuracy (D5)
+    # 2. TIGGE direct calibration — pair ENS snapshots with settlement_value
+    try:
+        r = subprocess.run(
+            [venv_python, str(scripts_dir / "etl_tigge_direct_calibration.py")],
+            capture_output=True, text=True, timeout=300,
+        )
+        results["tigge_direct_cal"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
+    except Exception as e:
+        results["tigge_direct_cal"] = f"ERROR: {e}"
+
+    # 3. Platt refit — critical for calibration accuracy (D5)
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "refit_platt.py")],
@@ -125,7 +147,7 @@ def _etl_recalibrate():
     except Exception as e:
         results["platt_refit"] = f"ERROR: {e}"
 
-    # 3. Replay audit snapshot — track system performance trend
+    # 4. Replay audit snapshot — track system performance trend
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "run_replay.py"),
@@ -292,10 +314,17 @@ def main():
             hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
         )
 
-    # Weekly recalibration: ETL refresh + alpha validation + Platt refit
+    # Daily WU observation collection — data is ephemeral, MUST run daily
+    scheduler.add_job(
+        _wu_daily_collection, "cron",
+        hour=12, minute=0, id="wu_daily",
+        max_instances=1, coalesce=True,
+    )
+
+    # Daily recalibration: ETL refresh + TIGGE direct cal + Platt refit
     scheduler.add_job(
         _etl_recalibrate, "cron",
-        day_of_week="mon", hour=6, minute=0,
+        hour=6, minute=0,
         id="etl_recalibrate",
     )
 

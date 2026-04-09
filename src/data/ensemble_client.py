@@ -56,6 +56,7 @@ def fetch_ensemble(
     city: City,
     forecast_days: int = 8,
     model: str = "ecmwf_ifs025",
+    past_days: int = 0,
 ) -> Optional[dict]:  # Spec §2.1
     """Fetch ensemble forecast from Open-Meteo.
 
@@ -79,6 +80,8 @@ def fetch_ensemble(
         "forecast_days": forecast_days,
         "temperature_unit": temp_unit,
     }
+    if past_days > 0:
+        params["past_days"] = past_days
 
     fetch_time = datetime.now(timezone.utc)
     last_error = None
@@ -175,6 +178,13 @@ def validate_ensemble(result: dict, expected_members: int | None = None) -> bool
     if n < expected_members:
         print(f"  WARN ensemble has {n} members, expected {expected_members}. REJECTED.")
         return False
+    members = result.get("members_hourly")
+    if members is not None:
+        import numpy as np
+        nan_frac = np.isnan(members).mean()
+        if nan_frac > 0.5:
+            print(f"  WARN ensemble has {nan_frac:.0%} NaN values. REJECTED.")
+            return False
     return True
 
 

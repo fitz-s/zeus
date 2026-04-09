@@ -130,16 +130,10 @@ class Bin:
         return "center"
 
 
-def _season_from_date(date_str: str) -> str:
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        return "DJF"
-    elif month in (3, 4, 5):
-        return "MAM"
-    elif month in (6, 7, 8):
-        return "JJA"
-    else:
-        return "SON"
+def _season_from_date(date_str: str, city_name: str = "") -> str:
+    from src.calibration.manager import season_from_date as _sfd, lat_for_city
+    lat = lat_for_city(city_name) if city_name else 90.0
+    return _sfd(date_str, lat=lat)
 
 
 # --- Climatology builder ---

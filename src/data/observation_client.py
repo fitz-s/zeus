@@ -160,7 +160,7 @@ def _fetch_wu_observation(
             params={
                 "apiKey": WU_API_KEY,
                 "units": unit,
-                "hours": 36,
+                "hours": 23,  # WU timeseries max is 23
             },
             timeout=15.0,
         )
@@ -332,15 +332,8 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
         if target_date is None:
             raise ValueError("target_date must be explicit for ASOS→WU offset lookup")
         target_day = _coerce_target_date(target_date)
-        month = target_day.month
-        if month in (12, 1, 2):
-            season = "DJF"
-        elif month in (3, 4, 5):
-            season = "MAM"
-        elif month in (6, 7, 8):
-            season = "JJA"
-        else:
-            season = "SON"
+        from src.calibration.manager import season_from_date
+        season = season_from_date(target_day.isoformat(), lat=city.lat)
 
         conn = get_connection()
         row = conn.execute(

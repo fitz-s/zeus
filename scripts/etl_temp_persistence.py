@@ -20,16 +20,11 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def season_from_date(date_str: str) -> str:
-    """Map date string (YYYY-MM-DD) to season code."""
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        return "DJF"
-    elif month in (3, 4, 5):
-        return "MAM"
-    elif month in (6, 7, 8):
-        return "JJA"
-    return "SON"
+def season_from_date(date_str: str, city_name: str = "") -> str:
+    """Hemisphere-aware season code."""
+    from src.calibration.manager import season_from_date as _sfd, lat_for_city
+    lat = lat_for_city(city_name) if city_name else 90.0
+    return _sfd(date_str, lat=lat)
 
 
 from src.state.db import get_shared_connection as get_connection, init_schema
@@ -110,7 +105,7 @@ def run_etl() -> dict:
                 continue
 
             delta = temp2 - temp1
-            season = season_from_date(date1)
+            season = season_from_date(date1, city_name=city)
             bucket = _classify_delta(delta)
 
             # Compute next-day reversion: if temp went up 5°F, did it come back?

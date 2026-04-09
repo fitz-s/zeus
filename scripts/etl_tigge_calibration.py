@@ -164,7 +164,7 @@ def run_etl() -> dict:
                     bins = _synthesize_bins(values, city.settlement_unit)
 
                 # Generate calibration pairs
-                season = season_from_date(target_date)
+                season = season_from_date(target_date, lat=city.lat)
                 for label, low, high in bins:
                     # Compute P_raw for this bin
                     if low is None and high is not None:

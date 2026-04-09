@@ -24,15 +24,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def season_from_date(date_str: str) -> str:
     """Map date string (YYYY-MM-DD) to season code."""
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        return "DJF"
-    elif month in (3, 4, 5):
-        return "MAM"
-    elif month in (6, 7, 8):
-        return "JJA"
-    return "SON"
+    from src.calibration.manager import season_from_date as _sfd
+    return _sfd(date_str)
 
+
+def season_from_date_with_city(date_str: str, city_name: str) -> str:
+    """Hemisphere-aware season code for a city."""
+    from src.calibration.manager import season_from_date as _sfd, lat_for_city
+    return _sfd(date_str, lat=lat_for_city(city_name))
 
 from src.state.db import get_shared_connection as get_connection, init_schema
 
@@ -170,7 +169,7 @@ def _compute_model_skill(conn):
 
     grouped = defaultdict(list)
     for r in detail_rows:
-        season = season_from_date(r["target_date"])
+        season = season_from_date_with_city(r["target_date"], r["city"])
         key = (r["city"], season, r["source"])
         error = r["forecast_high"] - r["settlement_value"]
         grouped[key].append(error)

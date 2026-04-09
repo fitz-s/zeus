@@ -24,27 +24,43 @@ from src.calibration.store import (
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
 
 
+def lat_for_city(city_name: str) -> float:
+    """Look up latitude for a city by name. Returns 90.0 (NH default) if not found."""
+    from src.config import cities_by_name
+    city = cities_by_name.get(city_name)
+    return city.lat if city else 90.0
+
+
 def bucket_key(cluster: str, season: str) -> str:
     """Canonical bucket key for storage."""
     return f"{cluster}_{season}"
 
 
-def season_from_date(date_str: str) -> str:
-    """Map date string (YYYY-MM-DD) to season code."""
+_SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
+
+
+def season_from_date(date_str: str, lat: float = 90.0) -> str:
+    """Map date string to meteorological season code, hemisphere-aware.
+
+    For Southern Hemisphere (lat < 0), labels are flipped so that
+    DJF always means "cold season" and JJA always means "warm season",
+    regardless of hemisphere.
+    """
     month = int(date_str.split("-")[1])
     if month in (12, 1, 2):
-        return "DJF"
+        season = "DJF"
     elif month in (3, 4, 5):
-        return "MAM"
+        season = "MAM"
     elif month in (6, 7, 8):
-        return "JJA"
+        season = "JJA"
     else:
-        return "SON"
+        season = "SON"
+    return _SH_FLIP[season] if lat < 0 else season
 
 
 def route_to_bucket(city: City, target_date: str) -> str:
     """Route a city + date to its calibration bucket key."""
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat)
     return bucket_key(city.cluster, season)
 
 

@@ -570,7 +570,7 @@ def harvest_settlement(
     Creates one pair per bin. Winning bin gets outcome=1, others get outcome=0.
     Returns: number of pairs created.
     """
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat)
     now = forecast_available_at or datetime.now(timezone.utc).isoformat()
 
     count = 0
@@ -693,10 +693,8 @@ def _settle_positions(
             "direction": pos.direction, "won": won,
             "position_won": bool(exit_price > 0),
             "pnl": round(pnl, 2), "entry_price": pos.entry_price,
-            "exit_price": getattr(closed or pos, "exit_price", settlement_price),
             "p_posterior": pos.p_posterior,
             "outcome": outcome,
-            "exit_reason": getattr(closed or pos, "exit_reason", "SETTLEMENT"),
             "edge_source": pos.edge_source,
             "strategy": pos.strategy,
             "decision_snapshot_id": pos.decision_snapshot_id,

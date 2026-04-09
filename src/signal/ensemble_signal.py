@@ -176,15 +176,9 @@ class EnsembleSignal:
         try:
             from src.state.db import get_shared_connection
 
-            month = target_date.month
-            if month in (12, 1, 2):
-                season = "DJF"
-            elif month in (3, 4, 5):
-                season = "MAM"
-            elif month in (6, 7, 8):
-                season = "JJA"
-            else:
-                season = "SON"
+            from src.calibration.manager import season_from_date
+
+            season = season_from_date(target_date.isoformat(), lat=city.lat)
 
             conn = get_shared_connection()
             row = conn.execute(

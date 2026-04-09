@@ -583,7 +583,7 @@ def evaluate_candidate(
     entry_validations.append("alpha_posterior")
 
     forecast_source = _forecast_source_key(ens_result.get("model"))
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat)
     bias_reference = _load_model_bias_reference(
         conn,
         city_name=city.name,

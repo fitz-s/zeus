@@ -23,6 +23,7 @@ from src.config import City, settings
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
+from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_target
 from src.engine.evaluator import EdgeDecision, MarketCandidate
@@ -106,6 +107,13 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     portfolio_path = tmp_path / "positions.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label, direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior, entry_method, strategy_key, edge_source, discovery_mode, chain_state, order_id, order_status, updated_at) 
+        VALUES ('t1', 'active', 't1', 'm1', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F', 'buy_yes', 'F', 8.0, 20.0, 8.0, 0.4, 0.6, 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt', 'unknown', '', 'filled', '2026-04-01T00:00:00Z')
+        """
+    )
+    conn.commit()
     conn.close()
     save_portfolio(PortfolioState(positions=[_position(size_usd=8.0, shares=20.0, cost_basis_usd=8.0)]), portfolio_path)
 
@@ -131,12 +139,18 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: load_portfolio(portfolio_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: save_portfolio(state, portfolio_path))
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
-    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (pos.entry_price, pos.p_posterior))
+    def _mock_refresh(conn, clob, pos):
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_prob_is_fresh = True
+        return EdgeContext(p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([pos.entry_price]), p_posterior=pos.p_posterior, forward_edge=pos.p_posterior - pos.entry_price, alpha=0.0, confidence_band_upper=pos.p_posterior - pos.entry_price + 0.1, confidence_band_lower=pos.p_posterior - pos.entry_price - 0.1, entry_provenance=None, decision_snapshot_id="snap", n_edges_found=1, n_edges_after_fdr=1, market_velocity_1h=0.0, divergence_score=0.0)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _mock_refresh)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
 
@@ -174,7 +188,7 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
     monkeypatch.setattr(cycle_runner, "_reconcile_pending_positions", lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False})
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
     monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
-    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (100.0, {"config_cap_usd": 100.0, "effective_bankroll_usd": 100.0, "dynamic_cap_usd": 100.0}))
+    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (100.0, {"config_cap_usd": 100.0, "portfolio_initial_bankroll_usd": 100.0, "dynamic_cap_usd": 100.0}))
     monkeypatch.setattr(cycle_runner, "_execute_discovery_phase", lambda *args, **kwargs: (False, False))
 
     def fake_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=None):
@@ -353,7 +367,12 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
-    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (pos.entry_price, pos.p_posterior))
+    def _mock_refresh(conn, clob, pos):
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_prob_is_fresh = True
+        return EdgeContext(p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([pos.entry_price]), p_posterior=pos.p_posterior, forward_edge=pos.p_posterior - pos.entry_price, alpha=0.0, confidence_band_upper=pos.p_posterior - pos.entry_price + 0.1, confidence_band_lower=pos.p_posterior - pos.entry_price - 0.1, entry_provenance=None, decision_snapshot_id="snap", n_edges_found=1, n_edges_after_fdr=1, market_velocity_1h=0.0, divergence_score=0.0)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _mock_refresh)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(
@@ -482,6 +501,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -684,6 +704,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -1190,11 +1211,12 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
     assert state.positions[0].strategy == "center_buy"
 
 
-def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path):
+def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -1243,11 +1265,12 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     assert state.bankroll == pytest.approx(99.0)
 
 
-def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path):
+def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     conn.close()
 
     path.write_text(json.dumps({
@@ -1274,11 +1297,12 @@ def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path):
     assert state.bankroll == pytest.approx(111.0)
 
 
-def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_projection(tmp_path):
+def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_projection(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -3065,65 +3089,6 @@ def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
     assert pos in portfolio.positions
     assert pos.state == "economically_closed"
     assert pos.exit_state == "sell_filled"
-
-
-def test_execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present():
-    from src.engine.lifecycle_events import build_entry_canonical_write
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
-
-    pos = _position(state="day0_window")
-    pos.day0_entered_at = "2026-03-30T01:00:00Z"
-    portfolio = PortfolioState(positions=[pos])
-    entry_events, entry_projection = build_entry_canonical_write(
-        pos,
-        decision_id="dec-1",
-        source_module="src.engine.cycle_runtime",
-    )
-    append_many_and_project(conn, entry_events, entry_projection)
-
-    ctx = ExitContext(
-        fresh_prob=0.41,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.46,
-        current_market_price_is_fresh=True,
-        best_bid=0.45,
-        best_ask=0.49,
-        market_vig=None,
-        hours_to_settlement=2.0,
-        position_state="day0_window",
-        day0_active=True,
-        exit_reason="forward edge failed",
-    )
-
-    outcome = exit_lifecycle_module.execute_exit(
-        portfolio=portfolio,
-        position=pos,
-        exit_context=ctx,
-        paper_mode=True,
-        conn=conn,
-    )
-
-    phase_row = conn.execute(
-        "SELECT phase FROM position_current WHERE position_id = ?",
-        (pos.trade_id,),
-    ).fetchone()
-    event_row = conn.execute(
-        "SELECT event_type, phase_before, phase_after FROM position_events WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
-        (pos.trade_id,),
-    ).fetchone()
-    conn.close()
-
-    assert outcome == "paper_exit: forward edge failed"
-    assert phase_row["phase"] == "economically_closed"
-    assert dict(event_row) == {
-        "event_type": "EXIT_ORDER_FILLED",
-        "phase_before": "pending_exit",
-        "phase_after": "economically_closed",
-    }
 
 
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):

@@ -31,21 +31,33 @@ from src.types import Bin
 TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"
 
 # Cities where T+24h at 00Z is a poor proxy for daily max
-OVERNIGHT_CITIES = {"London", "Paris", "Seoul", "Shanghai", "Tokyo",
-                    "Munich", "Wellington", "Buenos Aires", "Hong Kong", "Shenzhen"}
+OVERNIGHT_CITIES = {
+    "Ankara", "Beijing", "Buenos Aires", "Chengdu", "Chongqing",
+    "Hong Kong", "Istanbul", "London", "Lucknow", "Madrid",
+    "Mexico City", "Milan", "Moscow", "Munich", "Paris", "Sao Paulo",
+    "Seoul", "Shanghai", "Shenzhen", "Singapore", "Taipei",
+    "Tel Aviv", "Tokyo", "Toronto", "Warsaw", "Wellington", "Wuhan",
+}
 
 
 def _resolve_city_name(dirname: str) -> str | None:
     """Map TIGGE directory name to Zeus city name."""
     name_map = {
-        "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
-        "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
-        "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
-        "london": "London", "paris": "Paris", "austin": "Austin",
-        "denver": "Denver", "houston": "Houston",
-        "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
-        "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
-        "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
+        "ankara": "Ankara", "atlanta": "Atlanta", "austin": "Austin",
+        "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+        "chengdu": "Chengdu", "chicago": "Chicago", "chongqing": "Chongqing",
+        "dallas": "Dallas", "denver": "Denver",
+        "hong-kong": "Hong Kong", "houston": "Houston", "istanbul": "Istanbul",
+        "london": "London", "los-angeles": "Los Angeles", "lucknow": "Lucknow",
+        "madrid": "Madrid", "mexico-city": "Mexico City", "miami": "Miami",
+        "milan": "Milan", "moscow": "Moscow", "munich": "Munich",
+        "nyc": "NYC", "paris": "Paris",
+        "san-francisco": "San Francisco", "sao-paulo": "Sao Paulo",
+        "seattle": "Seattle", "seoul": "Seoul", "shanghai": "Shanghai",
+        "shenzhen": "Shenzhen", "singapore": "Singapore",
+        "taipei": "Taipei", "tel-aviv": "Tel Aviv", "tokyo": "Tokyo",
+        "toronto": "Toronto", "warsaw": "Warsaw",
+        "wellington": "Wellington", "wuhan": "Wuhan",
     }
     return name_map.get(dirname)
 
@@ -192,12 +204,24 @@ def _get_bins_for_settlement(conn, city: str, target_date: str) -> list[Bin]:
     if not rows:
         return []
 
+    # Resolve city name to City object for settlement_unit
+    city_obj = cities_by_name.get(city)
+    default_unit = city_obj.settlement_unit if city_obj else "F"
+
     bins = []
     for r in rows:
         low, high = _parse_temp_range(r["range_label"])
         if low is None and high is None:
             continue
-        bins.append(Bin(low=low, high=high, label=r["range_label"], unit=city.settlement_unit))
+        # Infer unit from label text: market labels carry °F or °C suffix
+        label = r["range_label"]
+        if "°C" in label or "°c" in label:
+            label_unit = "C"
+        elif "°F" in label or "°f" in label:
+            label_unit = "F"
+        else:
+            label_unit = default_unit
+        bins.append(Bin(low=low, high=high, label=label, unit=label_unit))
 
     # Sort by boundary
     def sort_key(b):
@@ -219,7 +243,7 @@ def _generate_cal_pairs(conn, city, city_name, target_date, bins, p_raw) -> int:
         return 0
 
     winning = settlement["winning_bin"]
-    season = season_from_date(target_date)
+    season = season_from_date(target_date, lat=city.lat if city else 90.0)
     cluster = city.cluster if city else "Other"
 
     count = 0

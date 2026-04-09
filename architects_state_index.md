@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE freeze`
+- Last updated by: `Codex VERIFY-ETL-RECALIBRATE-CONTAMINATION freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Active packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
 - Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
+- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Cherry-pick accepted commit `c33ab3f` onto `Architects` cleanly when ready.
-2. Keep the packet bounded to close-path trace convergence until transport is complete.
-3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+1. Cherry-pick accepted commit `0c9a348` onto `Architects` cleanly when ready.
+2. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+3. Freeze the next leftover-family packet only after transport or an explicit branch-local decision.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE.md`
+5. `work_packets/VERIFY-ETL-RECALIBRATE-CONTAMINATION.md`

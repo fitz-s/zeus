@@ -22,16 +22,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.state.db import get_shared_connection as get_connection, init_schema
 
 
-def season_from_date(date_str: str) -> str:
-    """Map date string (YYYY-MM-DD) to season code."""
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        return "DJF"
-    if month in (3, 4, 5):
-        return "MAM"
-    if month in (6, 7, 8):
-        return "JJA"
-    return "SON"
+def season_from_date(date_str: str, city_name: str = "") -> str:
+    """Hemisphere-aware season code."""
+    from src.calibration.manager import season_from_date as _sfd, lat_for_city
+    lat = lat_for_city(city_name) if city_name else 90.0
+    return _sfd(date_str, lat=lat)
 
 
 def _obs_hour(local_timestamp: str) -> int:
@@ -84,7 +79,7 @@ def run_etl() -> dict:
     per_day = defaultdict(list)
 
     for (city, target_date, hour), source_samples in canonical_day_hour.items():
-        season = season_from_date(target_date)
+        season = season_from_date(target_date, city_name=city)
         month = int(target_date.split("-")[1])
         temp = float(np.mean([sample["temp_current"] for sample in source_samples]))
         running_max_candidates = [

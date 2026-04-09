@@ -15,14 +15,19 @@ from src.types import Day0TemporalContext, ObservationInstant, SolarDay
 logger = logging.getLogger(__name__)
 
 
-def season_from_month(month: int) -> str:
+_SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
+
+
+def season_from_month(month: int, lat: float = 90.0) -> str:
     if month in (12, 1, 2):
-        return "DJF"
+        season = "DJF"
     elif month in (3, 4, 5):
-        return "MAM"
+        season = "MAM"
     elif month in (6, 7, 8):
-        return "JJA"
-    return "SON"
+        season = "JJA"
+    else:
+        season = "SON"
+    return _SH_FLIP[season] if lat < 0 else season
 
 
 def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
@@ -113,7 +118,9 @@ def get_peak_hour_context(
       2. diurnal_curves.p_high_set (seasonal) — ~120 days per cell
       3. heuristic slope — cities without openmeteo_archive daily coverage
     """
-    season = season_from_month(target_date.month)
+    from src.calibration.manager import lat_for_city
+    city_lat = lat_for_city(city_name)
+    season = season_from_month(target_date.month, lat=city_lat)
     month = target_date.month
     solar_day = get_solar_day(city_name, target_date)
 
@@ -197,7 +204,8 @@ def post_peak_confidence(
         0.3 - 0.7: near peak, uncertain
         0.7 - 1.0: post-peak, observation dominates ENS
     """
-    season = season_from_month(target_date.month)
+    from src.calibration.manager import lat_for_city
+    season = season_from_month(target_date.month, lat=lat_for_city(city_name))
     month = target_date.month
     solar_day = get_solar_day(city_name, target_date)
 

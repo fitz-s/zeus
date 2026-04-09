@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.calibration.manager import season_from_date
+from src.calibration.manager import season_from_date, lat_for_city
 from src.state.db import get_shared_connection as get_connection, init_schema
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
@@ -61,7 +61,7 @@ def run_etl() -> dict:
     # Group by city×season
     grouped = defaultdict(list)
     for p in pairs:
-        season = season_from_date(p["target_date"])
+        season = season_from_date(p["target_date"], lat=lat_for_city(p["city"]))
         key = (p["city"], season)
         offset = p["wu_high"] - p["asos_high"]
         # Reject extreme outliers (> 10° difference likely unit contamination)
