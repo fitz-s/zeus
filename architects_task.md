@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION acceptance`
+- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -90,11 +90,11 @@ Preserve the accepted truth-repair mainline while integrating the current Archit
 - [x] `tests/test_runtime_guards.py` merged without dropping truth economic-close assertions
 - [x] targeted ETL/runtime tests pass
 - [x] follow-up data-expansion gaps recorded explicitly
-- [ ] post-close critic review passed
-- [ ] post-close verifier review passed
+- [x] post-close critic review passed
+- [x] post-close verifier review passed
 
 ## Next required action
 
-1. Run the post-close critic review for this accepted integration packet.
-2. Run the post-close verifier review for this accepted integration packet.
-3. Hand the explicit data-expansion follow-up gaps to the responsible data-lane owner instead of widening this packet.
+1. Hand the explicit data-expansion follow-up gaps to the responsible data-lane owner instead of widening this packet.
+2. Keep truth-owned files on the accepted repair version unless a new packet explicitly authorizes change.
+3. Do not freeze a new packet on this branch until the follow-up gaps are explicitly acknowledged or superseded.

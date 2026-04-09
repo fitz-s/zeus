@@ -33,13 +33,32 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` (accepted locally in worktree)
 - Current active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Current packet status: `accepted locally / post-close review pending`
+- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted packet still requires the mandatory post-close critic + verifier
-  - explicit expansion follow-up gaps still need handoff to the data-lane owner after post-close
+  - explicit expansion follow-up gaps still need handoff to the data-lane owner before freezing the next packet
 
 ## Durable timeline
+
+## [2026-04-09 13:15 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close passed
+- Author: `Architects integration lane`
+- Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
+- Status delta:
+  - post-close critic and verifier completed successfully on accepted HEAD `d1f8861`
+  - control surfaces now align with repo truth
+- Basis / evidence:
+  - native `critic` subagent `Fermat` -> `PASS` on `d1f8861`
+  - native `verifier` subagent `Socrates` -> `PASS` on `d1f8861`
+  - packet evidence already records the preserved expansion files, truth-owned files, and explicit follow-up gaps
+- Decisions frozen:
+  - packet remains truthful about unresolved TIGGE coverage/fan-out follow-up debt
+  - truth-repair files remain authoritative and were not widened in this integration slice
+- Open uncertainties:
+  - the data-lane owner still needs to finish the explicit TIGGE coverage and fan-out follow-up work
+- Next required action:
+  - hand the remaining expansion follow-up gaps to the data-lane owner, then freeze the next packet only if warranted
+- Owner:
+  - Architects integration lane
 
 ## [2026-04-09 12:55 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION accepted locally
 - Author: `Architects integration lane`
