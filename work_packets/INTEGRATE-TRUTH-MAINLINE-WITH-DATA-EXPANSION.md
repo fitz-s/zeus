@@ -117,3 +117,5 @@ evidence_required:
   - remaining expansion follow-up gaps are now explicit, not silent: TIGGE maps still cover 21/38 configured cities and the expanded daily fan-out still needs broader runtime proof
 - pre-close critic review: native `critic` subagent `Ramanujan` -> `PASS` on `8f0a5a1` after confirming `httpx` dependency alignment and explicit TIGGE coverage-gap reporting
 - pre-close verifier review: native `verifier` subagent `Socrates` -> `PASS` on `8f0a5a1` after confirming test/compile evidence and non-overclaiming posture
+- post-close critic review: native `critic` subagent `Fermat` -> `PASS` on `d1f8861` after confirming the packet stays truthful about remaining expansion debt
+- post-close verifier review: native `verifier` subagent `Socrates` -> `PASS` on `d1f8861` after confirming the control surfaces, packet evidence, and test claims match repo truth

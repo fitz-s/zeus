@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION acceptance`
+- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Active packet state: `accepted locally / post-close review pending`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Run the required post-close critic + verifier on accepted `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`.
-2. After post-close passes, hand the explicit data-expansion follow-up gaps to the data-lane owner.
-3. Keep truth files in `src/state/**`, close-path engine/execution seams, and truth tests on the accepted repair version unless a new packet explicitly authorizes change.
+1. Hand the explicit data-expansion follow-up gaps to the data-lane owner.
+2. Keep truth files in `src/state/**`, close-path engine/execution seams, and truth tests on the accepted repair version unless a new packet explicitly authorizes change.
+3. Freeze the next packet only after the follow-up gaps are explicitly acknowledged or superseded.
 
 ## Current out-of-scope dirt
 
