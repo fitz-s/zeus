@@ -32,13 +32,33 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
-- Current active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
+- Current active packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - deeper comparator/shadow and settlement-authority drift remain unresolved follow-up work
+  - unsuffixed `zeus.db` still reports `stale_legacy_fallback` because legacy timestamps shadow `position_current.updated_at`
+  - deeper fallback-reader and output-layer parity drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 14:05 America/Chicago] BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW re-frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-PORTFOLIO-LEGACY-TIMESTAMP-SHADOW`
+- Status delta:
+  - current active packet re-frozen after the mode-aware probe and stage-event dedupe packets cleared the earlier immediate seams
+- Basis / evidence:
+  - accepted mode-db probe packet removed the wrong-path fallback, and accepted stage-event dedupe packet removed the first active counting seam
+  - fresh verification still shows unsuffixed `zeus.db` returns `stale_legacy_fallback` while the mode-correct paper DB is healthy
+  - active stale ids remain `trade-1`, `rt1`, and `75c98026-cd5`
+- Decisions frozen:
+  - return to the comparator/shadow seam as the next deeper portfolio-truth packet
+  - keep fallback-reader cleanup and output-layer parity assertions explicitly out of scope here
+- Open uncertainties:
+  - implementation may prove a later output-layer or fallback-reader packet is immediately needed afterward, but this packet should not assume that yet
+- Next required action:
+  - implement the comparator/shadow fix and lock it with targeted truth-surface tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 13:42 America/Chicago] BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE post-close passed
 - Author: `Architects mainline lead`
