@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW post-close sync`
+- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- Active packet state: `post_close_passed / next_freeze_allowed`
+- Active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next bounded packet.
-2. Keep runtime artifact refresh and downstream parity work out of this accepted packet unless a new packet is frozen.
-3. Preserve the distinction between strict 24h/7d reference semantics and broader runtime artifact freshness.
+1. Implement the bounded paper runtime artifact refresh entrypoint.
+2. Keep core truth math and broader parity redesign out of this packet unless a new packet is frozen.
+3. Preserve the distinction between artifact refresh and deeper consumer/output parity work.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW.md`
+5. `work_packets/REFRESH-PAPER-RUNTIME-ARTIFACTS.md`

@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW post-close sync`
+- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- State: `POST_CLOSE_PASSED / NEXT_FREEZE_ALLOWED`
+- Packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of silently falling back to an arbitrarily older consistent slice.
+Add a bounded, reproducible refresh path for paper runtime artifacts so stale persisted snapshots can be regenerated from current clean-branch truth.
 
 ## Allowed files
 
-- `work_packets/BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW.md`
+- `work_packets/REFRESH-PAPER-RUNTIME-ARTIFACTS.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/riskguard/riskguard.py`
-- `tests/test_riskguard.py`
+- `scripts/refresh_paper_runtime_artifacts.py`
+- `tests/test_runtime_artifact_refresh.py`
 
 ## Forbidden files
 
@@ -43,6 +43,7 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 - `architecture/**`
 - `src/state/**`
 - `src/observability/**`
+- `src/riskguard/**`
 - `src/control/**`
 - `src/supervisor_api/**`
 - `migrations/**`
@@ -50,8 +51,9 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 - `src/engine/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_truth_surface_health.py`
-- `tests/test_pnl_flow_and_audit.py`
-- `tests/test_runtime_guards.py`
+ - `tests/test_pnl_flow_and_audit.py`
+ - `tests/test_runtime_guards.py`
+ - `tests/test_riskguard.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -59,8 +61,8 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 
 ## Non-goals
 
-- no runtime artifact refresh in this packet
-- no `src/observability/status_summary.py` parity work yet
+- no core truth math changes in this packet
+- no `src/observability/status_summary.py` parity redesign yet
 - no reporting/dashboard/schema work
 - no schema redesign
 - no data-expansion follow-up work
@@ -68,19 +70,20 @@ Make trailing 24h/7d loss use a trustworthy near-cutoff reference row instead of
 
 ## Current blocker state
 
-- post-close review completed with no blocker-level contradictions on the accepted trailing-loss boundary
-- fresh direct probe still shows 24h reference degradation (`insufficient_history`) rather than accepting a row `13.73h` older than the cutoff
-- runtime artifact refresh remains explicit follow-up work and must be handled by a new packet instead of widening this accepted boundary
+- clean-branch direct truth probes are coherent, but persisted paper artifacts still preserve old snapshots
+- `risk_state-paper.db` still reports `portfolio_truth_source=working_state_fallback`, `settlement_sample_size=22`, `daily_loss=13.26`
+- `status_summary-paper.json` still follows the stale persisted risk snapshot instead of a refreshed one
 
 ## Immediate checklist
 
-- [x] `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` frozen
-- [x] too-old trailing-loss reference reproduced with packet-bounded evidence
-- [x] trailing loss refuses references outside the allowed freshness window
-- [x] packet-bounded trailing-loss tests pass
-- [x] runtime artifact refresh stays explicit follow-up work
+- [x] `REFRESH-PAPER-RUNTIME-ARTIFACTS` frozen
+- [ ] stale paper artifacts reproduced with packet-bounded evidence
+- [ ] bounded refresh entrypoint implemented
+- [ ] packet-bounded refresh tests pass
+- [ ] broader parity work remains explicit
 
 ## Next required action
 
-1. Freeze the next bounded packet.
-2. Keep `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` closed unless a new contradiction reopens it.
+1. Implement the bounded paper runtime artifact refresh entrypoint.
+2. Lock the refresh sequence with packet-bounded tests.
+3. If implementation proves a core reader/writer still must change, stop and freeze that deeper packet instead of widening silently.

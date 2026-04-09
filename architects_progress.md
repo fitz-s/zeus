@@ -32,14 +32,36 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` (accepted locally / post-close passed)
-- Current active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- Current packet status: `post-close passed / next freeze allowed`
+- Current active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - runtime artifact refresh remains a separate follow-up seam after the strict reference-window repair
-  - downstream parity work remains unresolved outside this accepted boundary
+  - persisted paper artifacts still preserve old snapshots even though clean-branch direct truth probes are coherent
+  - downstream parity work remains unresolved outside the new refresh packet
 
 ## Durable timeline
+
+## [2026-04-09 18:23 America/Chicago] REFRESH-PAPER-RUNTIME-ARTIFACTS frozen
+- Author: `Architects mainline lead`
+- Packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted strict trailing-loss packet completed post-close review without reopening
+  - persisted paper artifacts remain stale:
+    - `risk_state-paper.db` still shows `portfolio_truth_source=working_state_fallback`, `settlement_sample_size=22`, `daily_loss=13.26`
+    - `status_summary-paper.json` still reflects the old persisted risk snapshot
+  - direct clean-branch truth probes are already coherent:
+    - `load_portfolio(state/positions-paper.json)` -> `positions=12`, `recent_exits=19`, `recent_exit_pnl=-13.03`
+- Decisions frozen:
+  - the next bounded seam is reproducible paper artifact refresh, not another core truth-math patch
+  - keep core reader/writer redesign and broader parity work explicitly out of this packet
+- Open uncertainties:
+  - implementation must choose the narrowest safe refresh entrypoint and execution order
+- Next required action:
+  - implement the bounded artifact refresh entrypoint and lock it with packet-bounded tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 18:16 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW post-close passed
 - Author: `Architects mainline lead`
