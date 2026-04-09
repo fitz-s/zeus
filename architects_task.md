@@ -5,8 +5,8 @@ Purpose:
 - exactly one live packet at a time
 
 Metadata:
-- Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS freeze`
+- Last updated: `2026-04-09 America/Chicago`
+- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,32 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
 - State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Stop `center_buy` from entering the ultra-low-price `buy_yes` cohort that the accepted diagnosis isolated as the current settled-loss cluster.
+Preserve the accepted truth-repair mainline while integrating the current Architects data-expansion lane, keeping additive collection/scheduling/calibration expansion and rejecting local regressions that would weaken accepted truth behavior.
 
 ## Allowed files
 
-- `work_packets/REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS.md`
+- `work_packets/INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/engine/evaluator.py`
-- `tests/test_center_buy_repair.py`
+- `config/cities.json`
+- `src/main.py`
+- `scripts/etl_tigge_ens.py`
+- `src/data/observation_client.py`
+- `scripts/backfill_hourly_openmeteo.py`
+- `scripts/backfill_wu_daily_all.py`
+- `scripts/etl_tigge_direct_calibration.py`
+- `scripts/migrate_rainstorm_full.py`
+- `src/data/wu_daily_collector.py`
+- `tests/test_etl_recalibrate_chain.py`
+- `tests/test_runtime_guards.py`
 
 ## Forbidden files
 
@@ -42,17 +51,17 @@ Stop `center_buy` from entering the ultra-low-price `buy_yes` cohort that the ac
 - `docs/architecture/**`
 - `architecture/**`
 - `src/control/**`
-- `src/control/**`
 - `src/observability/**`
 - `src/riskguard/**`
 - `src/supervisor_api/**`
 - `migrations/**`
 - `src/state/**`
+- `src/engine/lifecycle_events.py`
 - `src/execution/**`
-- `tests/test_runtime_guards.py`
 - `tests/test_architecture_contracts.py`
 - `tests/test_pnl_flow_and_audit.py`
 - `tests/test_center_buy_diagnosis.py`
+- `tests/test_center_buy_repair.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -60,33 +69,30 @@ Stop `center_buy` from entering the ultra-low-price `buy_yes` cohort that the ac
 
 ## Non-goals
 
-- no ETL/recalibration work
+- no fresh truth-path rewrites in `src/state/**`
 - no broad reporting/dashboard work
 - no risk/status/operator summary rewrites
 - no schema redesign
-- no non-center_buy behavior changes
+- no new strategy behavior work
 - no team runtime launch
 
 ## Current blocker state
 
-- accepted diagnosis isolated the current `center_buy` loss cluster to `8` settled `buy_yes` losses totaling `-9.0`
-- all diagnosed losses sit in `<= 0.02` entry-price buckets
-- packet must stay on this one strategy-specific cohort only
+- live Architects data expansion currently exists only as a dirty local lane mixed with some regressions against accepted truth-repair files
+- the merge must preserve expansion files and keep truth-repair files authoritative
+- packet must stay off fresh truth rewrites and focus on bounded integration only
 
 ## Immediate checklist
 
-- [x] `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` frozen
-- [x] repair implemented
-- [x] adversarial non-center_buy safety test added
-- [x] targeted tests pass
-- [x] pre-close critic review passed
-- [x] pre-close verifier review passed
-- [x] packet accepted locally
-- [x] post-close third-party critic review passed
-- [x] post-close third-party verifier review passed
+- [x] `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` frozen
+- [ ] data-expansion files ported onto the accepted truth tip
+- [ ] `src/main.py` integrated without losing truth-safe subprocess behavior
+- [ ] `tests/test_runtime_guards.py` merged without dropping truth economic-close assertions
+- [ ] targeted ETL/runtime tests pass
+- [ ] follow-up data-expansion gaps recorded explicitly
 
 ## Next required action
 
-1. Decide whether to transport accepted commits back to `Architects` or continue branch-local sequencing.
-2. Freeze no further packet on this branch until that transport/supersession decision is explicit.
-3. Do not widen into other strategy behavior or runtime logic outside a new frozen packet.
+1. Port the additive Architects data-expansion files onto this accepted truth-repair branch.
+2. Merge `src/main.py` and `tests/test_runtime_guards.py` carefully at hunk level.
+3. Run targeted ETL/runtime checks and then record any remaining expansion follow-up gaps instead of widening further.

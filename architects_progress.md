@@ -32,14 +32,35 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` (accepted locally in worktree)
-- Current active packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
-- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
+- Current active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
+- Current packet status: `frozen / integration in progress`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - the accepted diagnosis and repair still need transport back to the live `Architects` branch or an explicit branch-local supersession decision
-  - the repair remains hypothesis-driven and should be checked against fresh runtime truth before widening further
+  - the live Architects data-expansion lane exists only as dirty local changes and must be merged without regressing accepted truth files
+  - expansion-follow-up gaps discovered during merge must be recorded explicitly instead of silently accepted
 
 ## Durable timeline
+
+## [2026-04-09 12:10 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION frozen
+- Author: `Architects integration lane`
+- Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted truth-repair tip `eecbcb9` is the cleanest integrated mainline boundary available before transport
+  - live Architects currently contains real data-expansion changes in `config/cities.json`, `src/main.py`, ETL scripts, and WU collection surfaces
+  - live Architects also contains local regressions against accepted truth files (`src/state/db.py`, close-path engine/execution surfaces, and truth tests), so wholesale transport would be dishonest
+  - bounded read-only merge analysis isolated the true merge set to additive expansion files plus small `src/main.py` and `tests/test_runtime_guards.py` adaptations
+- Decisions frozen:
+  - keep truth-repair files authoritative
+  - preserve the additive data-expansion lane
+  - merge `tests/test_runtime_guards.py` selectively so runtime adaptations land without dropping the economic-close truth test
+- Open uncertainties:
+  - whether expansion follow-up gaps remain after integration still needs post-merge verification
+- Next required action:
+  - port the expansion files, run targeted checks, and record any follow-up gaps explicitly
+- Owner:
+  - Architects integration lane
 
 ## [2026-04-08 05:40 America/Chicago] REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS accepted locally and passed post-close gate in worktree
 - Author: `Architects clean worktree lane`

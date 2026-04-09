@@ -192,12 +192,24 @@ def _get_bins_for_settlement(conn, city: str, target_date: str) -> list[Bin]:
     if not rows:
         return []
 
+    # Resolve city name to City object for settlement_unit
+    city_obj = cities_by_name.get(city)
+    default_unit = city_obj.settlement_unit if city_obj else "F"
+
     bins = []
     for r in rows:
         low, high = _parse_temp_range(r["range_label"])
         if low is None and high is None:
             continue
-        bins.append(Bin(low=low, high=high, label=r["range_label"], unit=city.settlement_unit))
+        # Infer unit from label text: market labels carry °F or °C suffix
+        label = r["range_label"]
+        if "°C" in label or "°c" in label:
+            label_unit = "C"
+        elif "°F" in label or "°f" in label:
+            label_unit = "F"
+        else:
+            label_unit = default_unit
+        bins.append(Bin(low=low, high=high, label=label, unit=label_unit))
 
     # Sort by boundary
     def sort_key(b):

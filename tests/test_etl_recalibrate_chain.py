@@ -21,6 +21,7 @@ REPRESENTATIVE_SHARED_SCRIPTS = (
     "scripts/etl_observation_instants.py",
     "scripts/etl_diurnal_curves.py",
     "scripts/etl_temp_persistence.py",
+    "scripts/etl_tigge_direct_calibration.py",
     "scripts/refit_platt.py",
     "scripts/etl_tigge_ens.py",
     "scripts/etl_tigge_calibration.py",
@@ -56,14 +57,16 @@ def test_etl_recalibrate_launches_expected_scripts_via_repo_venv(monkeypatch):
     main_module._etl_recalibrate()
 
     assert [Path(call[0][1]).name for call in calls] == [
+        "migrate_rainstorm_full.py",
         "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
         "etl_hourly_observations.py",
+        "etl_tigge_direct_calibration.py",
         "refit_platt.py",
         "run_replay.py",
     ]
-    for cmd, capture_output, text, timeout in calls[:5]:
+    for cmd, capture_output, text, timeout in calls[:7]:
         assert cmd[0] == str(EXPECTED_SUBPROCESS_PYTHON)
         assert Path(cmd[1]).is_absolute()
         assert capture_output is True
