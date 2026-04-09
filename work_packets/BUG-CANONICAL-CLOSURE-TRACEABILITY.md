@@ -32,7 +32,7 @@ required_reads:
   - AGENTS.md
   - src/state/AGENTS.md
   - src/engine/AGENTS.md
-  - docs/session_2026_04_07_final_state.md
+  - docs/archives/sessions/session_2026_04_07_final_state.md
   - src/state/db.py
   - src/execution/harvester.py
   - src/state/lifecycle_manager.py

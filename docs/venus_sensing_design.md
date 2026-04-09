@@ -148,7 +148,7 @@ The 8 checks map directly to the 8 translation boundaries in the truth surface c
 
 ### Pipeline Trace Reference
 
-`docs/pipeline_trace.md` contains the complete data flow trace for a single trade lifecycle — every function call, every DB/file/API read and write, with explicit paper/live divergence markers. Venus should reference this document when reasoning about where a data inconsistency could originate. The trace covers 8 phases:
+`docs/archives/traces/pipeline_trace.md` contains the complete data flow trace for a single trade lifecycle — every function call, every DB/file/API read and write, with explicit paper/live divergence markers. Venus should reference this document when reasoning about where a data inconsistency could originate. The trace covers 8 phases:
 
 1. Signal Discovery (data sources, scheduler)
 2. Edge Calculation (p_raw → p_posterior pipeline)

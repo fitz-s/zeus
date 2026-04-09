@@ -4824,7 +4824,7 @@ Archive policy:
 - Status delta:
   - current active packet frozen
 - Basis / evidence:
-  - `docs/session_2026_04_07_final_state.md` flagged `monitor_incomplete_exit_context=11` as an unresolved blocker candidate
+  - `docs/archives/sessions/session_2026_04_07_final_state.md` flagged `monitor_incomplete_exit_context=11` as an unresolved blocker candidate
   - current repo truth still routes the monitoring seam through a legacy single-DB connection pattern
   - the runtime question explicitly asks whether monitoring uses `get_trade_connection_with_shared()` or only the older seam
 - Decisions frozen:
@@ -4969,7 +4969,7 @@ Archive policy:
 - Status delta:
   - current active packet frozen
 - Basis / evidence:
-  - `docs/session_2026_04_07_final_state.md` still flags `effective_bankroll=$579.58 vs wallet=$93.68` as unresolved and separately flags RiskGuard/status-summary bankroll semantics drift
+  - `docs/archives/sessions/session_2026_04_07_final_state.md` still flags `effective_bankroll=$579.58 vs wallet=$93.68` as unresolved and separately flags RiskGuard/status-summary bankroll semantics drift
   - `src/engine/cycle_runtime.py::entry_bankroll_for_cycle()` still derives paper entry bankroll from `portfolio.effective_bankroll` alone (`142-153`)
   - `src/riskguard/riskguard.py::_load_riskguard_portfolio_truth()` still rebuilds a fresh `PortfolioState` with reset bankroll/baseline/recent-exit semantics (`73-97`)
   - `src/observability/status_summary.py` still fabricates `effective_bankroll` from `total_pnl` when risk details are missing and still drops regime scoping by passing `not_before=None` (`221-259`)
@@ -5087,7 +5087,7 @@ Archive policy:
 - Status delta:
   - current active packet frozen
 - Basis / evidence:
-  - `docs/session_2026_04_07_final_state.md` still flags canonical-only short-circuiting in `log_execution_report()` / `log_settlement_event()` before `execution_fact` / `outcome_fact` writes
+  - `docs/archives/sessions/session_2026_04_07_final_state.md` still flags canonical-only short-circuiting in `log_execution_report()` / `log_settlement_event()` before `execution_fact` / `outcome_fact` writes
   - `src/execution/harvester.py` explicitly permits `pending_exit + backoff_exhausted` positions to settle while `src/state/lifecycle_manager.py::enter_settled_runtime_state()` does not legalize that transition
   - existing tests already expose the touched seam: durable execution/outcome fact tests in `tests/test_db.py`, canonical bootstrap behavior in `tests/test_architecture_contracts.py`, and `backoff_exhausted` monitor/settlement tests in `tests/test_runtime_guards.py`
 - Decisions frozen:

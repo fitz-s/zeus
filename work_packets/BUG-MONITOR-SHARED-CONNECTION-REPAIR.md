@@ -33,7 +33,7 @@ required_reads:
   - .claude/CLAUDE.md
   - src/engine/AGENTS.md
   - src/state/AGENTS.md
-  - docs/session_2026_04_07_final_state.md
+  - docs/archives/sessions/session_2026_04_07_final_state.md
   - docs/zeus_FINAL_spec.md
   - docs/isolation_design.md
   - src/engine/cycle_runner.py

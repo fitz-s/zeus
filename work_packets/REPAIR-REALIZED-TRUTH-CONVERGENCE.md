@@ -30,7 +30,7 @@ required_reads:
   - architecture/negative_constraints.yaml
   - AGENTS.md
   - src/state/AGENTS.md
-  - docs/session_2026_04_07_final_state.md
+  - docs/archives/sessions/session_2026_04_07_final_state.md
   - src/riskguard/riskguard.py
   - src/observability/status_summary.py
   - tests/test_riskguard.py

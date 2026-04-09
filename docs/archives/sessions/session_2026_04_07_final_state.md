@@ -12,7 +12,7 @@ Before reading this document, read in order:
 2. `AGENTS.md` u2014 repo governance and agent rules
 3. `docs/isolation_design.md` u2014 the physical DB separation design
 4. `docs/ground_truth_pnl.md` u2014 the verified P&L with full evidence chain
-5. `docs/pipeline_trace.md` u2014 complete data flow for one trade lifecycle
+5. `docs/archives/traces/pipeline_trace.md` u2014 complete data flow for one trade lifecycle
 
 Key concepts:
 - **zeus.db** = LEGACY shared database (being replaced)
@@ -180,7 +180,7 @@ All 47 `get_connection()` call sites classified and migrated:
 - `state/venus_sensing_report.json` u2014 structured summary of Zeus state for Venus consumption
 - `state/venus_antibody_queue.json` u2014 queue of antibody events Venus can act on
 - `docs/venus_sensing_design.md` u2014 protocol for Venus to read Zeus state
-- `docs/venus_sensing_audit_report.md` u2014 audit of sensing accuracy
+- `docs/archives/reports/venus_sensing_audit_report.md` u2014 audit of sensing accuracy
 
 ### Relationship checks that exist
 - P&L computed from `outcome_fact` (settled) + `recent_exits` (deduped)

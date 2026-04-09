@@ -38,7 +38,7 @@ required_reads:
   - src/riskguard/riskguard.py
   - tests/test_riskguard.py
   - tests/test_pnl_flow_and_audit.py
-  - docs/adversarial_test_results.md
+  - docs/archives/results/adversarial_test_results.md
 files_may_change:
   - work_packets/RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY.md
   - architects_progress.md

@@ -39,7 +39,7 @@ Metadata:
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
 - `docs/archives/architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
-- `next_round_handoff.md` has unrelated local modifications and stays out of scope
+- `docs/archives/handoffs/next_round_handoff_p4_start.md` has unrelated local modifications and stays out of scope
 - `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
 - local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
