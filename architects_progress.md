@@ -31,15 +31,45 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` (accepted locally / post-close passed)
+- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW` (accepted locally / post-close pending)
 - Current active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - trailing-loss reference selection still allows an arbitrarily older consistent row, violating now-minus-24h semantics
   - runtime artifact refresh remains a separate follow-up seam after the strict reference-window repair
+  - downstream parity work remains unresolved outside this accepted boundary
 
 ## Durable timeline
+
+## [2026-04-09 18:06 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
+- Status delta:
+  - strict trailing-loss reference-window packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `2ec0ffa` -> `Freeze the strict trailing-loss reference-window repair`
+  - commit `07ae3f3` -> `Make trailing-loss references honor the requested lookback window`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `python3 -m py_compile src/riskguard/riskguard.py tests/test_riskguard.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py -k 'TrailingLossSemantics'` -> `7 passed, 38 deselected`
+  - direct live-state probe with current code:
+    - 24h reference -> `insufficient_history`
+    - 7d reference -> `inconsistent_history`
+    - the previous row `6888` is no longer accepted as a 24h reference even though it is `13.73h` older than cutoff
+  - native `critic` subagent `Parfit` -> `PASS`
+  - native `verifier` subagent `Kepler` -> `PASS`
+- Decisions frozen:
+  - trailing loss no longer manufactures a 24h/7d figure from an arbitrarily older reference row
+  - when no near-cutoff trustworthy row exists, the result degrades explicitly instead
+  - runtime artifact refresh remains explicit follow-up work rather than being silently folded into this packet
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 17:59 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW frozen
 - Author: `Architects mainline lead`
