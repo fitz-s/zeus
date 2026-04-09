@@ -32,14 +32,33 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING` (accepted locally / post-close passed)
-- Current active packet: `BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING`
-- Current packet status: `post-close passed / next freeze allowed`
+- Current active packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - downstream consumers and output layers may still hold older assumptions about `recent_exits` semantics after this loader repair
-  - broader realized-PnL/status parity remains unresolved follow-up work outside this accepted boundary
+  - trailing-loss reference selection still allows an arbitrarily older consistent row, violating now-minus-24h semantics
+  - runtime artifact refresh remains a separate follow-up seam after the strict reference-window repair
 
 ## Durable timeline
+
+## [2026-04-09 17:59 America/Chicago] BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW frozen
+- Author: `Architects mainline lead`
+- Packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - fresh direct probe showed `_trailing_loss_reference()` selecting row `6888` at `2026-04-08T04:15:08+00:00` for a 24h cutoff at `2026-04-08T17:58:43+00:00`
+  - the selected reference is `13.73h` older than the requested 24h point
+  - current clean-branch calculation therefore still yields `daily_loss=13.26` from a too-old reference row
+- Decisions frozen:
+  - supersede the previously accepted trailing-loss semantics with a narrower repair packet for reference freshness
+  - keep runtime artifact refresh and downstream status/output parity explicitly out of this packet
+- Open uncertainties:
+  - implementation must choose and document the allowed freshness window around the 24h/7d cutoff
+- Next required action:
+  - implement the bounded trailing-loss reference-window fix and lock it with packet-bounded tests
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 16:16 America/Chicago] BUG-LOAD-PORTFOLIO-RECENT-EXITS-TRUTH-MIXING post-close passed
 - Author: `Architects mainline lead`
