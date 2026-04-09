@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE acceptance`
+- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE post-close`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- Active packet state: `accepted locally / post-close pending`
+- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Run the required post-close critic + verifier on accepted `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`.
-2. Keep `src/state/decision_chain.py` fallback-reader cleanup and RiskGuard output parity work out of this packet unless a new packet is frozen.
-3. Preserve the distinction between deduping stage-event rows and claiming full settlement-authority convergence.
+1. Freeze the next deeper truth-unification packet around comparator/shadow cleanup or output-layer parity, whichever is now the tightest live seam.
+2. Keep `src/state/decision_chain.py` fallback-reader cleanup and RiskGuard output parity work out of the accepted stage-event packet unless a later packet explicitly widens it.
+3. Preserve the distinction between fixing the first active counting seam and claiming full settlement-authority convergence.
 
 ## Current out-of-scope dirt
 

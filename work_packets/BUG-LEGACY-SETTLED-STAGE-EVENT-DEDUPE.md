@@ -103,3 +103,5 @@ evidence_required:
   - synthetic low-limit probe now returns distinct latest rows under a limit (`['t3', 't2']` for limit=2) instead of letting duplicates crowd them out
 - pre-close critic review: native `critic` subagent `Euclid` -> `PASS` after confirming the packet fixes the first active counting seam while keeping comparator/shadow, fallback-reader, and output parity debt explicit
 - pre-close verifier review: native `verifier` subagent `Jason` -> `PASS` after confirming targeted tests, compile proof, and real-state settlement-count convergence
+- post-close critic review: native `critic` subagent `Euler` -> `PASS` after confirming the accepted boundary and packet/control surfaces stay truthful and do not hide deeper comparator/shadow, fallback-reader, or output-layer drift
+- post-close verifier review: native `verifier` subagent `Avicenna` -> `PASS` after confirming fresh synthetic repros, packet evidence, and accepted control surfaces match repo truth

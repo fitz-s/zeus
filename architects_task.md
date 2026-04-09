@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE acceptance`
+- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE post-close`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -81,11 +81,11 @@ Deduplicate legacy `POSITION_SETTLED` stage events before they feed authoritativ
 - [x] stage-event query dedupes duplicates with deterministic latest-wins behavior
 - [x] targeted settlement-query tests pass
 - [x] wider comparator/shadow and output-layer drift remain explicit
-- [ ] post-close critic review passed
-- [ ] post-close verifier review passed
+- [x] post-close critic review passed
+- [x] post-close verifier review passed
 
 ## Next required action
 
-1. Run the post-close critic review on the accepted packet boundary.
-2. Run the post-close verifier review on the accepted packet boundary.
-3. Freeze the next deeper comparator/shadow or output-parity packet only after post-close passes.
+1. Freeze the next deeper comparator/shadow or output-parity packet.
+2. Keep this packet’s stage-event dedupe behavior stable unless a later packet explicitly supersedes it.
+3. Do not let the next packet collapse the still-open fallback-reader and output-parity seams into “settlement truth fixed.”
