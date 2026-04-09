@@ -33,13 +33,37 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` (accepted locally / post-close passed)
 - Current active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `post-close passed / authority baseline ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
   - no blocker-level issues remain inside the authority-amendment packet boundary
   - any remaining cleanup work should treat the amended routing surfaces as the new baseline
 
 ## Durable timeline
+
+## [2026-04-09 20:20 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE post-close passed
+- Author: `Architects mainline lead`
+- Packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Status delta:
+  - post-close critic review found no blocker-level contradictions on the accepted authority boundary
+  - post-close verifier review found no blocker-level evidence gaps
+  - the amended authority stack became the baseline for follow-on cleanup work
+- Basis / evidence:
+  - native `critic` subagent `Carson` -> `PASS`
+  - native `verifier` subagent `Banach` -> `PASS`
+  - fresh post-close checks still held:
+    - no modified `docs/governance/**` files
+    - `git diff --check` clean on the accepted boundary
+    - active-vs-archive separation still explicit in `AGENTS.md`, `authority_index.md`, `docs/README.md`, and `WORKSPACE_MAP.md`
+- Decisions frozen:
+  - the authority amendment stands on the accepted boundary
+  - future file cleanup should treat this routing stack as current law rather than re-litigating the same ambiguity
+- Open uncertainties:
+  - none inside this packet boundary
+- Next required action:
+  - freeze the next bounded cleanup/governance packet as needed
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 20:16 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE accepted locally
 - Author: `Architects mainline lead`

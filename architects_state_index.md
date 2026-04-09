@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE acceptance sync`
+- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE post-close sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- Active packet state: `accepted_local / post_close_pending`
+- Active packet state: `post_close_passed / authority_baseline_ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close critic + verifier on the accepted authority-amendment boundary.
-2. Keep runtime logic, launchd ownership, and further archive moves out of this packet unless a new packet is frozen.
+1. Use this authority baseline for the next cleanup/governance packet.
+2. Keep runtime logic, launchd ownership, and further archive moves out of this closed packet unless a new packet is frozen.
 3. Preserve the distinction between active authority, active control surfaces, and archived historical material.
 
 ## Current out-of-scope dirt

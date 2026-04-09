@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE acceptance sync`
+- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / AUTHORITY_BASELINE_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -64,7 +64,7 @@ Amend the top authority and orientation surfaces so they reflect the current tru
 
 ## Current blocker state
 
-- packet-bounded authority/orientation amendments now pass, but post-close critic + verifier are still required before the next packet may freeze
+- packet boundary is post-close passed
 - active-vs-archive and root-vs-architects role separation is now explicit in the amended top routing surfaces
 - any further file cleanup should treat this packet as the new routing baseline rather than reopening authority ambiguity
 
@@ -78,5 +78,5 @@ Amend the top authority and orientation surfaces so they reflect the current tru
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted authority-amendment boundary.
-2. Freeze the next bounded cleanup packet instead of widening this one.
+1. Use this authority baseline for the next cleanup/governance packet.
+2. Keep this packet closed unless a new contradiction reopens it.
