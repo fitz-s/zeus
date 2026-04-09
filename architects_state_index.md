@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE acceptance sync`
+- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Active packet state: `accepted_local / post_close_pending`
+- Active packet state: `post_close_passed / final_audit_ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close critic + verifier on the accepted reroute boundary.
-2. Keep core truth logic and broader parity work out of this packet unless a new packet is frozen.
+1. Push this branch for final audit.
+2. Keep core truth logic and broader parity work out of this closed packet unless a new contradiction reopens it.
 3. Preserve the distinction between clean-runtime routing and downstream consumer parity.
 
 ## Current out-of-scope dirt
