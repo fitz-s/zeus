@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP acceptance sync`
+- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP post-close sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- State: `POST_CLOSE_PASSED / NEXT_FREEZE_ALLOWED`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -74,7 +74,7 @@ Isolate and reroute the live paper-mode background writer that keeps overwriting
 
 - the stale paper launchd writers are now disabled, and refreshed paper artifacts stay coherent
 - broader runtime rerouting still remains follow-up work outside this accepted boundary
-- post-close critic + verifier are still required before the next packet may freeze
+- the next bounded packet must restore paper runtime on a clean ownership path without reintroducing stale writers
 
 ## Immediate checklist
 
@@ -85,5 +85,5 @@ Isolate and reroute the live paper-mode background writer that keeps overwriting
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted ownership boundary.
-2. Freeze the next bounded packet instead of widening this one.
+1. Freeze the next bounded packet.
+2. Keep `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` closed unless a new contradiction reopens it.

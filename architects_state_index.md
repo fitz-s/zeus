@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP acceptance sync`
+- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP post-close sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- Active packet state: `accepted_local / post_close_pending`
+- Active packet state: `post_close_passed / next_freeze_allowed`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,8 +23,8 @@ Metadata:
 
 ## Current next action
 
-1. Run post-close critic + verifier on the accepted ownership boundary.
-2. Keep core truth math and broader parity redesign out of this packet unless a new packet is frozen.
+1. Freeze the next bounded packet.
+2. Keep core truth math and broader parity redesign out of this accepted packet unless a new packet is frozen.
 3. Preserve the distinction between artifact refresh entrypoint correctness and live writer ownership.
 
 ## Current out-of-scope dirt
