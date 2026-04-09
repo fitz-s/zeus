@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS freeze`
+- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS acceptance sync`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted_local / post_close_pending`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `BUG-TRAILING-LOSS-REFERENCE-FRESHNESS-WINDOW`
+- Last accepted packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,7 +23,7 @@ Metadata:
 
 ## Current next action
 
-1. Implement the bounded paper runtime artifact refresh entrypoint.
+1. Run post-close critic + verifier on the accepted refresh boundary.
 2. Keep core truth math and broader parity redesign out of this packet unless a new packet is frozen.
 3. Preserve the distinction between artifact refresh and deeper consumer/output parity work.
 

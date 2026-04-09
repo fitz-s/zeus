@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS freeze`
+- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -70,20 +70,19 @@ Add a bounded, reproducible refresh path for paper runtime artifacts so stale pe
 
 ## Current blocker state
 
-- clean-branch direct truth probes are coherent, but persisted paper artifacts still preserve old snapshots
-- `risk_state-paper.db` still reports `portfolio_truth_source=working_state_fallback`, `settlement_sample_size=22`, `daily_loss=13.26`
-- `status_summary-paper.json` still follows the stale persisted risk snapshot instead of a refreshed one
+- packet-bounded refresh entrypoint evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
+- clean-branch direct truth probes remain coherent while persisted paper artifacts still preserve old snapshots
+- broader downstream parity work remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
 
 ## Immediate checklist
 
 - [x] `REFRESH-PAPER-RUNTIME-ARTIFACTS` frozen
-- [ ] stale paper artifacts reproduced with packet-bounded evidence
-- [ ] bounded refresh entrypoint implemented
-- [ ] packet-bounded refresh tests pass
-- [ ] broader parity work remains explicit
+- [x] stale paper artifacts reproduced with packet-bounded evidence
+- [x] bounded refresh entrypoint implemented
+- [x] packet-bounded refresh tests pass
+- [x] broader parity work remains explicit
 
 ## Next required action
 
-1. Implement the bounded paper runtime artifact refresh entrypoint.
-2. Lock the refresh sequence with packet-bounded tests.
-3. If implementation proves a core reader/writer still must change, stop and freeze that deeper packet instead of widening silently.
+1. Run post-close critic + verifier on the accepted refresh boundary.
+2. Freeze the next bounded packet instead of widening this one.
