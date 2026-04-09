@@ -4,39 +4,42 @@ This is the first durable routing file for humans and coding agents.
 
 ## 1. Read order
 
+### Root authority guide
+1. `ZEUS_AUTHORITY.md`
+
 ### Principal present-tense architecture authority
-1. `docs/architecture/zeus_durable_architecture_spec.md`
+2. `docs/architecture/zeus_durable_architecture_spec.md`
 
 ### Terminal target-state / endgame authority
-2. `docs/zeus_FINAL_spec.md`
+3. `docs/zeus_FINAL_spec.md`
 
 ### Change-control authority
-3. `docs/governance/zeus_change_control_constitution.md`
-4. `docs/governance/zeus_autonomous_delivery_constitution.md`
+4. `docs/governance/zeus_change_control_constitution.md`
+5. `docs/governance/zeus_autonomous_delivery_constitution.md`
 
 ### Machine-checkable semantic authority
-5. `architecture/kernel_manifest.yaml`
-6. `architecture/invariants.yaml`
-7. `architecture/zones.yaml`
-8. `architecture/negative_constraints.yaml`
-9. `architecture/maturity_model.yaml`
+6. `architecture/kernel_manifest.yaml`
+7. `architecture/invariants.yaml`
+8. `architecture/zones.yaml`
+9. `architecture/negative_constraints.yaml`
+10. `architecture/maturity_model.yaml`
 
 ### Repo operating brief
-10. `AGENTS.md`
+11. `AGENTS.md`
 
 ### Active control / execution surfaces
-11. `architects_state_index.md`
-12. `architects_task.md`
-13. `architects_progress.md`
-14. `root_progress.md`
-15. `root_task.md`
-16. `docs/known_gaps.md`
+12. `architects_state_index.md`
+13. `architects_task.md`
+14. `architects_progress.md`
+15. `root_progress.md`
+16. `root_task.md`
+17. `docs/known_gaps.md`
 
 ### Historical rationale / archives (non-authoritative)
-17. `docs/architecture/zeus_blueprint_v2.md`
-18. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
-19. `docs/archives/**`
-20. `WORKSPACE_MAP.md`
+18. `docs/architecture/zeus_blueprint_v2.md`
+19. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
+20. `docs/archives/**`
+21. `WORKSPACE_MAP.md`
 
 ## 2. Precedence
 
@@ -55,6 +58,7 @@ If two sources disagree:
 ## 3. What each source is for
 
 - principal present-tense architecture: current system shape, migration order, architecture priorities, and present-tense routing
+- root authority guide: one-file compression of the system foundation, live invariants, negative constraints, and boundary rules
 - terminal target-state / endgame: finality framing, target-state intent, and endgame clause
 - change-control authority: how changes are allowed to happen
 - manifests: exact semantic atoms, zones, negative permissions, maturity stage
@@ -65,6 +69,7 @@ If two sources disagree:
 ## 4. Never do this
 
 - Never treat `docs/archives/**` or `WORKSPACE_MAP.md` as principal authority.
+- Never let `ZEUS_AUTHORITY.md` compete with the exact precedence or machine-checkable authority files it summarizes.
 - Never treat `status_summary.json` or `positions.json` as canonical truth.
 - Never let a coding agent infer authority order from retrieval similarity.
 - Never treat `zeus_mature_project_foundation/` as the active law location after the mirrored authority files have been installed.

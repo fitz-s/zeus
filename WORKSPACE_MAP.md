@@ -9,6 +9,7 @@
 
 | Item | Purpose |
 |------|---------|
+| `ZEUS_AUTHORITY.md` | Root authority guide summarizing system foundations and law |
 | `AGENTS.md` | Repo-native execution brief and current operating contract |
 | `architects_state_index.md` | Fastest current Architects entrypoint |
 | `architects_task.md` | Current live packet control surface |

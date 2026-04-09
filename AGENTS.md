@@ -1,7 +1,7 @@
 File: AGENTS.md
 Disposition: NEW
 Authority basis: architecture/self_check/authority_index.md; docs/governance/zeus_autonomous_delivery_constitution.md; docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; current repo runtime truth surfaces.
-Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
+Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root summary now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
 Why this file exists now: Codex/OMX and future zero-context agents need one repo-native instruction surface that loads before work starts.
 Current-phase or long-lived: Long-lived.
 
@@ -16,16 +16,17 @@ Your job is to change only what the active packet allows while protecting kernel
 Before editing anything, read in this order:
 
 1. `architecture/self_check/authority_index.md`
-2. `docs/governance/zeus_autonomous_delivery_constitution.md`
-3. `docs/architecture/zeus_durable_architecture_spec.md`
-4. `docs/zeus_FINAL_spec.md`
-5. `docs/governance/zeus_change_control_constitution.md`
-6. `architecture/kernel_manifest.yaml`
-7. `architecture/invariants.yaml`
-8. `architecture/zones.yaml`
-9. `architecture/negative_constraints.yaml`
-10. scoped `AGENTS.md` in the directory you are editing
-11. then the code
+2. `ZEUS_AUTHORITY.md`
+3. `docs/governance/zeus_autonomous_delivery_constitution.md`
+4. `docs/architecture/zeus_durable_architecture_spec.md`
+5. `docs/zeus_FINAL_spec.md`
+6. `docs/governance/zeus_change_control_constitution.md`
+7. `architecture/kernel_manifest.yaml`
+8. `architecture/invariants.yaml`
+9. `architecture/zones.yaml`
+10. `architecture/negative_constraints.yaml`
+11. scoped `AGENTS.md` in the directory you are editing
+12. then the code
 
 If current runtime facts conflict with target-law docs:
 - use runtime code/contracts for present-tense facts
@@ -38,6 +39,7 @@ Imported source-package note:
 - Do not edit the source-package copy as if it were the live law surface unless the packet explicitly targets source-package maintenance.
 
 Current routing note:
+- `ZEUS_AUTHORITY.md` is the root authority guide: foundation, invariants, negative constraints, and boundary rules in one place. It is a guide, not a precedence override.
 - `docs/archives/**` is historical/archive material and is never principal authority.
 - `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` are the active Architects packet-control surfaces.
 - `root_progress.md` and `root_task.md` remain program/backlog surfaces; they are not live packet-control authority.
