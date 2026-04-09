@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE freeze`
+- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE acceptance sync`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -64,19 +64,19 @@ Amend the top authority and orientation surfaces so they reflect the current tru
 
 ## Current blocker state
 
-- top routing/orientation surfaces still point at stale or ambiguous active paths
-- current archive cleanup has moved historical material, but the highest guidance files do not yet encode that boundary clearly
-- root-vs-architects control surface roles are still implied rather than explicitly harmonized
+- packet-bounded authority/orientation amendments now pass, but post-close critic + verifier are still required before the next packet may freeze
+- active-vs-archive and root-vs-architects role separation is now explicit in the amended top routing surfaces
+- any further file cleanup should treat this packet as the new routing baseline rather than reopening authority ambiguity
 
 ## Immediate checklist
 
 - [x] `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE` frozen
-- [ ] authority mismatch matrix recorded
-- [ ] active-vs-archive boundary clarified in top routing surfaces
-- [ ] root-vs-architects control roles clarified
-- [ ] stale active path references removed from top orientation files
+- [x] authority mismatch matrix recorded
+- [x] active-vs-archive boundary clarified in top routing surfaces
+- [x] root-vs-architects control roles clarified
+- [x] stale active path references removed from top orientation files
 
 ## Next required action
 
-1. Amend the bounded authority/orientation surfaces listed above.
-2. Verify routing/reference scans and then run pre-close review.
+1. Run post-close critic + verifier on the accepted authority-amendment boundary.
+2. Freeze the next bounded cleanup packet instead of widening this one.

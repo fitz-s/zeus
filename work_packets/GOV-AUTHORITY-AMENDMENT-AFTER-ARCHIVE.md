@@ -89,3 +89,10 @@ evidence_required:
 - This is the “highest authority amendment” packet requested after the archive cleanup passes.
 - It should prefer explicit role clarification over prose expansion.
 - If implementation proves the constitutions themselves must change, stop and freeze a superseding packet rather than widening silently.
+
+## Evidence log
+
+- `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+- `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- `git diff --check` -> clean
+- targeted routing scan confirmed the amended top surfaces no longer point at `docs/progress/zeus_progress.md` or `docs/plans/zeus_live_plan.md`

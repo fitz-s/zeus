@@ -1,5 +1,8 @@
 # root_progress.md
 
+> Role note: program-level narrative/backlog surface. Not principal architecture authority and not live packet-control authority.
+> For the current live packet boundary, start at `architects_state_index.md` and `architects_task.md`.
+
 ## Mission
 Close Zeus runtime spine so lifecycle, attribution, execution, and risk surfaces are fail-closed, durable, and operator-truthful before any signal expansion.
 

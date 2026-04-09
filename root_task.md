@@ -1,5 +1,8 @@
 # root_task.md
 
+> Role note: program-level backlog queue. Not principal architecture authority and not live packet-control authority.
+> Current live packet execution is controlled by `architects_task.md`.
+
 ## Status Legend
 - TODO
 - IN_PROGRESS

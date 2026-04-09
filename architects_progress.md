@@ -33,13 +33,37 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` (accepted locally / post-close passed)
 - Current active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - top routing/orientation surfaces still point at stale or ambiguous active paths
-  - active-vs-archive and root-vs-architects surface roles are not yet explicitly harmonized
+  - no blocker-level issues remain inside the authority-amendment packet boundary
+  - any remaining cleanup work should treat the amended routing surfaces as the new baseline
 
 ## Durable timeline
+
+## [2026-04-09 20:16 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE accepted locally
+- Author: `Architects mainline lead`
+- Packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Status delta:
+  - authority-amendment packet accepted locally on branch `architects-authority-amendment`
+- Basis / evidence:
+  - commit `ee354ed` -> `Freeze the authority amendment packet after archive cleanup`
+  - `python3 scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `git diff --check` -> clean
+  - targeted top-routing scan cleared stale path references (`docs/progress/zeus_progress.md`, `docs/plans/zeus_live_plan.md`) from the amended routing surfaces
+  - native `critic` subagent `Arendt` -> `PASS`
+  - native `verifier` subagent `Laplace` -> `PASS`
+- Decisions frozen:
+  - active authority, active control surfaces, and archived historical surfaces are now explicitly separated in the highest routing/orientation files
+  - `docs/zeus_FINAL_spec.md` is explicitly framed as terminal target-state / endgame authority, while `docs/architecture/zeus_durable_architecture_spec.md` remains the present-tense principal architecture authority
+  - `root_progress.md` / `root_task.md` are explicitly program/backlog surfaces rather than live packet-control authority
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded cleanup packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 20:01 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE frozen
 - Author: `Architects mainline lead`
