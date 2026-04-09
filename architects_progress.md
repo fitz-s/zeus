@@ -31,15 +31,47 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS` (accepted locally / post-close pending)
+- Last accepted packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` (accepted locally / post-close pending)
 - Current active packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - a stale live writer is overwriting refreshed paper artifacts back to fallback-based values
-  - downstream parity work remains unresolved outside the new ownership packet
+  - paper launchd writers are disabled, but paper runtime is not yet rerouted to a clean ownership path
+  - downstream parity work remains unresolved outside the ownership packet
 
 ## Durable timeline
+
+## [2026-04-09 19:16 America/Chicago] BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- Status delta:
+  - stale paper writer ownership packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `2086491` -> `Freeze the stale paper writer ownership packet`
+  - backup created: `/tmp/zeus-paper-launchd-backup-6BS74y`
+  - `launchctl disable` + `launchctl bootout` applied to:
+    - `com.zeus.paper-trading`
+    - `com.zeus.riskguard`
+  - `launchctl print gui/501/com.zeus.paper-trading` -> `Could not find service`
+  - `launchctl print gui/501/com.zeus.riskguard` -> `Could not find service`
+  - explicit refresh wrote coherent artifact row `8575`:
+    - `portfolio_truth_source=position_current`
+    - `portfolio_loader_status=ok`
+    - `settlement_sample_size=19`
+    - `daily_loss=0.0`
+  - after >60 seconds, no newer stale overwrite rows appeared
+  - native `critic` subagent `Newton` -> `PASS`
+  - native `verifier` subagent `Pascal` -> `PASS`
+- Decisions frozen:
+  - the stale launchd paper writers are no longer the active owners of paper artifact writes
+  - broader runtime rerouting remains explicit follow-up work rather than being silently folded into this ownership packet
+- Open uncertainties:
+  - post-close critic + verifier are still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next bounded packet
+- Owner:
+  - Architects mainline lead
+
 
 ## [2026-04-09 19:10 America/Chicago] BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP frozen
 - Author: `Architects mainline lead`
