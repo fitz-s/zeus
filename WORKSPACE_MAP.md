@@ -1,17 +1,21 @@
 # Zeus Workspace Map
 
-> Status: Orientation-only map, not principal authority.
+> Status: Orientation-only and archive-aware map, not principal authority.
 > Current authority order is defined in `architecture/self_check/authority_index.md`.
-> Current delivery law is defined in `docs/governance/zeus_autonomous_delivery_constitution.md`.
+> Current repo operating rules are defined in `AGENTS.md`.
+> Historical material moved under `docs/archives/**` is not active authority.
 
 ## Root
 
 | Item | Purpose |
 |------|---------|
-| `.claude/CLAUDE.md` | Zeus coding rules, design principles, Rainstorm reuse policy |
+| `AGENTS.md` | Repo-native execution brief and current operating contract |
+| `architects_state_index.md` | Fastest current Architects entrypoint |
+| `architects_task.md` | Current live packet control surface |
+| `architects_progress.md` | Durable Architects ledger |
+| `root_progress.md` | Program-level narrative / backlog context |
+| `root_task.md` | Program-level backlog queue |
 | `WORKSPACE_MAP.md` | This file — directory contract |
-| `docs/progress/zeus_progress.md` | Session-level progress tracking and status |
-| `docs/plans/zeus_live_plan.md` | Historical live-readiness plan, not principal authority |
 | `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
@@ -39,12 +43,13 @@
 | Path | Purpose | Authority |
 |------|---------|-----------|
 | `docs/architecture/zeus_durable_architecture_spec.md` | Principal architecture authority for current phase. | Active |
+| `docs/zeus_FINAL_spec.md` | Terminal target-state and endgame authority. | Active |
 | `docs/governance/zeus_change_control_constitution.md` | Change-control authority. | Active |
 | `docs/governance/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority. | Active |
+| `docs/known_gaps.md` | Active operational gap / antibody register. | Active |
+| `docs/archives/**` | Historical handoffs, audits, findings, traces, research, and reports. | Historical |
 | `docs/architecture/zeus_design_philosophy.md` | Historical rationale about system center and translation-loss failure mode. | Historical |
 | `docs/architecture/zeus_blueprint_v2.md` | Historical architectural rationale for position-centric design. | Historical |
-| `docs/strategy/data_strategy.md` | Data utilization and strategy planning. | Active |
-| `docs/reviews/zeus_review_phase2_strategic.md` | Strategic review and gap diagnosis (phase 2). | Historical |
 | `docs/KEY_REFERENCE/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |
 | `docs/KEY_REFERENCE/market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
 | `docs/KEY_REFERENCE/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |
@@ -61,11 +66,12 @@
 
 | File/Dir | Purpose |
 |----------|---------|
-| `zeus.db` | Main database (chronicle, calibration, decisions, ensemble snapshots) |
-| `risk_state.db` | RiskGuard state (separate process, separate DB) |
-| `positions.json` | Open positions (atomic writes) |
-| `status_summary.json` | Health snapshot (Venus reads this) |
-| `control_plane.json` | Runtime commands (Venus writes this) |
+| `zeus-paper.db` / `zeus-live.db` | Mode-specific trade databases |
+| `zeus-shared.db` | Shared world-data database |
+| `risk_state-paper.db` / `risk_state-live.db` | Mode-specific RiskGuard state |
+| `positions-paper.json` / `positions-live.json` | Mode-qualified position files |
+| `status_summary-paper.json` / `status_summary-live.json` | Mode-qualified derived operator snapshots |
+| `control_plane-paper.json` / `control_plane-live.json` | Mode-qualified runtime command surfaces |
 | `ensemble-log/` | ENS snapshots (append-only) |
 
 ## `tests/` — Test Suite
@@ -90,6 +96,11 @@
 ## `logs/` — Daemon Logs
 
 `zeus-paper.log`, `zeus-paper.err` — rotated by launchd.
+
+## Archive boundary
+
+- Historical handoffs, sessions, findings, traces, research, and reports now live under `docs/archives/`.
+- Do not treat archived files as live control surfaces unless a new packet explicitly promotes them.
 
 ---
 

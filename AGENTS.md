@@ -1,7 +1,7 @@
 File: AGENTS.md
 Disposition: NEW
 Authority basis: architecture/self_check/authority_index.md; docs/governance/zeus_autonomous_delivery_constitution.md; docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; current repo runtime truth surfaces.
-Supersedes / harmonizes: .claude/CLAUDE.md as primary instruction hub; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
+Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
 Why this file exists now: Codex/OMX and future zero-context agents need one repo-native instruction surface that loads before work starts.
 Current-phase or long-lived: Long-lived.
 
@@ -18,13 +18,14 @@ Before editing anything, read in this order:
 1. `architecture/self_check/authority_index.md`
 2. `docs/governance/zeus_autonomous_delivery_constitution.md`
 3. `docs/architecture/zeus_durable_architecture_spec.md`
-4. `docs/governance/zeus_change_control_constitution.md`
-5. `architecture/kernel_manifest.yaml`
-6. `architecture/invariants.yaml`
-7. `architecture/zones.yaml`
-8. `architecture/negative_constraints.yaml`
-9. scoped `AGENTS.md` in the directory you are editing
-10. then the code
+4. `docs/zeus_FINAL_spec.md`
+5. `docs/governance/zeus_change_control_constitution.md`
+6. `architecture/kernel_manifest.yaml`
+7. `architecture/invariants.yaml`
+8. `architecture/zones.yaml`
+9. `architecture/negative_constraints.yaml`
+10. scoped `AGENTS.md` in the directory you are editing
+11. then the code
 
 If current runtime facts conflict with target-law docs:
 - use runtime code/contracts for present-tense facts
@@ -35,6 +36,11 @@ Imported source-package note:
 - `zeus_mature_project_foundation/` is preserved as a source import for provenance and comparison.
 - Active authority lives in the mirrored repo surfaces under `architecture/`, `docs/architecture/`, `docs/governance/`, and `docs/rollout/`.
 - Do not edit the source-package copy as if it were the live law surface unless the packet explicitly targets source-package maintenance.
+
+Current routing note:
+- `docs/archives/**` is historical/archive material and is never principal authority.
+- `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` are the active Architects packet-control surfaces.
+- `root_progress.md` and `root_task.md` remain program/backlog surfaces; they are not live packet-control authority.
 
 ## 2. Required working posture
 

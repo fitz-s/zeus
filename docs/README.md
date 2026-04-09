@@ -19,6 +19,12 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - New generated reports should be written into `docs/reports/`.
 - Move historical investigations, audits, findings, and scratch-style research out of top-level `docs/` and into `docs/archives/` subfolders.
 
+## Active top-level docs
+- `docs/architecture/zeus_durable_architecture_spec.md` — present-tense principal architecture authority
+- `docs/zeus_FINAL_spec.md` — terminal target-state / endgame authority
+- `docs/known_gaps.md` — active operational gap / antibody register
+- `docs/archives/**` — historical only; not principal authority
+
 ## Naming Rules (Mandatory)
 - `plan` files must include explicit scope/topic in file name.
 - Use: `<topic>_plan.md` or `<topic>_<phase>_plan.md`.
