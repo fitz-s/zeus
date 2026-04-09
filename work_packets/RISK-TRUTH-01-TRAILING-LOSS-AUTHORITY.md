@@ -81,7 +81,7 @@ acceptance:
   - allowed status values are exactly `ok | insufficient_history | inconsistent_history | no_reference_row`
   - `*_reference` is either `null` or exactly `{row_id, checked_at, initial_bankroll, total_pnl, effective_bankroll}`
   - status mapping is pinned: `ok` = eligible row found at-or-before cutoff; `no_reference_row` = `risk_state` has no rows at all; `insufficient_history` = rows exist but none are at-or-before the cutoff; `inconsistent_history` = rows exist at-or-before the cutoff but none satisfy the eligibility rule
-  - when status is not `ok`, the numeric loss field is `null`, the corresponding loss level is forced `GREEN`, and `*_source = no_trustworthy_reference_row` so degraded truth never creates a false trigger by itself
+  - when status is not `ok`, the numeric loss field is `0.0`, the corresponding loss level is forced `YELLOW`, and `*_source = no_trustworthy_reference_row` so degraded truth stays explicit instead of being silently treated as healthy or reusing all-time baseline
   - the packet leaves broader portfolio-fallback and settlement-authority unification work explicitly open instead of disguising them as solved
 evidence_required:
   - work-packet grammar output

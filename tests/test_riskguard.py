@@ -660,6 +660,11 @@ class TestRiskGuardTrailingLossSemantics:
             checked_at=reference_checked_at,
             total_pnl=-13.26,
         )
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),
+            total_pnl=-13.26,
+        )
         risk_conn.commit()
         risk_conn.close()
 
@@ -767,11 +772,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert row["level"] == RiskLevel.GREEN.value
-        assert details["daily_loss"] is None
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "insufficient_history"
-        assert details["daily_loss_level"] == RiskLevel.GREEN.value
+        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -806,11 +811,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert row["level"] == RiskLevel.GREEN.value
-        assert details["daily_loss"] is None
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "inconsistent_history"
-        assert details["daily_loss_level"] == RiskLevel.GREEN.value
+        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
         assert details["daily_loss_reference"] is None
 
     def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
@@ -837,12 +842,59 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert row["level"] == RiskLevel.GREEN.value
-        assert details["daily_loss"] is None
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "no_reference_row"
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
+
+    def test_tick_skips_inconsistent_boundary_row_and_uses_older_trustworthy_reference(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        zeus_conn = get_connection(zeus_db)
+        init_schema(zeus_conn)
+        zeus_conn.close()
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            total_pnl=-5.0,
+        )
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+            total_pnl=-6.0,
+            effective_bankroll=149.0,
+        )
+        trusted_checked_at = (datetime.now(timezone.utc) - timedelta(hours=26)).isoformat()
+        trusted_id = _insert_risk_state_row(
+            risk_conn,
+            checked_at=trusted_checked_at,
+            total_pnl=-8.0,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        _mock_trailing_loss_tick(
+            monkeypatch,
+            zeus_db=zeus_db,
+            risk_db=risk_db,
+            realized_pnl=-10.0,
+            unrealized_pnl=0.0,
+        )
+
+        riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert details["daily_loss"] == pytest.approx(2.0)
+        assert details["daily_loss_status"] == "ok"
+        assert details["daily_loss_reference"]["row_id"] == trusted_id
+        assert details["daily_loss_reference"]["checked_at"] == trusted_checked_at
 
 
 class TestStrategyPolicyResolver:

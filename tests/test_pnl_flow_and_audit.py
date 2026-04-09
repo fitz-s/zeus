@@ -2487,8 +2487,8 @@ def test_inv_status_surfaces_trailing_loss_audit_fields(monkeypatch, tmp_path):
         status_summary_module,
         "_get_risk_details",
         lambda: {
-            "daily_loss": None,
-            "daily_loss_level": "GREEN",
+            "daily_loss": 0.0,
+            "daily_loss_level": "YELLOW",
             "daily_loss_status": "insufficient_history",
             "daily_loss_source": "no_trustworthy_reference_row",
             "daily_loss_reference": None,
@@ -2522,7 +2522,7 @@ def test_inv_status_surfaces_trailing_loss_audit_fields(monkeypatch, tmp_path):
     status = json.loads(status_path.read_text())
     details = status["risk"]["details"]
 
-    assert details["daily_loss"] is None
+    assert details["daily_loss"] == pytest.approx(0.0)
     assert details["daily_loss_status"] == "insufficient_history"
     assert details["daily_loss_source"] == "no_trustworthy_reference_row"
     assert details["daily_loss_reference"] is None

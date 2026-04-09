@@ -232,8 +232,8 @@ def _trailing_loss_snapshot(
     reference = reference_info.get("reference")
     if status != "ok" or reference is None:
         return {
-            "loss": None,
-            "level": RiskLevel.GREEN,
+            "loss": 0.0,
+            "level": RiskLevel.YELLOW,
             "status": status,
             "source": str(reference_info["source"]),
             "reference": None,
