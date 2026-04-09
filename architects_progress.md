@@ -31,14 +31,35 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS` (accepted locally in worktree)
-- Current active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
+- Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` (accepted locally / post-close passed)
+- Current active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - explicit expansion follow-up gaps still need handoff to the data-lane owner before freezing the next packet
+  - current `daily_loss` / `weekly_loss` semantics are wrong and still expose deeper risk/PnL truth drift
 
 ## Durable timeline
+
+## [2026-04-09 09:10 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY frozen
+- Author: `Architects mainline lead`
+- Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - user explicitly required `daily_loss` to mean current time minus 24-hour loss, not all-time loss or arbitrary baseline
+  - fresh risk-state inspection shows rows ~24h earlier already had `total_pnl = -13.26`, so the current `daily_loss = 13.26` is semantically false
+  - many `risk_state-paper.db` rows are internally inconsistent (`effective_bankroll != initial_bankroll + total_pnl`), so reference-row trust must be explicit
+  - this symptom also reveals deeper portfolio-fallback and mixed-settlement-authority drift, but those remain follow-up families after this bounded packet
+- Decisions frozen:
+  - keep packet 1 bounded to trailing-loss authority in riskguard only
+  - do not widen into `src/state/**`, `status_summary.py`, portfolio fallback, or settlement-authority unification unless implementation proves a real consumer mismatch
+  - degraded trailing-loss truth must be explicit and must not manufacture false RED by itself
+- Open uncertainties:
+  - how much wider truth drift will be exposed once trailing-loss authority is corrected still needs implementation-time evidence
+- Next required action:
+  - implement the bounded riskguard helper and targeted tests, then record the next truth-unification slice if needed
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 13:15 America/Chicago] INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close passed
 - Author: `Architects integration lane`

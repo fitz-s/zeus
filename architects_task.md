@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,32 +17,24 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PASSED`
+- Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Preserve the accepted truth-repair mainline while integrating the current Architects data-expansion lane, keeping additive collection/scheduling/calibration expansion and rejecting local regressions that would weaken accepted truth behavior.
+Repair the riskguard loss authority surface so `daily_loss` means trailing 24h equity loss and `weekly_loss` means trailing 7d equity loss, with explicit degraded-truth metadata instead of silent fallback to all-time or session baselines.
 
 ## Allowed files
 
-- `work_packets/INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION.md`
+- `work_packets/RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `config/cities.json`
-- `src/main.py`
-- `scripts/etl_tigge_ens.py`
-- `src/data/observation_client.py`
-- `scripts/backfill_hourly_openmeteo.py`
-- `scripts/backfill_wu_daily_all.py`
-- `scripts/etl_tigge_direct_calibration.py`
-- `scripts/migrate_rainstorm_full.py`
-- `src/data/wu_daily_collector.py`
-- `tests/test_etl_recalibrate_chain.py`
-- `tests/test_runtime_guards.py`
+- `src/riskguard/riskguard.py`
+- `tests/test_riskguard.py`
+- `tests/test_pnl_flow_and_audit.py`
 
 ## Forbidden files
 
@@ -50,16 +42,14 @@ Preserve the accepted truth-repair mainline while integrating the current Archit
 - `docs/governance/**`
 - `docs/architecture/**`
 - `architecture/**`
+- `src/state/**`
+- `src/observability/status_summary.py`
 - `src/control/**`
-- `src/observability/**`
-- `src/riskguard/**`
 - `src/supervisor_api/**`
 - `migrations/**`
-- `src/state/**`
-- `src/engine/lifecycle_events.py`
 - `src/execution/**`
+- `src/engine/**`
 - `tests/test_architecture_contracts.py`
-- `tests/test_pnl_flow_and_audit.py`
 - `tests/test_center_buy_diagnosis.py`
 - `tests/test_center_buy_repair.py`
 - `tests/test_healthcheck.py`
@@ -69,32 +59,30 @@ Preserve the accepted truth-repair mainline while integrating the current Archit
 
 ## Non-goals
 
-- no fresh truth-path rewrites in `src/state/**`
-- no broad reporting/dashboard work
-- no risk/status/operator summary rewrites
+- no broad settlement-authority unification yet
+- no portfolio fallback rewrite yet
+- no reporting/dashboard/schema work
 - no schema redesign
-- no new strategy behavior work
+- no data-expansion follow-up work
 - no team runtime launch
 
 ## Current blocker state
 
-- live Architects data expansion currently exists only as a dirty local lane mixed with some regressions against accepted truth-repair files
-- the merge must preserve expansion files and keep truth-repair files authoritative
-- packet must stay off fresh truth rewrites and focus on bounded integration only
+- fresh evidence shows `daily_loss` currently equals all-time loss instead of trailing 24h loss
+- many historical `risk_state` rows are internally inconsistent, so reference-row trust must be explicit
+- this packet must stay bounded to loss authority and expose deeper truth drift rather than quietly widening into portfolio/settlement fixes
 
 ## Immediate checklist
 
-- [x] `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` frozen
-- [x] data-expansion files ported onto the accepted truth tip
-- [x] `src/main.py` integrated without losing truth-safe subprocess behavior
-- [x] `tests/test_runtime_guards.py` merged without dropping truth economic-close assertions
-- [x] targeted ETL/runtime tests pass
-- [x] follow-up data-expansion gaps recorded explicitly
-- [x] post-close critic review passed
-- [x] post-close verifier review passed
+- [x] `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` frozen
+- [ ] trailing 24h / 7d reference-row helper implemented
+- [ ] baseline-driven loss math removed from riskguard
+- [ ] exact truth-status / audit-field contract implemented
+- [ ] targeted loss-authority tests pass
+- [ ] deeper truth drift exposed by the packet recorded explicitly
 
 ## Next required action
 
-1. Hand the explicit data-expansion follow-up gaps to the responsible data-lane owner instead of widening this packet.
-2. Keep truth-owned files on the accepted repair version unless a new packet explicitly authorizes change.
-3. Do not freeze a new packet on this branch until the follow-up gaps are explicitly acknowledged or superseded.
+1. Implement the bounded trailing-loss helper and semantics in `src/riskguard/riskguard.py`.
+2. Replace and expand targeted tests in `tests/test_riskguard.py` and `tests/test_pnl_flow_and_audit.py`.
+3. If consumer mismatch forces `src/state/**` or `src/observability/status_summary.py`, stop and freeze the next packet instead of widening silently.

@@ -6,16 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION post-close`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
-- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
+- Active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Hand the explicit data-expansion follow-up gaps to the data-lane owner.
-2. Keep truth files in `src/state/**`, close-path engine/execution seams, and truth tests on the accepted repair version unless a new packet explicitly authorizes change.
-3. Freeze the next packet only after the follow-up gaps are explicitly acknowledged or superseded.
+1. Implement trailing 24h / 7d loss authority in `src/riskguard/riskguard.py` under the frozen packet.
+2. Keep this packet bounded away from `src/state/db.py`, `src/state/portfolio.py`, and `src/observability/status_summary.py` unless a real consumer mismatch is proven and a new packet is frozen.
+3. Use this packet to expose, not hide, any deeper risk/PnL truth drift that appears during implementation.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION.md`
+5. `work_packets/RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY.md`
