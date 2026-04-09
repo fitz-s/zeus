@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE post-close sync`
+- Last updated by: `Codex GOV-PACKET-ENTRY-CONTROL-SURFACE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
-- Active packet state: `post_close_passed / authority_baseline_ready`
+- Active packet: `GOV-PACKET-ENTRY-CONTROL-SURFACE`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Use this authority baseline for the next cleanup/governance packet.
-2. Keep runtime logic, launchd ownership, and further archive moves out of this closed packet unless a new packet is frozen.
-3. Preserve the distinction between active authority, active control surfaces, and archived historical material.
+1. Define the replacement live control entry surface and update routing files.
+2. Archive/demote the superseded root/architects ledgers.
+3. Keep runtime logic and broader governance rewrites out of this packet.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE.md`
+5. `work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md`
