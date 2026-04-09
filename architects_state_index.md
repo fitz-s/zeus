@@ -6,14 +6,14 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY freeze`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY acceptance`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
 - Active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Active packet state: `frozen / implementation ready`
+- Active packet state: `accepted locally / post-close pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Implement trailing 24h / 7d loss authority in `src/riskguard/riskguard.py` under the frozen packet.
+1. Run the required post-close critic + verifier on accepted `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`.
 2. Keep this packet bounded away from `src/state/db.py`, `src/state/portfolio.py`, and `src/observability/status_summary.py` unless a real consumer mismatch is proven and a new packet is frozen.
-3. Use this packet to expose, not hide, any deeper risk/PnL truth drift that appears during implementation.
+3. Use the accepted packet evidence to freeze the next truth-unification slice only after post-close passes.
 
 ## Current out-of-scope dirt
 

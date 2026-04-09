@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY freeze`
+- Last updated by: `Codex RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY acceptance`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -75,14 +75,16 @@ Repair the riskguard loss authority surface so `daily_loss` means trailing 24h e
 ## Immediate checklist
 
 - [x] `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` frozen
-- [ ] trailing 24h / 7d reference-row helper implemented
-- [ ] baseline-driven loss math removed from riskguard
-- [ ] exact truth-status / audit-field contract implemented
-- [ ] targeted loss-authority tests pass
-- [ ] deeper truth drift exposed by the packet recorded explicitly
+- [x] trailing 24h / 7d reference-row helper implemented
+- [x] baseline-driven loss math removed from riskguard
+- [x] exact truth-status / audit-field contract implemented
+- [x] targeted loss-authority tests pass
+- [x] deeper truth drift exposed by the packet recorded explicitly
+- [ ] post-close critic review passed
+- [ ] post-close verifier review passed
 
 ## Next required action
 
-1. Implement the bounded trailing-loss helper and semantics in `src/riskguard/riskguard.py`.
-2. Replace and expand targeted tests in `tests/test_riskguard.py` and `tests/test_pnl_flow_and_audit.py`.
-3. If consumer mismatch forces `src/state/**` or `src/observability/status_summary.py`, stop and freeze the next packet instead of widening silently.
+1. Run the post-close critic review on the accepted packet boundary.
+2. Run the post-close verifier review on the accepted packet boundary.
+3. Freeze the next truth-unification packet only after post-close passes and the remaining deeper drift is explicitly framed.

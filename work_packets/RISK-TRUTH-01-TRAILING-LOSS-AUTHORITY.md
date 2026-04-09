@@ -103,4 +103,16 @@ evidence_required:
 
 ## Evidence log
 
-- Pending implementation.
+- work-packet grammar output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted riskguard/pnl pytest output:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py` -> `44 passed`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardTrailingLossSemantics tests/test_pnl_flow_and_audit.py::test_inv_status_surfaces_trailing_loss_audit_fields` -> `7 passed`
+- compile proof: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/riskguard/riskguard.py tests/test_riskguard.py tests/test_pnl_flow_and_audit.py` -> success
+- trailing-loss truth note:
+  - `daily_loss` / `weekly_loss` now read from historical `risk_state` rows at-or-before trailing cutoffs, not `portfolio.daily_baseline_total` / `weekly_baseline_total`
+  - eligible reference rows now require parsed finite `initial_bankroll`, `total_pnl`, and `effective_bankroll`, plus `abs((initial_bankroll + total_pnl) - effective_bankroll) <= 0.01`
+  - degraded history is explicit: `*_loss = 0.0`, `*_loss_level = YELLOW`, `*_loss_source = no_trustworthy_reference_row`, and `*_loss_reference = null`
+  - regression coverage now includes the bad-boundary-row path where an inconsistent row at the cutoff is skipped in favor of an older trustworthy reference
+- pre-close critic review: native `critic` subagent `Darwin` -> `PASS` on `f6a49e4` after confirming degraded history remains visible and wider portfolio/settlement drift stays explicit
+- pre-close verifier review: native `verifier` subagent `Singer` -> `PASS` on `f6a49e4` after confirming trailing-loss contract fields, skip-boundary regression, and targeted evidence

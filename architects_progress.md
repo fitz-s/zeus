@@ -33,12 +33,42 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `INTEGRATE-TRUTH-MAINLINE-WITH-DATA-EXPANSION` (accepted locally / post-close passed)
 - Current active packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - current `daily_loss` / `weekly_loss` semantics are wrong and still expose deeper risk/PnL truth drift
+  - accepted packet still requires the mandatory post-close critic + verifier
+  - deeper portfolio-fallback and mixed-settlement authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 10:05 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY accepted locally
+- Author: `Architects mainline lead`
+- Packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY`
+- Status delta:
+  - bounded trailing-loss authority packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `19e170b` -> `Freeze the first trailing-loss truth packet`
+  - commit `8c1057c` -> `Make trailing loss mean what the operator thinks it means`
+  - commit `f6a49e4` -> `Keep degraded trailing-loss truth visible instead of pretending it is healthy`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/riskguard/riskguard.py tests/test_riskguard.py tests/test_pnl_flow_and_audit.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py` -> `44 passed`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_riskguard.py::TestRiskGuardTrailingLossSemantics tests/test_pnl_flow_and_audit.py::test_inv_status_surfaces_trailing_loss_audit_fields` -> `7 passed`
+  - pre-close critic review via native `critic` subagent `Darwin` -> `PASS`
+  - pre-close verifier review via native `verifier` subagent `Singer` -> `PASS`
+- Decisions frozen:
+  - `daily_loss` now means trailing 24h equity loss from trustworthy `risk_state` history
+  - `weekly_loss` now means trailing 7d equity loss from trustworthy `risk_state` history
+  - degraded history remains visible as `0.0 + YELLOW + no_trustworthy_reference_row`, not silent all-time-baseline reuse
+  - deeper portfolio fallback and settlement authority drift remain explicit follow-up debt
+- Open uncertainties:
+  - post-close review is still required before freezing the next truth-unification packet
+  - the accepted packet does not resolve current `working_state_fallback` / mixed settlement authority drift
+- Next required action:
+  - run the required post-close critic + verifier and then freeze the next truth-unification slice if warranted
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 09:10 America/Chicago] RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY frozen
 - Author: `Architects mainline lead`
