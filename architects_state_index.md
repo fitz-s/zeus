@@ -6,17 +6,16 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close sync (merged with VERIFY-ETL-RECALIBRATE-CONTAMINATION)`
+- Last updated by: `Codex GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Active packet state: `post_close_passed / final_audit_ready`
+- Active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Active packet state: `frozen / implementation ready`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Previous accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally / post-close passed / cherry-picked via merge)
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -24,11 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Push this branch for final audit.
-2. Keep core truth logic and broader parity work out of this closed packet unless a new contradiction reopens it.
-3. Preserve the distinction between clean-runtime routing and downstream consumer parity.
-4. VERIFY-ETL-RECALIBRATE-CONTAMINATION commit `0c9a348` has been transported via this merge.
-5. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+1. Amend the highest authority/orientation surfaces to match the truth-mainline and the new archive boundary.
+2. Keep runtime logic, launchd ownership, and further archive moves out of this packet unless a new packet is frozen.
+3. Preserve the distinction between active authority, active control surfaces, and archived historical material.
 
 ## Current out-of-scope dirt
 
@@ -38,8 +35,8 @@ Metadata:
 - `docs/architecture/zeus_design_philosophy.md` has an unrelated local deletion and stays out of scope
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
-- `docs/archives/architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
-- `docs/archives/handoffs/next_round_handoff_p4_start.md` has unrelated local modifications and stays out of scope
+- `docs/archives/architects_progress_archive.md` and `docs/archives/handoffs/next_round_handoff_p4_start.md` are historical/archive surfaces outside this packet unless only path references need updating
+- `root_progress.md` and `root_task.md` are in scope only for role clarification, not archival removal
 - `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
 - local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
@@ -51,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE.md`
+5. `work_packets/GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE.md`

@@ -32,16 +32,38 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE` (accepted locally / post-close passed)
-- Previous accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION` (accepted locally in worktree / transported via merge)
-- Current active packet: `REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE`
-- Current packet status: `post-close passed / final audit ready`
+- Current active packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Current packet status: `frozen / implementation ready`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - no blocker-level issues remain inside the reroute packet boundary
-  - any further work belongs to final audit findings or future follow-up packets
-  - VERIFY-ETL-RECALIBRATE-CONTAMINATION commit `0c9a348` transported via this merge
+  - top routing/orientation surfaces still point at stale or ambiguous active paths
+  - active-vs-archive and root-vs-architects surface roles are not yet explicitly harmonized
 
 ## Durable timeline
+
+## [2026-04-09 20:01 America/Chicago] GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE frozen
+- Author: `Architects mainline lead`
+- Packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - archive cleanup moved a large set of historical material under `docs/archives/`
+  - fresh authority recheck still showed stale routing:
+    - `architecture/self_check/authority_index.md` still points at `.claude/CLAUDE.md` and historical/non-current paths
+    - `WORKSPACE_MAP.md` still describes obsolete root/docs and pre-isolation state paths
+    - `docs/README.md` is only partially archive-aware
+  - fresh scope split:
+    - keep active: `root_progress.md`, `root_task.md`, `docs/known_gaps.md`, `docs/zeus_FINAL_spec.md`
+    - archive next/downgrade later: `WORKSPACE_MAP.md`, `docs/isolation_design.md`, `docs/isolation_migration_map.md`
+- Decisions frozen:
+  - stop further broad archive movement until the top authority/orientation surfaces are amended
+  - keep constitutions and runtime code out of this packet unless later evidence forces a superseding packet
+- Open uncertainties:
+  - the amendment must resolve the current role ambiguity between `docs/zeus_FINAL_spec.md` and `docs/architecture/zeus_durable_architecture_spec.md`
+- Next required action:
+  - amend the bounded top authority/orientation surfaces and capture the mismatch matrix
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 19:35 America/Chicago] REROUTE-PAPER-LAUNCHD-TO-CLEAN-WORKTREE post-close passed
 - Author: `Architects mainline lead`
