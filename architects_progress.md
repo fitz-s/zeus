@@ -32,14 +32,34 @@ Archive policy:
 
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `DIAGNOSE-CENTER-BUY-FAILURE` (accepted locally in worktree)
-- Current active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
-- Current packet status: `accepted locally / post-close gate passed / ready for next packet freeze`
+- Current active packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Current packet status: `accepted locally / post-close review pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - the accepted diagnosis still needs transport back to the live `Architects` branch or an explicit branch-local supersession decision
-  - the historical leftover re-audit note remains external evidence, not repo authority
+  - post-close critic/verifier still need to pass on the accepted center_buy repair boundary
+  - the repair remains hypothesis-driven and must stay bounded to the diagnosed cohort
 
 ## Durable timeline
+
+## [2026-04-08 05:31 America/Chicago] REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS frozen
+- Author: `Architects clean worktree lane`
+- Packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Status delta:
+  - current active packet frozen
+- Basis / evidence:
+  - accepted DIAGNOSE-CENTER-BUY-FAILURE boundary plus passed post-close gate permit the next packet freeze
+  - diagnosis isolated the current `center_buy` loss cluster to `8` settled `buy_yes` losses totaling `-9.0`
+  - all diagnosed settled losses sit in `<= 0.02` entry-price buckets
+  - the diagnosis script also separated this cohort from `ORDER_REJECTED = 7`, so the next repair can stay on the settled-loss entry cohort only
+- Decisions frozen:
+  - keep this packet on a `center_buy` ultra-low-price `buy_yes` cohort guard only
+  - do not change other strategies until this bounded repair is verified
+- Open uncertainties:
+  - exact threshold and rejection reason still need implementation-time proof
+- Next required action:
+  - implement the bounded evaluator-side guard and adversarial non-center_buy safety tests
+- Owner:
+  - Architects clean worktree lane
 
 ## [2026-04-08 05:18 America/Chicago] DIAGNOSE-CENTER-BUY-FAILURE accepted locally and passed post-close gate in worktree
 - Author: `Architects clean worktree lane`

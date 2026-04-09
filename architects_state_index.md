@@ -12,8 +12,8 @@ Metadata:
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `DIAGNOSE-CENTER-BUY-FAILURE`
-- Active packet state: `accepted locally / post-close passed / ready for next packet freeze`
+- Active packet: `REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS`
+- Active packet state: `accepted locally / post-close review pending`
 - Active packet owner: `Architects mainline lead`
 - Last accepted packet: `REPAIR-RESIDUAL-STALE-GHOST-EXCLUSION`
 - Execution mode default: `solo lead with bounded subagents`
@@ -23,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Freeze the next lawful center_buy repair packet from the diagnosis evidence.
-2. Keep the diagnosis packet read-only and complete; do not reopen unless new contradiction appears.
-3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
+1. Run post-close critic + verifier on the accepted center_buy repair boundary.
+2. Keep the packet bounded to the diagnosed ultra-low-price center_buy cohort only.
+3. Keep the diagnosis packet read-only and complete; do not reopen unless new contradiction appears.
 
 ## Current out-of-scope dirt
 
@@ -48,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/DIAGNOSE-CENTER-BUY-FAILURE.md`
+5. `work_packets/REPAIR-CENTER-BUY-ULTRA-LOW-PRICE-TAIL-BETS.md`
