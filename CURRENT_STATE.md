@@ -7,16 +7,16 @@
 1. `AGENTS.md`
 2. `architecture/self_check/authority_index.md`
 3. `CURRENT_STATE.md`
-4. `work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md`
+4. `work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
 5. `docs/known_gaps.md` when current runtime gap context matters
 
 ## Current active packet
-- `work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md`
+- `work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
 - State: `IMPLEMENTING`
-- Branch: `architects-authority-amendment`
+- Branch: `architects-fast-archive-sweep`
 
 ## Last accepted packet
-- `work_packets/GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE.md`
+- `docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md`
 
 ## Historical control ledgers
 The following are archived and are no longer active control authority:
@@ -25,3 +25,7 @@ The following are archived and are no longer active control authority:
 - `docs/archives/control/architects_progress.md`
 - `docs/archives/control/architects_task.md`
 - `docs/archives/control/architects_state_index.md`
+
+## Historical work packets
+
+Completed work packets are archived under `docs/archives/work_packets/`. Only the current live packet remains in `work_packets/`.

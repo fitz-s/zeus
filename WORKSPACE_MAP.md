@@ -99,6 +99,8 @@
 
 - Historical handoffs, sessions, findings, traces, research, and reports now live under `docs/archives/`.
 - Retired root/architects control ledgers live under `docs/archives/control/`.
+- Completed work packets live under `docs/archives/work_packets/`; only the current live packet remains in `work_packets/`.
+- Retired root artifacts and historical top-level designs/reports live under `docs/archives/artifacts/`, `docs/archives/designs/`, `docs/archives/migration/`, and `docs/archives/reports/`.
 - Do not treat archived files as live control surfaces unless a new packet explicitly promotes them.
 
 ---
