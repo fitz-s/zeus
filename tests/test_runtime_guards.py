@@ -1327,7 +1327,7 @@ def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_pro
             city, target_date, market_id, bin_label, direction, strategy, edge_source,
             source, details_json, timestamp, env
         ) VALUES (
-            'CHAIN_SYNCED', 't1', 'entered', '', 'snap-1',
+            'POSITION_EXIT_RECORDED', 't1', 'economically_closed', '', 'snap-1',
             'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'opening_inertia', 'opening_inertia',
             'test', '{}', '2099-04-04T01:00:00Z', 'paper'
         )
@@ -1445,6 +1445,185 @@ def test_load_portfolio_uses_mode_db_even_when_unsuffixed_legacy_db_is_stale(tmp
     assert state.positions[0].strategy_key == "center_buy"
     assert state.positions[0].token_id == "json-yes"
     assert state.bankroll == pytest.approx(99.0)
+
+
+def test_load_portfolio_db_first_ignores_contradictory_json_recent_exits_without_canonical_settlements(tmp_path, monkeypatch):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-open', 'active', 'db-open', 'm-db', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "db-open",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2099-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+        }],
+        "recent_exits": [{
+            "city": "Bogus",
+            "bin_label": "bad",
+            "target_date": "2099-04-01",
+            "direction": "buy_no",
+            "pnl": 210.35,
+            "exit_reason": "JSON_ONLY",
+        }],
+        "bankroll": 99.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-open"]
+    assert state.recent_exits == []
+
+
+def test_load_portfolio_db_first_prefers_canonical_recent_exits_over_json_recent_exits(tmp_path, monkeypatch):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-open', 'active', 'db-open', 'm-db', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events_legacy (
+            event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
+            city, target_date, market_id, bin_label, direction, strategy, edge_source,
+            source, details_json, timestamp, env
+        ) VALUES (
+            'POSITION_SETTLED', 'settled-1', 'settled', '', 'snap-settled',
+            'NYC', '2099-04-01', 'm-settled', '41-42°F', 'buy_yes', 'center_buy', 'center_buy',
+            'test', ?, '2099-04-04T02:00:00Z', 'paper'
+        )
+        """,
+        (
+            json.dumps({
+                "contract_version": "v1",
+                "winning_bin": "41-42°F",
+                "position_bin": "41-42°F",
+                "won": False,
+                "outcome": 0,
+                "p_posterior": 0.55,
+                "exit_price": 0.02,
+                "pnl": -3.5,
+                "exit_reason": "SETTLEMENT",
+            }),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "db-open",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2099-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+        }],
+        "recent_exits": [{
+            "city": "Bogus",
+            "bin_label": "bad",
+            "target_date": "2099-04-01",
+            "direction": "buy_no",
+            "pnl": 210.35,
+            "exit_reason": "JSON_ONLY",
+        }],
+        "bankroll": 99.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-open"]
+    assert len(state.recent_exits) == 1
+    assert state.recent_exits[0]["pnl"] == pytest.approx(-3.5)
+    assert state.recent_exits[0]["exit_reason"] == "SETTLEMENT"
+
+
+def test_load_portfolio_json_fallback_keeps_json_recent_exits(tmp_path, monkeypatch):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "json-only",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2099-04-01",
+            "bin_label": "39-40°F",
+            "direction": "buy_yes",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+        }],
+        "recent_exits": [{
+            "city": "NYC",
+            "bin_label": "39-40°F",
+            "target_date": "2099-04-01",
+            "direction": "buy_yes",
+            "pnl": 1.25,
+            "exit_reason": "JSON_FALLBACK",
+        }],
+        "bankroll": 111.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["json-only"]
+    assert len(state.recent_exits) == 1
+    assert state.recent_exits[0]["pnl"] == pytest.approx(1.25)
+    assert state.recent_exits[0]["exit_reason"] == "JSON_FALLBACK"
 
 
 def test_lead_days_use_city_local_reference_time():
