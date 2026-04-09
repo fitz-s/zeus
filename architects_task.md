@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex REFRESH-PAPER-RUNTIME-ARTIFACTS acceptance sync`
+- Last updated by: `Codex BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,23 +17,23 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `REFRESH-PAPER-RUNTIME-ARTIFACTS`
-- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
+- Packet: `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP`
+- State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Add a bounded, reproducible refresh path for paper runtime artifacts so stale persisted snapshots can be regenerated from current clean-branch truth.
+Isolate and reroute the live paper-mode background writer that keeps overwriting refreshed artifacts with stale fallback-based snapshots.
 
 ## Allowed files
 
-- `work_packets/REFRESH-PAPER-RUNTIME-ARTIFACTS.md`
+- `work_packets/BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `scripts/refresh_paper_runtime_artifacts.py`
-- `tests/test_runtime_artifact_refresh.py`
+- `/Users/leofitz/Library/LaunchAgents/com.zeus.paper-trading.plist`
+- `/Users/leofitz/Library/LaunchAgents/com.zeus.riskguard.plist`
 
 ## Forbidden files
 
@@ -49,6 +49,8 @@ Add a bounded, reproducible refresh path for paper runtime artifacts so stale pe
 - `migrations/**`
 - `src/execution/**`
 - `src/engine/**`
+- `scripts/**`
+- `tests/**`
 - `tests/test_architecture_contracts.py`
 - `tests/test_truth_surface_health.py`
  - `tests/test_pnl_flow_and_audit.py`
@@ -62,7 +64,7 @@ Add a bounded, reproducible refresh path for paper runtime artifacts so stale pe
 ## Non-goals
 
 - no core truth math changes in this packet
-- no `src/observability/status_summary.py` parity redesign yet
+- no runtime service redesign beyond paper writer ownership/routing
 - no reporting/dashboard/schema work
 - no schema redesign
 - no data-expansion follow-up work
@@ -70,19 +72,18 @@ Add a bounded, reproducible refresh path for paper runtime artifacts so stale pe
 
 ## Current blocker state
 
-- packet-bounded refresh entrypoint evidence now passes, but post-close critic + verifier are still required before the next packet may freeze
-- clean-branch direct truth probes remain coherent while persisted paper artifacts still preserve old snapshots
-- broader downstream parity work remains follow-up work and must be handled by a new packet instead of widening this accepted boundary
+- the accepted refresh entrypoint can write coherent paper artifacts, but a stale live writer overwrites them again within minutes
+- `launchctl` shows the active paper writers are launchd jobs bound to the stale checkout at `/Users/leofitz/.openclaw/workspace-venus/zeus`
+- this packet must stay bounded to writer ownership/rerouting before any broader parity redesign
 
 ## Immediate checklist
 
-- [x] `REFRESH-PAPER-RUNTIME-ARTIFACTS` frozen
-- [x] stale paper artifacts reproduced with packet-bounded evidence
-- [x] bounded refresh entrypoint implemented
-- [x] packet-bounded refresh tests pass
-- [x] broader parity work remains explicit
+- [x] `BUG-PAPER-LAUNCHD-WRITER-OWNERSHIP` frozen
+- [ ] overwrite-after-refresh evidence logged
+- [ ] stale paper writer/owner path isolated
+- [ ] broader runtime redesign remains explicit
 
 ## Next required action
 
-1. Run post-close critic + verifier on the accepted refresh boundary.
-2. Freeze the next bounded packet instead of widening this one.
+1. Isolate and reroute the stale paper writer/owner path.
+2. Freeze a narrower superseding packet only if launchd rerouting alone is insufficient.
