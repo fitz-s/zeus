@@ -33,12 +33,38 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
 - Current active packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
+  - accepted packet still requires the mandatory post-close critic + verifier
   - deeper comparator/shadow and settlement-authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 13:20 America/Chicago] BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
+- Status delta:
+  - bounded legacy stage-event dedupe packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `66afaae` -> `Supersede the fallback-reader packet with the live stage-event dedupe fix`
+  - commit `c270594` -> `Deduplicate legacy settlement stage events before they poison summaries`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/db.py tests/test_db.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'authoritative_settlement or query_settlement_events'` -> `7 passed, 36 deselected`
+  - direct real-state probe: authoritative settlement rows now `19` / `19 unique`, settlement sample size `19`, by-strategy totals aligned
+  - pre-close critic review via native `critic` subagent `Euclid` -> `PASS`
+  - pre-close verifier review via native `verifier` subagent `Jason` -> `PASS`
+- Decisions frozen:
+  - the first active counting seam now dedupes duplicated legacy stage events with latest-wins ordering
+  - deeper comparator/shadow, fallback-reader, and output-layer parity drift remain explicit follow-up debt
+- Open uncertainties:
+  - post-close review is still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next deeper comparator/shadow or output-parity packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 12:28 America/Chicago] BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE frozen
 - Author: `Architects mainline lead`

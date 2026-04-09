@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE freeze`
+- Last updated by: `Codex BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE acceptance`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -77,13 +77,15 @@ Deduplicate legacy `POSITION_SETTLED` stage events before they feed authoritativ
 ## Immediate checklist
 
 - [x] `BUG-LEGACY-SETTLED-STAGE-EVENT-DEDUPE` frozen
-- [ ] duplicate legacy stage events reproduced in packet-bounded tests
-- [ ] stage-event query dedupes duplicates with deterministic latest-wins behavior
-- [ ] targeted settlement-query tests pass
-- [ ] wider comparator/shadow and output-layer drift remain explicit
+- [x] duplicate legacy stage events reproduced in packet-bounded tests
+- [x] stage-event query dedupes duplicates with deterministic latest-wins behavior
+- [x] targeted settlement-query tests pass
+- [x] wider comparator/shadow and output-layer drift remain explicit
+- [ ] post-close critic review passed
+- [ ] post-close verifier review passed
 
 ## Next required action
 
-1. Implement the bounded stage-event dedupe in `src/state/db.py`.
-2. Lock the duplicate-stage-event repro and latest-wins behavior in `tests/test_db.py`.
-3. If implementation proves the RiskGuard output layer also needs a parity assertion, stop and freeze that follow-up packet instead of widening silently.
+1. Run the post-close critic review on the accepted packet boundary.
+2. Run the post-close verifier review on the accepted packet boundary.
+3. Freeze the next deeper comparator/shadow or output-parity packet only after post-close passes.

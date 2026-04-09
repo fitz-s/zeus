@@ -90,4 +90,16 @@ evidence_required:
 
 ## Evidence log
 
-- Pending implementation.
+- work-packet grammar output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted settlement-query pytest output:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'authoritative_settlement or query_settlement_events'` -> `7 passed, 36 deselected`
+  - direct seam subset: `python3 -m pytest -q tests/test_db.py -k 'query_settlement_events_latest_wins_by_runtime_trade_id or query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates or query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id'` -> `3 passed, 40 deselected`
+- compile proof: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/db.py tests/test_db.py` -> success
+- direct duplicate-stage-event repro note:
+  - before repair, real `zeus-paper.db` returned `22` authoritative settlement rows with only `19` unique trade ids
+  - after repair, the same probe returns `19` authoritative rows / `19` unique trade ids
+  - `query_learning_surface_summary(...).settlement_sample_size` now reports `19` and by-strategy totals align with headline realized PnL
+  - synthetic low-limit probe now returns distinct latest rows under a limit (`['t3', 't2']` for limit=2) instead of letting duplicates crowd them out
+- pre-close critic review: native `critic` subagent `Euclid` -> `PASS` after confirming the packet fixes the first active counting seam while keeping comparator/shadow, fallback-reader, and output parity debt explicit
+- pre-close verifier review: native `verifier` subagent `Jason` -> `PASS` after confirming targeted tests, compile proof, and real-state settlement-count convergence
