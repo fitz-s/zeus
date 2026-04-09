@@ -33,12 +33,39 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
 - Current active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- Current packet status: `frozen / implementation ready`
+- Current packet status: `accepted locally / post-close pending`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-- `load_portfolio()` still falls back through the unsuffixed DB path even when the paper-mode loader is healthy
+  - accepted packet still requires the mandatory post-close critic + verifier
+  - deeper comparator/shadow and settlement-authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 11:10 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE accepted locally
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
+- Status delta:
+  - bounded mode-aware DB probe packet accepted locally on branch `architects-risk-trailing-loss-truth`
+- Basis / evidence:
+  - commit `de8f716` -> `Supersede the comparator packet with the real mode-db probe fix`
+  - commit `7692bbc` -> `Stop paper portfolio loading from consulting the wrong database`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/portfolio.py tests/test_runtime_guards.py tests/test_db.py` -> success
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `5 passed, 77 deselected`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `1 passed, 38 deselected`
+  - pre-close critic review via native `critic` subagent `Aristotle` -> `PASS`
+  - pre-close verifier review via native `verifier` subagent `Nietzsche` -> `PASS`
+- Decisions frozen:
+  - `load_portfolio()` now prefers the sibling mode DB for explicit mode-qualified portfolio files
+  - the immediate paper wrong-path fallback is removed
+  - deeper `src/state/db.py` comparator/shadow and settlement-authority seams remain explicit follow-up debt
+- Open uncertainties:
+  - post-close review is still required before the next packet may freeze
+- Next required action:
+  - run post-close critic + verifier, then freeze the next deeper portfolio-truth or settlement-authority packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 10:52 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE frozen
 - Author: `Architects mainline lead`

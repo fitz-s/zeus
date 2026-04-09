@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE freeze`
+- Last updated by: `Codex BUG-LOAD-PORTFOLIO-MODED-DB-PROBE acceptance`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -18,7 +18,7 @@ Do not use this file for:
 ## Current active packet
 
 - Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- State: `FROZEN / IMPLEMENTATION_READY`
+- State: `ACCEPTED_LOCAL / POST_CLOSE_PENDING`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
@@ -78,13 +78,15 @@ Make `load_portfolio()` probe the mode-correct trade DB instead of unsuffixed `z
 ## Immediate checklist
 
 - [x] `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE` frozen
-- [ ] mode-aware DB probe root cause reproduced in packet-bounded tests
-- [ ] `load_portfolio()` no longer falls back when the mode DB is healthy and unsuffixed `zeus.db` is stale
-- [ ] targeted load-portfolio tests pass
-- [ ] wider comparator/shadow / settlement dedupe drift remains explicit
+- [x] mode-aware DB probe root cause reproduced in packet-bounded tests
+- [x] `load_portfolio()` no longer falls back when the mode DB is healthy and unsuffixed `zeus.db` is stale
+- [x] targeted load-portfolio tests pass
+- [x] wider comparator/shadow / settlement dedupe drift remains explicit
+- [ ] post-close critic review passed
+- [ ] post-close verifier review passed
 
 ## Next required action
 
-1. Implement the bounded mode-aware DB probe fix in `src/state/portfolio.py`.
-2. Lock the healthy-paper-db / stale-unsuffixed-db scenario in `tests/test_runtime_guards.py` or `tests/test_db.py`.
-3. If the fix proves `src/state/db.py` comparator logic or settlement dedupe must change, stop and freeze the follow-up packet instead of widening silently.
+1. Run the post-close critic review on the accepted packet boundary.
+2. Run the post-close verifier review on the accepted packet boundary.
+3. Freeze the next portfolio-truth / settlement-authority packet only after post-close passes.

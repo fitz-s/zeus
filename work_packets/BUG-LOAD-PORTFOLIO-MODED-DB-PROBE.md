@@ -93,4 +93,16 @@ evidence_required:
 
 ## Evidence log
 
-- Pending implementation.
+- work-packet grammar output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
+- kernel-manifest check output: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
+- targeted load-portfolio/runtime pytest output:
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_runtime_guards.py -k 'load_portfolio'` -> `5 passed, 77 deselected`
+  - `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/pytest -q tests/test_db.py -k 'load_portfolio'` -> `1 passed, 38 deselected`
+- compile proof: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m py_compile src/state/portfolio.py tests/test_runtime_guards.py tests/test_db.py` -> success
+- direct mode-db probe note:
+  - `query_portfolio_loader_view(zeus-paper.db)` -> `ok`
+  - `query_portfolio_loader_view(zeus.db)` -> `stale_legacy_fallback` with stale trade `08d6c939-038`
+  - direct real-state `load_portfolio(state/positions-paper.json)` no longer emits the stale-fallback warning and now loads the paper positions from the sibling mode DB
+  - route-selection smoke probe confirmed `load_portfolio()` called `get_connection(.../zeus-paper.db)` and did not call `get_connection(.../zeus.db)` for an explicit `positions-paper.json` fixture
+- pre-close critic review: native `critic` subagent `Aristotle` -> `PASS` after confirming the packet removes the immediate wrong-path fallback while keeping the deeper comparator/shadow and settlement-authority drift explicit
+- pre-close verifier review: native `verifier` subagent `Nietzsche` -> `PASS` after confirming scope purity, targeted tests, and the direct mode-db probe evidence
