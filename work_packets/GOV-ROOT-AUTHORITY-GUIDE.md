@@ -70,3 +70,14 @@ evidence_required:
 
 - This packet is a foundation/methodology packet, not a control-surface or archive packet.
 - The guide must stay concise and principled. It must not restate AGENTS execution policy, team rules, or packet mechanics except by pointer.
+
+## Evidence log
+
+- Fresh source inventory confirmed `architecture/invariants.yaml` contains exactly `INV-01` through `INV-10`, with no duplicate IDs.
+- Fresh source inventory confirmed `architecture/negative_constraints.yaml` contains exactly `NC-01` through `NC-10`, with no duplicate IDs.
+- The chosen 5 boundary rules are compressed from existing source authority rather than invented as new law:
+  - authority boundary → `INV-03`, `INV-10`, `NC-02`
+  - lifecycle boundary → `INV-01`, `INV-02`, `INV-07`, `NC-04`, `NC-07`
+  - governance boundary → `INV-04`, `NC-03`
+  - temporal-truth boundary → `INV-06`, `INV-09`, `NC-05`
+  - durability boundary → `INV-09`, `INV-10`, `NC-06`, `NC-10`
