@@ -33,13 +33,33 @@ Archive policy:
 - Mainline stage: `P7 pre-retirement seams complete`
 - Last accepted packet: `RISK-TRUTH-01-TRAILING-LOSS-AUTHORITY` (accepted locally / post-close passed)
 - Current active packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
-- Current packet status: `accepted locally / post-close pending`
+- Current packet status: `accepted locally / post-close passed / ready for next packet freeze`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted packet still requires the mandatory post-close critic + verifier
   - deeper comparator/shadow and settlement-authority drift remain unresolved follow-up work
 
 ## Durable timeline
+
+## [2026-04-09 12:05 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE post-close passed
+- Author: `Architects mainline lead`
+- Packet: `BUG-LOAD-PORTFOLIO-MODED-DB-PROBE`
+- Status delta:
+  - post-close critic review passed
+  - post-close verifier review passed
+  - next deeper truth-unification packet freeze became allowed
+- Basis / evidence:
+  - native `critic` subagent `Chandrasekhar` -> `PASS` on accepted boundary `4bd9233`
+  - native `verifier` subagent `Meitner` -> `PASS` on accepted boundary `4bd9233`
+  - accepted packet evidence already records grammar, kernel, compile, targeted tests, and the direct mode-db probe notes
+- Decisions frozen:
+  - the mode-db probe packet stands on the accepted boundary
+  - deeper `src/state/db.py` comparator/shadow and settlement-authority seams remain explicit and unresolved
+- Open uncertainties:
+  - the next packet still needs to choose between comparator/shadow cleanup and legacy settlement fallback dedupe as the next deepest seam
+- Next required action:
+  - freeze the next deeper truth-unification packet
+- Owner:
+  - Architects mainline lead
 
 ## [2026-04-09 11:10 America/Chicago] BUG-LOAD-PORTFOLIO-MODED-DB-PROBE accepted locally
 - Author: `Architects mainline lead`
