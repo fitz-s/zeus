@@ -4,7 +4,7 @@ This is the first durable routing file for humans and coding agents.
 
 ## 1. Read order
 
-### Root top-law file
+### Root authority guide
 1. `ZEUS_AUTHORITY.md`
 
 ### Principal present-tense architecture authority
@@ -55,7 +55,7 @@ If two sources disagree:
 ## 3. What each source is for
 
 - principal present-tense architecture: current system shape, migration order, architecture priorities, and present-tense routing
-- root top-law file: one-file constitutional statement of the system foundation, method, invariants, negative constraints, and boundary law
+- root authority guide: one-file compression of the system foundation, live invariants, negative constraints, and boundary rules
 - terminal target-state / endgame: finality framing, target-state intent, and endgame clause
 - change-control authority: how changes are allowed to happen
 - manifests: exact semantic atoms, zones, negative permissions, maturity stage

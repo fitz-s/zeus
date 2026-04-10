@@ -9,7 +9,7 @@
 
 | Item | Purpose |
 |------|---------|
-| `ZEUS_AUTHORITY.md` | Root top-law file summarizing system foundations and law |
+| `ZEUS_AUTHORITY.md` | Root authority guide summarizing system foundations and law |
 | `AGENTS.md` | Repo-native execution brief and current operating contract |
 | `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
 | `pytest.ini` | Test configuration |

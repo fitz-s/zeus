@@ -22,7 +22,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - Move historical investigations, audits, findings, and scratch-style research out of top-level `docs/` and into `docs/archives/` subfolders.
 
 ## Active top-level docs
-- `../ZEUS_AUTHORITY.md` — root top-law file carrying the system foundation, method, invariants, negative constraints, and boundary doctrine
+- `../ZEUS_AUTHORITY.md` — root authority guide summarizing foundations, invariants, negative constraints, and boundary rules
 - `docs/architecture/zeus_durable_architecture_spec.md` — present-tense principal architecture authority
 - `docs/zeus_FINAL_spec.md` — terminal target-state / endgame authority
 - `docs/control/current_state.md` — single live control-entry pointer
