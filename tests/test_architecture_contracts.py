@@ -2920,7 +2920,7 @@ def test_advisory_gate_workflow_freezes_verdict():
 
     trigger_paths = set(triggers["pull_request"]["paths"])
     assert "scripts/_yaml_bootstrap.py" in trigger_paths
-    assert "work_packets/**" in trigger_paths
+    assert "docs/work_packets/**" in trigger_paths
 
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/check_advisory_gates.py")],

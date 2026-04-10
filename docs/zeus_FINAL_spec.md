@@ -3,6 +3,7 @@
 Version: 2026-04-05 — Terminal document
 Status: **FINAL**. Not v2, not revision-pending. This is the last architecture document Zeus will receive.
 Author: Fitz, with Claude Opus 4.6 synthesis
+Authority note (2026-04-09): This file remains active for terminal target-state intent and the endgame clause. For present-tense implementation routing and document precedence, use `architecture/self_check/authority_index.md`; `docs/architecture/zeus_durable_architecture_spec.md` remains the principal present-tense architecture authority.
 Predecessors merged:
 - `zeus_durable_architecture_spec.md` (2026-04-02) — P0–P8 foundation
 - `TOP_PRIORITY_zeus_reality_crisis_response.md` (2026-04-03) — 17 reality gaps

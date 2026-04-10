@@ -30,7 +30,7 @@ REQUIRED_TRIGGER_PATHS = {
     "scripts/replay_parity.py",
     "tests/test_architecture_contracts.py",
     "tests/test_cross_module_invariants.py",
-    "work_packets/**",
+    "docs/work_packets/**",
 }
 
 REQUIRED_ENV_KEYS = {
