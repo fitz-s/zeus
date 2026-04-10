@@ -35,7 +35,7 @@ required_reads:
   - architects_task.md
   - architects_progress.md
   - /tmp/zeus_session_note_reaudit/docs/session_2026_04_07_leftovers_reaudit.md
-  - docs/archives/migration/isolation_migration_map.md
+  - docs/isolation_migration_map.md
   - src/main.py
   - scripts/etl_observation_instants.py
   - scripts/etl_diurnal_curves.py

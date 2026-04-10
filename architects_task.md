@@ -6,7 +6,7 @@ Purpose:
 
 Metadata:
 - Last updated: `2026-04-08 America/Chicago`
-- Last updated by: `Codex BUG-CANONICAL-CLOSURE-TRACEABILITY closure slice`
+- Last updated by: `Codex VERIFY-ETL-RECALIBRATE-CONTAMINATION freeze`
 - Authority scope: `live packet control only`
 
 Do not use this file for:
@@ -17,27 +17,26 @@ Do not use this file for:
 
 ## Current active packet
 
-- Packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
+- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
 - State: `FROZEN / IMPLEMENTATION_READY`
 - Execution mode: `SOLO_LEAD / BOUNDED_SUBAGENTS_ALLOWED`
 - Current owner: `Architects mainline lead`
 
 ## Objective
 
-Restore one truthful close path so execution facts, outcome facts, and settlement legality stay durable and semantically aligned before broader projection cleanup.
+Prove the shared ETL/recalibrate chain stays on shared truth surfaces and repair the discovered TIGGE multi-step collapse before advancing into later leftover families.
 
 ## Allowed files
 
-- `work_packets/BUG-CANONICAL-CLOSURE-TRACEABILITY.md`
+- `work_packets/VERIFY-ETL-RECALIBRATE-CONTAMINATION.md`
 - `architects_progress.md`
 - `architects_task.md`
 - `architects_state_index.md`
-- `src/state/db.py`
-- `src/execution/harvester.py`
-- `src/state/lifecycle_manager.py`
-- `tests/test_db.py`
-- `tests/test_architecture_contracts.py`
-- `tests/test_runtime_guards.py`
+- `src/main.py`
+- `scripts/etl_tigge_calibration.py`
+- `tests/test_observation_instants_etl.py`
+- `tests/test_run_replay_cli.py`
+- `tests/test_etl_recalibrate_chain.py`
 
 ## Forbidden files
 
@@ -48,11 +47,11 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 - `src/control/**`
 - `src/execution/**`
 - `src/supervisor_api/**`
+- `src/observability/**`
+- `src/riskguard/**`
+- `src/state/db.py`
 - `src/state/portfolio.py`
-- `src/state/ledger.py`
-- `src/state/projection.py`
 - `migrations/**`
-- `tests/test_architecture_contracts.py`
 - `tests/test_healthcheck.py`
 - `.github/workflows/**`
 - `.claude/CLAUDE.md`
@@ -60,25 +59,25 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 
 ## Non-goals
 
-- no migration-script execution or daemon cutover claim
-- no projection-query compatibility cleanup
-- no control-plane durability work
-- no ETL/recalibration contamination work
+- no trade/lifecycle/risk/status truth repair
+- no broad 20-script migration cleanup
+- no schema redesign or replay-engine contract rewrite
+- no daemon cutover or scheduler timing claim
 - no team runtime launch
 
 ## Current blocker state
 
-- realized-truth contract has been repaired in code across `riskguard` and `status_summary`
-- targeted convergence tests now pass, and fresh paper-mode SQL/JSON evidence converges at `-13.03` across canonical facts, `risk_state`, and `status_summary`
-- pre-close critic + verifier passed on the repaired realized-truth seam
-- post-close third-party critic + verifier still need to run before packet closeout
-- out-of-scope local dirt must remain excluded from packet commits
+- session leftovers still rank ETL/recalibrate contamination as the highest-risk open family
+- fresh repo inspection already found one concrete blocker inside that family: `etl_tigge_calibration.py` only preserves the last step file per date directory and stamps `lead_hours = 24.0`
+- representative ETL scripts appear migrated to `get_shared_connection()`, but the weekly subprocess chain still lacks packet-bounded proof
+- packet must stay off trade/lifecycle/risk/status surfaces
 
 ## Immediate checklist
 
-- [x] `BUG-CANONICAL-CLOSURE-TRACEABILITY` frozen
-- [x] architecture/code-review/test map captured for the packet
-- [x] closure contract repaired in code
+- [x] `VERIFY-ETL-RECALIBRATE-CONTAMINATION` frozen
+- [x] ETL/recalibrate code-review/test map captured for the packet
+- [x] shared-binding/import proof captured in tests
+- [x] TIGGE multi-step truth repaired
 - [x] targeted tests pass
 - [x] pre-close critic review passed
 - [x] pre-close verifier review passed
@@ -88,6 +87,6 @@ Restore one truthful close path so execution facts, outcome facts, and settlemen
 
 ## Next required action
 
-1. Cherry-pick accepted commit `89579cb` onto `Architects` cleanly when ready.
+1. Cherry-pick accepted commit `0c9a348` onto `Architects` cleanly when ready.
 2. Update the live branch control surfaces only after transport is complete.
-3. Do not widen into projection-query cleanup, control-plane durability, or ETL contamination work without a new packet.
+3. Do not widen into trade/lifecycle/risk/status truth work or broader ETL cleanup without a new packet.
