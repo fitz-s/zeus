@@ -1,5 +1,7 @@
 # Known Gaps — Antibody Register
 
+> Role note: active operational gap register and antibody tracker. Useful for present-tense runtime gaps, but not principal architecture authority.
+
 This file records structural gaps that have been fixed and the tests that make them impossible to regress.
 Each entry: what the gap was, what the antibody test is, and when it was closed.
 

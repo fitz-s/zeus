@@ -14,7 +14,7 @@ on:
       - "scripts/replay_parity.py"
       - "tests/test_architecture_contracts.py"
       - "tests/test_cross_module_invariants.py"
-      - "work_packets/**"
+      - "docs/work_packets/**"
   push:
     paths:
       - "AGENTS.md"
@@ -28,7 +28,7 @@ on:
       - "scripts/replay_parity.py"
       - "tests/test_architecture_contracts.py"
       - "tests/test_cross_module_invariants.py"
-      - "work_packets/**"
+      - "docs/work_packets/**"
   workflow_dispatch:
 
 permissions:

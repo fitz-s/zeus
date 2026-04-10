@@ -1454,14 +1454,19 @@ These files own:
 - which files/modules belong to which class of change.
 
 ### D. Operator brief / implementation quick reference
-`.claude/CLAUDE.md`
+`AGENTS.md`
 
-This file is not principal architecture authority. It is a short operational brief that must point back to A, B, and C.
+This file is not principal architecture authority. It is the repo-native operational brief that must point back to A, B, and C.
 
-### E. Historical / explanatory references
+### E. Terminal target-state / endgame authority
+`docs/zeus_FINAL_spec.md`
+
+This file defines terminal target-state framing and the endgame clause. It does not outrank the present-tense architecture authority for current implementation routing.
+
+### F. Historical / explanatory references
 - `docs/architecture/zeus_blueprint_v2.md`
 - `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
-- `docs/progress/zeus_progress.md`
+- `docs/archives/**`
 
 These remain useful, but they are no longer allowed to compete with A, B, or C on system law.
 
@@ -1470,22 +1475,24 @@ These remain useful, but they are no longer allowed to compete with A, B, or C o
 If two artifacts disagree, precedence is:
 
 1. machine-checkable semantic authority when a rule is explicitly encoded there
-2. principal architecture authority
-3. change-control authority
-4. operator brief
-5. historical/explanatory references
-6. generated code
-7. LLM explanation
+2. principal present-tense architecture authority
+3. terminal target-state / endgame authority
+4. change-control authority
+5. repo operating brief
+6. historical/explanatory references
+7. generated code
+8. LLM explanation
 
 LLM output never outranks the authority stack.
 
 ## 16.3 Required workspace update
 
-`.claude/CLAUDE.md` must update its “Design Authority” section to point to:
-- principal architecture authority
+Any retained quick-reference brief (including historical `.claude/CLAUDE.md` compatibility notes) must point to:
+- principal present-tense architecture authority
+- terminal target-state / endgame authority
 - change-control authority
 - machine manifests
-and demote old blueprint docs to historical rationale.
+and must not compete with the active authority stack.
 
 ---
 
