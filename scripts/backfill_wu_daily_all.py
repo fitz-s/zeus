@@ -27,6 +27,7 @@ import requests
 
 from src.state.db import get_shared_connection, init_schema
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.config import cities_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,19 @@ CITY_STATIONS = {
     "Lucknow":       ("VILK", "IN", "C"),
     # Oceania
     "Wellington":    ("NZWN", "NZ", "C"),
+    "Auckland":      ("NZAA", "NZ", "C"),
+    # Africa
+    "Lagos":         ("DNMM", "NG", "C"),
+    "Cape Town":     ("FACT", "ZA", "C"),
+    # Middle East
+    "Jeddah":        ("OEJN", "SA", "C"),
+    # Southeast Asia
+    "Kuala Lumpur":  ("WMKK", "MY", "C"),
+    "Jakarta":       ("WIII", "ID", "C"),
+    # Asia-Northeast
+    "Busan":         ("RKPK", "KR", "C"),
+    # Latin America
+    "Panama City":   ("MPTO", "PA", "C"),
 }
 
 
@@ -138,8 +152,13 @@ def backfill_city(city_name: str, days_back: int, conn) -> dict:
 
         if high is not None:
             # Settlement precision gate: round to integer per contract
-            _sem = (SettlementSemantics.default_wu_celsius(icao) if unit == "C"
-                    else SettlementSemantics.default_wu_fahrenheit(icao))
+            city_cfg = cities_by_name.get(city_name)
+            if city_cfg is not None:
+                _sem = SettlementSemantics.for_city(city_cfg)
+            else:
+                # Fallback for cities not yet in config
+                _sem = (SettlementSemantics.default_wu_celsius(icao) if unit == "C"
+                        else SettlementSemantics.default_wu_fahrenheit(icao))
             settlement_val = _sem.assert_settlement_value(
                 high, context=f"backfill_wu_daily_all:{city_name}"
             )

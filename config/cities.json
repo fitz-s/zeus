@@ -944,6 +944,194 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.0
+    },
+    {
+      "name": "Auckland",
+      "aliases": [
+        "Auckland",
+        "auckland"
+      ],
+      "slug_names": [
+        "auckland"
+      ],
+      "noaa": null,
+      "lat": -36.8509,
+      "lon": 174.7645,
+      "wu_station": "NZAA",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Auckland Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/nz/auckland/NZAA",
+      "timezone": "Pacific/Auckland",
+      "cluster": "Oceania-Maritime",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 6.5
+    },
+    {
+      "name": "Kuala Lumpur",
+      "aliases": [
+        "Kuala Lumpur",
+        "kuala lumpur",
+        "KL"
+      ],
+      "slug_names": [
+        "kuala-lumpur"
+      ],
+      "noaa": null,
+      "lat": 2.7456,
+      "lon": 101.7072,
+      "wu_station": "WMKK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Kuala Lumpur Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/my/sepang/WMKK",
+      "timezone": "Asia/Kuala_Lumpur",
+      "cluster": "Southeast-Asia-Equatorial",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 5.0
+    },
+    {
+      "name": "Lagos",
+      "aliases": [
+        "Lagos",
+        "lagos"
+      ],
+      "slug_names": [
+        "lagos"
+      ],
+      "noaa": null,
+      "lat": 6.5774,
+      "lon": 3.3213,
+      "wu_station": "DNMM",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Murtala Muhammed Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/ng/lagos/DNMM",
+      "timezone": "Africa/Lagos",
+      "cluster": "Africa-West-Tropical",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 5.5
+    },
+    {
+      "name": "Jeddah",
+      "aliases": [
+        "Jeddah",
+        "jeddah",
+        "Jiddah"
+      ],
+      "slug_names": [
+        "jeddah"
+      ],
+      "noaa": null,
+      "lat": 21.6796,
+      "lon": 39.1565,
+      "wu_station": "OEJN",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "King Abdulaziz Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/sa/jeddah/OEJN",
+      "timezone": "Asia/Riyadh",
+      "cluster": "Middle-East-Arabian",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "Cape Town",
+      "aliases": [
+        "Cape Town",
+        "cape town"
+      ],
+      "slug_names": [
+        "cape-town"
+      ],
+      "noaa": null,
+      "lat": -33.9649,
+      "lon": 18.6017,
+      "wu_station": "FACT",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Cape Town Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/za/cape-town/FACT",
+      "timezone": "Africa/Johannesburg",
+      "cluster": "Africa-South-Maritime",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 8.0
+    },
+    {
+      "name": "Busan",
+      "aliases": [
+        "Busan",
+        "busan",
+        "Pusan"
+      ],
+      "slug_names": [
+        "busan"
+      ],
+      "noaa": null,
+      "lat": 35.1796,
+      "lon": 128.9382,
+      "wu_station": "RKPK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Gimhae Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/kr/busan/RKPK",
+      "timezone": "Asia/Seoul",
+      "cluster": "Asia-Northeast",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.5
+    },
+    {
+      "name": "Jakarta",
+      "aliases": [
+        "Jakarta",
+        "jakarta"
+      ],
+      "slug_names": [
+        "jakarta"
+      ],
+      "noaa": null,
+      "lat": -6.1256,
+      "lon": 106.6558,
+      "wu_station": "WIII",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Soekarno-Hatta Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/id/tangerang/WIII",
+      "timezone": "Asia/Jakarta",
+      "cluster": "Southeast-Asia-Equatorial",
+      "unit": "C",
+      "historical_peak_hour": 13.5,
+      "diurnal_amplitude_c": 5.0
+    },
+    {
+      "name": "Panama City",
+      "aliases": [
+        "Panama City",
+        "panama city",
+        "Panama"
+      ],
+      "slug_names": [
+        "panama-city"
+      ],
+      "noaa": null,
+      "lat": 9.0714,
+      "lon": -79.3835,
+      "wu_station": "MPTO",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Tocumen Intl Airport",
+      "settlement_source": "https://www.wunderground.com/history/daily/pa/panama-city/MPTO",
+      "timezone": "America/Panama",
+      "cluster": "Latin-America-Tropical",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 4.5
     }
   ]
 }
