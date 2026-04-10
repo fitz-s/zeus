@@ -1,19 +1,18 @@
 # CURRENT_STATE
 
 > Role: single live control entry surface for the repo.
-> Not principal architecture authority. Use `AGENTS.md` and `architecture/self_check/authority_index.md` for authority order.
+> For operating rules, see root `AGENTS.md`.
 
 ## Read order for active work
 1. `AGENTS.md`
-2. `architecture/self_check/authority_index.md`
-3. `docs/control/current_state.md`
-4. `docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
-5. `docs/known_gaps.md` when current runtime gap context matters
+2. `docs/control/current_state.md`
+3. Active work packet (below)
+4. `docs/known_gaps.md` when current runtime gap context matters
 
 ## Current active packet
-- `docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md`
-- State: `IMPLEMENTING`
-- Branch: `architects-fast-archive-sweep`
+- No active work packet — doc restructuring in progress
+- Branch: `data-improve`
+- Work: mesh network documentation restructuring (relocating governance rules, restoring decision rationale, enriching domain model)
 
 ## Last accepted packet
 - `docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md`
