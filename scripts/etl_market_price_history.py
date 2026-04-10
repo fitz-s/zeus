@@ -3,7 +3,10 @@
 Source: rainstorm.db:token_price_log (340,351 valid rows)
        JOIN rainstorm.db:market_events for market_slug + open time
        JOIN rainstorm.db:settlements for resolution time
-Target: zeus.db:market_price_history
+  — token_price_log schema differs between rainstorm and zeus-shared;
+    this script is a no-op when rainstorm.db is absent.
+    Data was already ETL'd on initial run.
+Target: zeus-shared.db:market_price_history
 
 Computes:
 - hours_since_open: (observed_at - market created_at) in hours
@@ -14,6 +17,7 @@ ZEUS_SPEC §14.3 ETL 3:
   Zeus currently uses 0 of these 222 intermediate prices."
 """
 
+import logging
 import sqlite3
 import sys
 from datetime import datetime
@@ -23,6 +27,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_shared_connection as get_connection, init_schema
+
+logger = logging.getLogger(__name__)
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
 
@@ -52,6 +58,13 @@ def _hours_between(earlier: datetime | None, later: datetime | None) -> float | 
 
 
 def run_etl() -> dict:
+    # Source table (token_price_log with observed_at) only exists in rainstorm.db
+    if not RAINSTORM_DB.exists():
+        msg = "Rainstorm DB not found — market_price_history already ETL'd"
+        logger.info(msg)
+        print(msg)
+        return {"status": "noop", "reason": "rainstorm_db_not_found"}
+
     rs = sqlite3.connect(str(RAINSTORM_DB))
     rs.row_factory = sqlite3.Row
 

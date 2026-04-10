@@ -2,10 +2,15 @@
 
 This is Zeus's authoritative hourly time-semantic table. New time-sensitive logic
 should build from this table rather than from lossy local-hour-only artifacts.
+
+NOTE: observation_instants are now populated by backfill_hourly_openmeteo.py.
+This script is retained for its ETL logic (used in tests) but skips at runtime
+when the legacy rainstorm.db source is absent.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import sys
 from datetime import datetime
@@ -15,6 +20,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_shared_connection as get_connection, init_schema
+
+logger = logging.getLogger(__name__)
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
 
@@ -40,6 +47,12 @@ def _is_temp_sane(temp: float | None, unit: str) -> bool:
 
 
 def run_etl(source_db: Path = RAINSTORM_DB) -> dict:
+    if not source_db.exists():
+        msg = "Rainstorm DB not found — observation_instants now populated by backfill_hourly_openmeteo.py"
+        logger.info(msg)
+        print(msg)
+        return {"status": "noop", "reason": "rainstorm_db_not_found"}
+
     rs = sqlite3.connect(str(source_db))
     rs.row_factory = sqlite3.Row
 

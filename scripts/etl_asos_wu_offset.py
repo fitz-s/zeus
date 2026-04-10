@@ -1,13 +1,12 @@
 """P1 ETL: ASOS→WU offset calibration per city×season.
 
-Source: rainstorm.db observations (wu_daily_observed + iem_asos on same date)
-Target: zeus.db:asos_wu_offsets
+Source: zeus-shared.db observations (wu_daily_observed + iem_asos on same date)
+Target: zeus-shared.db:asos_wu_offsets
 
 When using ASOS as Day0 observation (WU not available),
 apply this offset to correct for station differences.
 """
 
-import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -18,13 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.calibration.manager import season_from_date, lat_for_city
 from src.state.db import get_shared_connection as get_connection, init_schema
 
-RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
-
 
 def run_etl() -> dict:
-    rs = sqlite3.connect(str(RAINSTORM_DB))
-    rs.row_factory = sqlite3.Row
-
     zeus = get_connection()
     init_schema(zeus)
 
@@ -41,19 +35,18 @@ def run_etl() -> dict:
     """)
 
     # Get paired WU + ASOS observations on same city-date
-    pairs = rs.execute("""
+    # All migrated observations are daily (hourly excluded during migration)
+    pairs = zeus.execute("""
         SELECT wu.city, wu.target_date,
-               wu.temp_high_f as wu_high,
-               asos.temp_high_f as asos_high
+               wu.high_temp as wu_high,
+               asos.high_temp as asos_high
         FROM observations wu
         INNER JOIN observations asos
             ON wu.city = asos.city AND wu.target_date = asos.target_date
         WHERE wu.source = 'wu_daily_observed'
           AND asos.source = 'iem_asos'
-          AND wu.granularity = 'daily'
-          AND asos.granularity = 'daily'
-          AND wu.temp_high_f IS NOT NULL
-          AND asos.temp_high_f IS NOT NULL
+          AND wu.high_temp IS NOT NULL
+          AND asos.high_temp IS NOT NULL
     """).fetchall()
 
     print(f"Paired WU+ASOS observations: {len(pairs)}")
@@ -84,7 +77,6 @@ def run_etl() -> dict:
         count += 1
 
     zeus.commit()
-    rs.close()
     zeus.close()
 
     print(f"\nStored {count} city×season offsets")
