@@ -1,66 +1,113 @@
 # Zeus Workspace Map
 
-> Status: Orientation-only and archive-aware map, not principal authority.
-> Current authority order is defined in `architecture/self_check/authority_index.md`.
-> Current repo operating rules are defined in `AGENTS.md`.
-> Historical material moved under `docs/archives/**` is not active authority.
+> Orientation guide for file placement, directory purpose, and naming rules.
+> For operating rules, see root `AGENTS.md`. For domain model, see `docs/reference/zeus_domain_model.md`.
 
 ## Root
 
 | Item | Purpose |
 |------|---------|
-| `ZEUS_AUTHORITY.md` | Root authority guide summarizing system foundations and law |
-| `AGENTS.md` | Repo-native execution brief and current operating contract |
-| `zeus_mature_project_foundation/` | Imported foundation source package for provenance/reference, not active authority |
+| `AGENTS.md` | Root operating brief — read first, always |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
+| `.importlinter` | Zone boundary enforcement (import rules) |
 
-## `src/` — Source Code
+## `src/` — Source Code (by zone)
 
-| Package | Purpose |
-|---------|---------|
-| `contracts/` | Semantic types (HeldSideProbability, DecisionSnapshotRef, ValidationManifest) |
-| `control/` | Control plane (runtime commands from Venus/OpenClaw) |
-| `data/` | External data clients (ensemble, polymarket, observation, market scanner) |
-| `engine/` | CycleRunner (pure orchestrator), evaluator, monitor_refresh |
-| `execution/` | Executor, exit triggers, harvester |
-| `calibration/` | Platt, calibration store, manager, drift detection |
-| `observability/` | Status summary (written every cycle for Venus to read) |
-| `riskguard/` | Independent risk process (separate from main daemon) |
-| `signal/` | EnsembleSignal, Day0Signal, model agreement |
-| `state/` | Portfolio (Position objects), chronicler, decision chain, strategy tracker |
-| `strategy/` | Market analysis, market fusion, FDR filter, Kelly sizing, risk limits, correlation |
-| `types/` | Temperature, TemperatureDelta (unit safety) |
+| Package | Zone | Purpose |
+|---------|------|---------|
+| `contracts/` | K0 | Semantic types, settlement semantics, typed contracts |
+| `state/` | K0 | Portfolio, lifecycle manager, chronicler, chain reconciliation, DB truth |
+| `control/` | K1 | Control plane (runtime commands from Venus/OpenClaw) |
+| `riskguard/` | K1 | Independent risk process, risk level enforcement |
+| `supervisor_api/` | K2 | Supervisor contracts for external systems |
+| `execution/` | K2 | Executor, exit triggers, fill tracker, harvester |
+| `engine/` | K3 | CycleRunner orchestrator, evaluator, monitor refresh |
+| `signal/` | K3 | EnsembleSignal (Monte Carlo), Day0Signal, model agreement |
+| `calibration/` | K3 | Extended Platt, calibration store, drift detection |
+| `strategy/` | K3 | Market analysis, α-weighted fusion, FDR filter, Kelly sizing |
+| `data/` | K3 | External data clients (ECMWF, Polymarket, WU, observations) |
+| `analysis/` | K4 | Analysis utilities |
+| `observability/` | K4 | Status summary (written every cycle for Venus) |
+| `types/` | — | Temperature, TemperatureDelta (unit safety) |
+
+Each `src/` package has (or should have) its own `AGENTS.md` with zone-specific rules.
 
 ## `docs/` — Documentation
 
-## `docs/control/` — Live Control
+### Mesh design principle
+
+`docs/` uses a **flat mesh architecture**: each first-level subdirectory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent context loading fast — agents read only what's linked, not what's adjacent.
+
+### Architecture (active authority)
 
 | Path | Purpose |
 |------|---------|
-| `docs/control/current_state.md` | Single live current-state/control-entry pointer |
+| `docs/architecture/zeus_durable_architecture_spec.md` | Architecture spec — DB schema, event spine, truth surfaces, P0 decisions |
+| `docs/architecture/zeus_p1_p8_implementation_spec.md` | P1-P8 implementation detail — fact layer, migration, coding OS |
+| `docs/architecture/zeus_discrete_settlement_support_amendment.md` | Settlement support as architecture authority |
 
-## `docs/work_packets/` — Live Packet Surface
+### Reference (load on demand)
 
 | Path | Purpose |
 |------|---------|
-| current packet file | Live control surface named from `docs/control/current_state.md` |
+| `docs/reference/zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, WHY explanations |
+| `docs/reference/repo_overview.md` | Technical/runtime orientation |
+| `docs/reference/workspace_map.md` | This file |
+| `docs/reference/model_routing.md` | Codex/GPT model routing (Claude/Gemini: skip) |
+| `docs/reference/quantitative_research.md` | Calibration math, Kelly, sample sizes (Chinese) |
+| `docs/reference/market_microstructure.md` | Edge thesis, participant types, entry timing (Chinese) |
+| `docs/reference/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning (Chinese) |
 
-| Path | Purpose | Authority |
-|------|---------|-----------|
-| `docs/architecture/zeus_durable_architecture_spec.md` | Principal architecture authority for current phase. | Active |
-| `docs/zeus_FINAL_spec.md` | Terminal target-state and endgame authority. | Active |
-| `docs/governance/zeus_change_control_constitution.md` | Change-control authority. | Active |
-| `docs/governance/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority. | Active |
-| `docs/known_gaps.md` | Active operational gap / antibody register. | Active |
-| `docs/archives/**` | Historical handoffs, audits, findings, traces, research, and reports. | Historical |
-| `docs/architecture/zeus_design_philosophy.md` | Historical rationale about system center and translation-loss failure mode. | Historical |
-| `docs/architecture/zeus_blueprint_v2.md` | Historical architectural rationale for position-centric design. | Historical |
-| `docs/KEY_REFERENCE/quantitative_research.md` | Calibration math, Kelly, sample sizes | Domain reference |
-| `docs/KEY_REFERENCE/market_microstructure.md` | Edge thesis, participant types, entry timing | Domain reference |
-| `docs/KEY_REFERENCE/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning | Domain reference |
-| `docs/KEY_REFERENCE/architecture_blueprint.md` | **SUPERSEDED by blueprint_v2.** Historical only. | Historical |
+### Governance (active authority)
+
+| Path | Purpose |
+|------|---------|
+| `docs/governance/zeus_change_control_constitution.md` | Packet governance rules (Chinese) |
+| `docs/governance/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority |
+| `docs/governance/team_policy.md` | Team mode usage rules |
+| `docs/governance/zeus_packet_discipline.md` | Packet discipline — closure, pre/post-closeout, waivers |
+| `docs/governance/zeus_micro_event_logging.md` | Micro-event logging format and rules |
+| `docs/governance/zeus_autonomy_gates.md` | Post-P0.5 autonomy rule, team mode entry |
+| `docs/governance/zeus_openclaw_venus_delivery_boundary.md` | Zeus ↔ Venus ↔ OpenClaw boundary law |
+| `docs/governance/zeus_top_tier_decision_register.md` | Auditable register for irreversible choices |
+
+### Live documents (docs root)
+
+| Path | Purpose |
+|------|---------|
+| `docs/zeus_FINAL_spec.md` | Target-state spec (P9-P11, endgame clause) |
+| `docs/DATA_IMPROVEMENT_PLAN.md` | Data-improve branch work plan |
+| `docs/known_gaps.md` | Active operational gap register |
+
+### Control, strategy, planning
+
+| Path | Purpose |
+|------|---------|
+| `docs/control/current_state.md` | Current active work packet pointer |
+| `docs/strategy/data_inventory.md` | Current data source status |
+| `docs/strategy/data_strategy.md` | Data utilization strategy |
+| `docs/strategy/unused_data_inventory.md` | Unused data opportunities |
+| `docs/work_packets/` | Current live work packet(s) |
+| `docs/plans/` | Execution plans |
+
+### Archives (NEVER active authority)
+
+`docs/archives/**` — Historical handoffs, audits, findings, sessions, specs, work packets, old architecture, old governance, overlay packages, reality crisis docs.
+
+Archive subdirectories: `architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`, `governance/`, `handoffs/`, `investigations/`, `math/`, `memory/`, `migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`, `reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`, `traces/`, `work_packets/`.
+
+Do not treat archived files as live control surfaces unless a work packet explicitly promotes them.
+
+## `architecture/` — Machine-Checkable Authority
+
+| File | Purpose |
+|------|---------|
+| `kernel_manifest.yaml` | Kernel file ownership and protection rules |
+| `invariants.yaml` | 10 invariant definitions |
+| `zones.yaml` | Zone definitions with import rules |
+| `negative_constraints.yaml` | 10 negative constraint definitions |
 
 ## `config/` — Runtime Parameters
 
@@ -69,16 +116,14 @@
 | `settings.json` | All runtime parameters (single source of truth) |
 | `cities.json` | 16 cities with coordinates, stations, peak hours, units |
 
-## `state/` — Persistent State
+## `state/` — Persistent State (gitignored)
 
 | File/Dir | Purpose |
 |----------|---------|
 | `zeus-paper.db` / `zeus-live.db` | Mode-specific trade databases |
 | `zeus-shared.db` | Shared world-data database |
-| `risk_state-paper.db` / `risk_state-live.db` | Mode-specific RiskGuard state |
-| `positions-paper.json` / `positions-live.json` | Mode-qualified position files |
-| `status_summary-paper.json` / `status_summary-live.json` | Mode-qualified derived operator snapshots |
-| `control_plane-paper.json` / `control_plane-live.json` | Mode-qualified runtime command surfaces |
+| `risk_state-*.db` | Mode-specific RiskGuard state |
+| `positions-*.json` | Mode-qualified position files |
 | `ensemble-log/` | ENS snapshots (append-only) |
 
 ## `tests/` — Test Suite
@@ -86,38 +131,44 @@
 | Path | Purpose |
 |------|---------|
 | `tests/contracts/` | Spec-owned validation manifests |
-| `tests/test_cross_module_invariants.py` | **Cross-module relationship tests** (the mechanism that breaks the failure cycle) |
+| `tests/test_cross_module_invariants.py` | Cross-module invariant tests (break these = code is wrong) |
 | `tests/test_pnl_flow_and_audit.py` | P&L data flow chain invariants |
-| `tests/test_*.py` | Function and lifecycle tests |
 
 ## `scripts/` — One-Time Operations
 
-| Script | Purpose |
-|--------|---------|
-| `migrate_rainstorm_data.py` | Import data from rainstorm.db |
-| `backfill_ens.py` | 93-day ENS P_raw backfill |
-| `baseline_experiment.py` | Phase 0 GO/NO-GO gate |
-| `healthcheck.py` | Daemon alive/dead check (Venus cron target) |
-| `etl_*.py` | Data ETL from rainstorm.db / TIGGE / other sources |
-
-## `logs/` — Daemon Logs
-
-`zeus-paper.log`, `zeus-paper.err` — rotated by launchd.
-
-## Archive boundary
-
-- Historical handoffs, sessions, findings, traces, research, and reports now live under `docs/archives/`.
-- Retired root/architects control ledgers live under `docs/archives/control/`.
-- Completed work packets live under `docs/archives/work_packets/`; only the current live packet remains in `docs/work_packets/`.
-- Retired root artifacts and historical top-level designs/reports live under `docs/archives/artifacts/`, `docs/archives/designs/`, `docs/archives/migration/`, and `docs/archives/reports/`.
-- Do not treat archived files as live control surfaces unless a new packet explicitly promotes them.
+ETL scripts, migration scripts, healthcheck, baseline experiments. Not part of the runtime.
 
 ---
 
-## What Does NOT Belong in Zeus Workspace
+## File Placement Rules (MANDATORY)
 
-- Rainstorm source code (lives in `workspace-venus/rainstorm/`)
-- TIGGE raw data (lives in `workspace-venus/51 source data/`)
-- Session prompts, code review docs (live in `project level docs/archive/`)
-- OpenClaw central config (`~/.openclaw/openclaw.json`)
-- Venus agent identity files (live in `workspace-venus/` root)
+| Type | Location | Naming pattern |
+|------|----------|---------------|
+| Active work packets | `docs/work_packets/` | `<PACKET-ID>.md` |
+| Completed work packets | `docs/archives/work_packets/` | same name |
+| Progress snapshots | `docs/progress/` | `<topic>_progress.md` |
+| Plans | `docs/plans/` | `<topic>_plan.md` |
+| Strategy docs | `docs/strategy/` | `<topic>_strategy.md` |
+| Architecture specs | `docs/architecture/` | `zeus_<topic>_spec.md` |
+| Governance docs | `docs/governance/` | `zeus_<topic>_constitution.md` |
+| Reference material | `docs/reference/` | `<topic>.md` |
+| Generated reports | `docs/reports/` | `<date>_<topic>.md` |
+| Archives | `docs/archives/<type>/` | original name |
+| Control surfaces | `docs/control/` | `current_state.md` only |
+| Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
+
+## Naming Rules (MANDATORY)
+
+- All `.md` files: `lower_snake_case.md`
+- Exceptions: `AGENTS.md`, `README.md`
+- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<topic>_plan.md`
+- No spaces in filenames or directory names
+- Date prefixes only for time-bound reports
+
+## What Does NOT Belong Here
+
+- Rainstorm source code → `workspace-venus/rainstorm/`
+- TIGGE raw data → `workspace-venus/51 source data/`
+- Session prompts, code review docs → `project level docs/archive/`
+- OpenClaw central config → `~/.openclaw/openclaw.json`
+- Venus agent identity files → `workspace-venus/` root
