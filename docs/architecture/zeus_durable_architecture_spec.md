@@ -54,6 +54,76 @@ Backfill and daemon logs show substantial ENS fetch gaps and repeated 429 rate-l
 
 ---
 
+## §P0 Bearing-capacity prerequisites — decision records
+
+P0 exists because the repo cannot safely absorb P1+ if treated like ordinary features. These are the foundational decisions that make later work true instead of theatrical.
+
+> **Status**: All P0 items are installed. These records are preserved as decision rationale — the WHY and WHY NOT chains that prevent future agents from re-litigating settled decisions.
+
+### P0.1 Fix execution truth semantics before ledger work
+
+**Decision**: Introduce explicit exit lifecycle semantics before canonical ledger rollout.
+
+**Why**: `CycleRunner` closed positions locally immediately after `evaluate_exit()` returned `should_exit`, while live execution only posted BUY orders. If the system keeps "closing" locally before an exit order lifecycle exists, any future ledger persists false closure semantics. This is the deepest pre-ledger corruption risk.
+
+**Why not the alternatives**:
+- ❌ **Keep current close + let chain reconciliation repair later.** Reconciliation can detect mismatch, but cannot represent intent, pending exit, or execution latency truth.
+- ❌ **Separate paper/live exit semantics.** External trading frameworks explicitly reward shared semantics. Divergence recreates paper/live split-brain.
+
+**Result**: `ExitIntent` concept at engine/execution boundary. Exit events: `EXIT_INTENT`, `EXIT_ORDER_POSTED`, `EXIT_ORDER_FILLED`, `EXIT_ORDER_VOIDED`, `EXIT_REJECTED`. Monitor exit creates exit intent, not terminal closure.
+
+### P0.2 Freeze and simplify the attribution grammar
+
+**Decision**: Freeze `strategy_key` as the unique governance identity before changing risk or learning logic.
+
+**Why**: `strategy`, `edge_source`, `discovery_mode`, `entry_method`, and mode all behaved like partial attribution surfaces. `strategy_tracker.py` fell back to `opening_inertia` when attribution was imperfect. If governance is built before attribution is frozen, all later strategy-aware logic becomes polluted.
+
+**Why not the alternatives**:
+- ❌ **Make `edge_source` canonical.** Closer to provenance than governance.
+- ❌ **Keep several keys and "interpret consistently".** Depends on discipline, not architecture.
+- ❌ **Rename everything immediately.** Massive rename churn before semantics freeze is noise.
+
+**Result**: `strategy_key` is sole governance key. Four canonical values: `settlement_capture`, `shoulder_sell`, `center_buy`, `opening_inertia`. Other taxonomy fields relegated to metadata. Trades without legal `strategy_key` are rejected or quarantined.
+
+### P0.3 Define the canonical transaction boundary
+
+**Decision**: Canonical lifecycle writes must be **single-DB, single-transaction, synchronous**.
+
+**Why**: Cycle writes were split across `positions.json`, `decision_log`, `strategy_tracker.json`, `status_summary.json`, and DB state. External event-sourcing guidance only helps if history and current state are committed together. At SQLite/single-node scale, async projection is premature and dangerous.
+
+**Why not the alternatives**:
+- ❌ **Async event projector.** Too much dual-write/eventual-consistency risk for current maturity.
+- ❌ **Keep JSON authority + add DB mirrors.** Preserves multi-truth instead of removing it.
+- ❌ **Pure event replay without projection.** Too operationally expensive for frequent runtime queries.
+
+**Result**: `position_events` append and `position_current` mutation occur within same SQLite transaction. JSON outputs became projections/exports only.
+
+### P0.4 Make data availability explicit truth
+
+**Decision**: Model upstream data unavailability as a first-class fact before building learning analytics.
+
+**Why**: Logs showed missing ENS backfill coverage and repeated 429 failures. Learning derived only from available cases overestimates system coherence and under-measures opportunity loss.
+
+**Why not the alternatives**:
+- ❌ **Treat missing data as incidental logs only.** Hides opportunity attrition and selection bias.
+- ❌ **Wait until learning layer later.** Historical analytics become retroactively contaminated.
+
+**Result**: Explicit decision outcomes for `DATA_UNAVAILABLE`, `DATA_STALE`, `RATE_LIMITED`, `CHAIN_UNAVAILABLE`. Diagnostics can separate skipped-for-data from rejected-for-risk from rejected-for-edge.
+
+### P0.5 Install the implementation operating system
+
+**Decision**: Before large refactors, install a coding workflow that converts architecture intent into atomic, testable work packets.
+
+**Why**: The natural-language-to-vibe gap was explicitly identified. The architecture is subtle; code generation systems naturally collapse nuanced intent into local edits, omitted invariants, or surface-level implementations. Without an implementation OS, even a correct spec gets executed as vibe patches.
+
+**Why not the alternatives**:
+- ❌ **Rely on long prompts.** Long prompts do not create execution discipline.
+- ❌ **Trust individual LLM competence.** The failure mode is not intelligence but translation loss, omission, and shallow local optimization.
+
+**Result**: Work packet template, evidence bundle requirement, atomic patch boundaries, mandatory tests and invariant references, no broad "implement the whole spec" prompts. See `docs/governance/zeus_packet_discipline.md`.
+
+---
+
 ## §2 Architectural intent
 
 ### The north star

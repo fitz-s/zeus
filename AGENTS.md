@@ -1,410 +1,220 @@
-File: AGENTS.md
-Disposition: NEW
-Authority basis: architecture/self_check/authority_index.md; docs/governance/zeus_autonomous_delivery_constitution.md; docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; current repo runtime truth surfaces.
-Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root summary now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
-Why this file exists now: Codex/OMX and future zero-context agents need one repo-native instruction surface that loads before work starts.
-Current-phase or long-lived: Long-lived.
+# Zeus AGENTS
 
-# Zeus repo AGENTS
+Zeus is a position-managed weather-probability trading runtime on Polymarket.
+It converts ECMWF 51-member ensemble forecasts into calibrated probabilities, selects statistically significant edges via FDR control, sizes positions with fractional Kelly, and manages a full lifecycle from entry to settlement.
 
-You are working inside Zeus, a position-management system under authority hardening.
-Your job is not to “improve the repo.”
-Your job is to change only what the active packet allows while protecting kernel law, truth contracts, and boundary discipline.
+Your job is to change only what the active work packet allows while protecting kernel law, truth contracts, and zone boundaries.
 
-## 1. Read this first
+## 1. How Zeus Works (domain model)
 
-Before editing anything, read in this order:
+### The probability chain
 
-1. `architecture/self_check/authority_index.md`
-2. `ZEUS_AUTHORITY.md`
-3. `docs/governance/zeus_autonomous_delivery_constitution.md`
-4. `docs/architecture/zeus_durable_architecture_spec.md`
-5. `docs/zeus_FINAL_spec.md`
-6. `docs/governance/zeus_change_control_constitution.md`
-7. `architecture/kernel_manifest.yaml`
-8. `architecture/invariants.yaml`
-9. `architecture/zones.yaml`
-10. `architecture/negative_constraints.yaml`
-11. scoped `AGENTS.md` in the directory you are editing
-12. then the code
-
-If current runtime facts conflict with target-law docs:
-- use runtime code/contracts for present-tense facts
-- use authority docs for change permission and target direction
-- record the mismatch in the packet or delta ledger
-
-Imported source-package note:
-- `zeus_mature_project_foundation/` is preserved as a source import for provenance and comparison.
-- Active authority lives in the mirrored repo surfaces under `architecture/`, `docs/architecture/`, `docs/governance/`, and `docs/rollout/`.
-- Do not edit the source-package copy as if it were the live law surface unless the packet explicitly targets source-package maintenance.
-
-Current routing note:
-- `ZEUS_AUTHORITY.md` is the root authority guide: foundation, invariants, negative constraints, and boundary rules in one place. It is a guide, not a precedence override.
-- `docs/archives/**` is historical/archive material and is never principal authority.
-- `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` are the active Architects packet-control surfaces.
-- `root_progress.md` and `root_task.md` remain program/backlog surfaces; they are not live packet-control authority.
-
-## 2. Required working posture
-
-- Work packet first.
-- Distinguish program, packet, and execution slice.
-- Narrow scope first.
-- Evidence before claims.
-- No convenience rewrite of authority.
-- No broad repo edits.
-- No “while here” side migrations.
-
-Program / packet / slice rules:
-
-- A program phase is larger than a packet.
-  Examples: `FOUNDATION-MAINLINE`, `P0`, `P1`.
-- A packet is the atomic authority-bearing unit of execution.
-  Examples: `P0.2 attribution freeze`, `P0.1 exit semantics split`.
-- An execution slice is a commit-sized step inside one still-open packet.
-- Do not confuse “one slice completed” with “packet completed”.
-- If the active packet remains open, the next slice is clear, and no new authority/risk boundary is crossed, continue autonomously after commit/push instead of stopping for a human “continue”.
-- Stop only when:
-  - the packet is actually complete,
-  - the next slice would widen scope,
-  - the next slice would change phase/packet,
-  - the next slice would cross into a higher-risk zone,
-  - or a real blocker / contradiction appears.
-
-Closure / reopen rules:
-
-- Packet acceptance and phase closure are always **defeasible by later repo-truth contradiction**.
-- If repo truth later disproves a prior acceptance or closure claim, control surfaces must **reopen explicitly** rather than patch quietly around the contradiction.
-- Distinguish clearly between:
-  - packet family completed,
-  - current targeted evidence passed,
-  - bottom-layer semantic convergence actually achieved.
-- Do not collapse those into one “done” claim unless the evidence truly covers all three.
-
-Pre-closeout review rules:
-
-- Before any packet-family or phase-closeout claim, run the broadest review that is still packet-bounded:
-  - targeted tests/gates for the packet,
-  - broader affected-file checks when closure is being claimed,
-  - explicit adversarial review,
-  - at least one additional independent read-only review lane on the relevant bottom-layer surfaces for high-sensitivity runtime/governance work.
-- The point of critic/reviewer lanes before closeout is to surface blocker-level issues **before a human user does**.
-- If a human user can still trivially find additional blocker-level issues after an acceptance/closure claim, treat that as a **process failure signal**, not as normal “extra critic scope.”
-- In that situation:
-  - reopen the claim,
-  - freeze an explicit repair or superseding packet,
-  - update control surfaces to match repo truth,
-  - and only re-close after fresh evidence and review.
-- If multiple confirmed defects sit on the same bottom-layer truth boundary and the human explicitly directs one repair package, prefer one tightly bounded repair packet over artificial packet fragmentation.
-
-Post-closeout gate rules:
-
-- Packet closeout does **not** automatically authorize the next packet freeze.
-- Before marking a packet accepted or pushed, finish the packet’s pre-close critic/verifier review.
-- After a packet is marked accepted/pushed, run one additional independent third-party critic review and one additional verifier pass on the accepted boundary before freezing the next packet.
-- If that post-close review finds a contradiction, stale control-surface snapshot, or evidence gap:
-  - reopen or repair explicitly before advancing,
-  - synchronize `architects_state_index.md`, `architects_task.md`, and the top-level `architects_progress.md` snapshot to repo truth,
-  - and rerun the post-close gate until it passes.
-- Treat a passed post-close gate as a separate advancement permission, not as a byproduct of acceptance.
-
-Packet evidence visibility rule:
-
-- Every item listed in `evidence_required` must appear explicitly either:
-  - in the packet file itself, or
-  - in a clearly named paired ledger/evidence surface referenced by the packet.
-- Do not treat chat memory, reviewer intuition, or implied knowledge as sufficient evidence for packet closeout.
-
-Capability-present / capability-absent proof rule:
-
-- When a packet introduces behavior that depends on a capability or substrate being present (for example a table, contract, service, or bootstrap state), acceptance must explicitly cover:
-  - the capability-present behavior, and
-  - the capability-absent behavior.
-- If the absent-path behavior is advisory skip, fail-loud, or staged no-op, say so plainly and test or evidence it directly instead of silently overclaiming the present-path result.
-
-Micro-event logging rule:
-
-- Do not dump every small attempt into `architects_progress.md`.
-- Small events, retries, scout findings, timeout notes, and experiment breadcrumbs belong in `.omx/context/<packet>-worklog.md`.
-- `architects_progress.md` is packet-level durable state only.
-- `architects_task.md` is active control state only.
-- Spark scouts may draft or append micro-event worklog entries.
-- Spark scouts must not directly edit `architects_progress.md` or `architects_task.md`.
-- The leader is responsible for promoting a worklog fact into `architects_progress.md` only when it becomes a real packet state transition, blocker, or accepted evidence item.
-
-Preferred micro-event format:
-
-```md
-## [timestamp local] <packet> <slice-or-event>
-- Author:
-- Lane:
-- Type: scout | retry | timeout | evidence | blocker | note
-- Files:
-- Finding:
-- Evidence:
-- Suggested next slice:
-- Promote to architects_progress/task?: yes | no
+```
+51 ENS members → per-member daily max → Monte Carlo (sensor noise + rounding) → P_raw
+P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal
+P_cal + P_market → Bayesian fusion → P_posterior
+P_posterior - P_market → Edge (with double-bootstrap CI)
+Edges → BH FDR filter (220 hypotheses) → Selected edges
+Selected → Fractional Kelly (dynamic mult) → Position size
 ```
 
-Post-P0.5 autonomy rule:
+### Why settlement is integer
 
-- Before `P0.5` is complete and accepted:
-  - no broad autonomous multi-packet team execution
-  - no “open team from momentum”
-- `P0.5` does not self-authorize team autonomy while it is still the active packet being implemented.
-- After `P0.5` is complete, accepted, and pushed **and** after a later `FOUNDATION-TEAM-GATE` packet is frozen and accepted:
-  - later phases may use autonomous **packet-by-packet** team execution
-  - still only one frozen packet at a time
-  - owner, file boundary, acceptance gate, and blocker policy must still be frozen before team launch
-- Even after `P0.5`:
-  - final destructive/cutover work remains human-gated
-  - `P7` is never fully autonomous for final cutover/delete transitions
-  - “destructive” includes, at minimum:
-    - live cutover timing decisions
-    - data/archive/delete transitions
-    - irreversible migration/cutover switches
-    - authority-surface deletion/demotion that changes the active law stack
+Polymarket weather markets settle on Weather Underground's reported daily high. WU reports whole degrees (°F or °C). A real temperature of 74.45°F rounds to 74°F; 74.50°F rounds to 74°F (banker's rounding). This means probability mass concentrates at bin boundaries in ways that mean-based models miss entirely. Zeus's Monte Carlo explicitly simulates: atmosphere → NWP member → ASOS sensor noise (σ ≈ 0.2-0.5°F) → METAR rounding → WU integer display. The `SettlementSemantics` contract enforces this — every DB write of a settlement value MUST go through `assert_settlement_value()`.
 
-## 3. Planning lock is mandatory when
+### Why calibration uses temporal decay
 
-You must stop and produce or load an approved packet before changing anything if the task touches:
+Raw ensemble probabilities are systematically biased — overconfident at long lead times, underconfident near settlement. The Extended Platt model includes `B·lead_days` as a direct input feature (not a bucket dimension), which automatically discounts forecast skill as it decays. Without this, the system overtrades stale forecasts. Maturity gates: n<15 → use P_raw directly, 15-50 → strong regularization (C=0.1), 50+ → standard fit.
+
+### Why FDR filtering exists
+
+Each cycle evaluates ~220 simultaneous hypotheses (cities × bins × directions). At α=0.10 without FDR control, random chance produces ~22 spurious "edges." Benjamini-Hochberg controls the false discovery rate across all hypotheses, not just per-test significance.
+
+### The truth hierarchy
+
+```
+Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)
+```
+
+Three reconciliation rules:
+1. Local + chain match → SYNCED
+2. Local exists, NOT on chain → VOID immediately (local state is a hallucination)
+3. Chain exists, NOT local → QUARANTINE 48h (unknown asset, forced exit eval)
+
+### Lifecycle states
+
+9 states: `pending_entry → active → day0_window → pending_exit → economically_closed → settled`. Terminal: `voided`, `quarantined`, `admin_closed`. Transitions are enforced by `LEGAL_LIFECYCLE_FOLDS` — illegal transitions raise errors. The lifecycle manager is the ONLY state authority (INV-01).
+
+### Risk levels change behavior (INV-05)
+
+GREEN = normal. YELLOW = no new entries. ORANGE = no entries, exit at favorable prices. RED = cancel all, exit all immediately. Advisory-only risk is explicitly forbidden — if a risk level doesn't change behavior, it violates INV-05.
+
+For full domain model with worked examples: `docs/reference/zeus_domain_model.md`
+
+## 2. Zone system
+
+Zeus uses 5 zones (K0-K4). You can only import downward. You can only write in your assigned zone.
+
+| Zone | What | Key directories | Planning lock? |
+|------|------|-----------------|----------------|
+| K0 | Kernel: lifecycle, state schema, canonical truth | `src/state/`, `src/contracts/` | Always |
+| K1 | Protective: risk enforcement, control plane | `src/riskguard/`, `src/control/` | Always |
+| K2 | Execution: supervisor, CLOB interaction | `src/supervisor_api/`, `src/execution/` | Packet required |
+| K3 | Math/Data: signals, calibration, strategy, analysis | `src/signal/`, `src/calibration/`, `src/strategy/`, `src/engine/` | Only if touching lifecycle/governance semantics |
+| K4 | Extension: monitoring, reporting, observability | `src/observability/`, `src/analysis/` | No |
+
+Import rule: K4 may import K3, K3 may import K2, etc. Never upward.
+
+Zone definitions with full import rules: `architecture/zones.yaml`
+
+## 3. Invariants (break one = rejected change)
+
+| ID | Rule | WHY |
+|----|------|-----|
+| INV-01 | Lifecycle is the only state authority | Prevents parallel truth surfaces from diverging |
+| INV-02 | strategy_key is the sole governance key | Attribution must trace to exactly one strategy, never defaulted |
+| INV-03 | DB is the canonical truth surface | JSON/CSV exports are derived, never promoted back to truth |
+| INV-04 | Point-in-time learning only | No future data leakage into training or evaluation |
+| INV-05 | Risk levels must change behavior | Advisory-only risk is theater — every level enforces real constraints |
+| INV-06 | Settlement semantics are typed contracts | Rounding/precision drift is a fatal error, not a minor bug |
+| INV-07 | No zone boundary violations | K3 math code cannot redefine K0 lifecycle semantics |
+| INV-08 | Lifecycle grammar is bounded and frozen | No ad-hoc state strings — only `LifecyclePhase` enum values |
+| INV-09 | Attribution must be exact, never defaulted | If attribution doesn't exist, the system must fail, not guess |
+| INV-10 | Packet discipline for non-trivial changes | Prevents "while here" drift and scope creep |
+
+Full invariant definitions: `architecture/invariants.yaml`
+
+## 4. Forbidden moves
+
+- Promote JSON/CSV exports back to canonical truth (violates INV-03)
+- Let math code (K3) write or redefine lifecycle/control semantics (K0/K1) (violates INV-07)
+- Invent governance keys beyond `strategy_key` (violates INV-02)
+- Add strategy fallback defaults when exact attribution exists or should exist (violates INV-09)
+- Assign lifecycle phase strings ad hoc outside `LifecyclePhase` enum (violates INV-08)
+- Suppress type errors with `as any`, `@ts-ignore`, or equivalent
+- Commit without explicit request
+- Rewrite broad authority files in one unbounded patch
+
+Full negative constraint list: `architecture/negative_constraints.yaml`
+
+## 5. Change classification
+
+| Class | Definition | Examples |
+|-------|-----------|----------|
+| Math | Stays inside existing semantic contracts | Scoring formulas, calibration logic, signal thresholds, feature generation |
+| Architecture | Changes canonical write/read paths, lifecycle grammar, truth-surface ownership, zone boundaries | DB schema, state authority, event projection, truth contracts |
+| Governance | Changes manifests, constitutions, AGENTS, decision registers, migrations, control-plane semantics | Any file in `architecture/`, `docs/governance/`, `migrations/` |
+
+A math change BECOMES architecture/governance if it touches: lifecycle states, strategy_key grammar, unit semantics, point-in-time snapshot rules, control-plane behavior, DB truth contracts, or supervisor contracts.
+
+## 6. Planning lock (must stop and plan if touching)
 
 - `architecture/**`
 - `docs/governance/**`
 - `migrations/**`
 - `.github/workflows/**`
-- `.claude/CLAUDE.md`
 - `src/state/**` truth ownership, schema, projection, or lifecycle write paths
 - `src/control/**`
 - `src/supervisor_api/**`
-- cross-zone edits
-- more than 4 files
-- anything described as canonical truth, lifecycle, governance, or control
+- Cross-zone edits
+- More than 4 files
+- Anything described as canonical truth, lifecycle, governance, or control
 
-## 4. What counts as each change class
+## 7. Working discipline
 
-### Math change
-Allowed only when the change stays inside existing semantic contracts.
-Examples:
-- scoring formulas
-- calibration logic
-- signal thresholds
-- feature generation
-- exploration heuristics
+### Before editing, answer these questions:
+- What zone am I in?
+- Which invariants apply?
+- Is this math, architecture, or governance?
+- What is the canonical truth surface here?
+- What files am I allowed to change?
 
-A math change becomes architecture/governance work if it touches:
-- lifecycle states or phases
-- `strategy_key` grammar
-- unit semantics
-- point-in-time snapshot rules
-- control-plane behavior
-- DB/file truth contracts
-- supervisor contracts
+If you cannot answer, stop and plan.
 
-### Architecture change
-Any change to:
-- canonical write/read paths
-- lifecycle grammar
-- event/projection transaction boundaries
-- truth-surface ownership
-- zone boundaries
-- state authority
-
-### Governance / schema / truth-contract change
-Any change to:
-- manifests, constitutions, AGENTS, decision registers
-- migrations
-- control-plane file semantics
-- supervisor API contracts
-- derived-vs-canonical truth classification
-
-## 5. Forbidden moves
-
-Never do any of the following:
-
-- Treat `.claude/CLAUDE.md` as the top authority.
-- Treat historical docs as active law unless the packet explicitly extracts rationale from them.
-- Treat `zeus_mature_project_foundation/` as the active authority location after mirrored authority files are installed.
-- Promote JSON exports back to canonical truth.
-- Invent or widen governance keys beyond `strategy_key`.
-- Add strategy fallback defaults when exact attribution exists or should exist.
-- Assign lifecycle phase/state strings ad hoc outside the lifecycle kernel.
-- Let math code write or redefine lifecycle/protective/control semantics.
-- Let Venus/OpenClaw or workspace docs become repo authority.
-- Rewrite broad authority files and runtime files in one unbounded patch.
-- Claim convergence that runtime does not yet have.
-
-## 6. Zero-context safety questions
-
-Before you edit, answer:
-
-- What is the authoritative truth surface here?
-- What zone is being touched?
-- Which invariant IDs matter?
-- Which files are allowed to change?
-- Which files are forbidden?
-- Is this math, architecture, governance, or schema work?
-- What evidence is required before completion?
-
-If you cannot answer those, stop and plan.
-
-## 7. Team usage
-
-You may enter `$team`, `omx team`, `/team`, or `omc team` only when:
-- there is an approved packet
-- work is parallelizable
-- one owner remains accountable
-- team members are not being asked to redefine authority
-
-Do not teamize:
-- `architecture/**`
-- `docs/governance/**`
-- migration cutover decisions
-- `.claude/CLAUDE.md` compatibility policy
-- supervisor/control-plane semantics
-- packet-less exploratory rewrites
-
-Use advisory lanes instead:
-- `omx ask ...`
-- `omc ask ...`
-- `/ccg`
-- read-only critique/review
-
-Additional phase gate:
-
-- Before `P0.5` is complete, do not use team mode as a broad execution default for the foundation mainline.
-- After `P0.5`, team mode becomes allowed for later phases only on one frozen packet at a time and only after `FOUNDATION-TEAM-GATE` is accepted.
-
-## 8. Model routing and reasoning-effort policy
-
-If you are a Codex / GPT-family model, the routing policy below applies.
-If you are not a Codex / GPT-family model, do not treat the model names below as required defaults; map the intent to your local runtime equivalent instead.
-
-Current routing contract for this repo:
-
-- Normal work in this repo should be covered by exactly three preferred models:
-  `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`.
-- Do not recommend or auto-route to `gpt-5.3-codex`, `gpt-5-codex`, or `gpt-5-codex-mini` unless the user explicitly asks for compatibility testing or model-comparison work.
-
-Current observed Codex runtime ceilings on this machine:
-
-- `gpt-5.4`: about `272k` context window
-- `gpt-5.4-mini`: about `272k` context window
-- `gpt-5.3-codex-spark`: about `128k` context window
-
-Preferred working budgets:
-
-- `gpt-5.3-codex-spark`: prefer `<= 40k` input budget
-- `gpt-5.4-mini`: prefer `<= 140k` input budget
-- `gpt-5.4`: prefer `<= 220k` input budget
-
-Treat these as routing safety rails, not theoretical hard ceilings.
-
-- `gpt-5.4` is the leader model.
-  Use it for architecture authority, contract freezing, cross-zone reasoning, packet judgment, final integration, and final acceptance.
-- `gpt-5.4-mini` is the verifier / writer / bounded-review model.
-  Use it for evidence collection, targeted review, bounded synthesis, documentation polish, compact follow-up analysis, contradiction extraction, and scout-plus lanes when spark is too small.
-- `gpt-5.3-codex-spark` is the default scout subagent model.
-  Prefer it for narrow read-only lookup, repo mapping, symbol search, relationship tracing, diff triage, and repeated fact gathering.
-
-Child-agent default posture:
-
-- Prefer native subagents often.
-- Hard cap: no more than `6` active native subagents at once.
-- Preferred steady-state: `2` to `3` active lanes unless the packet explicitly justifies more.
-- Prefer 2 to 4 parallel `gpt-5.3-codex-spark` scout lanes before broad implementation when the task spans multiple files or multiple independent questions.
-- Keep spark batons small, concrete, read-only, and evidence-returning.
-- When spark is too small but the task is still bounded and non-authoritative, escalate to `gpt-5.4-mini` instead of introducing a second codex-default lane.
-- Prefer `gpt-5.4-mini` immediately when the lane needs:
-  - more than one small cluster of files
-  - contradiction extraction across several docs
-  - bounded adversarial review
-  - read-only synthesis that would otherwise risk spark timeout
-- Keep final judgment, contract freezing, and acceptance on the leader `gpt-5.4`.
-- Do not use subagents as an excuse to skip main-thread reading of core law surfaces.
-
-Reasoning-effort policy:
-
-- `low`:
-  fast lookup, grep-like exploration, structure mapping, obvious transforms, quick summaries
-- `medium`:
-  bounded comparison, packet drafting, shortlist building, moderate synthesis, first-pass review
-- `high`:
-  implementation planning, non-trivial debugging, verifier judgments, code review with blast-radius concerns
-- `xhigh`:
-  architecture authority, governance / law edits, schema or control-plane decisions, contradictory truth-surface resolution, high-stakes final acceptance
-
-Invocation guidance:
-
-- read-only scout:
-  prefer `explore` or another read-only native child lane on `gpt-5.3-codex-spark` with `low`
-- broader scout, bounded synthesis, verifier support, or documentation follow-up:
-  use `gpt-5.4-mini` with `medium` or `high`
-- verifier / writer / targeted reviewer:
-  use `gpt-5.4-mini` with `medium` or `high`
-- critic / adversarial review:
-  use `gpt-5.4` with `high` or `xhigh` for final attack review; use `gpt-5.4-mini` with `high` for pre-critique evidence compression
-- architect / critic / final integrator:
-  use `gpt-5.4` with `high` or `xhigh`
-- only escalate to `omx team` after owner, file boundary, acceptance gate, and blocker policy are frozen
-
-Scout escalation rule:
-
-- If a spark scout times out, returns ambiguous synthesis, or needs repeated retries because the baton is too broad, escalate the lane to `gpt-5.4-mini` instead of retrying spark indefinitely.
-- Spark is for narrow scouting, not for pretending medium-context synthesis is cheap.
-- If spawn attempts fail because the lane cap is reached, close or reuse an existing lane before creating a new one.
-
-Do not:
-
-- spend `xhigh` on routine scans
-- use spark for final architecture claims, governance edits, or overlapping write lanes
-- use mini for unresolved cross-zone design or kernel-law decisions
-- recommend `gpt-5.3-codex`, `gpt-5-codex`, or `gpt-5-codex-mini` as default lanes for normal Zeus work
-- assume long context removes the need for bounded batons
-- treat a temporary 1M leader window as permission for unbounded prompts; use it as headroom, not as the default working size
-
-## 9. External boundary
-
-OpenClaw and Venus are outside repo authority.
-
-- Repo law lives in repo files.
-- Workspace memory/docs may inform operator context, but do not outrank repo authority.
-- Zeus exposes typed contracts and derived status outward.
-- Outward tools must not directly mutate repo truth, schema, or authority.
-- Never read or write external workspace state as if it were repo canonical truth unless the packet is explicitly boundary-focused.
-
-## 10. Evidence before completion
-
-Completion requires:
-- changed files listed
-- tests/gates run
-- any waived gate explained
-- rollback note
-- unresolved uncertainty stated plainly
-
-Waiver rule:
-
-- A waived gate is acceptable only when:
-  - the gate is explicitly staged/advisory by current law, or
-  - the gate is unavailable for an external reason that is recorded as a blocker or limitation.
-- A waived gate is **not** acceptable when the real reason is convenience, impatience, or difficulty.
-- High-sensitivity architecture/governance/schema packets must not self-waive required gates by prose alone.
-
-## 11. Commit discipline
+### Commit discipline
 
 **Agents must commit after each verified batch of changes.** Uncommitted work is one `git checkout .` away from total loss.
 
-Rules:
-- After completing and verifying a batch of related edits (e.g., all P9 contracts, all migration call sites), commit immediately.
-- Never leave more than ~10 files uncommitted at once.
-- Never run `git checkout .`, `git restore .`, `git reset --hard`, or `git stash pop` without explicit human approval.
-- When multiple agents edit files in parallel, serialize writes to the same file (one agent per file, or coordinate via SendMessage).
-- After every Edit tool call, verify the edit persisted with a grep or Read before proceeding.
-- If an edit appears to have been lost (file doesn't contain expected content), investigate before re-applying u2014 another agent may have overwritten it.
+- Commit after completing and verifying a batch of related edits
+- Never leave more than ~10 files uncommitted at once
+- Never run `git checkout .`, `git restore .`, `git reset --hard`, or `git stash pop` without explicit human approval
+- After every edit, verify the edit persisted (grep/read) before proceeding
+- If an edit appears lost, investigate before re-applying — another agent may have overwritten it
 
-This rule exists because a 2026-04-07 session lost multiple edits across 50+ files due to zero commits over 12+ hours of work.
+> **Historical lesson**: A 2026-04-07 session lost multiple edits across 50+ files due to zero commits over 12+ hours of work. This rule is paid for in real loss.
 
-## 12. Write style for agents
+### Evidence before completion
+- Changed files listed
+- Tests/gates run (or waived with explanation)
+- Rollback note
+- Unresolved uncertainty stated plainly
+- A waived gate is acceptable only when the gate is explicitly staged/advisory or unavailable for a recorded reason — never for convenience
 
-Keep edits delta-shaped.
-Patch authority drift instead of rewriting everything.
-If you add a new surface, say what it harmonizes, what it supersedes, and why it does not create parallel authority.
+### Governance references (mesh network)
+
+Detailed rules for these topics are extracted to dedicated files:
+- **Packet discipline** (program/packet/slice, closure, pre/post-closeout, capability proof, waivers): `docs/governance/zeus_packet_discipline.md`
+- **Micro-event logging** (format, when to log, template): `docs/governance/zeus_micro_event_logging.md`
+- **Autonomy gates** (post-P0.5 rule, team mode entry, escalation): `docs/governance/zeus_autonomy_gates.md`
+- **Team policy** (team mode usage rules): `docs/governance/team_policy.md`
+- **Change control** (deep packet governance): `docs/governance/zeus_change_control_constitution.md`
+- **Autonomous delivery** (constitution): `docs/governance/zeus_autonomous_delivery_constitution.md`
+
+### External boundary
+OpenClaw, Venus, and workspace-level docs are outside repo authority. Zeus exposes typed contracts outward. External tools must not mutate repo truth.
+
+### Write style for agents
+
+Keep edits delta-shaped. Patch authority drift instead of rewriting everything. If you add a new surface, say what it harmonizes, what it supersedes, and why it does not create parallel authority.
+
+## 8. File placement rules
+
+| Type | Location | Naming |
+|------|----------|--------|
+| Active work packets | `docs/work_packets/` | `<PACKET-ID>.md` |
+| Completed work packets | `docs/archives/work_packets/` | same name |
+| Progress snapshots | `docs/progress/` | `<topic>_progress.md` |
+| Plans | `docs/plans/` | `<topic>_plan.md` |
+| Strategy docs | `docs/strategy/` | `<topic>_strategy.md` |
+| Architecture specs | `docs/architecture/` | `zeus_<topic>_spec.md` |
+| Governance docs | `docs/governance/` | `zeus_<topic>_constitution.md` |
+| Reference material | `docs/reference/` | `<topic>.md` |
+| Generated reports | `docs/reports/` | `<date>_<topic>.md` |
+| Archives | `docs/archives/<type>/` | original name |
+| Control surfaces | `docs/control/` | `current_state.md` only |
+| Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
+
+### Naming rules
+- All `.md` files: `lower_snake_case.md` (exceptions: `AGENTS.md`, `README.md`)
+- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<topic>_plan.md`
+- No spaces in filenames or directory names
+- Date prefixes only for time-bound reports
+
+## 9. What to read next (zone-keyed)
+
+After this file, read the scoped `AGENTS.md` in the directory you are editing. Then read the code.
+
+If you need deeper context:
+
+| If your work is in... | Also read |
+|---|---|
+| K3 math/data (signals, calibration, strategy) | `docs/reference/zeus_domain_model.md` for probability chain details |
+| K0/K1 architecture (state, lifecycle, riskguard) | `docs/architecture/zeus_durable_architecture_spec.md` + `architecture/kernel_manifest.yaml` |
+| Governance (constitutions, packets, authority) | `docs/governance/zeus_autonomous_delivery_constitution.md` + `docs/control/current_state.md` |
+| Data improvement (`data-improve` branch) | `docs/DATA_IMPROVEMENT_PLAN.md` + `docs/strategy/data_inventory.md` |
+| Target-state / endgame decisions | `docs/zeus_FINAL_spec.md` (Part II: P9-P11, Part III: endgame clause) |
+| First time in repo | `docs/reference/repo_overview.md` for technical orientation |
+| File/directory structure | `docs/reference/workspace_map.md` for placement rules and directory guide |
+
+### Current active work
+Check `docs/control/current_state.md` for the current packet and branch.
+
+## 10. Conditional references (loaded on demand, not by default)
+
+These files contain specialized content and should NOT be read unless your task requires them:
+
+- `docs/governance/zeus_change_control_constitution.md` — Deep packet governance rules (Chinese language)
+- `docs/reference/model_routing.md` — Codex/GPT model routing policy (Claude/Gemini agents: skip entirely)
+- `docs/governance/team_policy.md` — Team mode usage rules (only when entering team mode)
+- `docs/known_gaps.md` — Active operational gap register (when investigating runtime issues)
+- `docs/archives/**` — Historical only, never authoritative
