@@ -310,6 +310,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
         );
 
+        CREATE INDEX IF NOT EXISTS idx_chronicle_dedup
+          ON chronicle(trade_id, event_type);
+
         -- Durable stage-level runtime spine for position lifecycle events
         CREATE TABLE IF NOT EXISTS position_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

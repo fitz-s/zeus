@@ -33,6 +33,7 @@ class ExecutionPrice:
             "ask"                 — Best ask (raw, before fee)
             "bid"                 — Best bid
             "implied_probability" — Raw market probability (NOT suitable for Kelly cost)
+            "fee_adjusted"       — Price with taker fee applied (output of with_taker_fee())
         fee_deducted: True if taker fee has already been subtracted from value.
             At the Kelly boundary, fee_deducted must be True or the caller must
             explicitly acknowledge they will adjust downstream.
@@ -42,7 +43,7 @@ class ExecutionPrice:
     """
 
     value: float
-    price_type: Literal["vwmp", "ask", "bid", "implied_probability"]
+    price_type: Literal["vwmp", "ask", "bid", "implied_probability", "fee_adjusted"]
     fee_deducted: bool
     currency: Literal["usd", "probability_units"]
 
@@ -85,6 +86,34 @@ class ExecutionPrice:
                 "ExecutionPrice fails Kelly safety check (INV-12 violation):\n"
                 + "\n".join(f"  • {e}" for e in errors)
             )
+
+    def with_taker_fee(self, fee_rate: float = 0.05) -> "ExecutionPrice":
+        """Return new ExecutionPrice with Polymarket taker fee applied.
+
+        Delegates to polymarket_fee(): fee = fee_rate × p × (1-p).
+        NOT a flat percentage — fee is highest at p=0.50 and near-zero at extremes.
+        """
+        if self.fee_deducted:
+            raise ExecutionPriceContractError(
+                "with_taker_fee() called on already fee-adjusted price "
+                f"(value={self.value}, price_type='{self.price_type}'). "
+                "Double fee application would cause systematic undersizing."
+            )
+        fee = polymarket_fee(self.value, fee_rate)
+        return ExecutionPrice(
+            value=self.value + fee,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency=self.currency,
+        )
+
+    @classmethod
+    def schema_packet(cls) -> dict:
+        """Return typed schema for K2/K3 consumption contracts."""
+        return {
+            "type": "ExecutionPrice",
+            "required_fields": ["value", "price_type", "fee_deducted", "currency"],
+        }
 
 
 class ExecutionPriceContractError(Exception):

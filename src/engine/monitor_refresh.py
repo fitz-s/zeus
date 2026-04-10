@@ -580,7 +580,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             held_idx = bootstrap_ctx["held_idx"]
             bins = bootstrap_ctx["bins"]
             p_market_arr = np.zeros(len(bins))
-            p_market_arr[held_idx] = current_p_market
+            # A1: MarketAnalysis expects YES-side market prices (entry convention).
+            # For buy_no, current_p_market is native NO-side — convert back to YES.
+            p_market_yes = current_p_market if pos.direction == "buy_yes" else 1.0 - current_p_market
+            p_market_arr[held_idx] = p_market_yes
 
             analysis = MarketAnalysis(
                 p_raw=bootstrap_ctx["p_raw"],

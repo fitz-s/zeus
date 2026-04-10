@@ -27,6 +27,7 @@ from src.state.lifecycle_manager import (
 )
 from src.state.portfolio import (
     compute_economic_close,
+    compute_settlement_close,
     ExitContext,
     mark_admin_closed,
     Position,
@@ -690,3 +691,29 @@ def _mark_exit_retry(
         position.trade_id, reason, position.exit_retry_count,
         position.next_exit_retry_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# F1: Settlement exit facade — single-writer contract for settlement closes
+# ---------------------------------------------------------------------------
+
+def mark_settled(
+    portfolio: PortfolioState,
+    trade_id: str,
+    settlement_price: float,
+    exit_reason: str = "SETTLEMENT",
+) -> Optional[Position]:
+    """Single canonical entry point for settlement-driven position close.
+
+    Wraps compute_settlement_close so all exit state transitions
+    (signal + settlement) route through exit_lifecycle.
+    Covers buy_yes/buy_no settlements. Void/unknown-direction
+    positions are handled separately by void_position.
+    """
+    closed = compute_settlement_close(portfolio, trade_id, settlement_price, exit_reason)
+    if closed is not None:
+        logger.info(
+            "EXIT_LIFECYCLE mark_settled %s: price=%.4f reason=%s",
+            trade_id, settlement_price, exit_reason,
+        )
+    return closed

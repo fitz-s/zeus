@@ -45,6 +45,15 @@ from src.state.strategy_tracker import get_tracker, save_tracker
 logger = logging.getLogger(__name__)
 
 
+def _get_canonical_exit_flag() -> bool:
+    """Read CANONICAL_EXIT_PATH feature flag from settings."""
+    try:
+        from src.config import settings
+        return settings._data.get("feature_flags", {}).get("CANONICAL_EXIT_PATH", False)
+    except Exception:
+        return False
+
+
 def _next_canonical_sequence_no(conn, position_id: str) -> int:
     try:
         row = conn.execute(
@@ -609,6 +618,7 @@ def _settle_positions(
     if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
     settled = 0
+    _canonical_exit = _get_canonical_exit_flag()
     settlement_records = settlement_records if settlement_records is not None else []
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
@@ -650,7 +660,13 @@ def _settle_positions(
         settlement_price = exit_price
         if getattr(pos, "state", "") == "economically_closed":
             settlement_price = getattr(pos, "exit_price", exit_price)
-        closed = compute_settlement_close(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
+
+        # F1: Route settlement close through exit_lifecycle when flag is on
+        if _canonical_exit:
+            from src.execution.exit_lifecycle import mark_settled
+            closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
+        else:
+            closed = compute_settlement_close(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
         pnl = closed.pnl if closed is not None else round(shares * exit_price - pos.size_usd, 2)
         outcome = 1 if exit_price > 0 else 0
 

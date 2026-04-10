@@ -58,9 +58,15 @@ class TestDynamicKellyMult:
         m = dynamic_kelly_mult(base=0.25, drawdown_pct=0.10, max_drawdown=0.20)
         assert m == pytest.approx(0.25 * 0.5)
 
-    def test_full_drawdown_zeros(self):
+    def test_full_drawdown_floors_at_minimum(self):
+        """INV-05 / §P9.7: full drawdown returns floor 0.001, not 0.0."""
         m = dynamic_kelly_mult(base=0.25, drawdown_pct=0.20, max_drawdown=0.20)
-        assert m == 0.0
+        assert m == pytest.approx(0.001)
+
+    def test_nan_input_floors_at_minimum(self):
+        """NaN from upstream must not propagate — floor catches it."""
+        m = dynamic_kelly_mult(base=float("nan"))
+        assert m == pytest.approx(0.001)
 
 
 class TestRiskLimits:

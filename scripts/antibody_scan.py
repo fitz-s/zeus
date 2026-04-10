@@ -303,10 +303,10 @@ def check_model_health(result: ScanResult):
 # ─────────────────────────────────────────────────────────────
 
 def check_guardrail_coverage(result: ScanResult):
-    """Macro check: how many of Zeus's 7 design-gap contracts are actually enforced?
+    """Macro check: how many of Zeus's design-gap contracts are actually enforced?
 
-    Scans production source for assertion calls. Reports a single coverage %.
-    This is a structural linter, not a runtime check.
+    Scans production source for assertion calls + runtime scaffolding.
+    Reports a single coverage %. This is a structural linter, not a runtime check.
     """
     result.checks_run += 1
 
@@ -323,6 +323,16 @@ def check_guardrail_coverage(result: ScanResult):
         ("P10 reality-gate", "src/contracts/reality_verifier.py",
          "verify_all_blocking",
          ["src/engine/cycle_runner.py", "src/engine/evaluator.py"]),
+        # Phase 3 contracts
+        ("C1 provenance", "src/contracts/provenance_registry.py",
+         "require_provenance",
+         ["src/strategy/kelly.py", "src/engine/cycle_runner.py"]),
+        ("B4 chronicle-dedup", "src/state/chronicler.py",
+         "chronicle_dedup",
+         ["src/state/chronicler.py"]),
+        ("F1 exit-authority", "src/execution/exit_lifecycle.py",
+         "mark_settled",
+         ["src/execution/exit_lifecycle.py", "src/execution/harvester.py"]),
     ]
 
     wired, unwired = [], []

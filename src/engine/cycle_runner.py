@@ -21,7 +21,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
 from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
-from src.riskguard.riskguard import get_current_level
+from src.riskguard.riskguard import get_current_level, get_force_exit_review
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.db import get_trade_connection_with_shared
 
@@ -158,6 +158,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     except Exception as e:
         logger.warning("Control plane precheck failed: %s", e)
 
+    # C1/INV-13: one-time provenance registry validation — no-op mode
+    try:
+        from src.contracts.provenance_registry import require_provenance
+        require_provenance("kelly_mult", requires_provenance=False)
+    except Exception as e:
+        logger.warning("Provenance registry precheck failed: %s", e)
+
     risk_level = get_current_level()
     summary["risk_level"] = risk_level.value
 
@@ -199,6 +206,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     portfolio_dirty = portfolio_dirty or p_dirty
     tracker_dirty = tracker_dirty or t_dirty
 
+    # B5: When daily_loss RED, block new entries (Phase 1 scope: entry-blocking only;
+    # forced exit sweep for active positions is a Phase 2 item)
+    force_exit = get_force_exit_review()
+    if force_exit:
+        summary["force_exit_review"] = True
+        logger.warning("B5: force_exit_review active — daily loss RED. Blocking new entries.")
+
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
@@ -212,6 +226,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
         entries_blocked_reason = "portfolio_quarantined"
+    elif force_exit:
+        entries_blocked_reason = "force_exit_review_daily_loss_red"
     elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
