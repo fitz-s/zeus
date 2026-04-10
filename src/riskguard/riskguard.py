@@ -403,7 +403,6 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int =
     try:
         from src.state.db import _legacy_position_events_table
         table = _legacy_position_events_table(conn) or "position_events"
-        print(f"DEBUG: table={table}, env={env}")
         rows = conn.execute(
             f"""
             SELECT event_type, strategy
@@ -415,7 +414,6 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int =
             """,
             (env, limit),
         ).fetchall()
-        print(f"DEBUG: rows={len(rows)}")
     except sqlite3.OperationalError:
         rows = []
 
@@ -549,6 +547,13 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             checked_at TEXT NOT NULL
         );
     """)
+    # B5: Add force_exit_review column if missing (code-level migration, no raw ALTER)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_state)").fetchall()}
+    if "force_exit_review" not in cols:
+        try:
+            conn.execute("ALTER TABLE risk_state ADD COLUMN force_exit_review INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # concurrent process already added it
 
 
 def tick() -> RiskLevel:
@@ -721,9 +726,12 @@ def tick() -> RiskLevel:
         weekly_loss_level,
     )
 
+    # B5: force_exit_review when daily loss reaches RED
+    force_exit_review = 1 if daily_loss_level == RiskLevel.RED else 0
+
     risk_conn.execute("""
-        INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         level.value, b_score, d_accuracy, None,
         json.dumps({
@@ -792,6 +800,7 @@ def tick() -> RiskLevel:
             "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
         }),
         now,
+        force_exit_review,
     ))
     zeus_conn.commit()
     risk_conn.commit()
@@ -838,6 +847,31 @@ def get_current_level() -> RiskLevel:
         # R4: DB error = fail closed → RED
         logger.error("RiskGuard DB error: %s. Fail-closed → RED.", e)
         return RiskLevel.RED
+
+
+def get_force_exit_review() -> bool:
+    """Read force_exit_review flag from most recent risk_state row.
+
+    B5: When daily_loss_level reaches RED, this returns True so that
+    cycle_runner can block new entries. (Phase 1 scope: entry-blocking;
+    forced exit sweep for active positions is a Phase 2 item.)
+    Fail-closed: returns True on any error (conservative).
+    """
+    conn = None
+    try:
+        conn = get_connection(RISK_DB_PATH)
+        init_risk_db(conn)
+        row = conn.execute(
+            "SELECT force_exit_review FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(row["force_exit_review"])
+    except Exception:
+        return True  # fail-closed: assume exit review needed
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":

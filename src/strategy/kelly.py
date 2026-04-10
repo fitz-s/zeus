@@ -14,6 +14,8 @@ Dynamic multiplier reduces sizing when:
 
 import numpy as np
 
+from src.contracts.provenance_registry import require_provenance
+
 
 def kelly_size(
     p_posterior: float,
@@ -49,6 +51,9 @@ def dynamic_kelly_mult(
     Reduces base multiplier based on uncertainty and risk state.
     All adjustments are multiplicative (cumulative).
     """
+    # C1/INV-13: provenance check — default no-op until registry validation complete
+    require_provenance("kelly_mult", requires_provenance=False)
+
     m = base
 
     # CI width: wider CI → less confident → smaller size
@@ -77,4 +82,7 @@ def dynamic_kelly_mult(
     if drawdown_pct > 0 and max_drawdown > 0:
         m *= max(0.0, 1.0 - drawdown_pct / max_drawdown)
 
-    return m
+    # INV-05 / §P9.7: cascade floor — multiplier must never reach zero or NaN
+    if not (m == m):  # NaN check: NaN != NaN
+        return 0.001
+    return max(0.001, m)

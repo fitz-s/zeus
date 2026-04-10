@@ -47,6 +47,7 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
@@ -787,8 +788,31 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
         
-        # Apply RiskGraph Throttling Phase 3
-        size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)
+        # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost
+        ep = ExecutionPrice(
+            value=edge.entry_price,
+            price_type="implied_probability",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+        ep_fee_adjusted = ep.with_taker_fee()
+        ep_fee_adjusted.assert_kelly_safe()
+
+        _shadow_flag = settings._data.get("feature_flags", {}).get("EXECUTION_PRICE_SHADOW", False)
+        if _shadow_flag:
+            # New path authoritative — fee-adjusted entry price
+            size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle)
+        else:
+            # Shadow mode: old path authoritative, log delta for monitoring
+            size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)
+            shadow_size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle)
+            if size > 0:
+                _ep_logger = logging.getLogger("zeus.execution_price_shadow")
+                _ep_logger.info(
+                    "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
+                    size, shadow_size, size - shadow_size,
+                    edge.entry_price, ep_fee_adjusted.value,
+                )
         if policy.allocation_multiplier != 1.0:
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")

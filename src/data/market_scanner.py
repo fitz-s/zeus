@@ -66,6 +66,23 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     return None
 
 
+def get_sibling_outcomes(market_id: str) -> list[dict]:
+    """Return ALL outcomes (bins) for the event containing market_id.
+
+    S6: needed by monitor_refresh to build the full bin vector for
+    calibrate_and_normalize() (same path as entry).
+    """
+    events = _get_active_events()
+    if not events:
+        events = _fetch_events_by_keyword("temperature")
+
+    for event in events:
+        outcomes = _extract_outcomes(event)
+        if any(o.get("market_id") == market_id for o in outcomes):
+            return outcomes
+    return []
+
+
 def _get_active_events() -> list[dict]:
     global _ACTIVE_EVENTS_CACHE
     if _ACTIVE_EVENTS_CACHE is None:

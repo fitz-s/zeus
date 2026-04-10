@@ -64,6 +64,21 @@ def log_event(
             return
         raise sqlite3.OperationalError("no such table: chronicle")
 
+    # B4: dedup guard — prevent duplicate events within 1-minute window
+    if trade_id is not None:
+        dup = conn.execute("""
+            SELECT 1 FROM chronicle
+            WHERE trade_id = ? AND event_type = ?
+              AND abs(julianday(timestamp) - julianday(?)) < 0.0006944
+            LIMIT 1
+        """, (trade_id, event_type, now)).fetchone()
+        if dup is not None:
+            logger.debug(
+                "chronicle_dedup: skipping duplicate %s for trade %s",
+                event_type, trade_id,
+            )
+            return
+
     conn.execute("""
         INSERT INTO chronicle (event_type, trade_id, timestamp, details_json, env)
         VALUES (?, ?, ?, ?, ?)
