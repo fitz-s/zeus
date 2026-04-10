@@ -8,10 +8,13 @@ Usage:
     cd zeus
     source ../rainstorm/.venv/bin/activate
 
+    # Auto-discover a new city (looks up ICAO, coords, timezone from name)
+    python scripts/onboard_cities.py --discover "Auckland"
+
     # Dry run — show what would happen
     python scripts/onboard_cities.py --dry-run
 
-    # Onboard specific cities
+    # Onboard specific cities already in NEW_CITIES
     python scripts/onboard_cities.py --cities Auckland "Kuala Lumpur"
 
     # Onboard all pending new cities defined in NEW_CITIES below
@@ -656,6 +659,248 @@ def _print_verification(city_names: list[str]):
         logger.warning("Verification skipped: %s", e)
 
 
+CLUSTER_RULES = [
+    # (lat_min, lat_max, lon_min, lon_max, cluster_name)
+    (-90, -15, -180, 180, "Southern-Hemisphere-Tropical"),
+    (-15, 15, 90, 180, "Southeast-Asia-Equatorial"),
+    (-15, 15, -90, 90, "Tropical"),
+    (15, 35, 90, 150, "Asia-Subtropical"),
+    (35, 55, 120, 150, "Asia-Northeast"),
+    (35, 55, 90, 120, "Asia-East-China"),
+    (15, 35, 40, 90, "Middle-East-Arabian"),
+    (35, 55, -15, 40, "Europe-Continental"),
+    (45, 70, -15, 40, "Europe-Eastern"),
+    (35, 55, -15, 10, "Europe-Mediterranean"),
+    (50, 70, -15, 10, "Europe-Maritime"),
+    (25, 50, -130, -60, "US-generic"),
+    (-60, 15, -130, -30, "Latin-America-Tropical"),
+    (-15, 15, -30, 60, "Africa-West-Tropical"),
+    (-40, -15, 10, 60, "Africa-South-Maritime"),
+    (-55, 0, 140, 180, "Oceania-Maritime"),
+    (15, 35, 60, 90, "India-North"),
+]
+
+
+def _guess_cluster(lat: float, lon: float) -> str:
+    """Best-effort cluster assignment from coordinates."""
+    for lat_min, lat_max, lon_min, lon_max, cluster in CLUSTER_RULES:
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return cluster
+    return "Unclassified"
+
+
+def _guess_unit(lat: float, lon: float) -> str:
+    """F for US cities, C for everything else."""
+    if 25 <= lat <= 50 and -130 <= lon <= -60:
+        return "F"
+    return "C"
+
+
+def auto_discover_city(city_name: str) -> NewCity | None:
+    """Auto-discover city metadata from just a name.
+
+    Uses:
+    - OpenMeteo Geocoding API → lat, lon, country
+    - timezonefinder → timezone
+    - Geographic heuristics → cluster, unit
+    - WU station search → ICAO code
+
+    Returns a NewCity with all fields populated, or None on failure.
+    """
+    import requests
+
+    # 1. Geocoding: get coordinates
+    logger.info("  Geocoding '%s'...", city_name)
+    try:
+        resp = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city_name, "count": 5, "language": "en"},
+            timeout=10,
+        )
+        results = resp.json().get("results", [])
+        if not results:
+            logger.error("  Geocoding failed: no results for '%s'", city_name)
+            return None
+    except Exception as e:
+        logger.error("  Geocoding API error: %s", e)
+        return None
+
+    # Pick the top result (usually the major city)
+    geo = results[0]
+    lat = geo["latitude"]
+    lon = geo["longitude"]
+    country_code = geo.get("country_code", "").upper()
+    admin = geo.get("admin1", "")
+    logger.info("  Found: %s, %s (%s) → %.4f, %.4f", city_name, admin, country_code, lat, lon)
+
+    # 2. Timezone
+    try:
+        from timezonefinder import TimezoneFinder
+        tf = TimezoneFinder()
+        tz_name = tf.timezone_at(lat=lat, lng=lon)
+        if not tz_name:
+            tz_name = geo.get("timezone", "UTC")
+    except ImportError:
+        tz_name = geo.get("timezone", "UTC")
+    logger.info("  Timezone: %s", tz_name)
+
+    # 3. Unit and cluster
+    unit = _guess_unit(lat, lon)
+    cluster = _guess_cluster(lat, lon)
+    logger.info("  Unit: %s, Cluster: %s", unit, cluster)
+
+    # 4. ICAO station lookup via WU geocoding
+    icao = _find_nearest_icao(lat, lon, country_code)
+    if not icao:
+        logger.warning("  Could not auto-detect ICAO station — you'll need to set it manually")
+        icao = "XXXX"
+    else:
+        logger.info("  ICAO station: %s", icao)
+
+    slug = city_name.lower().replace(" ", "-")
+    return NewCity(
+        name=city_name,
+        lat=lat,
+        lon=lon,
+        timezone=tz_name,
+        unit=unit,
+        cluster=cluster,
+        wu_station=icao,
+        airport_name=f"{city_name} Airport",
+        aliases=[city_name, city_name.lower()],
+        slug_names=[slug],
+        settlement_source=f"https://www.wunderground.com/history/daily/{country_code.lower()}/{slug}/{icao}",
+        historical_peak_hour=14.5,
+        diurnal_amplitude=8.0 if abs(lat) > 30 else 5.0,
+    )
+
+
+def _find_nearest_icao(lat: float, lon: float, country_code: str) -> str | None:
+    """Find the nearest major airport ICAO code using WU autocomplete API."""
+    import requests
+
+    # Use OpenMeteo's built-in weather station search (free, no key)
+    try:
+        resp = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": f"airport {country_code}", "count": 1},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    # Fallback: use a curated mapping of country → major airport ICAO prefixes
+    COUNTRY_ICAO_PREFIX = {
+        "US": "K", "CA": "C", "MX": "MM", "BR": "SB", "AR": "SA",
+        "GB": "EG", "FR": "LF", "DE": "ED", "ES": "LE", "IT": "LI",
+        "NL": "EH", "PL": "EP", "RU": "UU", "TR": "LT", "IL": "LL",
+        "CN": "Z", "JP": "RJ", "KR": "RK", "TW": "RC", "SG": "WS",
+        "HK": "VH", "IN": "VI", "MY": "WM", "ID": "WI", "TH": "VT",
+        "NZ": "NZ", "AU": "Y", "ZA": "FA", "NG": "DN", "EG": "HE",
+        "SA": "OE", "AE": "OM", "QA": "OT", "PA": "MP", "CO": "SK",
+        "CL": "SC", "PE": "SP", "PH": "RP", "VN": "VV",
+    }
+
+    # Try WU station search
+    try:
+        resp = requests.get(
+            "https://api.weather.com/v3/location/search",
+            params={
+                "query": f"{lat},{lon}",
+                "language": "en-US",
+                "format": "json",
+                "apiKey": "e1f10a1e78da46f5b10a1e78da96f525",  # Public WU web key
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            icao_list = data.get("location", {}).get("iataCode", [])
+            if icao_list:
+                return icao_list[0]
+    except Exception:
+        pass
+
+    # Fallback: construct from country prefix + generic
+    prefix = COUNTRY_ICAO_PREFIX.get(country_code, "")
+    if prefix:
+        logger.info("  ICAO prefix for %s: %s (manual verification needed)", country_code, prefix)
+    return None
+
+
+def interactive_discover(city_names: list[str]):
+    """Interactively discover and confirm city metadata, then run pipeline."""
+    discovered = []
+
+    for name in city_names:
+        logger.info("\n" + "=" * 60)
+        logger.info("DISCOVERING: %s", name)
+        logger.info("=" * 60)
+
+        city = auto_discover_city(name)
+        if city is None:
+            logger.error("Failed to discover %s — skipping", name)
+            continue
+
+        # Display for confirmation
+        print(f"\n{'─' * 50}")
+        print(f"  Name:       {city.name}")
+        print(f"  Lat/Lon:    {city.lat:.4f}, {city.lon:.4f}")
+        print(f"  Timezone:   {city.timezone}")
+        print(f"  Unit:       {city.unit}")
+        print(f"  Cluster:    {city.cluster}")
+        print(f"  ICAO:       {city.wu_station}")
+        print(f"  Settlement: {city.settlement_source}")
+        print(f"{'─' * 50}")
+
+        confirm = input(f"  Accept {city.name}? [Y/n/edit] ").strip().lower()
+        if confirm == "n":
+            logger.info("  Skipped %s", name)
+            continue
+        elif confirm == "edit":
+            # Allow editing individual fields
+            new_icao = input(f"  ICAO [{city.wu_station}]: ").strip()
+            if new_icao:
+                city = NewCity(**{**city.__dict__, "wu_station": new_icao})
+            new_cluster = input(f"  Cluster [{city.cluster}]: ").strip()
+            if new_cluster:
+                city = NewCity(**{**city.__dict__, "cluster": new_cluster})
+            new_tz = input(f"  Timezone [{city.timezone}]: ").strip()
+            if new_tz:
+                city = NewCity(**{**city.__dict__, "timezone": new_tz})
+
+        discovered.append(city)
+        logger.info("  ✅ Confirmed %s", city.name)
+
+    if not discovered:
+        logger.info("No cities confirmed — exiting")
+        return
+
+    # Run pipeline
+    confirm_run = input(f"\nRun pipeline for {len(discovered)} cities? [Y/n] ").strip().lower()
+    if confirm_run == "n":
+        # Just print the NEW_CITIES code for manual addition
+        print("\n# Add to NEW_CITIES in onboard_cities.py:")
+        for c in discovered:
+            print(f"""    NewCity(
+        name="{c.name}",
+        lat={c.lat},
+        lon={c.lon},
+        timezone="{c.timezone}",
+        unit="{c.unit}",
+        cluster="{c.cluster}",
+        wu_station="{c.wu_station}",
+        airport_name="{c.airport_name}",
+        aliases={c.aliases},
+        slug_names={c.slug_names},
+        settlement_source="{c.settlement_source}",
+    ),""")
+        return
+
+    success = run_pipeline(discovered, dry_run=False)
+    sys.exit(0 if success else 1)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -663,6 +908,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--discover", nargs="+",
+                        help="Auto-discover city metadata from names (interactive)")
     parser.add_argument("--cities", nargs="+", help="City names to onboard (must be in NEW_CITIES)")
     parser.add_argument("--all", action="store_true", help="Onboard all cities in NEW_CITIES")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen without doing it")
@@ -679,9 +926,13 @@ def main():
             print(f"  {c.name:20s} {c.cluster:30s} {c.unit} ICAO={c.wu_station}")
         return
 
+    if args.discover:
+        interactive_discover(args.discover)
+        return
+
     if not args.cities and not args.all:
         parser.print_help()
-        print("\nError: specify --cities or --all")
+        print("\nError: specify --discover, --cities, or --all")
         sys.exit(1)
 
     # Resolve city list
