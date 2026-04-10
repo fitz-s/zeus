@@ -1,6 +1,6 @@
 # Zeus: Durable Weather Trading Runtime
 
-> Repo overview only. For law and authority start with `ZEUS_AUTHORITY.md`, then `AGENTS.md`, then `architecture/self_check/authority_index.md`.
+> Repo overview only. For root law start with `ZEUS_AUTHORITY.md`, then `architecture/self_check/authority_index.md`, then `AGENTS.md`.
 
 Zeus is a high-fidelity, position-managed trading runtime engineered for **Weather Prediction Markets** on the Polymarket CLOB. It converts superior meteorological forecasts into consistent financial alpha through a combination of physics-aware modeling and an authority-hardened execution spine.
 

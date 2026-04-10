@@ -74,3 +74,8 @@ evidence_required:
 
 - This packet supersedes the earlier assumption that `ZEUS_AUTHORITY.md` could stay as a thin root guide.
 - The goal is not brevity. The goal is a root law surface with real bearing capacity.
+
+## Evidence log
+
+- Before expansion, `ZEUS_AUTHORITY.md` was `88` lines with `7` headings, versus `627` lines / `72` headings in `docs/zeus_FINAL_spec.md` and `1937` lines / `285` headings in `docs/architecture/zeus_durable_architecture_spec.md`.
+- The expanded file now carries executive frame, source basis, architectural intent, non-goals, methodological law, constitutional law, live invariants, live negative constraints, boundary law, authority doctrine, archive/control doctrine, operator/change doctrine, unfinished law before live, methodology attribution, zero-context usage, and coda.
