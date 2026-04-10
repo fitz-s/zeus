@@ -102,7 +102,10 @@ def _synthesize_bins(median_val: float, unit: str) -> list[tuple[str, float | No
 
 
 def _temp_in_bin(temp: float, low: float | None, high: float | None) -> bool:
-    """Check if a temperature falls in a bin."""
+    """Check if a temperature falls in a bin.
+
+    Defensive: temp should already be integer-rounded by caller.
+    """
     if low is None and high is not None:
         return temp <= high
     elif high is None and low is not None:
@@ -117,6 +120,7 @@ def run_etl(dry_run: bool = False) -> dict:
     init_schema(conn)
 
     # Load all settlements with known settlement_value
+    # Defensive: round to integer per settlement precision contract
     settlements = {}
     for row in conn.execute("""
         SELECT city, target_date, settlement_value, winning_bin
@@ -125,7 +129,7 @@ def run_etl(dry_run: bool = False) -> dict:
     """).fetchall():
         key = (row["city"], row["target_date"])
         settlements[key] = {
-            "value": float(row["settlement_value"]),
+            "value": round(float(row["settlement_value"])),
             "winning_bin": row["winning_bin"],
         }
 

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.config import cities as CITIES, City
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.state.db import get_shared_connection
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,12 @@ def collect_daily_highs(
         high_temp = _fetch_wu_daily_high(city, target_date)
 
         if high_temp is not None:
+            # Settlement precision gate: round to integer per contract
+            sem = SettlementSemantics.for_city(city)
+            settlement_val = sem.assert_settlement_value(
+                high_temp, context="wu_daily_collector"
+            )
+
             conn.execute("""
                 INSERT OR IGNORE INTO observations
                 (city, target_date, source, high_temp, unit, fetched_at)
@@ -136,7 +143,7 @@ def collect_daily_highs(
                 SET settlement_value = ?, settlement_source = 'wu_daily_zeus'
                 WHERE city = ? AND target_date = ?
                 AND (settlement_value IS NULL OR settlement_value = '')
-            """, (high_temp, city.name, target_date.isoformat()))
+            """, (settlement_val, city.name, target_date.isoformat()))
 
             results["collected"] += 1
             results["details"].append({

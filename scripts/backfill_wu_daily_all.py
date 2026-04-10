@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import requests
 
 from src.state.db import get_shared_connection, init_schema
+from src.contracts.settlement_semantics import SettlementSemantics
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,14 @@ def backfill_city(city_name: str, days_back: int, conn) -> dict:
         high = _fetch_wu_icao_daily_high(icao, cc, target, unit)
 
         if high is not None:
-            # Insert/update observation
+            # Settlement precision gate: round to integer per contract
+            _sem = (SettlementSemantics.default_wu_celsius(icao) if unit == "C"
+                    else SettlementSemantics.default_wu_fahrenheit(icao))
+            settlement_val = _sem.assert_settlement_value(
+                high, context=f"backfill_wu_daily_all:{city_name}"
+            )
+
+            # Insert/update observation (keep raw for obs, rounded for settlement)
             conn.execute("""
                 INSERT OR REPLACE INTO observations
                 (city, target_date, source, high_temp, unit, fetched_at)
@@ -144,14 +152,14 @@ def backfill_city(city_name: str, days_back: int, conn) -> dict:
             """, (city_name, target.isoformat(), high, unit,
                   datetime.now(timezone.utc).isoformat()))
 
-            # Also fill settlement_value if missing
+            # Also fill settlement_value if missing — ROUNDED
             conn.execute("""
                 UPDATE settlements
                 SET settlement_value = ?, settlement_source = ?
                 WHERE city = ? AND target_date = ?
                 AND (settlement_value IS NULL OR settlement_value = ''
                      OR settlement_source = 'openmeteo_archive_daily_max')
-            """, (high, f"wu_icao_{icao}", city_name, target.isoformat()))
+            """, (settlement_val, f"wu_icao_{icao}", city_name, target.isoformat()))
 
             collected += 1
         else:

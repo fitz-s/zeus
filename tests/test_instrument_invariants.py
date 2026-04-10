@@ -363,3 +363,93 @@ def test_no_hardcoded_integer_rounding_for_celsius():
                 f"{module.__name__} uses hardcoded astype(int) rounding. "
                 f"Must use SettlementSemantics.precision for unit-aware rounding."
             )
+
+
+# ---- Settlement Precision Contract Enforcement ----
+
+def test_settlement_semantics_round_single():
+    """round_single() must return an integer for precision=1.0 contracts."""
+    sem_f = SettlementSemantics.default_wu_fahrenheit("KLGA")
+    assert sem_f.round_single(72.4) == 72.0
+    assert sem_f.round_single(72.5) == 72.0  # round_half_to_even: 72.5 → 72
+    assert sem_f.round_single(73.5) == 74.0  # round_half_to_even: 73.5 → 74
+
+    sem_c = SettlementSemantics.default_wu_celsius("EGLL")
+    assert sem_c.round_single(4.4) == 4.0
+    assert sem_c.round_single(4.6) == 5.0
+
+    # Negative temperatures (Moscow winter, sub-zero Celsius)
+    assert sem_c.round_single(-15.5) == -16.0  # round_half_to_even
+    assert sem_c.round_single(-0.5) == 0.0     # round_half_to_even: -0.5 → 0
+    assert sem_c.round_single(-3.7) == -4.0
+    assert sem_c.round_single(0.0) == 0.0
+
+
+def test_settlement_semantics_assert_rejects_nan():
+    """assert_settlement_value() must raise on NaN/inf."""
+    from src.contracts.exceptions import SettlementPrecisionError
+    sem = SettlementSemantics.default_wu_fahrenheit("KLGA")
+
+    with pytest.raises(SettlementPrecisionError):
+        sem.assert_settlement_value(float("nan"), context="test")
+
+    with pytest.raises(SettlementPrecisionError):
+        sem.assert_settlement_value(float("inf"), context="test")
+
+
+def test_settlement_semantics_assert_rounds_and_returns():
+    """assert_settlement_value() must return the rounded value."""
+    sem = SettlementSemantics.default_wu_fahrenheit("KLGA")
+    assert sem.assert_settlement_value(72.4) == 72.0
+    assert sem.assert_settlement_value(73.0) == 73.0
+
+
+def test_no_raw_settlement_writes_bypass_contract():
+    """Structural linter: all settlement DB write paths must round via SettlementSemantics.
+
+    Scans ALL Python files for INSERT/UPDATE statements targeting the settlements table.
+    Any file that writes settlement_value must import and use SettlementSemantics.
+    Test files are exempt (they may use integer literals directly).
+    """
+    import re
+    from pathlib import Path
+
+    project_root = Path(__file__).parent.parent
+    violations = []
+
+    # Pattern: any SQL that inserts/updates the settlements table
+    settlement_write_pattern = re.compile(
+        r'(INSERT\s+.*INTO\s+settlements|UPDATE\s+settlements\s+SET)',
+        re.IGNORECASE,
+    )
+
+    # Scan all non-test Python files
+    for py_file in sorted(project_root.rglob("*.py")):
+        rel = py_file.relative_to(project_root)
+        # Skip test files, __pycache__, and .venv
+        rel_str = str(rel)
+        if (rel_str.startswith("tests/") or "__pycache__" in rel_str
+                or ".venv" in rel_str):
+            continue
+
+        source = py_file.read_text(errors="ignore")
+        if not settlement_write_pattern.search(source):
+            continue
+
+        # This file writes to settlements — must use SettlementSemantics
+        if "SettlementSemantics" not in source:
+            violations.append(
+                f"{rel}: writes to settlements table but does not import SettlementSemantics"
+            )
+
+        if "assert_settlement_value" not in source and "round_single" not in source:
+            violations.append(
+                f"{rel}: writes to settlements table but never calls "
+                "assert_settlement_value() or round_single()"
+            )
+
+    if violations:
+        pytest.fail(
+            "Settlement precision contract violations:\n"
+            + "\n".join(f"  • {v}" for v in violations)
+        )

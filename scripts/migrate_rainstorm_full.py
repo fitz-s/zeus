@@ -51,6 +51,7 @@ def _ensure_forecasts_table(conn: sqlite3.Connection) -> None:
 def migrate_settlements(rs: sqlite3.Connection, zs: sqlite3.Connection) -> dict:
     """Migrate settlements with schema mapping."""
     from src.config import cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
 
     before = zs.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
 
@@ -83,7 +84,14 @@ def migrate_settlements(rs: sqlite3.Connection, zs: sqlite3.Connection) -> dict:
         # For Celsius cities, convert F→C.
         city_cfg = cities_by_name.get(city)
         if settlement_value is not None and city_cfg and city_cfg.settlement_unit == "C":
-            settlement_value = round((settlement_value - 32) * 5 / 9, 1)
+            settlement_value = (settlement_value - 32) * 5 / 9
+
+        # Settlement precision gate: round to integer per contract
+        if settlement_value is not None and city_cfg is not None:
+            sem = SettlementSemantics.for_city(city_cfg)
+            settlement_value = sem.assert_settlement_value(
+                float(settlement_value), context="migrate_rainstorm_full"
+            )
 
         try:
             zs.execute("""

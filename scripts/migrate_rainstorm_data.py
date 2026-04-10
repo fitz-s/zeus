@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_shared_connection as get_connection, init_schema
+from src.contracts.settlement_semantics import SettlementSemantics
+from src.config import cities_by_name
 
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
@@ -61,6 +63,16 @@ def _migrate_settlements(src: sqlite3.Connection, dst: sqlite3.Connection) -> in
     count = 0
     for r in rows:
         try:
+            # Settlement precision gate: round to integer per contract
+            raw_val = r["actual_temp_f"]
+            settlement_val = raw_val
+            city_cfg = cities_by_name.get(r["city"])
+            if settlement_val is not None and city_cfg is not None:
+                sem = SettlementSemantics.for_city(city_cfg)
+                settlement_val = sem.assert_settlement_value(
+                    float(settlement_val), context="migrate_rainstorm_data"
+                )
+
             dst.execute("""
                 INSERT OR IGNORE INTO settlements
                 (city, target_date, market_slug, winning_bin,
@@ -68,7 +80,7 @@ def _migrate_settlements(src: sqlite3.Connection, dst: sqlite3.Connection) -> in
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 r["city"], r["target_date"], r["event_id"],
-                r["winning_range"], r["actual_temp_f"],
+                r["winning_range"], settlement_val,
                 r["actual_temp_source"], r["settled_at"]
             ))
             count += 1

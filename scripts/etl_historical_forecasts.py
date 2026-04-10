@@ -144,8 +144,8 @@ def _compute_model_skill(conn):
     rows = conn.execute("""
         SELECT f.city,
                f.source,
-               AVG(ABS(f.forecast_high - s.settlement_value)) as mae,
-               AVG(f.forecast_high - s.settlement_value) as bias,
+               AVG(ABS(f.forecast_high - ROUND(s.settlement_value))) as mae,
+               AVG(f.forecast_high - ROUND(s.settlement_value)) as bias,
                COUNT(*) as n
         FROM historical_forecasts f
         JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date
@@ -160,7 +160,7 @@ def _compute_model_skill(conn):
 
     detail_rows = conn.execute("""
         SELECT f.city, f.target_date, f.source,
-               f.forecast_high, s.settlement_value
+               f.forecast_high, ROUND(s.settlement_value) as settlement_value
         FROM historical_forecasts f
         JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date
         WHERE f.lead_days = 1

@@ -195,7 +195,7 @@ def run():
         season = row["season"]
         lead = row["lead_days"]
         error = abs(row["error"])
-        actual = row["settlement_value"]
+        actual = round(float(row["settlement_value"])) if row["settlement_value"] is not None else None
         forecast = row["forecast_temp"]
         
         cs_key = (city, season)

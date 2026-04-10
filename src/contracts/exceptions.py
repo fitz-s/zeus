@@ -13,3 +13,13 @@ class ObservationUnavailableError(ZeusError):
 class MissingCalibrationError(ZeusError):
     """Raised when a strictly required calibration constant (like ASOS->WU offset) is missing."""
     pass
+
+
+class SettlementPrecisionError(ZeusError):
+    """Raised when a settlement value violates the integer precision contract.
+
+    Polymarket settles on the integer value displayed by Weather Underground.
+    Any code path that writes a non-integer settlement_value to the DB is
+    a contract violation that corrupts calibration training data.
+    """
+    pass

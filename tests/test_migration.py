@@ -126,7 +126,7 @@ def test_migration_with_mock_data(tmp_path, monkeypatch):
     london = conn.execute(
         "SELECT * FROM settlements WHERE city='London'"
     ).fetchone()
-    assert london["settlement_value"] == 4.5
+    assert london["settlement_value"] == 4.0  # Rounded to integer per settlement precision contract
 
     obs = conn.execute("SELECT * FROM observations").fetchone()
     assert obs["high_temp"] == 31.0
