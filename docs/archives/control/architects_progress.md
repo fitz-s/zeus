@@ -31,114 +31,16 @@ Archive policy:
 ## Current snapshot
 
 - Mainline stage: `P7 pre-retirement seams complete`
-- Last accepted packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE` (accepted locally in worktree)
-- Current active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Last accepted packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY` (accepted locally in worktree)
+- Current active packet: `BUG-CANONICAL-CLOSURE-TRACEABILITY`
 - Current packet status: `accepted locally / post-close gate passed / awaiting cherry-pick back to Architects`
 - Team status: allowed in principle after `FOUNDATION-TEAM-GATE`, but no team is active
 - Current hard blockers:
-  - accepted commit `c33ab3f` still needs transport back to the live `Architects` branch
-  - the historical leftover re-audit note remains external evidence, not repo authority
+  - accepted commit `89579cb` still needs transport back to the live `Architects` branch
+  - the untracked re-audit note stays out of packet transport unless explicitly requested
+  - no next packet should freeze off this worktree branch before transport is complete
 
 ## Durable timeline
-
-## [2026-04-08 03:57 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE accepted locally and passed post-close gate in worktree
-- Author: `Architects clean worktree lane`
-- Packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
-- Status delta:
-  - bounded close-path trace repair accepted locally in worktree branch `architects-position-settlement-trace`
-  - post-close critic review passed
-  - post-close verifier review passed
-- Basis / evidence:
-  - commit `c33ab3f` -> `Stop terminal positions from masquerading as open runtime truth`
-  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
-  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
-  - `.venv/bin/python -m py_compile src/state/db.py src/engine/lifecycle_events.py src/execution/exit_lifecycle.py src/execution/harvester.py tests/test_architecture_contracts.py tests/test_pnl_flow_and_audit.py tests/test_runtime_guards.py` -> success
-  - architecture subset -> `11 passed, 77 deselected`
-  - runtime subset -> `17 passed, 64 deselected`
-  - pnl/audit subset -> `4 passed, 51 deselected`
-  - pre-close critic artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-preclose-critic-20260408T084208Z.md`
-  - pre-close verifier artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-preclose-verifier-20260408T084558Z.md`
-  - post-close critic artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-postclose-critic-20260408T085520Z.md`
-  - post-close verifier artifact -> `.omx/artifacts/claude-repair-position-settlement-trace-postclose-verifier-20260408T085701Z.md`
-- Decisions frozen:
-  - close-path readers now exclude rows whose latest durable terminal truth already marks them exited/settled, including current mixed-state fallback through legacy `zeus.db`
-  - future economic-close paths now append canonical `EXIT_ORDER_FILLED` and update `position_current` to `economically_closed` when prior canonical history exists
-  - harvester chronicle settlement payloads now carry `exit_price`
-- Open uncertainties:
-  - broad historical cleanup for already-missing chronicle `exit_price` rows remains out of scope
-- Next required action:
-  - cherry-pick `c33ab3f` onto `Architects` and then decide whether the next packet should target the remaining stale-open ghosts or strategy diagnosis
-- Owner:
-  - Architects clean worktree lane
-
-## [2026-04-08 03:24 America/Chicago] REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE frozen
-- Author: `Architects clean worktree lane`
-- Packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
-- Status delta:
-  - current active packet frozen
-- Basis / evidence:
-  - accepted VERIFY-ETL-RECALIBRATE-CONTAMINATION boundary plus passed post-close gate permit the next packet freeze
-  - session leftovers rank position/state/settlement trace convergence as the next family after ETL
-  - direct live SQL/JSON inspection on `/Users/leofitz/.openclaw/workspace-venus/zeus/state` shows all 14 `positions-paper.json` `recent_exits` trade_ids still present in `position_current` on both `zeus.db` and `zeus-paper.db` (`9 active`, `5 day0_window`)
-  - direct live SQL/JSON inspection also shows all 19 paper `chronicle` settlement rows still missing `json_extract(details_json, '$.exit_price')`
-  - per-trade inspection confirms recent exited trade_ids still have only entry canonical events (`POSITION_OPEN_INTENT`, `ENTRY_ORDER_POSTED`, `ENTRY_ORDER_FILLED`) and no terminal canonical event
-- Decisions frozen:
-  - keep this packet on stale-open close-path repair plus settlement `exit_price` durability only
-  - do not widen into ETL, risk/status/operator summary rewrites, or broad historical migration cleanup
-- Open uncertainties:
-  - whether the bounded repair should combine read-side stale-open exclusion with future write-side economic-close dual-write, or whether one of those alone is sufficient, still needs implementation-time proof
-- Next required action:
-  - inspect close-path writers/readers and implement the smallest repair that restores runtime trace convergence on the touched seam
-- Owner:
-  - Architects clean worktree lane
-
-## [2026-04-08 02:43 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION accepted locally and passed post-close gate in worktree
-- Author: `Architects clean worktree lane`
-- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
-- Status delta:
-  - bounded ETL/recalibrate repair accepted locally in worktree branch `architects-verify-etl-contamination`
-  - post-close critic review passed
-  - post-close verifier review passed
-- Basis / evidence:
-  - commit `0c9a348` -> `Prevent ETL recalibration from collapsing shared step truth`
-  - `.venv/bin/python scripts/check_work_packets.py` -> `work packet grammar ok`
-  - `.venv/bin/python scripts/check_kernel_manifests.py` -> `kernel manifests ok`
-  - `.venv/bin/pytest -q tests/test_observation_instants_etl.py tests/test_run_replay_cli.py tests/test_etl_recalibrate_chain.py` -> `15 passed`
-  - `.venv/bin/python -m py_compile src/main.py scripts/etl_tigge_calibration.py tests/test_etl_recalibrate_chain.py` -> success
-  - pre-close critic artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-preclose-critic-20260408T073113Z.md`
-  - pre-close verifier fallback artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-preclose-verifier-fallback-20260408T073355Z.md`
-  - post-close critic artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-postclose-critic-20260408T073947Z.md`
-  - post-close verifier artifact -> `.omx/artifacts/claude-verify-etl-recalibrate-postclose-verifier-20260408T074222Z.md`
-- Decisions frozen:
-  - `_etl_recalibrate()` now chooses repo-local `.venv/bin/python` when present and otherwise falls back to the current interpreter
-  - representative shared scripts now have packet-bounded import-safe/shared-binding proof from outside repo cwd
-  - `etl_tigge_calibration.py` no longer collapses a date directory to the last step file and no longer hardcodes `lead_hours = 24.0`
-- Open uncertainties:
-  - transport back to the live `Architects` branch still needs to happen cleanly
-- Next required action:
-  - cherry-pick `0c9a348` onto `Architects` and then decide whether the next lawful packet should come from position/settlement trace convergence or another leftover family
-- Owner:
-  - Architects clean worktree lane
-
-## [2026-04-08 02:20 America/Chicago] VERIFY-ETL-RECALIBRATE-CONTAMINATION frozen
-- Author: `Architects clean worktree lane`
-- Packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
-- Status delta:
-  - current active packet frozen
-- Basis / evidence:
-  - accepted BUG-CANONICAL-CLOSURE-TRACEABILITY boundary plus passed post-close gate permit the next packet freeze
-  - `/tmp/zeus_session_note_reaudit/docs/session_2026_04_07_leftovers_reaudit.md` ranks ETL/recalibrate contamination as the top remaining leftover family
-  - read-only subprocess import probes from outside repo cwd succeeded for representative scripts (`etl_observation_instants.py`, `etl_diurnal_curves.py`, `etl_temp_persistence.py`, `refit_platt.py`, `etl_tigge_ens.py`, `etl_tigge_calibration.py`, `run_replay.py`) and reported `get_connection_name = get_shared_connection`
-  - fresh synthetic reproduction against `scripts/etl_tigge_calibration.py` processed `vectors_processed = 2` but stored only one `ensemble_snapshots` row (`tigge_cal_v3_step048`) with `lead_hours = 24.0`, proving the current multi-step collapse bug
-- Decisions frozen:
-  - keep this packet on shared ETL/recalibrate proof plus the concrete TIGGE multi-step seam only
-  - do not widen into trade/lifecycle/risk/status truth repairs or broad migration cleanup
-- Open uncertainties:
-  - whether `_etl_recalibrate()` itself needs code changes or only packet-bounded proof tests remains implementation-time evidence
-- Next required action:
-  - implement bounded ETL/recalibrate tests and repair the TIGGE multi-step collapse inside the frozen packet
-- Owner:
-  - Architects clean worktree lane
 
 ## [2026-04-08 01:53 America/Chicago] BUG-CANONICAL-CLOSURE-TRACEABILITY accepted locally and passed post-close gate in worktree
 - Author: `Architects worktree lane`
