@@ -99,7 +99,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     assert t_dirty is True
     assert len(tracker.exits) == 1
     assert "MODEL_DIVERGENCE_PANIC" in tracker.exits[0].exit_reason
-    assert len(portfolio.positions) == 0 # Closed
+    assert portfolio.positions[0].state == "economically_closed"
 
 def test_refresh_position_true_metrics(monkeypatch):
     from src.engine.monitor_refresh import refresh_position

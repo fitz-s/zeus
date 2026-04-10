@@ -262,8 +262,8 @@ def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'opportunity_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "opportunity_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "opportunity_fact"}
+    assert rows["n"] == 1
 
 
 def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
@@ -286,8 +286,8 @@ def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'availability_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "availability_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "availability_fact"}
+    assert rows["n"] == 1
 
 
 def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
@@ -306,8 +306,8 @@ def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'execution_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "execution_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "execution_fact"}
+    assert rows["n"] == 1
 
 
 def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
@@ -324,8 +324,8 @@ def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'outcome_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "outcome_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "outcome_fact"}
+    assert rows["n"] == 1
 
 
 def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
@@ -485,12 +485,7 @@ def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path)
     summary = query_p4_fact_smoke_summary(conn)
     conn.close()
 
-    assert summary["missing_tables"] == [
-        "opportunity_fact",
-        "availability_fact",
-        "execution_fact",
-        "outcome_fact",
-    ]
+    assert summary["missing_tables"] == []
     assert summary["opportunity"]["total"] == 0
     assert summary["availability"]["total"] == 0
     assert summary["execution"]["total"] == 0

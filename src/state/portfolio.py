@@ -93,7 +93,9 @@ class ExitContext:
         missing: list[str] = []
         if not self._is_finite(self.fresh_prob):
             missing.append("fresh_prob")
-        elif not self.fresh_prob_is_fresh:
+        elif not self.fresh_prob_is_fresh and not self.day0_active:
+            # Day0 positions waive fresh_prob_is_fresh requirement
+            missing.append("fresh_prob_is_fresh")
             missing.append("fresh_prob_is_fresh")
         if not self._is_finite(self.current_market_price):
             missing.append("current_market_price")
@@ -305,6 +307,11 @@ class Position:
 
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
+            # Day0 stale prob waiver: when fresh_prob_is_fresh=False, log the
+            # authority waiver and note the substitution for auditability
+            if not exit_context.fresh_prob_is_fresh:
+                applied.append("day0_stale_prob_authority_waived")
+                applied.append("stale_prob_substitution")
             if self.direction == "buy_no":
                 day0_decision = self._buy_no_exit(
                     forward_edge,

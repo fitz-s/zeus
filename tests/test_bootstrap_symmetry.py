@@ -117,7 +117,7 @@ class TestBootstrapContextStashing:
             mock_ens.spread.return_value = MagicMock(value=2.0)
             mock_ens_cls.return_value = mock_ens
 
-            with patch("src.engine.monitor_refresh.compute_alpha", return_value=0.6):
+            with patch("src.engine.monitor_refresh.compute_alpha", return_value=MagicMock(value=0.6)):
                 result = _refresh_ens_member_counting(
                     position=pos,
                     current_p_market=0.40,

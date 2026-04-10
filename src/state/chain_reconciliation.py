@@ -230,32 +230,49 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     def _legacy_rescue_query_available() -> bool:
         if conn is None:
             return False
-        rows = conn.execute("PRAGMA table_info(position_events)").fetchall()
-        columns = {row[1] for row in rows}
-        if not columns:
-            raise RuntimeError("reconciliation rescue query legacy schema not installed")
-
         from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
 
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns)
+        # Check both possible legacy table names (position_events_legacy after
+        # rename, or position_events itself when migration hasn't run).
+        for table in ("position_events_legacy", "position_events"):
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            columns = {row[1] for row in rows}
+            if not columns:
+                continue
+            has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(columns)
+            has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns)
+            if has_canonical and has_legacy:
+                raise RuntimeError("reconciliation rescue query does not support hybrid position_events schema")
+            if has_legacy:
+                return True
 
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation rescue query does not support hybrid position_events schema")
-        if has_legacy:
-            return True
-        if has_canonical:
+        # If canonical-only position_events exists, legacy rescue is unavailable.
+        canon_rows = conn.execute("PRAGMA table_info(position_events)").fetchall()
+        if canon_rows:
             return False
         raise RuntimeError("reconciliation rescue query legacy schema not installed")
+
+    def _legacy_event_table() -> str:
+        """Return the legacy position_events table name, or empty string."""
+        from src.state.db import LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
+        for table in ("position_events_legacy", "position_events"):
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            columns = {row[1] for row in rows}
+            if columns and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns):
+                return table
+        return ""
 
     def _already_logged_rescue_event(position) -> bool:
         if conn is None:
             return False
         if not _legacy_rescue_query_available():
             return False
+        table = _legacy_event_table()
+        if not table:
+            return False
         row = conn.execute(
-            """
-            SELECT 1 FROM position_events
+            f"""
+            SELECT 1 FROM {table}
             WHERE runtime_trade_id = ?
               AND event_type = 'POSITION_LIFECYCLE_UPDATED'
               AND source = 'chain_reconciliation'

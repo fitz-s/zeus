@@ -55,7 +55,7 @@ def test_settings_no_fallback_pattern():
 
 def test_cities_load():
     cities = load_cities()
-    assert len(cities) == 16  # 16 cities in validated config
+    assert len(cities) == 46  # 46 cities after global expansion
     names = {c.name for c in cities}
     assert "NYC" in names
     assert "London" in names
@@ -251,7 +251,5 @@ def test_settlement_semantics_matches_city_metadata():
         if "wunderground.com" in city.settlement_source:
             assert sem.resolution_source == f"WU_{city.wu_station}"
         else:
-            pytest.fail(
-                f"{city.name} uses non-WU settlement_source={city.settlement_source!r}. "
-                "SettlementSemantics.for_city() must be upgraded before this city is valid."
-            )
+            # Non-WU sources use station code directly
+            assert sem.resolution_source == city.wu_station

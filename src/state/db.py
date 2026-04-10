@@ -732,6 +732,13 @@ def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> No
     legacy_table = _legacy_position_events_table(conn)
     event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
     if not event_columns:
+        # Check if canonical schema is present (canonical bootstrap without legacy)
+        canonical_columns = _table_columns(conn, "position_events")
+        if canonical_columns and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(canonical_columns):
+            raise RuntimeError(
+                "legacy runtime position_events helpers do not support canonically bootstrapped databases; "
+                "this Stage-2 bootstrap path is not runtime-ready until a later migration/cutover packet lands"
+            )
         raise RuntimeError("legacy runtime position_events schema not installed")
     if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
         raise RuntimeError("legacy runtime position_events schema not installed")
@@ -1935,8 +1942,13 @@ def query_settlement_events(
         SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
                city, target_date, market_id, bin_label, direction, strategy, edge_source,
                source, details_json, timestamp, env
-        FROM {legacy_table}
-        WHERE {' AND '.join(filters)}
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY runtime_trade_id ORDER BY id DESC) AS rn
+            FROM {legacy_table}
+            WHERE {' AND '.join(filters)}
+        )
+        WHERE rn = 1
         ORDER BY id DESC
         """
     if limit is not None:

@@ -56,6 +56,14 @@ CITY_MAP = {
     "wellington": "Wellington", "wuhan": "Wuhan",
 }
 
+SUPPORTED_TIGGE_CITY_NAMES = frozenset(CITY_MAP.values())
+
+
+def _unsupported_configured_cities() -> list[str]:
+    """Return configured cities for which TIGGE data is not available."""
+    return sorted(set(cities_by_name) - SUPPORTED_TIGGE_CITY_NAMES)
+
+
 # Cities where T+24h at 00Z is a poor proxy for daily max
 OVERNIGHT_CITIES = {
     "Ankara", "Beijing", "Buenos Aires", "Chengdu", "Chongqing",

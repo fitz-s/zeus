@@ -104,6 +104,19 @@ class SettlementSemantics:
         This is the single entry point. Do NOT call default_wu_fahrenheit
         for °C cities.
         """
-        if city.settlement_unit == "C":
-            return cls.default_wu_celsius(city.wu_station)
-        return cls.default_wu_fahrenheit(city.wu_station)
+        source = getattr(city, 'settlement_source', '')
+        if not source or "wunderground.com" in source:
+            # WU-based settlement (default path)
+            if city.settlement_unit == "C":
+                return cls.default_wu_celsius(city.wu_station)
+            return cls.default_wu_fahrenheit(city.wu_station)
+
+        # Non-WU settlement sources (e.g., HK Observatory)
+        # Same precision/rounding contract, different resolution source
+        return cls(
+            resolution_source=city.wu_station,
+            measurement_unit=city.settlement_unit,
+            precision=1.0,
+            rounding_rule="round_half_to_even",
+            finalization_time="12:00:00Z",
+        )

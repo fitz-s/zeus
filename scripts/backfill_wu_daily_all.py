@@ -157,8 +157,13 @@ def backfill_city(city_name: str, days_back: int, conn) -> dict:
                 _sem = SettlementSemantics.for_city(city_cfg)
             else:
                 # Fallback for cities not yet in config
-                _sem = (SettlementSemantics.default_wu_celsius(icao) if unit == "C"
-                        else SettlementSemantics.default_wu_fahrenheit(icao))
+                _sem = SettlementSemantics(
+                    resolution_source=f"WU_{icao}",
+                    measurement_unit=unit,
+                    precision=1.0,
+                    rounding_rule="round_half_to_even",
+                    finalization_time="12:00:00Z",
+                )
             settlement_val = _sem.assert_settlement_value(
                 high, context=f"backfill_wu_daily_all:{city_name}"
             )

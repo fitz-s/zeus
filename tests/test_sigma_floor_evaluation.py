@@ -110,7 +110,7 @@ class TestSigmaFloorCalibration:
         print("-" * 60)
 
         from src.types import Bin
-        bins = [Bin(lo, lo + 1, "F") for lo in range(60, 86, 2)]
+        bins = [Bin(lo, lo + 1, unit="F") for lo in range(60, 86, 2)]
 
         results = []
         for peak in [0.0, 0.5, 0.8, 0.9, 1.0]:
@@ -167,7 +167,7 @@ class TestSigmaFloorCalibration:
 
         from src.types import Bin
         # F bins are 2 degrees wide (lo to lo+1 inclusive)
-        bins = [Bin(lo, lo + 1, "F") for lo in range(60, 82, 2)]
+        bins = [Bin(lo, lo + 1, unit="F") for lo in range(60, 82, 2)]
         obs_bin_idx = 6  # 72-73 bin
 
         for peak in [0.5, 0.8, 0.9, 1.0]:

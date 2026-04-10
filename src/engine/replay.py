@@ -494,7 +494,7 @@ def _replay_one_settlement(
             hours_since_open=48.0,
             city_name=city.name,
             season=season,
-        )
+        ).value
 
     # Calibrate — S6: use calibrate_and_normalize (same path as entry + monitor)
     bin_probs_raw = np.array(p_raw_stored, dtype=float)

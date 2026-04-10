@@ -839,6 +839,13 @@ def test_db_no_longer_owns_canonical_append_project_bodies():
     assert "def apply_architecture_kernel_schema(" not in text
 
 
+def _strip_canonical_schema(conn):
+    """Remove canonical tables to simulate a legacy-only DB."""
+    conn.execute("DROP TABLE IF EXISTS position_current")
+    conn.execute("DROP TABLE IF EXISTS position_events")
+    conn.commit()
+
+
 def _runtime_position(*, state: str = "pending_tracked", exit_state: str = "", chain_state: str = "local_only"):
     from src.state.portfolio import Position
 
@@ -2673,6 +2680,10 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    # Drop canonical tables to simulate legacy-only DB
+    conn.execute("DROP TABLE IF EXISTS position_current")
+    conn.execute("DROP TABLE IF EXISTS position_events")
+    conn.commit()
 
     wrote = _dual_write_canonical_entry_if_available(
         conn,
@@ -2682,8 +2693,8 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
     )
 
     assert wrote is False
-    events = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
-    assert events == 0
+    # Canonical tables were dropped; verify no canonical table was recreated
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='position_events'").fetchone()[0] == 0
     conn.close()
 
 
@@ -2760,6 +2771,33 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
     legacy_conn = sqlite3.connect(":memory:")
     legacy_conn.row_factory = sqlite3.Row
     init_schema(legacy_conn)
+    # Drop canonical tables to simulate legacy-only DB
+    legacy_conn.execute("DROP TABLE IF EXISTS position_current")
+    legacy_conn.execute("DROP TABLE IF EXISTS position_events")
+    legacy_conn.commit()
+    # Re-create position_events_legacy if init_schema didn't create it
+    legacy_conn.execute("""
+        CREATE TABLE IF NOT EXISTS position_events_legacy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            runtime_trade_id TEXT,
+            position_state TEXT,
+            order_id TEXT,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            market_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            strategy TEXT,
+            edge_source TEXT,
+            source TEXT DEFAULT 'runtime',
+            details_json TEXT,
+            timestamp TEXT NOT NULL,
+            env TEXT
+        )
+    """)
+    legacy_conn.commit()
     log_trade_entry(legacy_conn, pos)
     wrote_legacy = _dual_write_canonical_entry_if_available(
         legacy_conn,
@@ -2769,7 +2807,7 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
     )
     log_execution_report(legacy_conn, pos, _Result())
     assert wrote_legacy is False
-    assert legacy_conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] >= 2
+    assert legacy_conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0] >= 2
     legacy_conn.close()
 
     canonical_conn = sqlite3.connect(":memory:")

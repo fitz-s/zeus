@@ -8,6 +8,7 @@ lead time, and market freshness.
 import numpy as np
 
 from src.config import settings
+from src.contracts.alpha_decision import AlphaDecision
 from src.types.temperature import TemperatureDelta
 
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
@@ -59,7 +60,7 @@ def compute_alpha(
     hours_since_open: float,
     city_name: str = "",
     season: str = "",
-) -> float:
+) -> AlphaDecision:
     """Compute α for model-market blending. Spec §4.5.
 
     Higher α → trust model more. Lower α → trust market more.
@@ -121,7 +122,12 @@ def compute_alpha(
     if hours_since_open < 6:
         a += 0.05  # Cumulative with above
 
-    return max(0.20, min(0.85, a))
+    return AlphaDecision(
+        value=max(0.20, min(0.85, a)),
+        optimization_target="risk_cap",
+        evidence_basis="D1 resolution: conservative blending weight, not pure Brier minimizer",
+        ci_bound=0.05,
+    )
 
 
 # Cache to avoid repeated DB lookups within a cycle

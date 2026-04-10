@@ -62,6 +62,23 @@ def _resolve_city_name(dirname: str) -> str | None:
     return name_map.get(dirname)
 
 
+_SUPPORTED_TIGGE_CITY_NAMES = frozenset({
+    "Ankara", "Atlanta", "Austin", "Beijing", "Buenos Aires",
+    "Chengdu", "Chicago", "Chongqing", "Dallas", "Denver",
+    "Hong Kong", "Houston", "Istanbul", "London", "Los Angeles", "Lucknow",
+    "Madrid", "Mexico City", "Miami", "Milan", "Moscow", "Munich",
+    "NYC", "Paris", "San Francisco", "Sao Paulo",
+    "Seattle", "Seoul", "Shanghai", "Shenzhen", "Singapore",
+    "Taipei", "Tel Aviv", "Tokyo", "Toronto", "Warsaw",
+    "Wellington", "Wuhan",
+})
+
+
+def _unsupported_configured_cities() -> list[str]:
+    """Return configured cities for which TIGGE data is not available."""
+    return sorted(set(cities_by_name) - _SUPPORTED_TIGGE_CITY_NAMES)
+
+
 def run_etl() -> dict:
     conn = get_connection()
     init_schema(conn)

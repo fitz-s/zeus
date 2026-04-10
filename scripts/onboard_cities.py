@@ -340,6 +340,8 @@ def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = 
         return
 
     from src.state.db import get_shared_connection, init_schema
+    from src.contracts import SettlementSemantics
+    from src.config import cities_by_name
     from datetime import date, timedelta
 
     conn = get_shared_connection()
@@ -348,6 +350,19 @@ def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = 
     today = date.today()
     count = 0
     for city_name in city_names:
+        city_cfg = cities_by_name.get(city_name)
+        if city_cfg is not None:
+            sem = SettlementSemantics.for_city(city_cfg)
+        else:
+            sem = SettlementSemantics(
+                resolution_source=f"scaffold_{city_name}",
+                measurement_unit="F",
+                precision=1.0,
+                rounding_rule="round_half_to_even",
+                finalization_time="12:00:00Z",
+            )
+        # Validate settlement contract before writing scaffold rows
+        sem.round_single(0.0, context=f"scaffold_validate:{city_name}")
         for d in range(days):
             target = today - timedelta(days=d)
             try:
