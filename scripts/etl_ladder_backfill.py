@@ -1,7 +1,9 @@
 """ETL: Ladder backfill → forecast_skill + model_bias tables.
 
 Source: rainstorm.db:settlement_forecast_ladder_backfill (53,600 rows)
-Target: zeus.db:forecast_skill + model_bias
+  — table does not exist in zeus-shared.db; this script is a no-op
+  when rainstorm.db is absent. Data was already ETL'd on initial run.
+Target: zeus-shared.db:forecast_skill + model_bias
 
 Validates:
 - London/Paris → unit must be 'C'. Values > 50 for London winter → REJECT.
@@ -9,6 +11,7 @@ Validates:
 - Reconstructs available_at from forecast_basis_date + source model delay
 """
 
+import logging
 import sqlite3
 import sys
 from collections import defaultdict
@@ -20,6 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.calibration.manager import season_from_date, lat_for_city
 from src.state.db import get_shared_connection as get_connection, init_schema
 
+logger = logging.getLogger(__name__)
 
 RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
 
@@ -40,19 +44,25 @@ MODEL_DELAYS = {"ecmwf": 8, "gfs": 6, "icon": 6, "openmeteo": 4, "ukmo": 10}
 
 
 def run_etl() -> dict:
-    rs = sqlite3.connect(str(RAINSTORM_DB))
-    rs.row_factory = sqlite3.Row
-
     zeus = get_connection()
     init_schema(zeus)
 
-    # Check existing data
+    # Check existing data — if already populated, skip
     existing = zeus.execute("SELECT COUNT(*) FROM forecast_skill").fetchone()[0]
     if existing > 0:
         print(f"forecast_skill already has {existing} rows. Skipping ETL.")
-        rs.close()
         zeus.close()
         return {"imported": 0, "rejected": 0, "existing": existing}
+
+    # Source table (settlement_forecast_ladder_backfill) only exists in rainstorm.db
+    if not RAINSTORM_DB.exists():
+        msg = "Rainstorm DB not found — ladder backfill data already ETL'd to forecast_skill"
+        logger.info(msg)
+        print(msg)
+        zeus.close()
+        return {"status": "noop", "reason": "rainstorm_db_not_found"}
+
+    rs = sqlite3.connect(str(RAINSTORM_DB))
 
     rows = rs.execute("""
         SELECT city, target_date, forecast_source, source_family,

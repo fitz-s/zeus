@@ -1,12 +1,12 @@
-"""ETL: Historical forecasts from rainstorm.db → zeus.db:historical_forecasts + model_skill.
+"""ETL: Historical forecasts from zeus-shared.db → historical_forecasts + model_skill.
 
-Source: rainstorm.db:forecasts (171,003 rows, 5 NWP models)
+Source: zeus-shared.db:forecasts (migrated from rainstorm, 171K+ rows, 5 NWP models)
   - ecmwf_previous_runs: 35,518 (lead 0-7)
   - gfs_previous_runs: 35,518 (lead 0-7)
   - openmeteo_previous_runs: 34,939 (lead 0-7)
   - icon_previous_runs: 30,502 (lead 0-6)
   - ukmo_previous_runs: 30,148 (lead 0-6)
-Target: zeus.db:historical_forecasts + model_skill
+Target: zeus-shared.db:historical_forecasts + model_skill
 
 Validates:
 - Temperature range per unit (C/F)
@@ -14,7 +14,6 @@ Validates:
 - UNIQUE(city, target_date, source, lead_days) — modified from original schema
 """
 
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -34,8 +33,6 @@ def season_from_date_with_city(date_str: str, city_name: str) -> str:
     return _sfd(date_str, lat=lat_for_city(city_name))
 
 from src.state.db import get_shared_connection as get_connection, init_schema
-
-RAINSTORM_DB = Path.home() / ".openclaw/workspace-venus/rainstorm/state/rainstorm.db"
 
 # Source name normalization
 SOURCE_MAP = {
@@ -58,20 +55,17 @@ MODEL_DELAYS = {"ecmwf": 8, "gfs": 6, "icon": 6, "openmeteo": 4, "ukmo": 10, "no
 
 
 def run_etl() -> dict:
-    rs = sqlite3.connect(str(RAINSTORM_DB))
-    rs.row_factory = sqlite3.Row
-
     zeus = get_connection()
     init_schema(zeus)
 
     existing = zeus.execute("SELECT COUNT(*) FROM historical_forecasts").fetchone()[0]
     print(f"historical_forecasts has {existing} existing rows. Running incremental sync...")
 
-    rows = rs.execute("""
-        SELECT city, target_date, source, forecast_high_f, lead_days,
+    rows = zeus.execute("""
+        SELECT city, target_date, source, forecast_high, lead_days,
                forecast_basis_date
         FROM forecasts
-        WHERE forecast_high_f IS NOT NULL
+        WHERE forecast_high IS NOT NULL
     """).fetchall()
 
     print(f"Source rows: {len(rows):,}")
@@ -84,7 +78,7 @@ def run_etl() -> dict:
         city = r["city"]
         source_raw = r["source"]
         source = SOURCE_MAP.get(source_raw, source_raw)
-        forecast = r["forecast_high_f"]
+        forecast = r["forecast_high"]
         unit = "C" if city in CELSIUS_CITIES else "F"
         lead_days = r["lead_days"]
 
@@ -131,7 +125,6 @@ def run_etl() -> dict:
     # Now compute model_skill
     _compute_model_skill(zeus)
 
-    rs.close()
     zeus.close()
 
     return {"imported": final, "rejected": rejected}
