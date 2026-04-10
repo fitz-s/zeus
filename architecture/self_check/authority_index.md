@@ -28,15 +28,18 @@ This is the first durable routing file for humans and coding agents.
 11. `AGENTS.md`
 
 ### Active control / execution surfaces
-12. `docs/control/current_state.md`
-13. current work packet named in `docs/control/current_state.md`
-14. `docs/known_gaps.md`
+12. `architects_state_index.md`
+13. `architects_task.md`
+14. `architects_progress.md`
+15. `root_progress.md`
+16. `root_task.md`
+17. `docs/known_gaps.md`
 
 ### Historical rationale / archives (non-authoritative)
-15. `docs/architecture/zeus_blueprint_v2.md`
-16. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
-17. `docs/archives/**`
-18. `docs/reference/workspace_map.md`
+18. `docs/architecture/zeus_blueprint_v2.md`
+19. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
+20. `docs/archives/**`
+21. `WORKSPACE_MAP.md`
 
 ## 2. Precedence
 
@@ -60,12 +63,12 @@ If two sources disagree:
 - change-control authority: how changes are allowed to happen
 - manifests: exact semantic atoms, zones, negative permissions, maturity stage
 - repo operating brief: repo-native execution rules and reading discipline
-- active control surfaces: one live current-state pointer plus the current work packet and antibody register
+- active control surfaces: current packet state, packet queue, and live program/backlog context
 - historical docs / archives: reasoning context only
 
 ## 4. Never do this
 
-- Never treat `docs/archives/**` or `docs/reference/workspace_map.md` as principal authority.
+- Never treat `docs/archives/**` or `WORKSPACE_MAP.md` as principal authority.
 - Never let `ZEUS_AUTHORITY.md` compete with the exact precedence or machine-checkable authority files it summarizes.
 - Never treat `status_summary.json` or `positions.json` as canonical truth.
 - Never let a coding agent infer authority order from retrieval similarity.

@@ -1,7 +1,7 @@
 File: AGENTS.md
 Disposition: NEW
 Authority basis: architecture/self_check/authority_index.md; docs/governance/zeus_autonomous_delivery_constitution.md; docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; current repo runtime truth surfaces.
-Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root summary now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in docs/reference/workspace_map.md; historical authority claims in docs/specs and docs/architecture.
+Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root summary now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in WORKSPACE_MAP.md; historical authority claims in docs/specs and docs/architecture.
 Why this file exists now: Codex/OMX and future zero-context agents need one repo-native instruction surface that loads before work starts.
 Current-phase or long-lived: Long-lived.
 
@@ -25,10 +25,8 @@ Before editing anything, read in this order:
 8. `architecture/invariants.yaml`
 9. `architecture/zones.yaml`
 10. `architecture/negative_constraints.yaml`
-11. `docs/control/current_state.md`
-12. scoped `AGENTS.md` in the directory you are editing
-13. the current work packet named in `docs/control/current_state.md`
-14. then the code
+11. scoped `AGENTS.md` in the directory you are editing
+12. then the code
 
 If current runtime facts conflict with target-law docs:
 - use runtime code/contracts for present-tense facts
@@ -43,9 +41,8 @@ Imported source-package note:
 Current routing note:
 - `ZEUS_AUTHORITY.md` is the root authority guide: foundation, invariants, negative constraints, and boundary rules in one place. It is a guide, not a precedence override.
 - `docs/archives/**` is historical/archive material and is never principal authority.
-- `docs/control/current_state.md` is the single live control-entry pointer.
-- The current work packet named in `docs/control/current_state.md` is the live control surface.
-- `docs/archives/control/**` contains retired root/architects ledgers and is historical-only.
+- `architects_state_index.md`, `architects_task.md`, and `architects_progress.md` are the active Architects packet-control surfaces.
+- `root_progress.md` and `root_task.md` remain program/backlog surfaces; they are not live packet-control authority.
 
 ## 2. Required working posture
 
@@ -106,7 +103,7 @@ Post-closeout gate rules:
 - After a packet is marked accepted/pushed, run one additional independent third-party critic review and one additional verifier pass on the accepted boundary before freezing the next packet.
 - If that post-close review finds a contradiction, stale control-surface snapshot, or evidence gap:
   - reopen or repair explicitly before advancing,
-  - synchronize `docs/control/current_state.md` and the current work packet to repo truth,
+  - synchronize `architects_state_index.md`, `architects_task.md`, and the top-level `architects_progress.md` snapshot to repo truth,
   - and rerun the post-close gate until it passes.
 - Treat a passed post-close gate as a separate advancement permission, not as a byproduct of acceptance.
 
@@ -126,13 +123,13 @@ Capability-present / capability-absent proof rule:
 
 Micro-event logging rule:
 
-- Do not dump every small attempt into the current work packet.
+- Do not dump every small attempt into `architects_progress.md`.
 - Small events, retries, scout findings, timeout notes, and experiment breadcrumbs belong in `.omx/context/<packet>-worklog.md`.
-- The current work packet is packet-level durable state only.
-- `docs/control/current_state.md` is the single live control-entry pointer.
+- `architects_progress.md` is packet-level durable state only.
+- `architects_task.md` is active control state only.
 - Spark scouts may draft or append micro-event worklog entries.
-- Spark scouts must not directly edit the current work packet or `docs/control/current_state.md`.
-- The leader is responsible for promoting a worklog fact into the current work packet only when it becomes a real packet state transition, blocker, or accepted evidence item.
+- Spark scouts must not directly edit `architects_progress.md` or `architects_task.md`.
+- The leader is responsible for promoting a worklog fact into `architects_progress.md` only when it becomes a real packet state transition, blocker, or accepted evidence item.
 
 Preferred micro-event format:
 
