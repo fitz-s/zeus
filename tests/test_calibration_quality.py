@@ -120,9 +120,8 @@ def parse_winning_bin_index(winning_bin: str, p_vector: list[float], settlement_
     
     if is_celsius:
         # Celsius bins are 1-degree wide
-        # Typical structure: <=X, X+1, X+2, ..., >=Y
-        # Use settlement_value directly
-        value = settlement_value
+        # Defensive: round to integer per settlement precision contract
+        value = round(float(settlement_value))
         
         # Heuristic for C cities with 11 bins:
         # Assume bins are: <=5, 6, 7, 8, 9, 10, 11, 12, 13, 14, >=15 (example)
@@ -143,8 +142,8 @@ def parse_winning_bin_index(winning_bin: str, p_vector: list[float], settlement_
             return min(n_bins - 1, max(0, int((value - 5) / 15 * n_bins)))
     else:
         # Fahrenheit bins are 2-degree wide
-        # Standard structure: <=32, 33-34, 35-36, ..., 49-50, >=51
-        value = settlement_value
+        # Defensive: round to integer per settlement precision contract
+        value = round(float(settlement_value))
         
         if n_bins == 11:
             # Standard 11-bin F structure

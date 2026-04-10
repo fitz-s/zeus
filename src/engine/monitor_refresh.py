@@ -12,14 +12,14 @@ import numpy as np
 
 from src.calibration.manager import get_calibrator
 from src.calibration.platt import calibrate_and_normalize
-from src.config import cities_by_name, day0_n_mc, ensemble_n_mc
+from src.config import cities_by_name, day0_n_mc, edge_n_bootstrap, ensemble_n_mc
 from src.contracts import (
     EntryMethod,
     recompute_native_probability,
     SettlementSemantics,
 )
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
-from src.data.market_scanner import _parse_temp_range, get_current_yes_price
+from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.time_context import lead_days_to_target
@@ -39,6 +39,53 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
 
 
+def _build_all_bins(position: Position, city) -> tuple[list, int]:
+    """Build full bin vector for a position's market.
+
+    S6: Uses sibling outcomes from market scanner to reconstruct the
+    complete bin set, matching the entry path's calibrate_and_normalize().
+    Falls back to single held bin if siblings are unavailable.
+
+    Returns (all_bins, held_bin_index).
+    """
+    held_low, held_high = _parse_temp_range(position.bin_label)
+    held_bin = Bin(low=held_low, high=held_high, label=position.bin_label, unit=position.unit)
+
+    if not position.market_id:
+        return [held_bin], 0
+
+    siblings = get_sibling_outcomes(position.market_id)
+    if len(siblings) < 2:
+        return [held_bin], 0
+
+    all_bins = []
+    held_idx = 0
+    for o in siblings:
+        low, high = o.get("range_low"), o.get("range_high")
+        if low is None and high is None:
+            continue
+        try:
+            b = Bin(low=low, high=high, label=o["title"], unit=city.settlement_unit)
+        except (ValueError, TypeError):
+            continue
+        if o.get("market_id") == position.market_id:
+            held_idx = len(all_bins)
+        all_bins.append(b)
+
+    if not all_bins:
+        return [held_bin], 0
+
+    # Guard: if held market_id was never matched, fall back to single bin
+    matched = any(o.get("market_id") == position.market_id for o in siblings
+                  if not (o.get("range_low") is None and o.get("range_high") is None))
+    if not matched:
+        logger.warning("S6: held market_id %s not found in siblings, falling back to single bin",
+                       position.market_id)
+        return [held_bin], 0
+
+    return all_bins, held_idx
+
+
 def _refresh_ens_member_counting(
     *,
     position: Position,
@@ -50,8 +97,6 @@ def _refresh_ens_member_counting(
     """Recompute fresh probability with the same ENS member-counting path as entry."""
 
     # Semantic Provenance Guard
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
     requested_lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
     if requested_lead_days < 0:
@@ -79,19 +124,31 @@ def _refresh_ens_member_counting(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
-    p_raw_single = float(ens.p_raw_vector(single_bin, n_mc=ensemble_n_mc())[0])
+    # S6: Build full bin vector for calibrate_and_normalize (same path as entry).
+    # Fall back to single-bin predict_for_bin if sibling outcomes unavailable.
+    all_bins, held_idx = _build_all_bins(position, city)
+
+    p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
-    if cal is not None:
-        p_cal_yes = cal.predict_for_bin(
-            p_raw_single,
+    if cal is not None and len(all_bins) > 1:
+        p_cal_vector = calibrate_and_normalize(
+            p_raw_vector,
+            cal,
             float(lead_days),
-            bin_width=single_bin[0].width,
+            bin_widths=[b.width for b in all_bins],
+        )
+        p_cal_yes = float(p_cal_vector[held_idx])
+        applied = ["fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration", "vector_normalization"]
+    elif cal is not None:
+        p_cal_yes = cal.predict_for_bin(
+            float(p_raw_vector[0]),
+            float(lead_days),
+            bin_width=all_bins[0].width,
         )
         applied = ["fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
     else:
-        p_cal_yes = p_raw_single
+        p_cal_yes = float(p_raw_vector[held_idx])
         applied = ["fresh_ens_fetch", "mc_instrument_noise"]
 
     # Compute actual hours since position was entered (not hardcoded 48h)
@@ -132,6 +189,21 @@ def _refresh_ens_member_counting(
         p_cal_native = p_cal_yes
 
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+
+    # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
+    p_cal_full = p_cal_vector if (cal is not None and len(all_bins) > 1) else np.array([p_cal_yes])
+    setattr(position, "_bootstrap_context", {
+        "p_raw": p_raw_vector,
+        "p_cal": p_cal_full,
+        "alpha": alpha,
+        "bins": all_bins,
+        "held_idx": held_idx,
+        "member_maxes": ens.member_maxes,
+        "calibrator": cal,
+        "lead_days": float(lead_days),
+        "unit": city.settlement_unit,
+    })
+
     _set_monitor_probability_fresh(position, True)
     return current_p_posterior, [*applied, "alpha_posterior"]
 
@@ -155,8 +227,6 @@ def _refresh_day0_observation(
     """Recompute fresh probability through the Day0 observation + ENS path."""
 
     # Semantic Provenance Guard
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
     obs = _fetch_day0_observation(city, target_d)
     if obs is None:
@@ -214,19 +284,30 @@ def _refresh_day0_observation(
         current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
         temporal_context=temporal_context,
     )
-    single_bin = [Bin(low=low, high=high, label=position.bin_label, unit=position.unit)]
-    p_raw_yes = float(day0.p_vector(single_bin, n_mc=day0_n_mc())[0])
+    # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
+    all_bins, held_idx = _build_all_bins(position, city)
+
+    p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
     cal, cal_level = get_calibrator(conn, city, position.target_date)
-    if cal is not None:
-        p_cal_yes = cal.predict_for_bin(
-            p_raw_yes,
+    if cal is not None and len(all_bins) > 1:
+        p_cal_vector = calibrate_and_normalize(
+            p_raw_vector,
+            cal,
             0.0,
-            bin_width=single_bin[0].width,
+            bin_widths=[b.width for b in all_bins],
+        )
+        p_cal_yes = float(p_cal_vector[held_idx])
+        applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration", "vector_normalization"]
+    elif cal is not None:
+        p_cal_yes = cal.predict_for_bin(
+            float(p_raw_vector[0]),
+            0.0,
+            bin_width=all_bins[0].width,
         )
         applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
     else:
-        p_cal_yes = p_raw_yes
+        p_cal_yes = float(p_raw_vector[held_idx])
         applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise"]
 
     ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
@@ -250,6 +331,21 @@ def _refresh_day0_observation(
     )
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+
+    # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
+    p_cal_full = p_cal_vector if (cal is not None and len(all_bins) > 1) else np.array([p_cal_yes])
+    setattr(position, "_bootstrap_context", {
+        "p_raw": p_raw_vector,
+        "p_cal": p_cal_full,
+        "alpha": alpha,
+        "bins": all_bins,
+        "held_idx": held_idx,
+        "member_maxes": remaining_member_maxes,
+        "calibrator": cal,
+        "lead_days": 0.0,
+        "unit": city.settlement_unit,
+    })
+
     _set_monitor_probability_fresh(position, True)
     return current_p_posterior, [*applied, "alpha_posterior"]
 
@@ -302,9 +398,13 @@ def _check_persistence_anomaly(
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
-                deltas.append(predicted_high - row["settlement_value"])
+                deltas.append(predicted_high - round(float(row["settlement_value"])))
 
         if not deltas:
+            logger.warning(
+                "PERSISTENCE_CHECK_DISABLED: all 3 recent settlement days NULL for %s/%s — returning 1.0 (no discount)",
+                city_name, target_date,
+            )
             return 1.0
 
         delta = sum(deltas) / len(deltas)
@@ -341,8 +441,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     Falls back to stored values if refresh fails.
     """
     # Semantic Provenance Guard
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
     if False: _ = None.selected_method; _ = None.entry_method
     current_p_market = (
         pos.last_monitor_market_price
@@ -434,6 +532,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         )
         pos.selected_method = refresh_pos.selected_method
         pos.applied_validations = list(refresh_pos.applied_validations)
+        # A1: Propagate bootstrap context from refresh_pos (may differ from pos for day0_window)
+        _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
+        if _bootstrap_ctx is not None:
+            setattr(pos, "_bootstrap_context", _bootstrap_ctx)
         prob_refresh_is_fresh = getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
         # Persist monitor state on Position
@@ -467,16 +569,59 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # Wrap into verified EdgeContext
     current_forward_edge = current_p_posterior - current_p_market
-    ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
+
+    # A1: Recompute bootstrap CI from fresh data (symmetric with entry path)
+    ci_lower = current_forward_edge
+    ci_upper = current_forward_edge
+    bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
+    if bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
+        try:
+            from src.strategy.market_analysis import MarketAnalysis
+            held_idx = bootstrap_ctx["held_idx"]
+            bins = bootstrap_ctx["bins"]
+            p_market_arr = np.zeros(len(bins))
+            p_market_arr[held_idx] = current_p_market
+
+            analysis = MarketAnalysis(
+                p_raw=bootstrap_ctx["p_raw"],
+                p_cal=bootstrap_ctx["p_cal"],
+                p_market=p_market_arr,
+                alpha=bootstrap_ctx["alpha"],
+                bins=bins,
+                member_maxes=bootstrap_ctx["member_maxes"],
+                calibrator=bootstrap_ctx["calibrator"],
+                lead_days=bootstrap_ctx["lead_days"],
+                unit=bootstrap_ctx["unit"],
+            )
+            # Call _bootstrap_bin directly (not find_edges) so CI is computed
+            # regardless of edge sign — monitor needs CI even when edge is negative.
+            if pos.direction == "buy_yes":
+                ci_lower, ci_upper, _ = analysis._bootstrap_bin(held_idx, edge_n_bootstrap())
+            else:
+                ci_lower, ci_upper, _ = analysis._bootstrap_bin_no(held_idx, edge_n_bootstrap())
+            # Guard against NaN from degenerate bootstrap (e.g., empty member_maxes)
+            if np.isnan(ci_lower) or np.isnan(ci_upper):
+                raise ValueError("Bootstrap produced NaN CI bounds")
+        except Exception as e:
+            logger.debug("A1: Bootstrap CI recomputation failed for %s: %s", pos.trade_id, e)
+            ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
+            ci_lower = current_forward_edge - ci_half_width
+            ci_upper = current_forward_edge + ci_half_width
+    else:
+        # Single-bin fallback or no bootstrap context — use stale CI width
+        ci_half_width = max(0.0, pos.entry_ci_width) / 2.0
+        ci_lower = current_forward_edge - ci_half_width
+        ci_upper = current_forward_edge + ci_half_width
+
     return EdgeContext(
         p_raw=np.array([]),
         p_cal=np.array([]),
         p_market=np.array([current_p_market]),
         p_posterior=current_p_posterior,
         forward_edge=current_forward_edge,
-        alpha=0.0,
-        confidence_band_upper=current_forward_edge + ci_half_width,
-        confidence_band_lower=current_forward_edge - ci_half_width,
+        alpha=bootstrap_ctx["alpha"] if bootstrap_ctx else 0.0,
+        confidence_band_upper=ci_upper,
+        confidence_band_lower=ci_lower,
         entry_provenance=EntryMethod(pos.entry_method),
         decision_snapshot_id=pos.decision_snapshot_id,
         n_edges_found=1,

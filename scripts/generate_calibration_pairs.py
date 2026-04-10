@@ -112,7 +112,8 @@ def generate_pairs() -> dict:
                 season=season,
                 cluster=city.cluster,
                 forecast_available_at=available_at,
-                settlement_value=row["settlement_value"],
+                settlement_value=(round(float(row["settlement_value"]))
+                                  if row["settlement_value"] is not None else None),
             )
             total_pairs += 1
 

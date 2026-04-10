@@ -61,7 +61,10 @@ def add_calibration_pair(
     """Insert a calibration pair (one per bin per settled market).
 
     Spec §8.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
+    settlement_value is stored for audit only — defensive round to integer per contract.
     """
+    if settlement_value is not None:
+        settlement_value = round(float(settlement_value))
     conn.execute("""
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days,

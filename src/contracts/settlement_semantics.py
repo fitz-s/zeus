@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import logging
 import numpy as np
+
+from src.contracts.exceptions import SettlementPrecisionError
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SettlementSemantics:
@@ -32,6 +37,39 @@ class SettlementSemantics:
             rounded = np.round(scaled)
 
         return rounded / inv
+
+    def round_single(self, value: float) -> float:
+        """Round a single settlement value to contract precision.
+
+        This is the MANDATORY gate for all settlement DB writes.
+        No code path may store a settlement_value without calling this first.
+        """
+        return float(self.round_values([value])[0])
+
+    def assert_settlement_value(self, value: float, *, context: str = "") -> float:
+        """Validate and round a settlement value. Returns the rounded value.
+
+        Raises SettlementPrecisionError if the raw value is NaN or infinite.
+        Always rounds to contract precision (integer for all current markets).
+
+        Usage at every DB write boundary:
+            sem = SettlementSemantics.for_city(city)
+            settlement_value = sem.assert_settlement_value(raw_temp, context="wu_daily_collector")
+        """
+        if not np.isfinite(value):
+            raise SettlementPrecisionError(
+                f"Settlement value is not finite: {value}. "
+                f"Contract: {self.resolution_source}, unit={self.measurement_unit}. "
+                f"Context: {context}"
+            )
+        rounded = self.round_single(value)
+        delta = abs(value - rounded)
+        if delta > 1e-9:
+            logger.debug(
+                "Settlement value %.1f rounded to %.0f (delta=%.1f) [%s] %s",
+                value, rounded, delta, self.resolution_source, context,
+            )
+        return rounded
     
     @classmethod
     def default_wu_fahrenheit(cls, city_code: str) -> "SettlementSemantics":

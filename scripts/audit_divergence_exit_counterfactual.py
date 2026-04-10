@@ -69,6 +69,8 @@ def _winning_price(conn, exit_row: dict) -> float | None:
     settlement_value = settlement["settlement_value"]
     bin_label = exit_row.get("bin_label", "")
     if settlement_value is not None:
+        # Defensive: round to integer per settlement precision contract
+        settlement_value = round(float(settlement_value))
         low, high = _parse_temp_range(bin_label)
         if low is None and high is not None:
             hit = settlement_value <= high

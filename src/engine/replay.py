@@ -496,20 +496,17 @@ def _replay_one_settlement(
             season=season,
         )
 
-    # Calibrate
+    # Calibrate — S6: use calibrate_and_normalize (same path as entry + monitor)
     bin_probs_raw = np.array(p_raw_stored, dtype=float)
     p_cal_vector_ref = decision_ref.get("p_cal_vector") or []
     if len(p_cal_vector_ref) == len(bin_probs_raw):
         bin_probs_cal = np.array([float(v) for v in p_cal_vector_ref], dtype=float)
     elif cal is not None:
+        from src.calibration.platt import calibrate_and_normalize
         bin_widths = [b.width for b in bins]
-        bin_probs_cal = np.array([
-            cal.predict_for_bin(float(p), float(lead_days), bin_width=bin_widths[i])
-            for i, p in enumerate(bin_probs_raw)
-        ])
-        total = bin_probs_cal.sum()
-        if total > 0:
-            bin_probs_cal = bin_probs_cal / total
+        bin_probs_cal = calibrate_and_normalize(
+            bin_probs_raw, cal, float(lead_days), bin_widths=bin_widths,
+        )
     else:
         bin_probs_cal = bin_probs_raw
 
@@ -535,6 +532,9 @@ def _replay_one_settlement(
 
     winning_bin = settlement.get("winning_bin", "")
     settlement_value = settlement.get("settlement_value")
+    # Defensive: round to integer per settlement precision contract
+    if settlement_value is not None:
+        settlement_value = round(float(settlement_value))
 
     decisions = []
     best_edge = 0.0
@@ -624,9 +624,16 @@ def _replay_one_settlement(
 
 
 def _bin_matches_settlement(label: str, settlement_value: Optional[float]) -> bool:
-    """Check if a settlement value falls within a bin label's range."""
+    """Check if a settlement value falls within a bin label's range.
+
+    Defensive: rounds settlement_value to integer before comparison.
+    Polymarket settles on integer temperatures displayed by WU.
+    """
     if settlement_value is None:
         return False
+
+    # Belt-and-suspenders: even if DB has fractional values, compare as integer
+    settlement_value = round(settlement_value)
 
     from src.data.market_scanner import _parse_temp_range
     try:

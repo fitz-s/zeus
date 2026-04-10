@@ -585,7 +585,9 @@ def harvest_settlement(
             conn, city=city.name, target_date=target_date,
             range_label=label, p_raw=p_raw, outcome=outcome,
             lead_days=lead_days, season=season, cluster=city.cluster,
-            forecast_available_at=now, settlement_value=settlement_value,
+            forecast_available_at=now,
+            settlement_value=(round(float(settlement_value))
+                              if settlement_value is not None else None),
         )
         count += 1
 
