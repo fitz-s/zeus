@@ -203,8 +203,13 @@ PIPELINE_STEPS = [
         "type": "python",
     },
     {
+        "id": "market_events",
+        "name": "Discover markets from Polymarket Gamma API",
+        "type": "python",
+    },
+    {
         "id": "wu_daily",
-        "name": "Backfill WU daily observations",
+        "name": "Backfill WU daily observations + settlements",
         "script": "backfill_wu_daily_all.py",
         "city_flag": "--cities",
         "extra_args": ["--days", "90"],
@@ -216,6 +221,11 @@ PIPELINE_STEPS = [
         "script": "backfill_hourly_openmeteo.py",
         "city_flag": "--cities",
         "extra_args": ["--days", "440"],
+    },
+    {
+        "id": "solar_daily",
+        "name": "Compute sunrise/sunset times (astral)",
+        "type": "python",
     },
     {
         "id": "temp_persistence",
@@ -233,9 +243,20 @@ PIPELINE_STEPS = [
         "script": "etl_historical_forecasts.py",
     },
     {
+        "id": "asos_wu_offsets",
+        "name": "Compute ASOS-WU station offsets",
+        "script": "etl_asos_wu_offset.py",
+        "optional": True,
+    },
+    {
         "id": "ens_backfill",
         "name": "Backfill ENS snapshots from OpenMeteo",
         "script": "backfill_ens.py",
+    },
+    {
+        "id": "calibration_pairs",
+        "name": "Generate calibration pairs from ENS + settlements",
+        "script": "generate_calibration_pairs.py",
     },
 ]
 
@@ -339,6 +360,138 @@ def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = 
     logger.info("  Scaffolded %d settlement rows for %d cities", count, len(city_names))
 
 
+def discover_market_events(city_names: list[str], dry_run: bool = False):
+    """Discover active Polymarket weather markets for cities and populate market_events.
+
+    Uses the Gamma API to find temperature markets, then inserts bin structures
+    into the market_events table so ENS backfill and calibration can proceed.
+    """
+    if dry_run:
+        logger.info("  [DRY RUN] Would scan Polymarket Gamma for %d cities", len(city_names))
+        return
+
+    from src.data.market_scanner import find_weather_markets
+    from src.state.db import get_shared_connection
+
+    conn = get_shared_connection()
+    city_set = set(city_names)
+
+    try:
+        # Fetch all weather markets with low min_hours to catch recent ones
+        events = find_weather_markets(min_hours_to_resolution=0.0)
+        logger.info("  Gamma API returned %d total weather markets", len(events))
+    except Exception as e:
+        logger.warning("  Gamma API call failed: %s — market_events will be empty", e)
+        conn.close()
+        return
+
+    inserted = 0
+    matched_cities = set()
+    for event in events:
+        city = event.get("city")
+        if city is None or city.name not in city_set:
+            continue
+        matched_cities.add(city.name)
+
+        target_date = event.get("target_date")
+        event_id = event.get("event_id", "")
+        for outcome in event.get("outcomes", []):
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO market_events
+                    (market_slug, city, target_date, condition_id, token_id,
+                     range_label, range_low, range_high, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """, (
+                    event_id,
+                    city.name,
+                    target_date,
+                    outcome.get("market_id", ""),
+                    outcome.get("token_id", ""),
+                    outcome.get("title", ""),
+                    outcome.get("range_low"),
+                    outcome.get("range_high"),
+                ))
+                inserted += 1
+            except Exception as e:
+                logger.debug("  Insert failed: %s", e)
+
+    conn.commit()
+    conn.close()
+
+    no_markets = city_set - matched_cities
+    logger.info("  Inserted %d market_events for %d cities", inserted, len(matched_cities))
+    if no_markets:
+        logger.info("  No Polymarket markets found for: %s", ", ".join(sorted(no_markets)))
+        logger.info("  (These cities will skip calibration until markets are created)")
+
+
+def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = False):
+    """Compute sunrise/sunset times using the astral library.
+
+    Generates solar_daily entries for each city × date from coordinates alone.
+    No external JSONL file needed.
+    """
+    if dry_run:
+        logger.info("  [DRY RUN] Would compute solar times for %d cities × %d days", len(cities), days)
+        return
+
+    try:
+        from astral import Observer
+        from astral.sun import sun
+    except ImportError:
+        logger.warning("  astral not installed — skipping solar_daily")
+        logger.warning("  Install with: pip install astral")
+        return
+
+    from datetime import date, timedelta, timezone as tz
+    from zoneinfo import ZoneInfo
+    from src.state.db import get_shared_connection
+
+    conn = get_shared_connection()
+    today = date.today()
+    inserted = 0
+
+    for city in cities:
+        observer = Observer(latitude=city.lat, longitude=city.lon, elevation=0)
+        local_tz = ZoneInfo(city.timezone)
+
+        for d in range(days):
+            target = today - timedelta(days=d)
+            try:
+                s = sun(observer, date=target, tzinfo=local_tz)
+                sunrise_local = s["sunrise"].strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunset_local = s["sunset"].strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunrise_utc = s["sunrise"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                sunset_utc = s["sunset"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                # DST detection
+                target_dt = datetime(target.year, target.month, target.day, 12, tzinfo=local_tz)
+                jan1 = datetime(target.year, 1, 1, 12, tzinfo=local_tz)
+                offset_now = target_dt.utcoffset().total_seconds() / 60
+                offset_std = jan1.utcoffset().total_seconds() / 60
+                dst_active = 1 if abs(offset_now - offset_std) > 0 else 0
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO solar_daily
+                    (city, target_date, timezone, lat, lon,
+                     sunrise_local, sunset_local, sunrise_utc, sunset_utc,
+                     utc_offset_minutes, dst_active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    city.name, target.isoformat(), city.timezone, city.lat, city.lon,
+                    sunrise_local, sunset_local, sunrise_utc, sunset_utc,
+                    int(offset_now), dst_active,
+                ))
+                inserted += 1
+            except Exception as e:
+                logger.debug("Solar calc failed %s %s: %s", city.name, target, e)
+
+    conn.commit()
+    conn.close()
+    logger.info("  Computed %d solar_daily entries for %d cities", inserted, len(cities))
+
+
 def run_script(step: dict, city_names: list[str], dry_run: bool = False) -> bool:
     """Run a single pipeline script. Returns True on success."""
     script = step.get("script")
@@ -400,54 +553,63 @@ def run_pipeline(
     start_from: str | None = None,
 ):
     """Run the full onboarding pipeline for a batch of new cities."""
+    total_steps = len(PIPELINE_STEPS)
     logger.info("=" * 70)
     logger.info("ZEUS CITY ONBOARDING PIPELINE")
     logger.info("Cities: %s", ", ".join(c.name for c in cities))
     logger.info("Mode: %s", "DRY RUN" if dry_run else "LIVE")
+    logger.info("Steps: %d", total_steps)
     logger.info("=" * 70)
 
-    # Step 1: Config
-    started = start_from is None
-    if not started and start_from == "config":
-        started = True
-
-    if started:
-        logger.info("\n[1/8] Adding cities to config...")
-        added = add_cities_to_config(cities, dry_run=dry_run)
-        if not added and not dry_run:
-            logger.info("  No new cities to add — all already in config")
     city_names = [c.name for c in cities]
+    started = start_from is None
 
-    # Step 2: Settlements scaffold
-    if not started and start_from == "settlements_scaffold":
-        started = True
-    if started:
-        logger.info("\n[2/8] Creating settlement scaffolds...")
-        scaffold_settlements(city_names, days=90, dry_run=dry_run)
-
-    # Steps 3-8: ETL scripts
-    step_num = 3
-    for step in PIPELINE_STEPS[2:]:  # Skip config and scaffold
+    for step_num, step in enumerate(PIPELINE_STEPS, 1):
         step_id = step["id"]
+
         if not started:
             if start_from == step_id:
                 started = True
             else:
-                step_num += 1
                 continue
 
         if skip_wu_daily and step_id == "wu_daily":
-            logger.info("\n[%d/8] SKIPPED %s (--skip-wu-daily)", step_num, step["name"])
-            step_num += 1
+            logger.info("\n[%d/%d] SKIPPED %s (--skip-wu-daily)", step_num, total_steps, step["name"])
             continue
 
-        logger.info("\n[%d/8] %s...", step_num, step["name"])
+        logger.info("\n[%d/%d] %s...", step_num, total_steps, step["name"])
+
+        # Custom Python steps
+        if step_id == "config":
+            added = add_cities_to_config(cities, dry_run=dry_run)
+            if not added and not dry_run:
+                logger.info("  No new cities to add — all already in config")
+            continue
+
+        if step_id == "settlements_scaffold":
+            scaffold_settlements(city_names, days=90, dry_run=dry_run)
+            continue
+
+        if step_id == "market_events":
+            discover_market_events(city_names, dry_run=dry_run)
+            continue
+
+        if step_id == "solar_daily":
+            compute_solar_daily(cities, days=440, dry_run=dry_run)
+            continue
+
+        # Script-based steps
+        if step.get("optional"):
+            success = run_script(step, city_names, dry_run=dry_run)
+            if not success and not dry_run:
+                logger.warning("  ⚠️  Optional step %s failed — continuing", step["name"])
+            continue
+
         success = run_script(step, city_names, dry_run=dry_run)
         if not success and not dry_run:
             logger.error("Pipeline failed at step: %s", step["name"])
             logger.error("Fix the issue and resume with: --start-from %s", step_id)
             return False
-        step_num += 1
 
     logger.info("\n" + "=" * 70)
     logger.info("PIPELINE COMPLETE")
@@ -468,8 +630,10 @@ def _print_verification(city_names: list[str]):
 
         tables = [
             "settlements", "observations", "observation_instants",
-            "temp_persistence", "diurnal_curves", "ensemble_snapshots",
+            "market_events", "solar_daily", "temp_persistence",
+            "diurnal_curves", "ensemble_snapshots",
             "calibration_pairs", "historical_forecasts",
+            "asos_wu_offsets",
         ]
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
@@ -482,10 +646,10 @@ def _print_verification(city_names: list[str]):
                     city_names,
                 ).fetchone()
                 count = row[0] if row else 0
-                status = "✅" if count > 0 else "⚠️"
-                logger.info("  %s %-25s %d rows", status, table, count)
+                status = "OK" if count > 0 else "EMPTY"
+                logger.info("  %5s %-25s %d rows", status, table, count)
             except Exception:
-                logger.info("  ❓ %-25s (table may not exist)", table)
+                logger.info("  %5s %-25s (table missing)", "SKIP", table)
 
         conn.close()
     except Exception as e:
