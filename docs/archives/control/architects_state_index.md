@@ -1,5 +1,3 @@
-> Historical archive surface. No longer active control authority; use `CURRENT_STATE.md` and the current work packet for live control entry.
-
 # architects_state_index.md
 
 Purpose:
@@ -7,17 +5,17 @@ Purpose:
 - minimizes reread cost before packet execution resumes
 
 Metadata:
-- Last updated: `2026-04-09 America/Chicago`
-- Last updated by: `Codex GOV-PACKET-ENTRY-CONTROL-SURFACE freeze`
+- Last updated: `2026-04-08 America/Chicago`
+- Last updated by: `Codex REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE freeze`
 - Authority scope: `current-state pointer only`
 
 ## Current state
 
 - Stage: `post-P7R7 bounded bugfix`
-- Active packet: `GOV-PACKET-ENTRY-CONTROL-SURFACE`
-- Active packet state: `frozen / implementation ready`
+- Active packet: `REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE`
+- Active packet state: `accepted locally / post-close passed / awaiting cherry-pick`
 - Active packet owner: `Architects mainline lead`
-- Last accepted packet: `GOV-AUTHORITY-AMENDMENT-AFTER-ARCHIVE`
+- Last accepted packet: `VERIFY-ETL-RECALIBRATE-CONTAMINATION`
 - Execution mode default: `solo lead with bounded subagents`
 - Team status:
   - allowed in principle after `FOUNDATION-TEAM-GATE`
@@ -25,9 +23,9 @@ Metadata:
 
 ## Current next action
 
-1. Define the replacement live control entry surface and update routing files.
-2. Archive/demote the superseded root/architects ledgers.
-3. Keep runtime logic and broader governance rewrites out of this packet.
+1. Cherry-pick accepted commit `c33ab3f` onto `Architects` cleanly when ready.
+2. Keep the packet bounded to close-path trace convergence until transport is complete.
+3. Keep the historical re-audit note read-only unless a later packet explicitly promotes it into repo authority.
 
 ## Current out-of-scope dirt
 
@@ -37,8 +35,8 @@ Metadata:
 - `docs/architecture/zeus_design_philosophy.md` has an unrelated local deletion and stays out of scope
 - `docs/TOP_PRIORITY_zeus_reality_crisis_response.md` is untracked and out of scope
 - `docs/archives/` is untracked and out of scope
-- `docs/archives/architects_progress_archive.md` and `docs/archives/handoffs/next_round_handoff_p4_start.md` are historical/archive surfaces outside this packet unless only path references need updating
-- `root_progress.md` and `root_task.md` are in scope only for role clarification, not archival removal
+- `architects_progress_archive.md`, `root_progress.md`, and `root_task.md` have unrelated local deletions and stay out of scope
+- `next_round_handoff.md` has unrelated local modifications and stays out of scope
 - `.trash/` and `memory/` are untracked workspace artifacts outside packet scope
 - local DB artifacts (`risk_state.db`, `trading.db`, `zeus.db`, `zeus_state.db`) are untracked and out of scope
 - `tests/test_calibration_quality.py` and `work_packets/MATH-002-BIN-HIT-RATE-CALIBRATION.md` are unrelated untracked files outside packet scope
@@ -50,4 +48,4 @@ Metadata:
 2. `architects_state_index.md`
 3. `architects_task.md`
 4. `architects_progress.md`
-5. `work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md`
+5. `work_packets/REPAIR-POSITION-SETTLEMENT-TRACE-CONVERGENCE.md`

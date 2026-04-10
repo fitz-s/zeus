@@ -1064,6 +1064,63 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
     conn.close()
 
 
+def test_economic_close_builder_emits_event_and_projection_that_append_cleanly():
+    from src.engine.lifecycle_events import (
+        build_economic_close_canonical_write,
+        build_entry_canonical_write,
+    )
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    entry_events, entry_projection = build_entry_canonical_write(
+        _runtime_position(state="day0_window", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    closed_pos = _runtime_position(state="economically_closed", chain_state="unknown")
+    closed_pos.day0_entered_at = "2026-04-03T00:06:00Z"
+    closed_pos.last_exit_at = "2026-04-03T02:00:00Z"
+    closed_pos.exit_price = 0.46
+    closed_pos.pnl = 1.5
+    closed_pos.exit_reason = "forward edge failed"
+    closed_pos.exit_state = "sell_filled"
+
+    events, projection = build_economic_close_canonical_write(
+        closed_pos,
+        sequence_no=4,
+        phase_before="pending_exit",
+        source_module="src.execution.exit_lifecycle",
+    )
+
+    append_many_and_project(conn, events, projection)
+
+    event_row = conn.execute(
+        "SELECT event_type, sequence_no, phase_before, phase_after, payload_json FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    projection_row = conn.execute(
+        "SELECT phase, strategy_key FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+
+    assert event_row["event_type"] == "EXIT_ORDER_FILLED"
+    assert event_row["sequence_no"] == 4
+    assert event_row["phase_before"] == "pending_exit"
+    assert event_row["phase_after"] == "economically_closed"
+    payload = json.loads(event_row["payload_json"])
+    assert payload["exit_price"] == pytest.approx(0.46)
+    assert payload["pnl"] == pytest.approx(1.5)
+    assert payload["exit_reason"] == "forward edge failed"
+    assert dict(projection_row) == {
+        "phase": "economically_closed",
+        "strategy_key": "center_buy",
+    }
+    conn.close()
+
+
 def test_settlement_builder_accepts_pending_exit_fold():
     from src.engine.lifecycle_events import build_settlement_canonical_write
 
@@ -1323,6 +1380,7 @@ def test_lifecycle_builder_module_exists():
     assert "def canonical_phase_for_position" in text
     assert "def build_position_current_projection" in text
     assert "def build_entry_canonical_write" in text
+    assert "def build_economic_close_canonical_write" in text
     assert "def build_settlement_canonical_write" in text
     assert "def build_reconciliation_rescue_canonical_write" in text
 

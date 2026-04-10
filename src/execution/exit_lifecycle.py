@@ -127,6 +127,67 @@ def _release_pending_exit(position: Position) -> None:
         position.pre_exit_state = ""
 
 
+def _next_canonical_sequence_no(conn: sqlite3.Connection, position_id: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 1
+    return int(row[0] or 0) + 1
+
+
+def _has_canonical_position_history(conn: sqlite3.Connection, position_id: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
+def _canonical_phase_before_for_economic_close(position: Position) -> str:
+    return "pending_exit"
+
+
+def _dual_write_canonical_economic_close_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    phase_before: str,
+) -> bool:
+    if conn is None:
+        return False
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write
+    from src.state.db import append_many_and_project
+
+    if not _has_canonical_position_history(conn, getattr(position, "trade_id", "")):
+        logger.debug(
+            "Canonical economic-close dual-write skipped for %s: no prior canonical position history",
+            getattr(position, "trade_id", ""),
+        )
+        return False
+
+    try:
+        events, projection = build_economic_close_canonical_write(
+            position,
+            sequence_no=_next_canonical_sequence_no(conn, getattr(position, "trade_id", "")),
+            phase_before=phase_before,
+            source_module="src.execution.exit_lifecycle",
+        )
+        append_many_and_project(conn, events, projection)
+    except Exception as exc:
+        raise RuntimeError(
+            f"canonical economic-close dual-write failed for {getattr(position, 'trade_id', '')}: {exc}"
+        ) from exc
+
+    return True
+
+
 def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mode: bool) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
@@ -209,6 +270,7 @@ def execute_exit(
     if paper_mode:
         _mark_pending_exit(position)
         position.exit_state = "exit_intent"
+        phase_before = _canonical_phase_before_for_economic_close(position)
         closed = compute_economic_close(
             portfolio,
             position.trade_id,
@@ -217,6 +279,11 @@ def execute_exit(
         )
         if closed is not None:
             closed.exit_state = "sell_filled"
+            _dual_write_canonical_economic_close_if_available(
+                conn,
+                closed,
+                phase_before=phase_before,
+            )
             return f"paper_exit: {exit_intent.reason}"
         return "paper_exit_failed: position_not_found"
 
@@ -365,9 +432,15 @@ def _execute_live_exit(
             status, _ = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
                 actual_price = _extract_fill_price(sell_result, current_market_price, best_bid)
+                phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
                     closed.exit_state = "sell_filled"
+                    _dual_write_canonical_economic_close_if_available(
+                        conn,
+                        closed,
+                        phase_before=phase_before,
+                    )
                     if conn is not None:
                         log_exit_fill_event(
                             conn,
@@ -505,9 +578,15 @@ def check_pending_exits(
                 getattr(pos, "last_monitor_best_bid", None),
             )
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
+            phase_before = _canonical_phase_before_for_economic_close(pos)
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
                 closed.exit_state = "sell_filled"
+                _dual_write_canonical_economic_close_if_available(
+                    conn,
+                    closed,
+                    phase_before=phase_before,
+                )
                 stats["filled_positions"].append(closed)
                 if conn is not None:
                     log_exit_fill_event(

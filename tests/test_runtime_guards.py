@@ -3091,6 +3091,65 @@ def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
     assert pos.exit_state == "sell_filled"
 
 
+def test_execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _position(state="day0_window")
+    pos.day0_entered_at = "2026-03-30T01:00:00Z"
+    portfolio = PortfolioState(positions=[pos])
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    ctx = ExitContext(
+        fresh_prob=0.41,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.46,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        best_ask=0.49,
+        market_vig=None,
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+        exit_reason="forward edge failed",
+    )
+
+    outcome = exit_lifecycle_module.execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ctx,
+        paper_mode=True,
+        conn=conn,
+    )
+
+    phase_row = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    event_row = conn.execute(
+        "SELECT event_type, phase_before, phase_after FROM position_events WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
+        (pos.trade_id,),
+    ).fetchone()
+    conn.close()
+
+    assert outcome == "paper_exit: forward edge failed"
+    assert phase_row["phase"] == "economically_closed"
+    assert dict(event_row) == {
+        "event_type": "EXIT_ORDER_FILLED",
+        "phase_before": "pending_exit",
+        "phase_after": "economically_closed",
+    }
+
+
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
