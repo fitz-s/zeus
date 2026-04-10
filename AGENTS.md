@@ -1,7 +1,7 @@
 File: AGENTS.md
 Disposition: NEW
 Authority basis: architecture/self_check/authority_index.md; docs/governance/zeus_autonomous_delivery_constitution.md; docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; current repo runtime truth surfaces.
-Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root top-law file now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in docs/reference/workspace_map.md; historical authority claims in docs/specs and docs/architecture.
+Supersedes / harmonizes: historical quick-reference guidance in `.claude/CLAUDE.md`; the root summary now carried in `ZEUS_AUTHORITY.md`; ad hoc guidance in docs/reference/workspace_map.md; historical authority claims in docs/specs and docs/architecture.
 Why this file exists now: Codex/OMX and future zero-context agents need one repo-native instruction surface that loads before work starts.
 Current-phase or long-lived: Long-lived.
 
@@ -41,7 +41,7 @@ Imported source-package note:
 - Do not edit the source-package copy as if it were the live law surface unless the packet explicitly targets source-package maintenance.
 
 Current routing note:
-- `ZEUS_AUTHORITY.md` is the root top-law file: foundation, method, invariants, negative constraints, and boundary doctrine in one place. It does not replace exact precedence or machine-checkable enforcement.
+- `ZEUS_AUTHORITY.md` is the root authority guide: foundation, invariants, negative constraints, and boundary rules in one place. It is a guide, not a precedence override.
 - `docs/archives/**` is historical/archive material and is never principal authority.
 - `docs/control/current_state.md` is the single live control-entry pointer.
 - The current work packet named in `docs/control/current_state.md` is the live control surface.
