@@ -12,7 +12,7 @@ Your job is to change only what the active work packet allows while protecting k
 ```
 51 ENS members → per-member daily max → Monte Carlo (sensor noise + rounding) → P_raw
 P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal
-P_cal + P_market → Bayesian fusion → P_posterior
+P_cal + P_market → α-weighted fusion → P_posterior
 P_posterior - P_market → Edge (with double-bootstrap CI)
 Edges → BH FDR filter (220 hypotheses) → Selected edges
 Selected → Fractional Kelly (dynamic mult) → Position size
