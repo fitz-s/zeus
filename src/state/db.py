@@ -2528,18 +2528,15 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
             "positions": [],
             "stale_trade_ids": stale_trade_ids,
         }
-    if stale_trade_ids:
-        return {
-            "status": "stale_legacy_fallback",
-            "table": "position_current",
-            "positions": [],
-            "stale_trade_ids": stale_trade_ids,
-        }
-    return {
-        "status": "ok",
+    status = "partial_stale" if stale_trade_ids else "ok"
+    result: dict = {
+        "status": status,
         "table": "position_current",
         "positions": positions,
     }
+    if stale_trade_ids:
+        result["stale_trade_ids"] = stale_trade_ids
+    return result
 
 
 def upsert_control_override(

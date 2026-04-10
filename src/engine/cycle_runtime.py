@@ -8,6 +8,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -251,7 +252,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
-        env=deps.settings.mode,
+        env=os.environ.get("ZEUS_MODE", deps.settings.mode),
     )
 
 

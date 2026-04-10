@@ -162,27 +162,49 @@ def _dual_write_canonical_economic_close_if_available(
     if conn is None:
         return False
 
-    from src.engine.lifecycle_events import build_economic_close_canonical_write
+    import copy
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write, build_entry_canonical_write
     from src.state.db import append_many_and_project
 
-    if not _has_canonical_position_history(conn, getattr(position, "trade_id", "")):
-        logger.debug(
-            "Canonical economic-close dual-write skipped for %s: no prior canonical position history",
-            getattr(position, "trade_id", ""),
-        )
-        return False
+    trade_id = getattr(position, "trade_id", "")
+    has_history = _has_canonical_position_history(conn, trade_id)
+
+    if not has_history:
+        # Backfill canonical entry events for positions that only exist in
+        # the legacy table.  Create an entry-phase snapshot so
+        # build_entry_canonical_write produces the standard three-event
+        # sequence (OPEN_INTENT / ORDER_POSTED / ORDER_FILLED → active).
+        entry_snapshot = copy.copy(position)
+        entry_snapshot.state = "entered"
+        entry_snapshot.exit_state = ""
+        try:
+            entry_events, _ = build_entry_canonical_write(
+                entry_snapshot,
+                source_module="src.execution.exit_lifecycle:backfill",
+            )
+        except Exception as exc:
+            logger.debug(
+                "Canonical entry backfill failed for %s: %s", trade_id, exc,
+            )
+            return False
+        exit_seq = len(entry_events) + 1
+    else:
+        entry_events = []
+        exit_seq = _next_canonical_sequence_no(conn, trade_id)
 
     try:
-        events, projection = build_economic_close_canonical_write(
+        exit_events, projection = build_economic_close_canonical_write(
             position,
-            sequence_no=_next_canonical_sequence_no(conn, getattr(position, "trade_id", "")),
+            sequence_no=exit_seq,
             phase_before=phase_before,
             source_module="src.execution.exit_lifecycle",
         )
-        append_many_and_project(conn, events, projection)
+        all_events = entry_events + exit_events
+        append_many_and_project(conn, all_events, projection)
     except Exception as exc:
         raise RuntimeError(
-            f"canonical economic-close dual-write failed for {getattr(position, 'trade_id', '')}: {exc}"
+            f"canonical economic-close dual-write failed for {trade_id}: {exc}"
         ) from exc
 
     return True

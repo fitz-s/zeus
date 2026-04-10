@@ -835,7 +835,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     settlement_rows: list[dict] = []
     try:
         snapshot = query_portfolio_loader_view(conn)
-        if snapshot.get("status") == "ok":
+        if snapshot.get("status") in ("ok", "partial_stale"):
             query_env = mode_override or current_mode
             try:
                 settlement_rows = query_authoritative_settlement_rows(
@@ -852,7 +852,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     finally:
         conn.close()
 
-    if snapshot.get("status") != "ok":
+    if snapshot.get("status") not in ("ok", "partial_stale"):
         logger.warning(
             "load_portfolio falling back to JSON because canonical projection is unavailable: %s",
             snapshot.get("status"),

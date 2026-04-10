@@ -98,7 +98,7 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
-    if loader_view.get("status") == "ok":
+    if loader_view.get("status") in ("ok", "partial_stale"):
         metadata_state, capital_source = _load_riskguard_capital_metadata()
         positions = [
             _portfolio_position_from_loader_row(row)

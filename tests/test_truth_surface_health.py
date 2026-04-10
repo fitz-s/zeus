@@ -30,17 +30,17 @@ class TestPortfolioTruthSource:
     """AB-003: canonical truth path must never silently degrade to fallback."""
 
     def test_portfolio_truth_source_is_canonical(self):
-        """Portfolio loader must return status 'ok', not 'CANONICAL_AUTHORITY_UNAVAILABLE'.
+        """Portfolio loader must return status 'ok' or 'partial_stale'.
 
-        If this fails, position_current projections are older than
-        position_events_legacy — canonical truth is NOT available.
-        This is a structural failure, not soft staleness.
+        If this fails, position_current projections are missing or broken.
+        'partial_stale' is acceptable when some legacy positions have newer
+        events — those are excluded per-position while the rest are served.
         """
         conn = get_connection()
         result = query_portfolio_loader_view(conn)
         status = result.get("status", "unknown")
-        assert status == "ok", (
-            f"portfolio_truth_source is '{status}', not 'ok'. "
+        assert status in ("ok", "partial_stale"), (
+            f"portfolio_truth_source is '{status}', not 'ok'/'partial_stale'. "
             f"Stale trade IDs: {result.get('stale_trade_ids', [])}. "
             f"This means position_current is behind position_events_legacy."
         )
@@ -49,7 +49,7 @@ class TestPortfolioTruthSource:
         """Portfolio loader must return at least one position when ok."""
         conn = get_connection()
         result = query_portfolio_loader_view(conn)
-        if result.get("status") == "ok":
+        if result.get("status") in ("ok", "partial_stale"):
             positions = result.get("positions", [])
             assert len(positions) > 0, "Status is ok but zero positions returned"
 
