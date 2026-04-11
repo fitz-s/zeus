@@ -98,6 +98,30 @@ def _canonical_phase_before_for_settlement(pos) -> str:
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
+_TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
+
+
+def _current_phase_in_db(conn, trade_id: str) -> str | None:
+    """Read the authoritative phase from position_current for the given trade.
+
+    Returns None if the row does not exist or the table is missing.
+    This is the canonical dedup anchor — stale in-memory pos objects must
+    never be used to decide whether a settlement has already been emitted.
+    """
+    if not trade_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT phase FROM position_current WHERE trade_id = ? LIMIT 1",
+            (trade_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return str(row["phase"]) if hasattr(row, "keys") else str(row[0])
+
+
 def _dual_write_canonical_settlement_if_available(
     conn,
     pos,
@@ -110,12 +134,38 @@ def _dual_write_canonical_settlement_if_available(
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project
 
-    if not _has_canonical_position_history(conn, getattr(pos, "trade_id", "")):
+    trade_id = getattr(pos, "trade_id", "")
+
+    if not _has_canonical_position_history(conn, trade_id):
         logger.debug(
             "Canonical settlement dual-write skipped for %s: no prior canonical position history",
-            getattr(pos, "trade_id", ""),
+            trade_id,
         )
         return False
+
+    # Bug #9 dedup guard: the authoritative source for "is this position already
+    # in a terminal phase?" is position_current in the DB, NOT the in-memory pos
+    # object. If load_portfolio fell back to the JSON cache (bug #7 path), the
+    # pos object may show economically_closed while the DB already reflects
+    # settled from an earlier cycle. Refusing re-entry at this layer makes
+    # settlement idempotent regardless of the iterator's staleness.
+    db_phase = _current_phase_in_db(conn, trade_id)
+    if db_phase in _TERMINAL_PHASES:
+        logger.info(
+            "Canonical settlement dual-write skipped for %s: position_current.phase=%s already terminal",
+            trade_id,
+            db_phase,
+        )
+        return False
+
+    # Prefer the DB-authoritative phase_before when available; fall back to the
+    # pos-object-derived value only when the DB has no row yet (e.g. very first
+    # lifecycle event for a canonical-bootstrap migration).
+    resolved_phase_before = (
+        db_phase
+        if db_phase is not None
+        else (phase_before or _canonical_phase_before_for_settlement(pos))
+    )
 
     try:
         events, projection = build_settlement_canonical_write(
@@ -123,14 +173,14 @@ def _dual_write_canonical_settlement_if_available(
             winning_bin=winning_bin,
             won=won,
             outcome=outcome,
-            sequence_no=_next_canonical_sequence_no(conn, getattr(pos, "trade_id", "")),
-            phase_before=phase_before or _canonical_phase_before_for_settlement(pos),
+            sequence_no=_next_canonical_sequence_no(conn, trade_id),
+            phase_before=resolved_phase_before,
             source_module="src.execution.harvester",
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
         raise RuntimeError(
-            f"canonical settlement dual-write failed for {getattr(pos, 'trade_id', '')}: {exc}"
+            f"canonical settlement dual-write failed for {trade_id}: {exc}"
         ) from exc
 
     return True
