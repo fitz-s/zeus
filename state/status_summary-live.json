@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-04-09T19:03:20.479937+00:00",
+  "timestamp": "2026-04-11T02:32:43.890595+00:00",
   "process": {
-    "pid": 2276,
+    "pid": 5018,
     "mode": "paper",
     "version": "zeus_v2"
   },
   "control": {
-    "entries_paused": false,
+    "entries_paused": true,
     "edge_threshold_multiplier": 1.0,
     "strategy_gates": {
       "center_buy": false
@@ -40,29 +40,41 @@
   },
   "risk": {
     "level": "RED",
-    "riskguard_level": "GREEN",
+    "riskguard_level": "YELLOW",
     "details": {
       "brier_level": "GREEN",
       "settlement_quality_level": "GREEN",
       "execution_quality_level": "GREEN",
       "strategy_signal_level": "GREEN",
       "daily_loss_level": "GREEN",
-      "weekly_loss_level": "GREEN",
+      "weekly_loss_level": "YELLOW",
       "daily_loss": 0.0,
       "weekly_loss": 0.0,
+      "daily_loss_status": "ok",
+      "weekly_loss_status": "insufficient_history",
+      "daily_loss_source": "risk_state_history",
+      "weekly_loss_source": "no_trustworthy_reference_row",
+      "daily_loss_reference": {
+        "row_id": 2004,
+        "checked_at": "2026-04-10T02:31:28.405456+00:00",
+        "initial_bankroll": 150.0,
+        "total_pnl": 0.0,
+        "effective_bankroll": 150.0
+      },
+      "weekly_loss_reference": null,
       "initial_bankroll": 150.0,
       "daily_baseline_total": 150.0,
       "weekly_baseline_total": 150.0,
-      "realized_pnl": 0,
-      "unrealized_pnl": 0,
-      "total_pnl": 0,
-      "effective_bankroll": 150.0,
+      "realized_pnl": 204.27,
+      "unrealized_pnl": 197.1,
+      "total_pnl": 401.37,
+      "effective_bankroll": 551.37,
       "portfolio_truth_source": "working_state_fallback",
       "portfolio_loader_status": "empty",
       "portfolio_fallback_active": true,
       "portfolio_fallback_reason": "empty",
-      "portfolio_position_count": 0,
-      "portfolio_capital_source": "settings_capital_base_fallback",
+      "portfolio_position_count": 24,
+      "portfolio_capital_source": "working_state_metadata",
       "realized_truth_source": "none",
       "settlement_sample_size": 0,
       "settlement_storage_source": "none",
@@ -134,10 +146,9 @@
     "consistency_check": {
       "ok": false,
       "issues": [
-        "cycle_failed",
         "strategy_health_empty"
       ],
-      "cycle_risk_level": null
+      "cycle_risk_level": "YELLOW"
     }
   },
   "portfolio": {
@@ -145,11 +156,11 @@
     "total_exposure_usd": 0.0,
     "heat_pct": 0.0,
     "initial_bankroll": 150.0,
-    "realized_pnl": 0.0,
-    "unrealized_pnl": 0.0,
-    "total_pnl": 0.0,
-    "effective_bankroll": 150.0,
-    "bankroll": 150.0,
+    "realized_pnl": 204.27,
+    "unrealized_pnl": 197.1,
+    "total_pnl": 401.37,
+    "effective_bankroll": 551.37,
+    "bankroll": 551.37,
     "positions": []
   },
   "runtime": {
@@ -205,12 +216,32 @@
   },
   "cycle": {
     "mode": "day0_capture",
-    "failed": true,
-    "failure_reason": "live portfolio contains paper position 04473054-eaa \u2014 refusing to load. Resolve manually: settle or void all paper positions before switching modes."
+    "started_at": "2026-04-11T02:32:28.707238+00:00",
+    "monitors": 12,
+    "exits": 0,
+    "candidates": 0,
+    "trades": 0,
+    "no_trades": 0,
+    "risk_level": "YELLOW",
+    "pending_voids": 0,
+    "chain_sync": {
+      "skipped": "paper_mode"
+    },
+    "config_cap_usd": 150.0,
+    "effective_bankroll_usd": 150.0,
+    "dynamic_cap_usd": 150.0,
+    "entry_bankroll_contract": "paper_effective_bankroll_capped_by_config",
+    "bankroll_truth_source": "portfolio.initial_bankroll",
+    "wallet_balance_used": false,
+    "monitor_incomplete_exit_context": 12,
+    "monitor_skipped_economic_close": 12,
+    "portfolio_heat_pct": 28.9,
+    "entries_paused": true,
+    "completed_at": "2026-04-11T02:32:43.890539+00:00"
   },
   "truth": {
     "mode": "paper",
-    "generated_at": "2026-04-09T19:03:20.479937+00:00",
+    "generated_at": "2026-04-11T02:32:43.890595+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,

@@ -353,13 +353,16 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     conn = get_connection(db_path)
     init_schema(conn)
     conn.close()
-    portfolio = PortfolioState(positions=[_position(size_usd=72.0, shares=180.0, cost_basis_usd=72.0)])
+    # Use a future target_date so monitoring doesn't exit the position before
+    # the exposure gate is evaluated.
+    portfolio = PortfolioState(positions=[_position(size_usd=72.0, shares=180.0, cost_basis_usd=72.0, target_date="2026-12-01")])
 
     class DummyClob:
         def __init__(self, paper_mode):
             self.paper_mode = True
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
@@ -367,6 +370,7 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
     def _mock_refresh(conn, clob, pos):
         pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_prob_is_fresh = True
@@ -520,6 +524,8 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
@@ -648,6 +654,8 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _dummy_refresh)
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
 
     def _capture_eval(candidate, conn, portfolio, clob, limits, entry_bankroll=None):
         captured["entry_bankroll"] = entry_bankroll
@@ -727,6 +735,8 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
 
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
@@ -793,6 +803,8 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
     conn = get_connection(db_path)
@@ -1185,6 +1197,13 @@ def test_execution_stub_does_not_reinvent_strategy_without_strategy_key():
 
 
 def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
+    # Create empty sibling DB so load_portfolio uses it (empty → JSON fallback)
+    # instead of falling through to the production DB.
+    sibling_db = tmp_path / "zeus-paper.db"
+    conn = get_connection(sibling_db)
+    init_schema(conn)
+    conn.close()
+
     path = tmp_path / "positions-paper.json"
     path.write_text(json.dumps({
         "positions": [{
