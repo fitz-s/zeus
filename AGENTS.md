@@ -131,6 +131,14 @@ A math change BECOMES architecture/governance if it touches: lifecycle states, s
 
 If you cannot answer, stop and plan.
 
+### Translation loss law
+
+Natural language → code translation has systematic information loss. Functions and types survive sessions at 100%. Design philosophy and architecture rationale survive at ~20%. This is not fixable — it is a physical property of attention allocation across context boundaries.
+
+**Consequence**: Every session should encode insights as code structure (types, tests, contracts), not docs. `Bin.unit`, `SettlementSemantics.for_city()`, and `test_celsius_cities_get_celsius_semantics()` are executable forms of design intent — they enforce correctness without being understood. Docs that explain *why* are valuable but fragile; code that *prevents* errors is durable.
+
+**Relationship tests before implementation**: Before writing a new module, write tests for its relationships with existing modules — not "does this function return the right value" but "when this function's output flows into the next function, what properties must hold?" If you cannot express a cross-module relationship as a pytest assertion, you do not yet understand that relationship. Go back and understand it before coding.
+
 ### Commit discipline
 
 **Agents must commit after each verified batch of changes.** Uncommitted work is one `git checkout .` away from total loss.

@@ -196,3 +196,44 @@ Advisory-only risk is explicitly forbidden. If a risk level doesn't change behav
 Overall level = max of all individual levels. Fail-closed: any computation error → RED.
 
 **Key file**: `src/riskguard/risk_level.py`
+
+## 11. Four independent strategies
+
+Zeus's edges fall into four categories with fundamentally different risk/alpha profiles. They should be tracked independently because their alpha decay rates differ — portfolio-level P&L masks which strategies are working and which are being competed away.
+
+### Strategy A: Settlement Capture (observation-based, most durable)
+
+- **Edge source**: Observed fact — temperature has already crossed a bin threshold post-peak
+- **Risk**: Near-zero (post-peak + already crossed ≈ near-certain)
+- **Requires**: Observation speed (frequent WU/ASOS polling, ideally every 3–5 min in Day0 window)
+- **Does NOT require**: ENS forecast, Platt calibration, bootstrap CI
+- **Alpha decay**: Very slow — this is not a predictive edge, it's an observation speed advantage
+- **Key insight**: Only strategy where increasing operational frequency directly increases edge
+
+### Strategy B: Shoulder Bin Sell (structural, durable)
+
+- **Edge source**: Retail cognitive bias (prospect theory, lottery effect → shoulder bins overpriced)
+- **Risk**: Tail risk (extreme weather events cause large losses)
+- **Requires**: Basic climatological probability estimates
+- **Does NOT require**: Precise ENS signals — a rough "this bin wins ~5% historically" suffices
+- **Alpha decay**: Moderate — as more bots enter, shoulder overpricing narrows
+
+### Strategy C: Center Bin Buy (predictive, moderate durability)
+
+- **Edge source**: Model is more accurate than market at estimating the most likely temperature bin
+- **Risk**: Medium (model error → loss = entry price)
+- **Requires**: Full signal chain (ENS → Platt → bootstrap → FDR)
+- **Alpha decay**: Fastest — most easily competed away by other quantitative participants
+
+### Strategy D: Opening Inertia (temporal, unverified)
+
+- **Edge source**: New market mispricing (first liquidity provider's anchoring effect)
+- **Risk**: Medium-high (opening price may be coincidentally correct)
+- **Requires**: Market scanning + model signal
+- **Alpha decay**: Fastest — as bots scan new market opens, the window shrinks
+
+### Edge decay monitoring
+
+Each strategy's average edge magnitude should be tracked over 30/60/90-day windows. When a strategy's edge trend is negative and sustained for 30+ days, the correct response is to reduce capital allocation to that strategy — not to refine the model. If all four strategies show compressing edges, reduce total position sizing until the trend reverses.
+
+Per-strategy tracking enables: independent win rate, cumulative P&L, edge trend, fill rate, and holding period. RiskGuard monitoring (Brier score, drawdown) should eventually be per-strategy so that Strategy C's deterioration doesn't halt Strategy A.
