@@ -212,6 +212,7 @@ def test_run_cycle_monitoring_fails_loudly_when_shared_seam_unavailable(monkeypa
 
     monkeypatch.setattr(cycle_runner, "get_connection", broken_get_connection)
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
 
     with pytest.raises(RuntimeError, match="shared unavailable"):
         cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)

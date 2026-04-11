@@ -18,5 +18,6 @@ __pycache__/
 *.pyc
 .venv/
 
-
 state/*.db
+state/*.bak
+.git-commit-msg.tmp
