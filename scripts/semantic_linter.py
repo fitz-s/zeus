@@ -22,7 +22,7 @@ SEMANTIC_RULES = {
     }
 }
 
-TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py"}
+TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py", "day0_residual.py"}
 
 
 class SemanticAnalyzer(ast.NodeVisitor):

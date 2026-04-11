@@ -112,6 +112,31 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "quarantined": "quarantined",
     "admin_closed": "admin_closed",
 }
+
+_RUNTIME_STATE_ORDER = {
+    "pending_tracked": 0,
+    "entered": 1,
+    "day0_window": 2,
+    "pending_exit": 3,
+    "economically_closed": 4,
+    "settled": 5,
+    "voided": 5,
+    "quarantined": 5,
+    "admin_closed": 5,
+}
+
+# Maximum timestamp drift (in seconds) from dual-write that is treated as a
+# same-transaction shadow rather than a genuine stale signal.
+_DUAL_WRITE_TOLERANCE_SECS = 1.0
+
+
+def _is_semantic_advance(current_runtime: str, legacy_state: str) -> bool:
+    cur_ord = _RUNTIME_STATE_ORDER.get(current_runtime, -1)
+    leg_ord = _RUNTIME_STATE_ORDER.get(legacy_state, -1)
+    if leg_ord < 0:
+        return True
+    return leg_ord > cur_ord
+
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 
 
@@ -3095,16 +3120,20 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
     latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
-    legacy_latest_by_trade: dict[str, datetime] = {}
+    legacy_latest_by_trade: dict[str, tuple[datetime, str]] = {}
     legacy_table = _legacy_position_events_table(conn)
     if legacy_table:
         placeholders = ", ".join("?" for _ in trade_ids)
         legacy_rows = conn.execute(
             f"""
-            SELECT runtime_trade_id, MAX(timestamp) AS latest_timestamp
-            FROM {legacy_table}
-            WHERE runtime_trade_id IN ({placeholders})
-            GROUP BY runtime_trade_id
+            SELECT l.runtime_trade_id, l.timestamp AS latest_timestamp, l.position_state
+            FROM {legacy_table} l
+            INNER JOIN (
+                SELECT runtime_trade_id, MAX(timestamp) AS max_ts
+                FROM {legacy_table}
+                WHERE runtime_trade_id IN ({placeholders})
+                GROUP BY runtime_trade_id
+            ) agg ON l.runtime_trade_id = agg.runtime_trade_id AND l.timestamp = agg.max_ts
             """,
             trade_ids,
         ).fetchall()
@@ -3112,7 +3141,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
             trade_id = str(legacy_row["runtime_trade_id"] or "")
             parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
             if trade_id and parsed is not None:
-                legacy_latest_by_trade[trade_id] = parsed
+                legacy_latest_by_trade[trade_id] = (parsed, str(legacy_row["position_state"] or ""))
 
     current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     positions: list[dict] = []
@@ -3126,10 +3155,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
         if position_env != current_mode:
             continue
         projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
-        latest_legacy = legacy_latest_by_trade.get(trade_id)
-        if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
-            stale_trade_ids.append(trade_id)
-            continue
+        legacy_entry = legacy_latest_by_trade.get(trade_id)
+        if projection_updated_at is not None and legacy_entry is not None:
+            latest_legacy_ts, legacy_state = legacy_entry
+            if latest_legacy_ts > projection_updated_at:
+                # Same-phase legacy events within the dual-write tolerance
+                # window are harmless shadow events, not a stale signal.
+                current_runtime = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
+                drift_secs = (latest_legacy_ts - projection_updated_at).total_seconds()
+                if _is_semantic_advance(current_runtime, legacy_state) or drift_secs > _DUAL_WRITE_TOLERANCE_SECS:
+                    stale_trade_ids.append(trade_id)
+                    continue
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
         terminal_runtime_state = _terminal_runtime_state_for_trade_decision_status(latest_trade_status)
         if terminal_runtime_state:
