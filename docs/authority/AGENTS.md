@@ -24,3 +24,20 @@ This directory defines how Zeus is architected, changed, delivered, verified, an
 - hide uncertainty under polished prose
 - turn dossiers into primary authority
 - let runbooks outrank constitutions or manifests
+
+## File registry
+
+| File | Purpose |
+|------|---------|
+| `zeus_durable_architecture_spec.md` | Architecture spec — DB schema, event spine, truth surfaces, projection model |
+| `target_state_spec.md` | Target-state spec — P9-P11 endgame, endgame clause, convergence criteria |
+| `zeus_autonomous_delivery_constitution.md` | Delivery constitution — packet discipline, escalation gates, closure rules |
+| `zeus_change_control_constitution.md` | Deep packet governance rules (Chinese language) |
+| `zeus_packet_discipline.md` | Packet discipline — program/packet/slice, closure, pre/post-closeout, waivers |
+| `zeus_autonomy_gates.md` | Autonomy gates — post-P0.5 rule, team mode entry, escalation |
+| `zeus_micro_event_logging.md` | Micro-event logging format, when to log, template |
+| `zeus_openclaw_venus_delivery_boundary.md` | Boundary law between Zeus, Venus, and OpenClaw |
+| `zeus_top_tier_decision_register.md` | High-stakes decision register — irreversible choices and their rationale |
+| `zeus_discrete_settlement_support_amendment.md` | Amendment: discrete settlement semantics for integer rounding |
+| `zeus_p1_p8_implementation_spec.md` | P1-P8 implementation spec — phase-by-phase deliverables |
+| `team_policy.md` | Team mode usage rules (loaded on demand) |

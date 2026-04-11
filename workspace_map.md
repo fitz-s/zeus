@@ -11,10 +11,13 @@ workspace_map.md (YOU ARE HERE)
   ├── AGENTS.md              ← operating rules, invariants, zones
   ├── src/*/AGENTS.md        ← zone-specific rules + file registry per package
   ├── tests/AGENTS.md        ← test catalog with invariant mappings
-  ├── docs/README.md         ← docs index → authority/ reference/ operations/
+  ├── docs/README.md         ← docs index
+  │   ├── docs/authority/AGENTS.md   ← architecture + governance file registry
+  │   ├── docs/reference/AGENTS.md   ← domain model + research file registry
+  │   └── docs/operations/AGENTS.md  ← active work packets file registry
   ├── architecture/AGENTS.md ← machine-checkable authority files
+  ├── config/AGENTS.md       ← runtime parameters + reality contracts
   ├── scripts/AGENTS.md      ← script catalog
-  ├── migrations/AGENTS.md   ← migration rules
   └── .github/workflows/AGENTS.md ← CI gate rules
 ```
 
@@ -31,7 +34,6 @@ workspace_map.md (YOU ARE HERE)
 | `AGENTS.md` | Root operating brief — read first, always |
 | `workspace_map.md` | This file — master topology node |
 | `src/main.py` | Daemon entry point (paper/live mode) |
-| `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
 | `.importlinter` | Zone boundary enforcement (import rules) |
@@ -170,9 +172,9 @@ See `docs/README.md` for the docs index.
 
 | Directory | Files | Purpose | AGENTS.md |
 |-----------|-------|---------|-----------|
-| `docs/authority/` | 13 | Architecture specs + governance — constitutions, boundary law, decision register | `docs/authority/AGENTS.md` |
-| `docs/reference/` | 9 | Domain model, data inventory, quantitative research, methodology | — |
-| `docs/operations/` | 3 | Live control pointer + active work packets | — |
+| `docs/authority/` | 12 | Architecture specs + governance — constitutions, boundary law, decision register | `docs/authority/AGENTS.md` |
+| `docs/reference/` | 9 | Domain model, data inventory, quantitative research, methodology | `docs/reference/AGENTS.md` |
+| `docs/operations/` | 3 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
 | `docs/archives/` | many | Historical — never active authority | — |
 
 Root docs: `docs/README.md` (index), `docs/known_gaps.md` (operational gap register).
@@ -191,6 +193,7 @@ See `architecture/AGENTS.md` for zone rules. Changes here are ALWAYS governance 
 | `negative_constraints.yaml` | 10 negative constraint definitions |
 | `maturity_model.yaml` | Maturity model definitions |
 | `lifecycle_grammar.md` | Lifecycle grammar specification |
+| `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |
 | `self_check/zero_context_entry.md` | Zero-context agent entry checklist |
 | `ast_rules/semgrep_zeus.yml` | Semgrep rules for code enforcement |
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
@@ -199,6 +202,8 @@ See `architecture/AGENTS.md` for zone rules. Changes here are ALWAYS governance 
 ---
 
 ## `config/` — Runtime Parameters
+
+See `config/AGENTS.md` for file registry and rules.
 
 | File | Purpose |
 |------|---------|
@@ -226,16 +231,6 @@ See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of 
 | **Calibration** | `refit_platt.py`, `generate_calibration_pairs.py`, `validate_dynamic_alpha.py` |
 | **Migration** | `migrate_rainstorm_full.py`, `migrate_to_isolated_dbs.py`, `onboard_cities.py` |
 | **Validation** | `validate_assumptions.py`, `verify_truth_surfaces.py`, `diagnose_*.py`, `semantic_linter.py` |
-
----
-
-## `migrations/` — Database Migrations
-
-See `migrations/AGENTS.md` for rules. High-stakes — requires packet + rollback note.
-
-| File | Purpose |
-|------|---------|
-| `2026_04_02_architecture_kernel.sql` | Architecture kernel schema (position_events, position_current, etc.) |
 
 ---
 
@@ -286,7 +281,7 @@ See `.github/workflows/AGENTS.md` for gate rules.
 
 ## What Does NOT Belong Here
 
-- Rainstorm source code → `workspace-venus/rainstorm/`
+- old Rainstorm
 - TIGGE raw data → `workspace-venus/51 source data/`
 - Session prompts, code review docs → `project level docs/archive/`
 - OpenClaw central config → `~/.openclaw/openclaw.json`
