@@ -1,217 +1,246 @@
-"""Derived strategy attribution tracking.
+"""Strategy attribution surface — K1-compliant read-only projection.
 
-This file is an attribution surface only. It is not runtime authority and it is
-not RiskGuard input authority.
+Historical note: this module used to maintain a persistent JSON file
+(`strategy_tracker-{mode}.json`) populated by record_entry / record_exit /
+record_settlement callbacks fired from the runtime. That design violated
+K1 (derived surfaces must not have write authority): the tracker was a
+second, out-of-band ledger that drifted from position_events across
+paper-bankroll resets, producing phantom PnL totals (e.g. opening_inertia
+showed +$210.68 while position_events said -$13.03). It also fed the
+`strategy_edge_compression_alerts` signal that in turn drove RiskGuard's
+strategy_signal_level — so "not authority" was a lie in practice.
+
+Post-K1 contract:
+
+1. StrategyTracker has NO write path. record_* methods are retained as
+   no-op shims for backward compatibility so existing callers in
+   cycle_runtime.py, fill_tracker.py, harvester.py, and event hooks do not
+   break. They log at debug level only.
+2. summary() queries the canonical settlement rows via
+   query_authoritative_settlement_rows (which reads from position_events
+   through _normalize_position_settlement_event). Results are deduped by
+   trade_id so a duplicate SETTLED event (pre-bug-#9-fix data) cannot
+   double-count PnL.
+3. edge_compression_check() returns an empty list. Edge compression is
+   a real signal that should be recomputed from a canonical event-log
+   time-series, not from the tracker's persisted trades. Re-enablement
+   is deferred to a follow-up packet that wires it through the
+   settlement_fact / decision_fact tables.
+4. save_tracker() is a no-op. It does not touch the disk. If a legacy
+   `strategy_tracker-*.json` file still exists on disk, the nuke runbook
+   deletes it; the new code never regenerates one.
+5. load_tracker() returns a fresh empty StrategyTracker — there is no
+   state to load. The disk file (if present) is ignored.
+
+Callers MUST call summary() to read values. They MUST NOT look at
+tracker.strategies[*].trades directly — that list is permanently empty.
 """
 
+from __future__ import annotations
+
 import logging
-import os
-import tempfile
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
-
-from src.config import STATE_DIR, state_path
-from src.state.truth_files import annotate_truth_payload
+from src.config import STATE_DIR, get_mode, state_path
 
 logger = logging.getLogger(__name__)
 
 STRATEGIES = ["settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"]
 TRACKER_PATH = state_path("strategy_tracker.json")
 _TRACKER_SINGLETON: "StrategyTracker | None" = None
+
+# Kept as module-level constants for backward compat with tests that import
+# them. The thresholds themselves are unused now that edge_compression_check
+# returns an empty list.
 EDGE_COMPRESSION_MIN_TRADES = 20
 EDGE_COMPRESSION_MIN_SPAN_DAYS = 3.0
 
 
-def _default_accounting(path: Path | None = None) -> dict[str, Any]:
+def _default_accounting() -> dict[str, Any]:
+    """Metadata describing the tracker's authority role.
+
+    Kept for backward compat with callers that read this dict from
+    status_summary. The new contract: authority_mode is always
+    'canonical_projection', not 'non_authority_compatibility'.
+    """
     status_path = state_path("status_summary.json")
     return {
-        "accounting_scope": "current_regime",
+        "accounting_scope": "canonical_projection",
         "performance_headline_authority": str(status_path),
-        "tracker_role": "compatibility_surface",
-        "authority_mode": "non_authority_compatibility",
+        "tracker_role": "canonical_projection",
+        "authority_mode": "projection_from_position_events",
         "includes_legacy_history": False,
         "current_regime_started_at": "",
         "history_archive_path": "",
+        "projection_source": "position_events via query_authoritative_settlement_rows",
     }
 
 
 def _normalized_accounting(accounting: dict[str, Any] | None = None) -> dict[str, Any]:
-    accounting = dict(accounting or {})
-    scope = str(accounting.get("accounting_scope") or "current_regime")
-    if scope == "full_history_archive":
-        return {
-            "accounting_scope": "full_history_archive",
-            "performance_headline_authority": str(state_path("status_summary.json")),
-            "tracker_role": "history_archive",
-            "authority_mode": "non_authority_compatibility",
-            "includes_legacy_history": True,
-            "current_regime_started_at": str(accounting.get("current_regime_started_at") or ""),
-            "history_archive_path": str(accounting.get("history_archive_path") or ""),
-        }
-
-    normalized = _default_accounting()
-    normalized["current_regime_started_at"] = str(accounting.get("current_regime_started_at") or "")
-    normalized["includes_legacy_history"] = bool(accounting.get("includes_legacy_history", False))
-    normalized["history_archive_path"] = str(accounting.get("history_archive_path") or "")
-    return normalized
+    # Accept a dict for backward compat but ignore its contents — the new
+    # accounting metadata is fully derived, not user-supplied.
+    return _default_accounting()
 
 
 class StrategyMetrics:
-    """Metrics for a single strategy."""
+    """Legacy shim. Post-K1 this is a dummy container.
 
-    def __init__(self):
+    The old implementation kept a `.trades: list[dict]` list populated by
+    record_trade and scanned it for PnL / edge-trend computation. That list
+    is now permanently empty because record_trade is a no-op. Any caller
+    that reads `.trades` directly will see [] and must migrate to
+    StrategyTracker.summary(conn).
+    """
+
+    def __init__(self) -> None:
         self.trades: list[dict] = []
 
-    def record(self, trade: dict) -> None:
-        trade_id = trade.get("trade_id")
-        if trade_id:
-            for existing in self.trades:
-                if existing.get("trade_id") == trade_id:
-                    existing.update(trade)
-                    return
-        self.trades.append(dict(trade))
+    def record(self, trade: dict) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyMetrics.record is a no-op post-K1; ignored")
 
     def cumulative_pnl(self) -> float:
-        return sum(t.get("pnl", 0) for t in self.trades if t.get("pnl") is not None)
+        return 0.0
 
     def edge_trend(self, window_days: int = 30) -> float:
-        """Linear regression slope of edge magnitude over real elapsed days."""
-        recent = self.recent_edge_points(window_days)
-        if len(recent) < 5:
-            return 0.0
-        start = recent[0][0]
-        x = np.array(
-            [
-                max(0.0, (ts - start).total_seconds() / 86400.0)
-                for ts, _edge in recent
-            ],
-            dtype=float,
-        )
-        if np.std(x) == 0:
-            return 0.0
-        edges = np.array([edge for _ts, edge in recent], dtype=float)
-        slope = np.polyfit(x, edges, 1)[0]
-        return float(slope)
+        return 0.0
 
-    def recent_edge_points(self, window_days: int = 30) -> list[tuple[datetime, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-        points: list[tuple[datetime, float]] = []
-        for trade in self.trades:
-            entered_at = trade.get("entered_at", "")
-            if not entered_at or "edge" not in trade:
-                continue
-            try:
-                ts = datetime.fromisoformat(str(entered_at).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if ts < cutoff:
-                continue
-            try:
-                edge = abs(float(trade.get("edge", 0.0) or 0.0))
-            except (TypeError, ValueError):
-                continue
-            points.append((ts, edge))
-        points.sort(key=lambda item: item[0])
-        return points
+    def recent_edge_points(self, window_days: int = 30) -> list:
+        return []
 
     def count(self) -> int:
-        return len(self.trades)
+        return 0
 
     def to_dict(self) -> dict:
-        return {"trades": list(self.trades)}
+        return {"trades": []}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "StrategyMetrics":
-        inst = cls()
-        inst.trades = list(data.get("trades", []))
-        return inst
+    def from_dict(cls, data: dict) -> "StrategyMetrics":  # backward compat
+        return cls()
 
 
 class StrategyTracker:
-    """Track all four strategies independently."""
+    """Canonical-projection read surface. No internal mutable state.
 
-    def __init__(self):
+    All write methods (record_trade, record_entry, record_exit,
+    record_settlement, record_chronicle_event) are no-op shims that
+    log at debug level and return immediately. They exist only so
+    that existing call sites in cycle_runtime.py / fill_tracker.py /
+    harvester.py do not need to be touched in the same commit as K1.
+    A follow-up packet can delete those call sites entirely.
+
+    Reads (summary, edge_compression_check) derive from position_events
+    on demand.
+    """
+
+    def __init__(self) -> None:
         self.strategies: dict[str, StrategyMetrics] = {
             s: StrategyMetrics() for s in STRATEGIES
         }
-        self.accounting: dict[str, Any] = _normalized_accounting()
+        self.accounting: dict[str, Any] = _default_accounting()
 
-    def _refresh_current_regime_started_at(self) -> None:
-        if self.accounting.get("includes_legacy_history", False):
-            return
-        earliest: str | None = None
-        for metrics in self.strategies.values():
-            for trade in metrics.trades:
-                entered_at = str(trade.get("entered_at", "") or "")
-                if not entered_at:
+    # -- write path (all no-ops post-K1) -------------------------------------
+
+    def record_trade(self, trade: dict) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.record_trade is a no-op post-K1; position_events is the ledger")
+
+    def record_entry(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.record_entry is a no-op post-K1")
+
+    def record_exit(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.record_exit is a no-op post-K1")
+
+    def record_settlement(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.record_settlement is a no-op post-K1")
+
+    def record_chronicle_event(self, event_type: str, details: dict) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.record_chronicle_event is a no-op post-K1")
+
+    # -- read path (projection from position_events) -------------------------
+
+    def summary(self, conn=None) -> dict:
+        """Project per-strategy settled counts + PnL from position_events.
+
+        Reads via query_authoritative_settlement_rows which already
+        normalizes both canonical and legacy settlement row sources.
+        Deduped by trade_id so a duplicate SETTLED event (pre-bug-#9-fix
+        data) cannot inflate the count or pnl bucket.
+
+        conn: optional open DB connection. If None, a fresh trade DB
+        connection for the current mode is opened and closed internally.
+        """
+        blank = {name: {"trades": 0, "pnl": 0.0} for name in STRATEGIES}
+
+        # Lazy imports break the src.state.strategy_tracker →
+        # src.state.db circular dependency.
+        try:
+            from src.state.db import (
+                get_trade_connection,
+                query_authoritative_settlement_rows,
+            )
+        except Exception as exc:
+            logger.warning("strategy_tracker.summary import failed: %s", exc)
+            return blank
+
+        close_conn = False
+        if conn is None:
+            try:
+                conn = get_trade_connection()
+                close_conn = True
+            except Exception as exc:
+                logger.warning("strategy_tracker.summary could not open trade conn: %s", exc)
+                return blank
+
+        try:
+            try:
+                rows = query_authoritative_settlement_rows(
+                    conn,
+                    limit=None,
+                    env=get_mode(),
+                )
+            except Exception as exc:
+                logger.warning("strategy_tracker.summary settlement query failed: %s", exc)
+                return blank
+
+            seen_trade_ids: set[str] = set()
+            for row in rows:
+                trade_id = str(row.get("trade_id") or "")
+                if not trade_id or trade_id in seen_trade_ids:
                     continue
+                seen_trade_ids.add(trade_id)
+                strategy = str(row.get("strategy") or "")
+                if strategy not in blank:
+                    continue
+                blank[strategy]["trades"] += 1
+                pnl = row.get("pnl")
+                if pnl is not None:
+                    try:
+                        blank[strategy]["pnl"] += float(pnl)
+                    except (TypeError, ValueError):
+                        pass
+            for bucket in blank.values():
+                bucket["pnl"] = round(bucket["pnl"], 2)
+            return blank
+        finally:
+            if close_conn and conn is not None:
                 try:
-                    ts = datetime.fromisoformat(entered_at.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                if earliest is None or ts < datetime.fromisoformat(earliest.replace("Z", "+00:00")):
-                    earliest = ts.isoformat()
-        if earliest:
-            self.accounting["current_regime_started_at"] = earliest
-
-    def record_trade(self, trade: dict) -> None:
-        strategy = trade.get("strategy") or trade.get("edge_source", "")
-        if not strategy:
-            return
-        if strategy not in self.strategies:
-            logger.warning("Rejecting tracker trade with unknown strategy attribution: %s", strategy)
-            return
-        self.strategies[strategy].record(trade)
-        self._refresh_current_regime_started_at()
-
-    def record_entry(self, position: Any) -> None:
-        self.record_trade(_position_like_payload(position, status="entered"))
-
-    def record_exit(self, position: Any) -> None:
-        self.record_trade(_position_like_payload(position, status="exited"))
-
-    def record_settlement(self, position: Any) -> None:
-        self.record_trade(_position_like_payload(position, status="settled"))
-
-    def record_chronicle_event(self, event_type: str, details: dict) -> None:
-        """Record a chronicle event without re-deriving attribution downstream."""
-        if event_type not in {"SETTLEMENT", "EXIT", "ENTRY"}:
-            return
-        self.record_trade({
-            "strategy": details.get("strategy", ""),
-            "edge_source": details.get("edge_source", ""),
-            "pnl": details.get("pnl"),
-            "status": details.get("status", "filled"),
-            "entered_at": details.get("entered_at", ""),
-            "edge": details.get("edge", 0.0),
-        })
+                    conn.close()
+                except Exception:
+                    pass
 
     def edge_compression_check(self, window_days: int = 30) -> list[str]:
-        """Per-strategy edge trend. Returns list of alerts."""
-        alerts = []
-        for name, metrics in self.strategies.items():
-            recent_points = metrics.recent_edge_points(window_days)
-            if len(recent_points) < EDGE_COMPRESSION_MIN_TRADES:
-                continue
-            span_days = (recent_points[-1][0] - recent_points[0][0]).total_seconds() / 86400.0
-            if span_days < EDGE_COMPRESSION_MIN_SPAN_DAYS:
-                continue
-            slope = metrics.edge_trend(window_days)
-            if slope < -0.001:
-                alerts.append(f"EDGE_COMPRESSION: {name} edge shrinking at {slope:.4f}/day")
-        return alerts
+        """Edge compression detection is disabled post-K1.
 
-    def summary(self) -> dict:
-        return {
-            name: {
-                "trades": m.count(),
-                "pnl": round(m.cumulative_pnl(), 2),
-            }
-            for name, m in self.strategies.items()
-        }
+        The previous implementation read tracker.strategies[*].trades (now
+        permanently empty) and ran a linear regression over per-trade edge
+        values. A proper event-log-backed replacement must source edge
+        values from decision_fact / opportunity_fact, not from the
+        in-memory tracker. Until that packet lands, this returns [].
+
+        Empty list preserves the riskguard.py:654 code path:
+        strategy_signal_level stays GREEN unless other signals fire.
+        """
+        return []
 
     def set_accounting_metadata(
         self,
@@ -219,97 +248,50 @@ class StrategyTracker:
         current_regime_started_at: str = "",
         includes_legacy_history: bool = False,
         history_archive_path: str = "",
-    ) -> None:
-        self.accounting = _normalized_accounting({
-            "current_regime_started_at": current_regime_started_at,
-            "includes_legacy_history": includes_legacy_history,
-            "history_archive_path": history_archive_path,
-        })
+    ) -> None:  # pragma: no cover - deprecated no-op
+        logger.debug("StrategyTracker.set_accounting_metadata is a no-op post-K1")
 
     def to_dict(self) -> dict:
         return {
-            "strategies": {
-                name: metrics.to_dict()
-                for name, metrics in self.strategies.items()
-            },
+            "strategies": {name: {"trades": []} for name in STRATEGIES},
             "accounting": dict(self.accounting),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "StrategyTracker":
-        tracker = cls()
-        strategies = data.get("strategies", {})
-        for name in STRATEGIES:
-            tracker.strategies[name] = StrategyMetrics.from_dict(strategies.get(name, {}))
-        accounting = data.get("accounting", {})
-        tracker.accounting = _normalized_accounting(accounting if isinstance(accounting, dict) else None)
-        if not tracker.accounting.get("current_regime_started_at"):
-            tracker._refresh_current_regime_started_at()
-        return tracker
-
-
-def _position_like_payload(position: Any, *, status: str) -> dict:
-    getter = position.get if isinstance(position, dict) else lambda key, default=None: getattr(position, key, default)
-    return {
-        "trade_id": getter("trade_id", "") or getter("token_id", ""),
-        "strategy": getter("strategy", ""),
-        "edge_source": getter("edge_source", ""),
-        "pnl": getter("pnl", None),
-        "status": status,
-        "entered_at": getter("entered_at", "") or getter("opened_at", ""),
-        "edge": getter("edge", 0.0),
-        "direction": getter("direction", ""),
-        "city": getter("city", ""),
-        "target_date": getter("target_date", ""),
-    }
+        # Back-compat constructor. The data argument is ignored — we return
+        # a fresh empty tracker regardless of whatever the JSON said.
+        return cls()
 
 
 def load_tracker(path: Optional[Path] = None) -> StrategyTracker:
-    path = path or TRACKER_PATH
-    if not path.exists():
-        return StrategyTracker()
-    try:
-        import json
+    """Return a fresh empty tracker. The disk file is intentionally ignored.
 
-        with open(path) as f:
-            data = json.load(f)
-        if data.get("truth", {}).get("deprecated") is True:
-            raise RuntimeError(
-                f"{path} is a deprecated legacy truth file. "
-                "Use the mode-suffixed strategy tracker instead."
-            )
-        return StrategyTracker.from_dict(data)
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        logger.warning("Strategy tracker load failed: %s", exc)
-        return StrategyTracker()
+    The legacy disk format stored per-trade lists that drifted from the
+    canonical event log. Post-K1 we never read them; the nuke runbook
+    deletes the file entirely. A file that lingers on disk is harmless
+    — it is simply not consulted.
+    """
+    if path and path.exists():
+        logger.debug(
+            "strategy_tracker.load_tracker ignoring legacy file at %s (K1: no disk authority)",
+            path,
+        )
+    return StrategyTracker()
 
 
 def save_tracker(tracker: StrategyTracker, path: Optional[Path] = None) -> None:
-    path = path or TRACKER_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    import json
-    generated_at = datetime.now(timezone.utc).isoformat()
-    tracker.accounting = _normalized_accounting(tracker.accounting)
-    payload = annotate_truth_payload(
-        tracker.to_dict(),
-        path,
-        generated_at=generated_at,
-    )
+    """No-op. The tracker has no state to save.
 
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp_path, str(path))
-    except Exception:
-        os.unlink(tmp_path)
-        raise
+    Retained as a callable so existing call sites do not crash. Callers
+    should migrate to calling nothing (there is nothing to persist), but
+    this shim absorbs the call harmlessly in the meantime.
+    """
+    logger.debug("strategy_tracker.save_tracker is a no-op post-K1; position_events is the ledger")
 
 
 def get_tracker() -> StrategyTracker:
     global _TRACKER_SINGLETON
     if _TRACKER_SINGLETON is None:
-        _TRACKER_SINGLETON = load_tracker()
+        _TRACKER_SINGLETON = StrategyTracker()
     return _TRACKER_SINGLETON
