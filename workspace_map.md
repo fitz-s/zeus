@@ -8,6 +8,7 @@
 | Item | Purpose |
 |------|---------|
 | `AGENTS.md` | Root operating brief — read first, always |
+| `workspace_map.md` | This file — directory guide and file placement rules |
 | `pytest.ini` | Test configuration |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
@@ -64,7 +65,6 @@ Each `src/` package has (or should have) its own `AGENTS.md` with zone-specific 
 |------|---------|
 | `docs/reference/zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, WHY explanations |
 | `docs/reference/repo_overview.md` | Technical/runtime orientation |
-| `docs/reference/workspace_map.md` | This file — directory guide and file placement rules |
 | `docs/reference/data_inventory.md` | Current data source status |
 | `docs/reference/data_strategy.md` | Data utilization strategy |
 | `docs/reference/unused_data_inventory.md` | Unused data opportunities |
@@ -157,8 +157,11 @@ ETL scripts, migration scripts, healthcheck, baseline experiments. Not part of t
 
 - All `.md` files: `lower_snake_case.md`
 - Exceptions: `AGENTS.md`, `README.md`
-- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<topic>_plan.md`
+- **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date. Example: `datafix_2026-04-10_tigge_backfill_status.md`
+- No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
+- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
 - No spaces in filenames or directory names
+- Existing files keep current names (no retroactive renames)
 - Date prefixes only for time-bound reports
 
 ## What Does NOT Belong Here

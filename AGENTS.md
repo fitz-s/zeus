@@ -188,8 +188,11 @@ Keep edits delta-shaped. Patch authority drift instead of rewriting everything. 
 
 ### Naming rules
 - All `.md` files: `lower_snake_case.md` (exceptions: `AGENTS.md`, `README.md`)
-- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<topic>_plan.md`
+- **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date. Example: `datafix_2026-04-10_tigge_backfill_status.md`
+- No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
+- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
 - No spaces in filenames or directory names
+- Existing files keep current names (no retroactive renames)
 - Date prefixes only for time-bound reports
 
 ## 9. What to read next (zone-keyed)
@@ -203,10 +206,10 @@ If you need deeper context:
 | K3 math/data (signals, calibration, strategy) | `docs/reference/zeus_domain_model.md` for probability chain details |
 | K0/K1 architecture (state, lifecycle, riskguard) | `docs/authority/zeus_durable_architecture_spec.md` + `architecture/kernel_manifest.yaml` |
 | Governance (constitutions, packets, authority) | `docs/authority/zeus_autonomous_delivery_constitution.md` + `docs/operations/current_state.md` |
-| Data improvement (`data-improve` branch) | `docs/archives/plans/data_improvement_plan.md` + `docs/reference/data_inventory.md` |
+| Data improvement (`data-improve` branch) | `docs/reference/data_inventory.md` for current data status |
 | Target-state / endgame decisions | `docs/authority/target_state_spec.md` (Part II: P9-P11, Part III: endgame clause) |
 | First time in repo | `docs/reference/repo_overview.md` for technical orientation |
-| File/directory structure | `docs/reference/workspace_map.md` for placement rules and directory guide |
+| File/directory structure | `workspace_map.md` (repo root) for placement rules and directory guide |
 
 ### Current active work
 Check `docs/operations/current_state.md` for the current packet and branch.

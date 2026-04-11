@@ -36,7 +36,7 @@ files_may_change:
   - architecture/self_check/authority_index.md
   - docs/README.md
   - docs/reference/repo_overview.md
-  - docs/reference/workspace_map.md
+  - workspace_map.md
 files_may_not_change:
   - docs/authority/**
   - architecture/kernel_manifest.yaml

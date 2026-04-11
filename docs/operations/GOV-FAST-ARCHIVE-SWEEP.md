@@ -18,18 +18,14 @@ invariants_touched:
   - INV-10
 required_reads:
   - AGENTS.md
-  - ZEUS_AUTHORITY.md
-  - architecture/self_check/authority_index.md
   - docs/README.md
   - docs/operations/current_state.md
-  - docs/reference/workspace_map.md
-  - docs/archives/work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md
-  - docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md
+  - workspace_map.md
 files_may_change:
   - docs/operations/GOV-FAST-ARCHIVE-SWEEP.md
   - AGENTS.md
   - architecture/self_check/authority_index.md
-  - docs/reference/workspace_map.md
+  - workspace_map.md
   - .github/workflows/architecture_advisory_gates.yml
   - docs/README.md
   - docs/operations/current_state.md

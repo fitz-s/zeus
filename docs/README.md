@@ -11,7 +11,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 | Directory | Purpose | Files |
 |-----------|---------|-------|
 | `authority/` | Architecture specs + governance — constitutions, packet discipline, autonomy gates, boundary law, decision register, architecture specs | 13 |
-| `reference/` | Domain model, technical orientation, workspace map, quantitative research, data inventory, strategy | 10 |
+| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy | 9 |
 | `operations/` | Live control-entry pointer + current work packets | 3 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 
@@ -23,7 +23,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - `authority/target_state_spec.md` — target-state spec (P9-P11, endgame clause)
 - `known_gaps.md` — active operational gap register
 - `operations/current_state.md` — single live control-entry pointer
-- `reference/workspace_map.md` — directory guide and file placement rules
+- `../workspace_map.md` — directory guide and file placement rules (repo root)
 
 ## Archives
 
@@ -32,6 +32,9 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 ## Naming Rules (Mandatory)
 
 - All `.md` files: `lower_snake_case.md` (exceptions: `AGENTS.md`, `README.md`)
-- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<topic>_plan.md`
+- **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date
+- No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
+- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
 - No spaces in filenames or directory names
+- Existing files keep current names (no retroactive renames)
 - Date prefixes only for time-bound reports

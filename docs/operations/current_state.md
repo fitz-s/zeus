@@ -15,16 +15,7 @@
 - Work: mesh network documentation restructuring (consolidating to 3-folder structure: authority/, reference/, operations/)
 
 ## Last accepted packet
-- `docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md`
+- GOV-ROOT-AUTHORITY-GUIDE (archived)
 
-## Historical control ledgers
-The following are archived and are no longer active control authority:
-- `docs/archives/control/root_progress.md`
-- `docs/archives/control/root_task.md`
-- `docs/archives/control/architects_progress.md`
-- `docs/archives/control/architects_task.md`
-- `docs/archives/control/architects_state_index.md`
-
-## Historical work packets
-
-Completed work packets are archived under `docs/archives/work_packets/`. Only the current live packet remains in `docs/operations/`.
+## Note
+Historical control ledgers (root_progress, root_task, architects_progress, etc.) and completed work packets are archived under `docs/archives/`. They are NOT active control authority.
