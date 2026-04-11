@@ -12,14 +12,16 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 def load_yaml(path: str) -> dict:
     with open(ROOT / path) as f:
         return yaml.safe_load(f)
 
+
 def test_principal_authority_files_exist():
     required = [
-        "docs/architecture/zeus_durable_architecture_spec.md",
-        "docs/governance/zeus_change_control_constitution.md",
+        "docs/authority/zeus_current_architecture.md",
+        "docs/authority/zeus_change_control_constitution.md",
         "architecture/kernel_manifest.yaml",
         "architecture/invariants.yaml",
         "architecture/zones.yaml",
@@ -27,6 +29,7 @@ def test_principal_authority_files_exist():
     ]
     for rel in required:
         assert (ROOT / rel).exists(), rel
+
 
 def test_strategy_key_manifest_is_frozen():
     kernel = load_yaml("architecture/kernel_manifest.yaml")
@@ -39,18 +42,21 @@ def test_strategy_key_manifest_is_frozen():
         "opening_inertia",
     ]
 
+
 def test_negative_constraints_include_no_local_close():
     negative = load_yaml("architecture/negative_constraints.yaml")
     ids = {item["id"] for item in negative["constraints"]}
     assert "NC-04" in ids
+
 
 def test_negative_constraints_cover_strategy_fallback():
     negative = load_yaml("architecture/negative_constraints.yaml")
     ids = {item["id"] for item in negative["constraints"]}
     assert "NC-03" in ids
 
+
 def test_strategy_policy_tables_exist_in_schema():
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS strategy_health" in sql
     assert "execution_decay_flag" in sql
     assert "edge_compression_flag" in sql
@@ -59,14 +65,17 @@ def test_strategy_policy_tables_exist_in_schema():
     assert "allocation_multiplier" in sql
     assert "CREATE TABLE IF NOT EXISTS control_overrides" in sql
 
+
 def test_schema_has_append_only_triggers():
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     assert "position_events is append-only" in sql
+
 
 def test_zone_model_declares_k0_and_k3():
     zones = load_yaml("architecture/zones.yaml")
     assert "K0_frozen_kernel" in zones["zones"]
     assert "K3_extension" in zones["zones"]
+
 
 def test_semgrep_rules_cover_core_forbidden_moves():
     text = (ROOT / "architecture/ast_rules/semgrep_zeus.yml").read_text()
@@ -196,7 +205,7 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     conn.executescript(sql)
 
     event = _canonical_event()
@@ -205,7 +214,9 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
     append_event_and_project(conn, event, projection)
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 1
-    row = conn.execute("SELECT strategy_key, phase FROM position_current WHERE position_id = 'pos-1'").fetchone()
+    row = conn.execute(
+        "SELECT strategy_key, phase FROM position_current WHERE position_id = 'pos-1'"
+    ).fetchone()
     assert row["strategy_key"] == "center_buy"
     assert row["phase"] == "pending_entry"
 
@@ -216,7 +227,9 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
     else:
         raise AssertionError("expected duplicate event insert to fail")
 
-    row = conn.execute("SELECT strategy_key, phase FROM position_current WHERE position_id = 'pos-1'").fetchone()
+    row = conn.execute(
+        "SELECT strategy_key, phase FROM position_current WHERE position_id = 'pos-1'"
+    ).fetchone()
     assert row["strategy_key"] == "center_buy"
     assert row["phase"] == "pending_entry"
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 1
@@ -228,7 +241,7 @@ def test_canonical_transaction_boundary_helper_rejects_mismatched_payloads():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     conn.executescript(sql)
 
     bad_event = _canonical_event()
@@ -252,7 +265,7 @@ def test_append_many_and_project_is_atomic():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     conn.executescript(sql)
 
     event1 = _canonical_event()
@@ -269,7 +282,9 @@ def test_append_many_and_project_is_atomic():
     append_many_and_project(conn, [event1, event2], projection)
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 2
-    row = conn.execute("SELECT phase FROM position_current WHERE position_id = 'pos-1'").fetchone()
+    row = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-1'"
+    ).fetchone()
     assert row["phase"] == "active"
     conn.close()
 
@@ -283,8 +298,12 @@ def test_transaction_boundary_helper_rejects_legacy_init_schema():
 
     append_event_and_project(conn, _canonical_event(), _canonical_projection())
     event_count = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
-    projection_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
-    legacy_count = conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0]
+    projection_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[
+        0
+    ]
+    legacy_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events_legacy"
+    ).fetchone()[0]
 
     assert event_count == 1
     assert projection_count == 1
@@ -301,18 +320,34 @@ def test_init_schema_bootstraps_additive_canonical_support_tables():
     init_schema(conn)
 
     current_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
     }
     strategy_health_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
     }
     control_override_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
     }
 
-    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
-    assert {"strategy_key", "as_of", "execution_decay_flag", "edge_compression_flag"}.issubset(strategy_health_columns)
-    assert {"override_id", "target_type", "target_key", "action_type", "precedence"}.issubset(control_override_columns)
+    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(
+        current_columns
+    )
+    assert {
+        "strategy_key",
+        "as_of",
+        "execution_decay_flag",
+        "edge_compression_flag",
+    }.issubset(strategy_health_columns)
+    assert {
+        "override_id",
+        "target_type",
+        "target_key",
+        "action_type",
+        "precedence",
+    }.issubset(control_override_columns)
     conn.close()
 
 
@@ -325,14 +360,24 @@ def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
     apply_architecture_kernel_schema(conn)
 
     event_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
     }
     current_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
     }
 
-    assert {"event_id", "position_id", "sequence_no", "strategy_key", "payload_json"}.issubset(event_columns)
-    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(current_columns)
+    assert {
+        "event_id",
+        "position_id",
+        "sequence_no",
+        "strategy_key",
+        "payload_json",
+    }.issubset(event_columns)
+    assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(
+        current_columns
+    )
 
     append_event_and_project(conn, _canonical_event(), _canonical_projection())
     event_row = conn.execute(
@@ -365,13 +410,16 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
     apply_architecture_kernel_schema(conn)
 
     strategy_health_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(strategy_health)").fetchall()
     }
     risk_action_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(risk_actions)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(risk_actions)").fetchall()
     }
     control_override_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
     }
 
     assert {
@@ -410,14 +458,18 @@ def test_apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_
     apply_architecture_kernel_schema(conn)
 
     legacy_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
     }
     canonical_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
     }
 
     assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
-    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(canonical_columns)
+    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(
+        canonical_columns
+    )
     conn.close()
 
 
@@ -457,9 +509,14 @@ def test_canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_help
         try:
             fn(conn, *args)
         except RuntimeError as exc:
-            assert "not runtime-ready until a later migration/cutover packet lands" in str(exc)
+            assert (
+                "not runtime-ready until a later migration/cutover packet lands"
+                in str(exc)
+            )
         else:
-            raise AssertionError(f"expected {fn.__name__} to reject canonical bootstrap DB")
+            raise AssertionError(
+                f"expected {fn.__name__} to reject canonical bootstrap DB"
+            )
 
     conn.close()
 
@@ -468,7 +525,9 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
     forbidden_hits: list[str] = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel in {"src/state/db.py", "src/state/ledger.py"} or rel.startswith("tests/"):
+        if rel in {"src/state/db.py", "src/state/ledger.py"} or rel.startswith(
+            "tests/"
+        ):
             continue
         if "apply_architecture_kernel_schema(" in path.read_text(errors="ignore"):
             forbidden_hits.append(rel)
@@ -481,7 +540,7 @@ def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     conn.executescript(sql)
 
     projection = _canonical_projection()
@@ -504,7 +563,10 @@ def test_db_exposes_canonical_transaction_boundary_helpers():
 
     assert state_db.append_event_and_project is state_ledger.append_event_and_project
     assert state_db.append_many_and_project is state_ledger.append_many_and_project
-    assert state_db.apply_architecture_kernel_schema is state_ledger.apply_architecture_kernel_schema
+    assert (
+        state_db.apply_architecture_kernel_schema
+        is state_ledger.apply_architecture_kernel_schema
+    )
     assert (ROOT / "src/state/ledger.py").exists()
     assert (ROOT / "src/state/projection.py").exists()
     assert hasattr(state_projection, "upsert_position_current")
@@ -516,7 +578,7 @@ def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     conn.executescript(sql)
     conn.execute(
         """
@@ -553,12 +615,24 @@ def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
     conn.commit()
     conn.close()
 
-    legacy_path.write_text(json.dumps({
-        "positions": [
-            {"trade_id": "trade-1", "strategy": "center_buy", "state": "holding"},
-            {"trade_id": "legacy-only", "strategy": "opening_inertia", "state": "holding"},
-        ]
-    }))
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "trade_id": "trade-1",
+                        "strategy": "center_buy",
+                        "state": "holding",
+                    },
+                    {
+                        "trade_id": "legacy-only",
+                        "strategy": "opening_inertia",
+                        "state": "holding",
+                    },
+                ]
+            }
+        )
+    )
 
     run = subprocess.run(
         [
@@ -578,8 +652,12 @@ def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
     payload = json.loads(run.stdout)
     assert payload["status"] == "mismatch"
     assert payload["canonical"]["open_positions"] == 2
-    assert payload["legacy_exports"][0]["comparison"]["missing_in_canonical"] == ["legacy-only"]
-    assert payload["legacy_exports"][0]["comparison"]["missing_in_legacy"] == ["trade-2"]
+    assert payload["legacy_exports"][0]["comparison"]["missing_in_canonical"] == [
+        "legacy-only"
+    ]
+    assert payload["legacy_exports"][0]["comparison"]["missing_in_legacy"] == [
+        "trade-2"
+    ]
 
 
 def test_replay_parity_reports_staged_missing_tables(tmp_path):
@@ -605,7 +683,9 @@ def test_replay_parity_reports_staged_missing_tables(tmp_path):
     assert "position_current" in payload["missing_tables"]
 
 
-def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(tmp_path):
+def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(
+    tmp_path,
+):
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
@@ -636,7 +716,9 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(t
     assert payload["canonical"]["open_positions"] == 0
 
 
-def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advances_parity(tmp_path):
+def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advances_parity(
+    tmp_path,
+):
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
@@ -647,25 +729,29 @@ def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advan
     conn.close()
 
     pos1 = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos1.update({
-        "trade_id": "paper-open-1",
-        "strategy_key": "opening_inertia",
-        "strategy": "opening_inertia",
-        "edge_source": "opening_inertia",
-        "discovery_mode": "opening_hunt",
-        "env": "paper",
-    })
+    pos1.update(
+        {
+            "trade_id": "paper-open-1",
+            "strategy_key": "opening_inertia",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "discovery_mode": "opening_hunt",
+            "env": "paper",
+        }
+    )
     pos2 = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos2.update({
-        "trade_id": "paper-open-2",
-        "market_id": "mkt-2",
-        "bin_label": "41-42°F",
-        "strategy_key": "opening_inertia",
-        "strategy": "opening_inertia",
-        "edge_source": "opening_inertia",
-        "discovery_mode": "opening_hunt",
-        "env": "paper",
-    })
+    pos2.update(
+        {
+            "trade_id": "paper-open-2",
+            "market_id": "mkt-2",
+            "bin_label": "41-42°F",
+            "strategy_key": "opening_inertia",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "discovery_mode": "opening_hunt",
+            "env": "paper",
+        }
+    )
     legacy_path.write_text(json.dumps({"positions": [pos1, pos2]}))
 
     run = subprocess.run(
@@ -714,7 +800,15 @@ def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_p
     db_path = tmp_path / "zeus.db"
     legacy_path = tmp_path / "positions-paper.json"
     sqlite3.connect(str(db_path)).close()
-    legacy_path.write_text(json.dumps({"positions": [asdict(_runtime_position(state="entered", chain_state="unknown"))]}))
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    asdict(_runtime_position(state="entered", chain_state="unknown"))
+                ]
+            }
+        )
+    )
 
     run = subprocess.run(
         [
@@ -738,7 +832,9 @@ def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_p
     assert "position_current" in payload["missing_tables"]
 
 
-def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_positions(tmp_path):
+def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_positions(
+    tmp_path,
+):
     from src.state.db import init_schema
 
     db_path = tmp_path / "zeus.db"
@@ -749,14 +845,16 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
     conn.close()
 
     pos = asdict(_runtime_position(state="entered", chain_state="unknown"))
-    pos.update({
-        "trade_id": "paper-open-1",
-        "strategy_key": "opening_inertia",
-        "strategy": "opening_inertia",
-        "edge_source": "opening_inertia",
-        "discovery_mode": "opening_hunt",
-        "env": "paper",
-    })
+    pos.update(
+        {
+            "trade_id": "paper-open-1",
+            "strategy_key": "opening_inertia",
+            "strategy": "opening_inertia",
+            "edge_source": "opening_inertia",
+            "discovery_mode": "opening_hunt",
+            "env": "paper",
+        }
+    )
     legacy_path.write_text(json.dumps({"positions": [pos]}))
 
     command = [
@@ -768,8 +866,12 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
         str(legacy_path),
     ]
     env = {**os.environ, "ZEUS_MODE": "paper"}
-    first = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
-    second = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    first = subprocess.run(
+        command, capture_output=True, text=True, check=False, env=env
+    )
+    second = subprocess.run(
+        command, capture_output=True, text=True, check=False, env=env
+    )
 
     assert first.returncode == 0
     assert second.returncode == 0
@@ -782,7 +884,10 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
 
 
 def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions():
-    from src.state.db import apply_architecture_kernel_schema, backfill_open_legacy_paper_positions
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        backfill_open_legacy_paper_positions,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -799,7 +904,10 @@ def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions(
     pending_exit.edge_source = "opening_inertia"
     pending_exit.discovery_mode = "opening_hunt"
 
-    with pytest.raises(ValueError, match="entry canonical builder only supports pending/active entry states"):
+    with pytest.raises(
+        ValueError,
+        match="entry canonical builder only supports pending/active entry states",
+    ):
         backfill_open_legacy_paper_positions(conn, [pending_exit])
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
@@ -815,19 +923,26 @@ def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
     init_schema(conn)
 
     tables = {
-        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
     }
     assert "position_events" in tables
     assert "position_events_legacy" in tables
 
     legacy_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
     }
     canonical_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
     }
     assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
-    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(canonical_columns)
+    assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(
+        canonical_columns
+    )
     conn.close()
 
 
@@ -846,7 +961,12 @@ def _strip_canonical_schema(conn):
     conn.commit()
 
 
-def _runtime_position(*, state: str = "pending_tracked", exit_state: str = "", chain_state: str = "local_only"):
+def _runtime_position(
+    *,
+    state: str = "pending_tracked",
+    exit_state: str = "",
+    chain_state: str = "local_only",
+):
     from src.state.portfolio import Position
 
     return Position(
@@ -884,19 +1004,72 @@ def _runtime_position(*, state: str = "pending_tracked", exit_state: str = "", c
 def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
     from src.engine.lifecycle_events import canonical_phase_for_position
 
-    assert canonical_phase_for_position(_runtime_position(state="pending_tracked")) == "pending_entry"
-    assert canonical_phase_for_position(_runtime_position(state="entered", chain_state="unknown")) == "active"
-    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="synced")) == "active"
-    assert canonical_phase_for_position(_runtime_position(state="day0_window", chain_state="synced")) == "day0_window"
-    assert canonical_phase_for_position(_runtime_position(state="pending_exit", exit_state="sell_pending")) == "pending_exit"
-    assert canonical_phase_for_position(_runtime_position(state="holding", exit_state="sell_pending", chain_state="exit_pending_missing")) == "pending_exit"
-    assert canonical_phase_for_position(_runtime_position(state="quarantined", chain_state="quarantined")) == "quarantined"
-    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantined")) == "quarantined"
-    assert canonical_phase_for_position(_runtime_position(state="holding", chain_state="quarantine_expired")) == "quarantined"
+    assert (
+        canonical_phase_for_position(_runtime_position(state="pending_tracked"))
+        == "pending_entry"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="entered", chain_state="unknown")
+        )
+        == "active"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="holding", chain_state="synced")
+        )
+        == "active"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="day0_window", chain_state="synced")
+        )
+        == "day0_window"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="pending_exit", exit_state="sell_pending")
+        )
+        == "pending_exit"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(
+                state="holding",
+                exit_state="sell_pending",
+                chain_state="exit_pending_missing",
+            )
+        )
+        == "pending_exit"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="quarantined", chain_state="quarantined")
+        )
+        == "quarantined"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="holding", chain_state="quarantined")
+        )
+        == "quarantined"
+    )
+    assert (
+        canonical_phase_for_position(
+            _runtime_position(state="holding", chain_state="quarantine_expired")
+        )
+        == "quarantined"
+    )
     assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
-    assert canonical_phase_for_position(_runtime_position(state="economically_closed")) == "economically_closed"
+    assert (
+        canonical_phase_for_position(_runtime_position(state="economically_closed"))
+        == "economically_closed"
+    )
     assert canonical_phase_for_position(_runtime_position(state="settled")) == "settled"
-    assert canonical_phase_for_position(_runtime_position(state="admin_closed")) == "admin_closed"
+    assert (
+        canonical_phase_for_position(_runtime_position(state="admin_closed"))
+        == "admin_closed"
+    )
 
 
 def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
@@ -971,7 +1144,10 @@ def test_entry_builder_emits_pending_entry_batch_and_projection():
 
 def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
     from src.engine.lifecycle_events import build_entry_canonical_write
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1017,7 +1193,10 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
         build_entry_canonical_write,
         build_settlement_canonical_write,
     )
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1076,7 +1255,10 @@ def test_economic_close_builder_emits_event_and_projection_that_append_cleanly()
         build_economic_close_canonical_write,
         build_entry_canonical_write,
     )
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1157,7 +1339,10 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
         build_entry_canonical_write,
         build_reconciliation_rescue_canonical_write,
     )
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1264,7 +1449,10 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
         build_chain_size_corrected_canonical_write,
         build_entry_canonical_write,
     )
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1423,7 +1611,9 @@ def test_log_execution_report_degrades_cleanly_on_canonical_bootstrap_db():
     apply_architecture_kernel_schema(conn)
     _create_execution_fact_table(conn)
 
-    log_execution_report(conn, _runtime_position(state="entered", chain_state="unknown"), _Result())
+    log_execution_report(
+        conn, _runtime_position(state="entered", chain_state="unknown"), _Result()
+    )
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
     fact_row = conn.execute(
@@ -1490,7 +1680,9 @@ def test_log_execution_report_still_fails_loudly_on_malformed_legacy_position_ev
     )
 
     try:
-        log_execution_report(conn, _runtime_position(state="entered", chain_state="unknown"), _Result())
+        log_execution_report(
+            conn, _runtime_position(state="entered", chain_state="unknown"), _Result()
+        )
     except RuntimeError as exc:
         assert "legacy runtime position_events schema not installed" in str(exc)
     else:
@@ -1500,7 +1692,11 @@ def test_log_execution_report_still_fails_loudly_on_malformed_legacy_position_ev
 
 
 def test_entry_telemetry_sequence_degrades_cleanly_on_canonical_bootstrap_db():
-    from src.state.db import apply_architecture_kernel_schema, log_execution_report, log_trade_entry
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        log_execution_report,
+        log_trade_entry,
+    )
 
     class _Result:
         status = "filled"
@@ -1581,7 +1777,10 @@ def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_ev
 
 
 def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db():
-    from src.state.db import apply_architecture_kernel_schema, log_reconciled_entry_event
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        log_reconciled_entry_event,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1629,7 +1828,10 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_posit
 
 
 def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
-    from src.state.db import apply_architecture_kernel_schema, log_reconciled_entry_event
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        log_reconciled_entry_event,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1675,12 +1877,20 @@ def test_reconciliation_pending_fill_path_degrades_cleanly_on_canonical_bootstra
     pos.order_id = "ord-1"
     pos.condition_id = "cond-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
     # match buy_yes token
     portfolio.positions[0].token_id = ""
     portfolio.positions[0].no_token_id = ""
     portfolio.positions[0].token_id = "tok-1"
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -1713,7 +1923,11 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     append_many_and_project(conn, entry_events, entry_projection)
 
     portfolio = PortfolioState(positions=[pending_pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -1755,7 +1969,11 @@ def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db
     pos.order_id = "ord-1"
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -1765,7 +1983,9 @@ def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db
     conn.close()
 
 
-def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_explicit(monkeypatch):
+def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_explicit(
+    monkeypatch,
+):
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
@@ -1787,7 +2007,11 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     append_many_and_project(conn, entry_events, entry_projection)
 
     portfolio = PortfolioState(positions=[pending_pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     def _boom(*args, **kwargs):
         raise RuntimeError("append-failed")
@@ -1799,7 +2023,9 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     except RuntimeError as exc:
         assert "canonical reconciliation rescue dual-write failed" in str(exc)
     else:
-        raise AssertionError("expected canonical reconciliation rescue failure to surface explicitly")
+        raise AssertionError(
+            "expected canonical reconciliation rescue failure to surface explicitly"
+        )
 
     event_rows = conn.execute(
         "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
@@ -1812,7 +2038,9 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     conn.close()
 
 
-def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation(
+    monkeypatch,
+):
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
     from src.state.portfolio import PortfolioState
@@ -1826,7 +2054,11 @@ def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before
     pos.order_id = "ord-1"
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     def _boom(*args, **kwargs):
         raise RuntimeError("legacy-sync-failed")
@@ -1845,7 +2077,9 @@ def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before
     conn.close()
 
 
-def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation(
+    monkeypatch,
+):
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
     from src.state.portfolio import PortfolioState
@@ -1859,9 +2093,15 @@ def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_befor
     pos.order_id = "ord-1"
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
-    monkeypatch.setattr("src.state.db.update_trade_lifecycle", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.state.db.update_trade_lifecycle", lambda *args, **kwargs: None
+    )
 
     def _boom(*args, **kwargs):
         raise RuntimeError("legacy-event-failed")
@@ -1873,7 +2113,9 @@ def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_befor
     except RuntimeError as exc:
         assert "legacy-event-failed" in str(exc)
     else:
-        raise AssertionError("expected legacy rescue event failure to surface explicitly")
+        raise AssertionError(
+            "expected legacy rescue event failure to surface explicitly"
+        )
 
     assert portfolio.positions[0].state.value == "pending_tracked"
     assert query_position_events(conn, "rt-pos-1") == []
@@ -1906,7 +2148,11 @@ def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_sch
     pos.condition_id = "cond-1"
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     try:
         reconcile(portfolio, chain_positions, conn=conn)
@@ -1938,7 +2184,15 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     append_many_and_project(conn, entry_events, entry_projection)
 
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -1977,7 +2231,15 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
     pos = _runtime_position(state="entered", chain_state="unknown")
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -1999,7 +2261,15 @@ def test_reconciliation_size_correction_path_skips_canonical_write_without_prior
     pos = _runtime_position(state="entered", chain_state="unknown")
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
@@ -2041,14 +2311,24 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     )
 
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
 
     try:
         reconcile(portfolio, chain_positions, conn=conn)
     except RuntimeError as exc:
         assert "hybrid position_events schema" in str(exc)
     else:
-        raise AssertionError("expected hybrid drift size-correction path to fail loudly")
+        raise AssertionError(
+            "expected hybrid drift size-correction path to fail loudly"
+        )
 
     rows = conn.execute(
         "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
@@ -2062,7 +2342,9 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     conn.close()
 
 
-def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mutation(monkeypatch):
+def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mutation(
+    monkeypatch,
+):
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
@@ -2081,7 +2363,15 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     append_many_and_project(conn, entry_events, entry_projection)
 
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=22.0, avg_price=0.44, cost=11.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
 
     def _boom(*args, **kwargs):
         raise RuntimeError("append-failed")
@@ -2093,7 +2383,9 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     except RuntimeError as exc:
         assert "canonical reconciliation size-correction dual-write failed" in str(exc)
     else:
-        raise AssertionError("expected size-correction dual-write failure to surface explicitly")
+        raise AssertionError(
+            "expected size-correction dual-write failure to surface explicitly"
+        )
 
     rows = conn.execute(
         "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
@@ -2139,7 +2431,11 @@ def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonica
     )
 
     portfolio = PortfolioState(positions=[pending_pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     try:
         reconcile(portfolio, chain_positions, conn=conn)
@@ -2201,14 +2497,20 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
     pos.order_id = "ord-1"
     pos.token_id = "tok-1"
     portfolio = PortfolioState(positions=[pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     try:
         reconcile(portfolio, chain_positions, conn=conn)
     except RuntimeError as exc:
         assert "missing current projection" in str(exc)
     else:
-        raise AssertionError("expected missing canonical projection baseline to fail loudly")
+        raise AssertionError(
+            "expected missing canonical projection baseline to fail loudly"
+        )
 
     conn.close()
 
@@ -2232,10 +2534,16 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
         source_module="src.engine.cycle_runtime",
     )
     append_many_and_project(conn, entry_events, entry_projection)
-    conn.execute("UPDATE position_current SET phase = 'day0_window' WHERE position_id = 'rt-pos-1'")
+    conn.execute(
+        "UPDATE position_current SET phase = 'day0_window' WHERE position_id = 'rt-pos-1'"
+    )
 
     portfolio = PortfolioState(positions=[pending_pos])
-    chain_positions = [ChainPosition(token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1")]
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1", size=20.0, avg_price=0.5, cost=10.0, condition_id="cond-1"
+        )
+    ]
 
     try:
         reconcile(portfolio, chain_positions, conn=conn)
@@ -2301,7 +2609,9 @@ def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_
     except sqlite3.OperationalError as exc:
         assert "chronicle" in str(exc).lower()
     else:
-        raise AssertionError("expected hybrid drift schema without chronicle to fail loudly")
+        raise AssertionError(
+            "expected hybrid drift schema without chronicle to fail loudly"
+        )
 
     conn.close()
 
@@ -2416,7 +2726,9 @@ def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
     conn.close()
 
 
-def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(monkeypatch):
+def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(
+    monkeypatch,
+):
     from src.execution.harvester import _settle_positions
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
@@ -2455,7 +2767,9 @@ def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(
     except RuntimeError as exc:
         assert "canonical settlement dual-write failed" in str(exc)
     else:
-        raise AssertionError("expected canonical settlement dual-write failure to surface explicitly")
+        raise AssertionError(
+            "expected canonical settlement dual-write failure to surface explicitly"
+        )
 
     event_rows = conn.execute(
         "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
@@ -2694,7 +3008,12 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
 
     assert wrote is False
     # Canonical tables were dropped; verify no canonical table was recreated
-    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='position_events'").fetchone()[0] == 0
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='position_events'"
+        ).fetchone()[0]
+        == 0
+    )
     conn.close()
 
 
@@ -2807,7 +3126,10 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
     )
     log_execution_report(legacy_conn, pos, _Result())
     assert wrote_legacy is False
-    assert legacy_conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0] >= 2
+    assert (
+        legacy_conn.execute("SELECT COUNT(*) FROM position_events_legacy").fetchone()[0]
+        >= 2
+    )
     legacy_conn.close()
 
     canonical_conn = sqlite3.connect(":memory:")
@@ -2822,8 +3144,14 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
     )
     log_execution_report(canonical_conn, pos, _Result())
     assert wrote_canonical is True
-    assert canonical_conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 3
-    assert canonical_conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 1
+    assert (
+        canonical_conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
+        == 3
+    )
+    assert (
+        canonical_conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        == 1
+    )
     canonical_conn.close()
 
 
@@ -2831,7 +3159,7 @@ def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
     text = (ROOT / "src/engine/cycle_runtime.py").read_text()
     marker = "log_trade_entry(conn, pos)"
     start = text.index(marker)
-    snippet = text[start:start + 300]
+    snippet = text[start : start + 300]
     assert marker in snippet
     assert "_dual_write_canonical_entry_if_available(" in snippet
 
@@ -2866,7 +3194,12 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         def error(self, *args, **kwargs):
             return None
 
-    city = SimpleNamespace(name="NYC", cluster="US-Northeast", settlement_unit="F", timezone="America/New_York")
+    city = SimpleNamespace(
+        name="NYC",
+        cluster="US-Northeast",
+        settlement_unit="F",
+        timezone="America/New_York",
+    )
     edge = SimpleNamespace(
         direction="buy_yes",
         bin=SimpleNamespace(label="39-40°F"),
@@ -3005,6 +3338,7 @@ def test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_d
     }
     conn.close()
 
+
 def test_advisory_gate_workflow_freezes_verdict():
     workflow = load_yaml(".github/workflows/architecture_advisory_gates.yml")
     jobs = workflow["jobs"]
@@ -3025,4 +3359,7 @@ def test_advisory_gate_workflow_freezes_verdict():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "policy verdict only; advisory jobs still require separate evidence review" in result.stdout
+    assert (
+        "policy verdict only; advisory jobs still require separate evidence review"
+        in result.stdout
+    )

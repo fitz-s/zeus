@@ -9,14 +9,21 @@
 ```
 workspace_map.md (YOU ARE HERE)
   ├── AGENTS.md              ← operating rules, invariants, zones
-  ├── src/*/AGENTS.md        ← zone-specific rules + file registry per package
+  ├── src/AGENTS.md          ← source root: zone map + navigation
+  │   └── src/*/AGENTS.md    ← zone-specific rules + file registry per package
   ├── tests/AGENTS.md        ← test catalog with invariant mappings
-  ├── docs/README.md         ← docs index
+  │   └── tests/contracts/AGENTS.md  ← spec-owned validation manifests
+  ├── docs/AGENTS.md         ← docs root: design principle + directory index
   │   ├── docs/authority/AGENTS.md   ← architecture + governance file registry
   │   ├── docs/reference/AGENTS.md   ← domain model + research file registry
-  │   └── docs/operations/AGENTS.md  ← active work packets file registry
+  │   ├── docs/operations/AGENTS.md  ← active work packets file registry
+  │   └── docs/archives/AGENTS.md    ← archive rules (read-only, never authority)
   ├── architecture/AGENTS.md ← machine-checkable authority files
+  │   ├── architecture/ast_rules/AGENTS.md       ← AST enforcement rules
+  │   ├── architecture/packet_templates/AGENTS.md ← work packet templates
+  │   └── architecture/self_check/AGENTS.md       ← agent entry checklists
   ├── config/AGENTS.md       ← runtime parameters + reality contracts
+  │   └── config/reality_contracts/AGENTS.md ← external assumption contracts (INV-11)
   ├── scripts/AGENTS.md      ← script catalog
   └── .github/workflows/AGENTS.md ← CI gate rules
 ```
@@ -42,7 +49,7 @@ workspace_map.md (YOU ARE HERE)
 
 ## `src/` — Source Code (14 packages, organized by zone)
 
-Each package has its own `AGENTS.md` with zone rules, domain context, and a complete file registry. Read the package `AGENTS.md` before editing any file in that package.
+See `src/AGENTS.md` for the zone map and navigation guide. Each package has its own `AGENTS.md` with zone rules, domain context, and a complete file registry. Read the package `AGENTS.md` before editing any file in that package.
 
 ### Zone K0 — Kernel (truth, lifecycle, contracts)
 
@@ -168,14 +175,14 @@ See `tests/AGENTS.md` for the complete test catalog with invariant mappings.
 
 ## `docs/` — Documentation (flat mesh architecture)
 
-See `docs/README.md` for the docs index.
+See `docs/AGENTS.md` for the docs root index, or `docs/README.md` for the detailed docs index.
 
 | Directory | Files | Purpose | AGENTS.md |
 |-----------|-------|---------|-----------|
 | `docs/authority/` | 6 | Current architecture + current delivery law + packet/autonomy/boundary governance | `docs/authority/AGENTS.md` |
 | `docs/reference/` | 7 | Domain model, repo orientation, data status, and conditional research/methodology | `docs/reference/AGENTS.md` |
 | `docs/operations/` | 1 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
-| `docs/archives/` | many | Historical — never active authority | — |
+| `docs/archives/` | many | Historical — never active authority | `docs/archives/AGENTS.md` |
 
 Root docs: `docs/README.md` (index), `docs/known_gaps.md` (operational gap register).
 
@@ -185,7 +192,7 @@ Default active-law docs: `docs/authority/zeus_current_architecture.md`, `docs/au
 
 ## `architecture/` — Machine-Checkable Authority
 
-See `architecture/AGENTS.md` for zone rules. Changes here are ALWAYS governance changes.
+See `architecture/AGENTS.md` for zone rules. Changes here are ALWAYS governance changes. Subdirectories (`ast_rules/`, `packet_templates/`, `self_check/`) each have their own `AGENTS.md`.
 
 | File | Purpose |
 |------|---------|

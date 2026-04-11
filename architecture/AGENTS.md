@@ -46,5 +46,15 @@ Changes here are architecture or governance changes, never “just docs.”
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
 
+## Subdirectory navigation
+
+Each subdirectory has its own `AGENTS.md` with file registry and rules:
+
+| Subdirectory | AGENTS.md | Purpose |
+|--------------|-----------|---------|
+| `ast_rules/` | `ast_rules/AGENTS.md` | AST-level enforcement rules (Semgrep + forbidden patterns) |
+| `packet_templates/` | `packet_templates/AGENTS.md` | Work packet templates for change classification |
+| `self_check/` | `self_check/AGENTS.md` | Agent entry checklists |
+
 ## Review rule
 At least one independent verifier must read the final diff before acceptance.

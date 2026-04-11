@@ -14,7 +14,10 @@ from src.state.projection import (
 )
 
 
-ARCHITECTURE_KERNEL_SQL_PATH = Path(__file__).resolve().parents[2] / "migrations/2026_04_02_architecture_kernel.sql"
+ARCHITECTURE_KERNEL_SQL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "architecture/2026_04_02_architecture_kernel.sql"
+)
 
 CANONICAL_POSITION_EVENT_COLUMNS = (
     "event_id",
@@ -46,7 +49,9 @@ def assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
     event_columns = table_columns(conn, "position_events")
     current_columns = table_columns(conn, "position_current")
     if not event_columns or not current_columns:
-        raise RuntimeError("canonical transaction boundary requires migrated position_events and position_current tables")
+        raise RuntimeError(
+            "canonical transaction boundary requires migrated position_events and position_current tables"
+        )
     if not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
         raise RuntimeError("canonical position_events schema not installed")
     if not set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns):
@@ -56,7 +61,9 @@ def assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     """Apply the canonical architecture schema only when no legacy collision exists."""
     event_columns = table_columns(conn, "position_events")
-    if event_columns and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns):
+    if event_columns and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(
+        event_columns
+    ):
         raise RuntimeError(
             "legacy position_events table blocks canonical schema bootstrap; "
             "freeze a dedicated migration packet before changing live/runtime schema"
@@ -66,11 +73,15 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     assert_canonical_transaction_schema(conn)
 
 
-def append_event_and_project(conn: sqlite3.Connection, event: dict, projection: dict) -> None:
+def append_event_and_project(
+    conn: sqlite3.Connection, event: dict, projection: dict
+) -> None:
     """Canonical transaction-boundary helper for target event + projection writes."""
     assert_canonical_transaction_schema(conn)
     require_payload_fields(event, CANONICAL_POSITION_EVENT_COLUMNS, label="event")
-    require_payload_fields(projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection")
+    require_payload_fields(
+        projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
+    )
     validate_event_projection_pair(event, projection)
     with conn:
         conn.execute(
@@ -83,12 +94,18 @@ def append_event_and_project(conn: sqlite3.Connection, event: dict, projection: 
         upsert_position_current(conn, projection)
 
 
-def append_many_and_project(conn: sqlite3.Connection, events: list[dict], projection: dict) -> None:
+def append_many_and_project(
+    conn: sqlite3.Connection, events: list[dict], projection: dict
+) -> None:
     """Batch canonical event append with a single final projection update."""
     assert_canonical_transaction_schema(conn)
-    require_payload_fields(projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection")
+    require_payload_fields(
+        projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
+    )
     for idx, event in enumerate(events, 1):
-        require_payload_fields(event, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]")
+        require_payload_fields(
+            event, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]"
+        )
     validate_event_projection_batch(events, projection)
     with conn:
         for event in events:

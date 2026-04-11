@@ -41,7 +41,7 @@ REQUIRED_ENV_KEYS = {
 
 FORBIDDEN_EXTERNAL_REFERENCES = (
     "scripts/audit_architecture_alignment.py",
-    "docs/governance/zeus_openclaw_venus_delivery_boundary.md",
+    "docs/authority/zeus_openclaw_venus_delivery_boundary.md",
 )
 
 
@@ -108,11 +108,18 @@ def ensure_semgrep_and_replay_are_advisory(data: dict, errors: list[str]) -> Non
         for step in jobs.get("replay-parity", {}).get("steps", [])
         if isinstance(step, dict)
     )
-    if "python scripts/replay_parity.py" not in replay_steps or "--ci" not in replay_steps:
+    if (
+        "python scripts/replay_parity.py" not in replay_steps
+        or "--ci" not in replay_steps
+    ):
         errors.append("replay-parity: expected advisory replay command missing")
 
-    semgrep_review = jobs.get("semgrep-zeus", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
-    replay_review = jobs.get("replay-parity", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
+    semgrep_review = (
+        jobs.get("semgrep-zeus", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
+    )
+    replay_review = (
+        jobs.get("replay-parity", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
+    )
     if "Promote only after" not in semgrep_review:
         errors.append("semgrep-zeus: promotion condition must stay explicit")
     if "Promote only after" not in replay_review:
@@ -123,7 +130,9 @@ def ensure_no_external_blocking_references(data: dict, errors: list[str]) -> Non
     rendered = WORKFLOW_PATH.read_text()
     for forbidden in FORBIDDEN_EXTERNAL_REFERENCES:
         if forbidden in rendered:
-            errors.append(f"workflow must not hard-wire external-boundary advisory surface: {forbidden}")
+            errors.append(
+                f"workflow must not hard-wire external-boundary advisory surface: {forbidden}"
+            )
 
 
 def main() -> int:
