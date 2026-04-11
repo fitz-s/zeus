@@ -381,7 +381,11 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
                 "count": 0,
                 "pnl": 0.0,
                 "wins": 0,
-                "accuracy": None,
+                # K2 rename (bug #3): this is trade profitability (wins/count),
+                # distinct from probability_directional_accuracy at the
+                # risk.details top level. The old shared 'accuracy' key name
+                # caused LLM reporters to conflate the two metrics.
+                "trade_profitability_rate": None,
             },
         )
         bucket["count"] += 1
@@ -395,7 +399,9 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     for strategy, bucket in summary.items():
         count = bucket["count"]
         bucket["pnl"] = round(bucket["pnl"], 2)
-        bucket["accuracy"] = round(bucket["wins"] / count, 4) if count else None
+        bucket["trade_profitability_rate"] = (
+            round(bucket["wins"] / count, 4) if count else None
+        )
     return summary
 
 
@@ -771,7 +777,14 @@ def tick() -> RiskLevel:
             "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
             "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
             "settlement_metric_ready_count": len(metric_ready_rows),
-            "accuracy": round(d_accuracy, 4),
+            # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
+            # hit rate computed from brier forecasts (did p>0.5 match the
+            # outcome?). It is NOT the same as trade profitability rate, which
+            # lives inside strategy_settlement_summary as per-strategy
+            # 'trade_profitability_rate'. The previous bare 'accuracy' key
+            # collided in name with the per-strategy rate and caused LLM
+            # reporters to copy 0.8947 as 'win rate'.
+            "probability_directional_accuracy": round(d_accuracy, 4),
             "strategy_settlement_summary": strategy_settlement_summary,
             "entry_execution_summary": entry_execution_summary,
             "strategy_tracker_summary": tracker_summary,
