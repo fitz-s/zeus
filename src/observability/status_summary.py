@@ -300,8 +300,38 @@ def write_status(cycle_summary: dict = None) -> None:
         "issues": consistency_issues,
         "cycle_risk_level": cycle_risk_level or None,
     }
-    if consistency_issues:
-        status["risk"]["level"] = "RED"
+    # K4: infrastructure / data-availability issues are a SEPARATE dimension from
+    # trading risk. Previously any consistency_issue escalated risk.level to RED,
+    # which meant cold-start states like strategy_health_empty or
+    # cycle_risk_level_mismatch produced false-RED alerts indistinguishable from
+    # real trading halts. risk.level now reflects RiskGuard's six trading
+    # dimensions only. infrastructure_level reflects observability/data-health.
+    # Downstream consumers (Venus supervisor, daily review, Discord alerts) must
+    # read both fields and treat them as orthogonal signals.
+    if not consistency_issues:
+        infrastructure_level = "GREEN"
+    else:
+        # Hard infrastructure failures escalate to RED because they mean the
+        # observability layer cannot be trusted; soft cold-start or
+        # availability states stay YELLOW so they do not page as emergencies.
+        _HARD_INFRASTRUCTURE_FAILURE_PREFIXES = (
+            "cycle_failed",
+            "execution_summary_unavailable",
+            "learning_summary_unavailable",
+            "no_trade_summary_unavailable",
+            "position_current_missing_table",
+            "position_current_query_error",
+        )
+        if any(
+            issue.startswith(prefix)
+            for issue in consistency_issues
+            for prefix in _HARD_INFRASTRUCTURE_FAILURE_PREFIXES
+        ):
+            infrastructure_level = "RED"
+        else:
+            infrastructure_level = "YELLOW"
+    status["risk"]["infrastructure_level"] = infrastructure_level
+    status["risk"]["infrastructure_issues"] = list(consistency_issues)
 
     learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
     for name, learning_bucket in learning_by_strategy.items():
