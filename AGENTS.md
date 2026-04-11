@@ -221,7 +221,7 @@ This is non-negotiable. An unregistered file is invisible to other agents.
 | Authority docs (specs, constitutions, boundary law) | `docs/authority/` | `zeus_<topic>.md` |
 | Reference material (domain model, data inventory) | `docs/reference/` | `<topic>.md` |
 | Operations (control, plans, work packets) | `docs/operations/` | varies |
-| Completed work packets | `docs/archives/work_packets/` | same name |
+| Completed work packets | `docs/archives/<program>/` | same name, grouped by program |
 | Archives | `docs/archives/<type>/` | original name |
 | Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
 

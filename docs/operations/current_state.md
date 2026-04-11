@@ -10,12 +10,14 @@
 4. `docs/known_gaps.md` when current runtime gap context matters
 
 ## Current active packet
-- No active work packet — doc restructuring in progress
+- No active work packet
 - Branch: `data-improve`
-- Work: mesh network documentation restructuring (consolidating to 3-folder structure: authority/, reference/, operations/)
+- Next: return to Zeus development (data improvement work)
 
 ## Last accepted packet
 - GOV-ROOT-AUTHORITY-GUIDE (archived)
+- GOV-FAST-ARCHIVE-SWEEP (archived to `docs/archives/governance_doc_restructuring/`)
+- GOV-TOP-LAW-EXPANSION (archived to `docs/archives/governance_doc_restructuring/`)
 
 ## Note
-Historical control ledgers (root_progress, root_task, architects_progress, etc.) and completed work packets are archived under `docs/archives/`. They are NOT active control authority.
+Historical control ledgers and completed work packets are archived under `docs/archives/`. They are NOT active control authority. See `docs/operations/AGENTS.md` for packet lifecycle rules.

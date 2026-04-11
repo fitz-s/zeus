@@ -174,7 +174,7 @@ See `docs/README.md` for the docs index.
 |-----------|-------|---------|-----------|
 | `docs/authority/` | 12 | Architecture specs + governance — constitutions, boundary law, decision register | `docs/authority/AGENTS.md` |
 | `docs/reference/` | 9 | Domain model, data inventory, quantitative research, methodology | `docs/reference/AGENTS.md` |
-| `docs/operations/` | 3 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
+| `docs/operations/` | 1 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
 | `docs/archives/` | many | Historical — never active authority | — |
 
 Root docs: `docs/README.md` (index), `docs/known_gaps.md` (operational gap register).
@@ -257,27 +257,9 @@ See `.github/workflows/AGENTS.md` for gate rules.
 
 ---
 
-## File Placement Rules (MANDATORY)
+## File Placement & Naming Rules
 
-| Type | Location | Naming pattern |
-|------|----------|---------------|
-| Authority docs (specs, constitutions, boundary law) | `docs/authority/` | `zeus_<topic>.md` |
-| Reference material (domain model, data inventory) | `docs/reference/` | `<topic>.md` |
-| Operations (control, plans, work packets) | `docs/operations/` | varies |
-| Completed work packets | `docs/archives/work_packets/` | same name |
-| Archives | `docs/archives/<type>/` | original name |
-| Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
-
-## Naming Rules (MANDATORY)
-
-- All `.md` files: `lower_snake_case.md`
-- Exceptions: `AGENTS.md`, `README.md`
-- **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date. Example: `datafix_2026-04-10_tigge_backfill_status.md`
-- No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
-- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
-- No spaces in filenames or directory names
-- Existing files keep current names (no retroactive renames)
-- Date prefixes only for time-bound reports
+See `AGENTS.md` §8 for canonical file placement rules and naming conventions. That is the single source of truth — do not duplicate here.
 
 ## What Does NOT Belong Here
 

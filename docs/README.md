@@ -12,7 +12,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 |-----------|---------|-------|
 | `authority/` | Architecture specs + governance — constitutions, packet discipline, autonomy gates, boundary law, decision register, architecture specs | 12 |
 | `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy | 9 |
-| `operations/` | Live control-entry pointer + current work packets | 3 |
+| `operations/` | Live control-entry pointer + current work packets | 1 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 
 ## Active top-level docs
