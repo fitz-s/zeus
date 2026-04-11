@@ -216,6 +216,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
+    logger.debug("EXPOSURE_GATE: bankroll=%s heat=%s max_heat=%s threshold=%s gate_hit=%s", entry_bankroll, current_heat, limits.max_portfolio_heat_pct, limits.max_portfolio_heat_pct * 0.95 if limits.max_portfolio_heat_pct else None, exposure_gate_hit)
 
     entries_blocked_reason = None
     has_quarantine = any(

@@ -331,12 +331,11 @@ class Position:
                 )
             if day0_decision.should_exit:
                 return day0_decision
-            self.applied_validations = _dedupe_validations(day0_decision.applied_validations)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
+            # Don't return False here — fall through to SETTLEMENT_IMMINENT
+            # and other force-exit checks (whale toxicity, edge reversal).
+            # Without this fallthrough, positions with expired target_dates
+            # loop forever in day0_window.
+            applied = list(day0_decision.applied_validations or applied)
 
         # Settlement imminent
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
@@ -745,7 +744,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
         entry_method=str(row.get("entry_method") or ""),
         strategy_key=str(row.get("strategy_key") or ""),
-        strategy=str(row.get("strategy_key") or ""),
+        strategy=str(row.get("strategy") or row.get("strategy_key") or ""),
         edge_source=str(row.get("edge_source") or ""),
         discovery_mode=str(row.get("discovery_mode") or ""),
         state=state,

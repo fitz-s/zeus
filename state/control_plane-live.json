@@ -8,6 +8,12 @@
       "strategy": "center_buy",
       "enabled": false,
       "note": "0/16 win rate, structurally unprofitable at 2F bin precision"
+    },
+    {
+      "command": "pause_entries",
+      "acked_at": "2026-04-11T01:17:28.735505+00:00",
+      "status": "executed",
+      "note": "live lock: paper/live contamination cleanup in progress"
     }
   ]
 }
