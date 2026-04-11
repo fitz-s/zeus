@@ -23,6 +23,7 @@ SEMANTIC_RULES = {
 }
 
 TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py", "day0_residual.py"}
+P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
 
 
 class SemanticAnalyzer(ast.NodeVisitor):
@@ -37,6 +38,10 @@ class SemanticAnalyzer(ast.NodeVisitor):
         prev_function = self.current_function
         self.current_function = node.name
         self.function_attributes[node.name] = set()
+        # Track parameter names separately for provenance-as-param checks
+        self._function_params: set[str] = set()
+        for arg in node.args.args + node.args.kwonlyargs:
+            self._function_params.add(arg.arg)
         
         # Visit all nodes inside the function
         self.generic_visit(node)
@@ -48,9 +53,13 @@ class SemanticAnalyzer(ast.NodeVisitor):
             # Check if any target attribute was accessed
             found_targets = [t for t in targets if t in attrs]
             if found_targets:
+                # Skip p_raw rule for files that ARE the calibration layer
+                if set(found_targets) <= {"p_raw"} and self.filepath.name in P_RAW_CALIBRATION_FILES:
+                    continue
                 # Target accessed. Did we also access the required context?
                 required = rule["required_context"]
-                if not any(req in attrs for req in required):
+                params = getattr(self, "_function_params", set())
+                if not any(req in attrs or req in params for req in required):
                     self.violations.append(
                         f"{self.filepath}:{node.lineno} in function '{node.name}':\n"
                         f"  [ERROR] {rule['message']}\n"
