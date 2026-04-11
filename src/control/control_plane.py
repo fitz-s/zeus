@@ -336,7 +336,28 @@ def recommended_autosafe_commands_from_status(status: dict) -> list[dict]:
 
 
 def review_required_commands_from_status(status: dict) -> list[dict]:
-    """Build commands that remain operator-review-required even if recommended."""
+    """Build commands that remain operator-review-required even if recommended.
+
+    K3 fix (bug #5): the previous version auto-generated un-gate commands for
+    every strategy in `gated_but_not_recommended`, using the note
+    "recommended_by=gate_drift_resolved". This made the resolver treat absence
+    from today's recommendation list as a refutation of the original gating
+    reason — which is invalid, because `recommended_strategy_gates` is only
+    built from edge_compression + execution_decay signals, not from strategy
+    health or settlement accuracy. A strategy gated manually for losing 8/8
+    settlements would never generate an edge_compression alert (no new trades
+    means no new edge signal), and therefore always showed up as "drift"
+    → auto un-gate recommendation.
+
+    Until full K3 (GateDecision with reason_code + reason_snapshot + explicit
+    reason_refuted() check) lands, we SUPPRESS auto un-gate entirely. Operators
+    who want to re-enable a gated strategy must do so via an explicit command,
+    not via drift-resolution. This prevents the LLM reporter and daily review
+    from suggesting re-enablement based on a broken heuristic.
+
+    recommended_but_not_gated still generates gate-ON commands (those are new
+    recommendations from RiskGuard, which IS the correct signal direction).
+    """
     control = (status or {}).get("control", {}) or {}
     gate_reasons = control.get("recommended_strategy_gate_reasons", {}) or {}
     commands: list[dict] = []
@@ -350,15 +371,9 @@ def review_required_commands_from_status(status: dict) -> list[dict]:
         if reasons:
             command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
         commands.append(command)
-    for strategy in control.get("gated_but_not_recommended", []) or []:
-        commands.append(
-            {
-                "command": "set_strategy_gate",
-                "strategy": strategy,
-                "enabled": True,
-                "note": "recommended_by=gate_drift_resolved",
-            }
-        )
+    # K3: gated_but_not_recommended → auto un-gate loop removed.
+    # Do NOT re-add without implementing reason_refuted() on top of
+    # reason_code-bearing GateDecision objects.
     return commands
 
 
