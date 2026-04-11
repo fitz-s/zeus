@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.config import get_mode, settings, STATE_DIR
+from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,
     directional_accuracy,
@@ -30,6 +31,7 @@ from src.state.db import (
     refresh_strategy_health,
 )
 from src.state.portfolio import PortfolioState, Position, load_portfolio
+from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
@@ -98,7 +100,8 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
-    if loader_view.get("status") in ("ok", "partial_stale"):
+    policy = choose_portfolio_truth_source(loader_view.get("status"))
+    if policy.source == "canonical_db":
         metadata_state, capital_source = _load_riskguard_capital_metadata()
         positions = [
             _portfolio_position_from_loader_row(row)
@@ -129,7 +132,8 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "source": "working_state_fallback",
         "loader_status": str(loader_view.get("status") or "unknown"),
         "fallback_active": True,
-        "fallback_reason": str(loader_view.get("status") or "unknown"),
+        "fallback_reason": policy.reason,
+        "fallback_escalate": policy.escalate,
         "position_count": len(portfolio.positions),
         "capital_source": capital_source,
     }
@@ -372,8 +376,41 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
 
 
 def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
+    """Aggregate settlement rows into per-strategy counts and PnL.
+
+    K1 invariant (bug #1/#2): this aggregation MUST be deduped by
+    trade_id. Settlement rows can come from multiple upstream sources
+    (canonical position_events, legacy position_events_legacy, legacy
+    decision_log artifacts) and the same underlying trade may appear in
+    more than one source or in multiple batches of the same source. Prior
+    to dedup, opening_inertia would show 19 settlements on paper on
+    2026-04-11 while the canonical truth was 6 unique positions, because
+    two decision_log settlement batches (19:43 and 20:43) each recorded
+    the same 6 positions. The two bugs are now fixed at the writer layer
+    but historical decision_log rows from before the fix still contain
+    duplicates, so the reader must dedup defensively.
+
+    Dedup policy: for each trade_id, keep the FIRST row encountered in
+    iteration order. Callers should pass rows ordered by occurred_at ASC
+    if they want the earliest settlement record; the current caller
+    passes most-recent-first order from query_settlement_events, which
+    means the last recorded settlement wins. That is fine as long as
+    settlement is idempotent at the writer layer (bug #9 fix).
+    """
     summary: dict[str, dict] = {}
+    seen_trade_ids: set[str] = set()
     for row in rows:
+        trade_id = str(row.get("trade_id") or row.get("runtime_trade_id") or "")
+        if not trade_id:
+            # Rows without a trade_id cannot be deduped; fall back to
+            # including them so we do not silently drop data. This should
+            # be rare after the settlement writer fixes land.
+            pass
+        elif trade_id in seen_trade_ids:
+            continue
+        else:
+            seen_trade_ids.add(trade_id)
+
         strategy = str(row.get("strategy") or "unclassified")
         bucket = summary.setdefault(
             strategy,
@@ -571,6 +608,11 @@ def tick() -> RiskLevel:
     zeus_conn = _get_runtime_trade_connection()
     risk_conn = get_connection(RISK_DB_PATH)
     init_risk_db(risk_conn)
+
+    previous_row = risk_conn.execute(
+        "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+    ).fetchone()
+    previous_level = RiskLevel(previous_row["level"]) if previous_row else None
 
     thresholds = settings["riskguard"]
     portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
@@ -820,6 +862,62 @@ def tick() -> RiskLevel:
 
     zeus_conn.close()
     risk_conn.close()
+
+    try:
+        if level == RiskLevel.RED:
+            failed_rules = []
+            if brier_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "brier",
+                    "value": round(b_score, 4),
+                    "threshold": thresholds["brier_red"],
+                    "detail": f"accuracy={d_accuracy:.4f}",
+                })
+            if settlement_quality_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "settlement_quality",
+                    "value": 0,
+                    "threshold": 1,
+                    "detail": f"storage_source={settlement_storage_source}",
+                })
+            if daily_loss_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "daily_loss_pct",
+                    "value": round(float(daily_loss or 0.0), 4),
+                    "threshold": thresholds["max_daily_loss_pct"],
+                    "detail": f"effective_bankroll={current_total_value:.2f}",
+                })
+            if weekly_loss_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "weekly_loss_pct",
+                    "value": round(float(weekly_loss or 0.0), 4),
+                    "threshold": thresholds["max_weekly_loss_pct"],
+                    "detail": f"effective_bankroll={current_total_value:.2f}",
+                })
+            alert_halt(failed_rules or [{
+                "name": "riskguard",
+                "value": 1,
+                "threshold": 0,
+                "detail": f"level={level.value}",
+            }])
+        elif previous_level == RiskLevel.RED and level == RiskLevel.GREEN:
+            alert_resume("rules cleared")
+        elif level == RiskLevel.YELLOW:
+            if brier_level == RiskLevel.YELLOW:
+                alert_warning("Brier score", round(b_score, 4), thresholds["brier_yellow"], detail=f"accuracy={d_accuracy:.4f}")
+            if execution_quality_level == RiskLevel.YELLOW:
+                alert_warning(
+                    "Execution fill rate",
+                    round(execution_overall.get("fill_rate", 0.0), 4) if execution_overall.get("fill_rate") is not None else 0.0,
+                    0.3,
+                    detail=f"observed={execution_observed}",
+                )
+            if settlement_quality_level == RiskLevel.YELLOW:
+                alert_warning("Settlement quality", float(degraded_rows), 1.0, detail=f"storage_source={settlement_storage_source}")
+            if strategy_signal_level == RiskLevel.YELLOW:
+                alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
+    except Exception as exc:
+        logger.warning("Discord alert emission failed: %s", exc)
 
     if level != RiskLevel.GREEN:
         logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
