@@ -654,6 +654,20 @@ class DeprecatedStateFileError(RuntimeError):
     pass
 
 
+# Bug #7 fix: terminal lifecycle states must never enter the active-positions
+# runtime view. save_portfolio and the JSON-fallback load path both filter
+# these out. This is defence-in-depth on top of the K1 structural direction
+# (derived surfaces should not write at all) — if any code path accidentally
+# leaves a settled row in state.positions, the write-side filter strips it;
+# if a stale JSON file lingers on disk, the read-side filter strips it.
+_TERMINAL_POSITION_STATES = frozenset({
+    "settled",
+    "voided",
+    "admin_closed",
+    "quarantined",
+})
+
+
 def _load_portfolio_json_payload(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -670,7 +684,21 @@ def _load_portfolio_json_payload(path: Path) -> dict:
 def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> PortfolioState:
     position_fields = {f.name for f in fields(Position)}
     positions = []
+    skipped_terminal: list[str] = []
     for p in data.get("positions", []):
+        # Bug #7 read-side filter: terminal-state rows must never reach
+        # runtime portfolio state from a JSON fallback. If position_current
+        # is healthy, the canonical DB-first path is used and this loader
+        # is never called. If it IS called (partial_stale, missing_table,
+        # DB error), the JSON on disk could still contain settled rows
+        # from a prior save_portfolio write that predates the write-side
+        # filter. Strip them here and log which were skipped.
+        raw_state = str(p.get("state", "") or "").strip().lower()
+        if raw_state in _TERMINAL_POSITION_STATES:
+            skipped_terminal.append(
+                f"{p.get('trade_id', '?')}({raw_state})"
+            )
+            continue
         filtered = {k: v for k, v in p.items() if k in position_fields}
         if "env" not in p:
             filtered["env"] = current_mode
@@ -683,6 +711,14 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
                 f"strategy_key={pos.strategy_key}, strategy={pos.strategy}"
             )
         positions.append(pos)
+
+    if skipped_terminal:
+        logger.warning(
+            "_load_portfolio_from_json_data skipped %d terminal-state rows "
+            "from JSON fallback (bug #7 defense): %s",
+            len(skipped_terminal),
+            ", ".join(skipped_terminal[:10]) + ("..." if len(skipped_terminal) > 10 else ""),
+        )
 
     for pos in positions:
         if pos.env and pos.env != current_mode:
@@ -933,8 +969,19 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     state.updated_at = datetime.now(timezone.utc).isoformat()
+    # Bug #7 write-side filter: positions-{mode}.json is an "active positions
+    # view" file — terminal-state rows must not appear. If a terminal row
+    # somehow remains in state.positions (e.g. an event path appended to
+    # the list without popping), strip it here. This is defence-in-depth
+    # on top of the explicit pop() calls in compute_settlement_close,
+    # mark_admin_closed, and void_position. Settled rows belong in
+    # position_events / position_current, not in this cache file.
+    active_positions = [
+        p for p in state.positions
+        if str(getattr(p, "state", "") or "").strip().lower() not in _TERMINAL_POSITION_STATES
+    ]
     data = {
-        "positions": [asdict(p) for p in state.positions],
+        "positions": [asdict(p) for p in active_positions],
         "bankroll": state.bankroll,
         "updated_at": state.updated_at,
         "daily_baseline_total": state.daily_baseline_total,
