@@ -8,8 +8,8 @@ Referenced by: `AGENTS.md` §7 (working discipline)
 
 ## 1. Program / packet / slice hierarchy
 
-- A **program phase** is larger than a packet. Examples: `FOUNDATION-MAINLINE`, `P0`, `P1`.
-- A **packet** is the atomic authority-bearing unit of execution. Examples: `P0.2 attribution freeze`, `P0.1 exit semantics split`.
+- A **program phase** is larger than a packet. Examples: `FOUNDATION-MAINLINE`, `data-improve`.
+- A **packet** is the atomic authority-bearing unit of execution. Examples: `DATAFIX-001 ensemble backfill`, `FEAT-002 hourly obs pipeline`.
 - An **execution slice** is a commit-sized step inside one still-open packet.
 
 **Do not confuse** "one slice completed" with "packet completed."
