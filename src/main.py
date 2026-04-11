@@ -259,6 +259,8 @@ def _startup_data_health_check(conn):
 
 
 def main():
+    if "ZEUS_MODE" not in os.environ:
+        sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=paper or ZEUS_MODE=live")
     mode = get_mode()
     once = "--once" in sys.argv
     logging.basicConfig(
