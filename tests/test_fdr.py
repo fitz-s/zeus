@@ -10,6 +10,7 @@ Covers:
 import pytest
 
 from src.strategy.fdr_filter import fdr_filter
+from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id
 from src.types import Bin, BinEdge
 
 
@@ -75,3 +76,35 @@ class TestFDRFilter:
         """Single edge with p=0.15, fdr=0.10 → fails (0.15 > 0.10)."""
         result = fdr_filter([_make_edge(0.15)], fdr_alpha=0.10)
         assert len(result) == 0
+
+
+class TestSelectionFamilySubstrate:
+    def test_family_id_is_stable(self):
+        assert make_family_id(
+            cycle_mode="opening_hunt",
+            city="NYC",
+            target_date="2026-04-01",
+            strategy_key="center_buy",
+            discovery_mode="opening_hunt",
+            decision_snapshot_id="snap-1",
+        ) == "opening_hunt|NYC|2026-04-01|center_buy|opening_hunt|snap-1"
+
+    def test_bh_mask_uses_full_tested_family(self):
+        mask = benjamini_hochberg_mask([0.001, 0.020, 0.080, 0.500], q=0.10)
+        assert mask == [True, True, False, False]
+
+    def test_apply_familywise_fdr_separates_families(self):
+        rows = [
+            {"family_id": "fam-a", "hypothesis_id": "a1", "p_value": 0.001, "tested": True},
+            {"family_id": "fam-a", "hypothesis_id": "a2", "p_value": 0.500, "tested": True},
+            {"family_id": "fam-b", "hypothesis_id": "b1", "p_value": 0.080, "tested": True},
+            {"family_id": "fam-b", "hypothesis_id": "b2", "p_value": 0.900, "tested": False},
+        ]
+
+        out = apply_familywise_fdr(rows, q=0.10)
+
+        assert [row["selected_post_fdr"] for row in out] == [1, 0, 1, 0]
+        assert out[0]["q_value"] <= 0.10
+        assert out[1]["q_value"] > 0.10
+        assert out[2]["q_value"] <= 0.10
+        assert out[3]["q_value"] is None

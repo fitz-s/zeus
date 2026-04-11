@@ -146,7 +146,7 @@ def test_init_schema_creates_all_tables():
     expected = {
         "settlements", "observations", "market_events", "token_price_log",
         "ensemble_snapshots", "calibration_pairs", "platt_models",
-        "trade_decisions", "shadow_signals", "chronicle", "position_events", "solar_daily",
+        "trade_decisions", "shadow_signals", "probability_trace_fact", "chronicle", "position_events", "solar_daily",
         "observation_instants", "diurnal_peak_prob"
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
@@ -264,6 +264,385 @@ def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
 
     assert result == {"status": "written", "table": "opportunity_fact"}
     assert rows["n"] == 1
+
+
+def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-1",
+        slug="nyc-apr-1",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+            {"title": "41-42°F", "range_low": 41, "range_high": 42},
+        ],
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_yes",
+        p_posterior=0.62,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-1",
+        decision_snapshot_id="snap-pt-1",
+        edge=edge,
+        p_raw=[0.2, 0.8],
+        p_cal=[0.25, 0.75],
+        p_market=[0.3, 0.7],
+        alpha=0.55,
+        agreement="AGREE",
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+        n_edges_found=2,
+        n_edges_after_fdr=1,
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        """
+        SELECT decision_id, candidate_id, trace_status, p_raw_json, p_cal_json,
+               p_market_json, p_posterior_json, p_posterior, bin_labels_json
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-1'
+        """
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert result == {
+        "status": "written",
+        "table": "probability_trace_fact",
+        "trace_status": "complete",
+    }
+    assert row["candidate_id"] == "evt-pt-1"
+    assert row["trace_status"] == "complete"
+    assert json.loads(row["p_raw_json"]) == [0.2, 0.8]
+    assert json.loads(row["p_cal_json"]) == [0.25, 0.75]
+    assert json.loads(row["p_market_json"]) == [0.3, 0.7]
+    assert row["p_posterior_json"] is None
+    assert row["p_posterior"] == pytest.approx(0.62)
+    assert json.loads(row["bin_labels_json"]) == ["39-40°F", "41-42°F"]
+    assert completeness["trace_rows"] == 1
+    assert completeness["complete_rows"] == 1
+    assert completeness["with_p_raw_json"] == 1
+    assert completeness["with_p_cal_json"] == 1
+    assert completeness["with_p_market_json"] == 1
+
+
+def test_log_probability_trace_fact_marks_pre_vector_unavailable(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-2",
+        discovery_mode="day0_capture",
+        outcomes=[],
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-2",
+        decision_snapshot_id="",
+        edge=None,
+        selected_method="day0_observation",
+        strategy_key="",
+        rejection_stage="SIGNAL_QUALITY",
+        availability_status="DATA_UNAVAILABLE",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="day0_capture",
+    )
+    row = conn.execute(
+        """
+        SELECT trace_status, missing_reason_json, p_raw_json, p_cal_json, p_market_json
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-2'
+        """
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    missing = json.loads(row["missing_reason_json"])
+    assert result["trace_status"] == "pre_vector_unavailable"
+    assert row["trace_status"] == "pre_vector_unavailable"
+    assert missing["missing_vectors"] == ["p_raw_json", "p_cal_json", "p_market_json"]
+    assert missing["rejection_stage"] == "SIGNAL_QUALITY"
+    assert missing["availability_status"] == "DATA_UNAVAILABLE"
+    assert row["p_raw_json"] is None
+    assert row["p_cal_json"] is None
+    assert row["p_market_json"] is None
+    assert completeness["pre_vector_rows"] == 1
+
+
+def test_probability_trace_completeness_does_not_count_empty_vectors(tmp_path):
+    from src.state.db import query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO probability_trace_fact (
+            trace_id, decision_id, trace_status, missing_reason_json,
+            p_raw_json, p_cal_json, p_market_json, recorded_at
+        )
+        VALUES (
+            'trace-empty', 'dec-empty', 'degraded_missing_vectors', '[]',
+            '[]', '[]', '[]', '2026-04-03T00:00:00Z'
+        )
+        """
+    )
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert completeness["trace_rows"] == 1
+    assert completeness["with_p_raw_json"] == 0
+    assert completeness["with_p_cal_json"] == 0
+    assert completeness["with_p_market_json"] == 0
+
+
+def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path):
+    from src.state.db import log_probability_trace_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-3",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_yes",
+        p_model=0.61,
+        p_market=0.42,
+        p_posterior=0.58,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-3",
+        decision_snapshot_id="snap-pt-3",
+        edge=edge,
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        """
+        SELECT trace_status, p_raw_json, p_cal_json, p_market_json, p_posterior
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-3'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result["trace_status"] == "pre_vector_unavailable"
+    assert row["trace_status"] == "pre_vector_unavailable"
+    assert row["p_raw_json"] is None
+    assert row["p_cal_json"] is None
+    assert row["p_market_json"] is None
+    assert row["p_posterior"] == pytest.approx(0.58)
+
+
+def test_log_probability_trace_fact_degrades_unavailable_decision_context(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-4",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-4",
+        decision_snapshot_id="snap-pt-4",
+        edge=types.SimpleNamespace(
+            bin=types.SimpleNamespace(label="39-40°F"),
+            direction="buy_yes",
+            p_posterior=0.58,
+        ),
+        p_raw=[0.2],
+        p_cal=[0.25],
+        p_market=[0.3],
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+        rejection_stage="MARKET_LIQUIDITY",
+        availability_status="DATA_UNAVAILABLE",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        "SELECT trace_status FROM probability_trace_fact WHERE decision_id = 'pt-dec-4'"
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert result["trace_status"] == "degraded_decision_context"
+    assert row["trace_status"] == "degraded_decision_context"
+    assert completeness["complete_rows"] == 0
+    assert completeness["degraded_rows"] == 1
+
+
+def test_log_probability_trace_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_probability_trace_fact
+
+    conn = get_connection(tmp_path / "raw.db")
+    result = log_probability_trace_fact(
+        conn,
+        candidate=types.SimpleNamespace(city=types.SimpleNamespace(name="NYC"), target_date="2026-04-01"),
+        decision=types.SimpleNamespace(decision_id="pt-dec-3"),
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "probability_trace_fact"}
+
+
+def test_model_eval_and_promotion_surfaces_write_idempotently(tmp_path):
+    from src.state.db import (
+        log_model_eval_point,
+        log_model_eval_run,
+        upsert_promotion_registry,
+    )
+
+    conn = get_connection(tmp_path / "model_eval.db")
+    init_schema(conn)
+
+    run_result = log_model_eval_run(
+        conn,
+        run_id="run-1",
+        model_name="platt",
+        model_version="v1",
+        task_name="calibration",
+        data_source="calibration_pairs",
+        split_method="blocked_time",
+        scorer={"brier": True},
+        config={"folds": 3},
+        metrics={"brier": 0.12},
+        status="completed",
+        created_at="2026-04-11T00:00:00Z",
+        completed_at="2026-04-11T00:01:00Z",
+    )
+    point_result = log_model_eval_point(
+        conn,
+        point_id="point-1",
+        run_id="run-1",
+        point_type="calibration_group",
+        reference_id="NYC|2026-04-01",
+        city="NYC",
+        target_date="2026-04-01",
+        bucket_key="US-Northeast_MAM",
+        lead_days=3.0,
+        y_true=1.0,
+        p_raw=0.4,
+        p_cal=0.45,
+        p_post=0.5,
+        brier=0.25,
+        meta={"source": "test"},
+        recorded_at="2026-04-11T00:01:00Z",
+    )
+    promotion_result = upsert_promotion_registry(
+        conn,
+        promotion_id="promo-1",
+        model_name="platt",
+        model_version="v1",
+        task_name="calibration",
+        status="candidate",
+        eval_run_id="run-1",
+        decision_reason="blocked_oos_passed",
+        meta={"owner": "test"},
+        recorded_at="2026-04-11T00:02:00Z",
+    )
+    promotion_result_2 = upsert_promotion_registry(
+        conn,
+        promotion_id="promo-1",
+        model_name="platt",
+        model_version="v1",
+        task_name="calibration",
+        status="shadow",
+        eval_run_id="run-1",
+        decision_reason="downgraded_for_test",
+        meta={},
+        recorded_at="2026-04-11T00:03:00Z",
+    )
+    counts = {
+        "runs": conn.execute("SELECT COUNT(*) FROM model_eval_run").fetchone()[0],
+        "points": conn.execute("SELECT COUNT(*) FROM model_eval_point").fetchone()[0],
+        "promotions": conn.execute("SELECT COUNT(*) FROM promotion_registry").fetchone()[0],
+    }
+    promotion = conn.execute("SELECT status, decision_reason FROM promotion_registry").fetchone()
+    conn.close()
+
+    assert run_result == {"status": "written", "table": "model_eval_run"}
+    assert point_result == {"status": "written", "table": "model_eval_point"}
+    assert promotion_result == {"status": "written", "table": "promotion_registry"}
+    assert promotion_result_2 == {"status": "written", "table": "promotion_registry"}
+    assert counts == {"runs": 1, "points": 1, "promotions": 1}
+    assert promotion["status"] == "shadow"
+    assert promotion["decision_reason"] == "downgraded_for_test"
+
+
+def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
+    from src.state.db import query_data_improvement_inventory
+
+    conn = get_connection(tmp_path / "inventory.db")
+    init_schema(conn)
+    inventory = query_data_improvement_inventory(conn)
+    conn.close()
+
+    assert inventory["status"] == "ok"
+    assert inventory["missing_tables"] == []
+    for table in (
+        "probability_trace_fact",
+        "calibration_decision_group",
+        "day0_residual_fact",
+        "forecast_error_profile",
+        "selection_family_fact",
+        "selection_hypothesis_fact",
+        "model_eval_run",
+        "model_eval_point",
+        "promotion_registry",
+    ):
+        assert inventory["tables"][table] == {"exists": True, "rows": 0}
 
 
 def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):

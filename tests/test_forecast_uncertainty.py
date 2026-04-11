@@ -1,4 +1,8 @@
 from src.signal.ensemble_signal import sigma_instrument
+from src.signal.forecast_error_distribution import (
+    build_forecast_error_profiles,
+    write_forecast_error_profiles,
+)
 from src.signal.forecast_uncertainty import (
     analysis_mean_context,
     analysis_mean_offset,
@@ -18,6 +22,69 @@ from src.signal.forecast_uncertainty import (
     day0_post_peak_sigma,
     day0_temporal_closure_weight,
 )
+from src.state.db import get_connection, init_schema
+
+
+def test_forecast_error_profiles_materialize_distribution_moments(tmp_path):
+    conn = get_connection(tmp_path / "forecast_error.db")
+    init_schema(conn)
+    rows = [
+        ("NYC", "2026-04-01", "ecmwf", 3, 70.0, 72.0, 2.0, "F", "MAM", "2026-03-29T00:00:00Z"),
+        ("NYC", "2026-04-02", "ecmwf", 3, 75.0, 74.0, -1.0, "F", "MAM", "2026-03-30T00:00:00Z"),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO forecast_skill (
+            city, target_date, source, lead_days, forecast_temp, actual_temp,
+            error, temp_unit, season, available_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+    profiles = build_forecast_error_profiles(conn)
+    written = write_forecast_error_profiles(conn, profiles, recorded_at="2026-04-11T00:00:00Z")
+    stored = conn.execute("SELECT * FROM forecast_error_profile").fetchone()
+    conn.close()
+
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile.profile_id == "NYC|MAM|ecmwf|3"
+    assert profile.n_samples == 2
+    assert profile.bias == 0.5
+    assert profile.mae == 1.5
+    assert profile.mse == 2.5
+    assert profile.error_variance == 2.25
+    assert profile.error_stddev == 1.5
+    assert written == 1
+    assert stored["profile_id"] == "NYC|MAM|ecmwf|3"
+
+
+def test_forecast_error_profile_single_row_has_zero_variance(tmp_path):
+    conn = get_connection(tmp_path / "forecast_error_single.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO forecast_skill (
+            city, target_date, source, lead_days, forecast_temp, actual_temp,
+            error, temp_unit, season, available_at
+        )
+        VALUES ('NYC', '2026-04-01', 'ecmwf', 3, 70.0, 72.0, 2.0, 'F', 'MAM', '2026-03-29T00:00:00Z')
+        """
+    )
+    profiles = build_forecast_error_profiles(conn)
+    assert write_forecast_error_profiles(conn, profiles, recorded_at="t1") == 1
+    assert write_forecast_error_profiles(conn, profiles, recorded_at="t2") == 1
+    row = conn.execute("SELECT COUNT(*) AS n, error_variance, error_stddev, recorded_at FROM forecast_error_profile").fetchone()
+    conn.close()
+
+    assert profiles[0].error_variance == 0.0
+    assert profiles[0].error_stddev == 0.0
+    assert row["n"] == 1
+    assert row["error_variance"] == 0.0
+    assert row["error_stddev"] == 0.0
+    assert row["recorded_at"] == "t2"
 
 
 def test_analysis_bootstrap_sigma_matches_current_instrument_sigma():

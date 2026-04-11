@@ -4,6 +4,12 @@ import numpy as np
 import pytest
 
 from src.signal.day0_signal import Day0Signal
+from src.signal.day0_residual import (
+    build_day0_residual_facts,
+    residual_target,
+    write_day0_residual_facts,
+)
+from src.state.db import get_connection, init_schema
 from src.types import Bin, SolarDay, DaylightPhase
 from datetime import date, datetime, timezone, timedelta
 
@@ -36,6 +42,139 @@ class TestDay0Signal:
         assert pytest.approx(p.sum(), abs=0.01) == 1.0
         # Bins below 45 should be near zero (obs floor at 45)
         assert p[0] + p[1] + p[2] + p[3] + p[4] < 0.05
+
+    def test_day0_residual_target_is_non_negative(self):
+        assert residual_target(70.0, 65.0) == (5.0, 1)
+        assert residual_target(68.0, 69.0) == (0.0, 0)
+        assert residual_target(71.0, 71.0) == (0.0, 0)
+        assert residual_target(None, 71.0) == (None, None)
+        assert residual_target(71.0, None) == (None, None)
+
+    def test_day0_residual_facts_materialize_from_observation_instants(self, tmp_path):
+        conn = get_connection(tmp_path / "day0_residual.db")
+        init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO settlements (
+                city, target_date, market_slug, winning_bin, settlement_value,
+                settlement_source, settled_at
+            ) VALUES (
+                'NYC', '2026-04-01', 'slug', '70°F', 70.0,
+                'wu_daily_observed', '2026-04-02T12:00:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_hour,
+                local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
+                is_ambiguous_local_hour, is_missing_local_hour, time_basis,
+                temp_current, running_max, delta_rate_per_h, temp_unit,
+                station_id, observation_count, raw_response, source_file, imported_at
+            ) VALUES (
+                'NYC', '2026-04-01', 'wu_api', 'America/New_York', 14.0,
+                '2026-04-01T14:00:00-04:00', '2026-04-01T18:00:00+00:00',
+                -240, 1, 0, 0, 'zoneinfo',
+                68.0, 67.0, 1.5, 'F',
+                'KLGA', 1, '{}', 'test', '2026-04-01T18:01:00+00:00'
+            )
+            """
+        )
+        facts = build_day0_residual_facts(conn)
+        written = write_day0_residual_facts(conn, facts, recorded_at="2026-04-11T00:00:00Z")
+        row = conn.execute("SELECT * FROM day0_residual_fact").fetchone()
+        conn.close()
+
+        assert len(facts) == 1
+        assert facts[0].residual_upside == pytest.approx(3.0)
+        assert facts[0].has_upside == 1
+        assert written == 1
+        assert row["fact_id"] == "NYC|2026-04-01|wu_api|2026-04-01T18:00:00+00:00"
+        assert row["residual_upside"] == pytest.approx(3.0)
+        assert row["has_upside"] == 1
+        assert row["fact_status"] == "complete"
+
+    def test_day0_residual_facts_preserve_missing_inputs(self, tmp_path):
+        conn = get_connection(tmp_path / "day0_residual_missing.db")
+        init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_hour,
+                local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
+                is_ambiguous_local_hour, is_missing_local_hour, time_basis,
+                temp_current, running_max, delta_rate_per_h, temp_unit,
+                station_id, observation_count, raw_response, source_file, imported_at
+            ) VALUES (
+                'NYC', '2026-04-02', 'wu_api', 'America/New_York', 14.0,
+                '2026-04-02T14:00:00-04:00', '2026-04-02T18:00:00+00:00',
+                -240, 1, 0, 0, 'zoneinfo',
+                68.0, NULL, 1.5, 'F',
+                'KLGA', 1, '{}', 'test', '2026-04-02T18:01:00+00:00'
+            )
+            """
+        )
+        facts = build_day0_residual_facts(conn)
+        written = write_day0_residual_facts(conn, facts, recorded_at="2026-04-11T00:00:00Z")
+        row = conn.execute("SELECT * FROM day0_residual_fact").fetchone()
+        conn.close()
+
+        assert len(facts) == 1
+        assert facts[0].fact_status == "missing_inputs"
+        assert set(facts[0].missing_reasons) == {"running_max", "settlement_value"}
+        assert facts[0].residual_upside is None
+        assert facts[0].has_upside is None
+        assert written == 1
+        assert row["fact_status"] == "missing_inputs"
+        assert row["residual_upside"] is None
+        assert row["has_upside"] is None
+
+    def test_day0_residual_facts_preserve_missing_features_and_dst_collisions(self, tmp_path):
+        conn = get_connection(tmp_path / "day0_residual_dst.db")
+        init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO settlements (
+                city, target_date, market_slug, winning_bin, settlement_value,
+                settlement_source, settled_at
+            ) VALUES (
+                'NYC', '2026-11-01', 'slug', '70°F', 70.0,
+                'wu_daily_observed', '2026-11-02T12:00:00+00:00'
+            )
+            """
+        )
+        for utc_ts in ("2026-11-01T05:30:00+00:00", "2026-11-01T06:30:00+00:00"):
+            conn.execute(
+                """
+                INSERT INTO observation_instants (
+                    city, target_date, source, timezone_name, local_hour,
+                    local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
+                    is_ambiguous_local_hour, is_missing_local_hour, time_basis,
+                    temp_current, running_max, delta_rate_per_h, temp_unit,
+                    station_id, observation_count, raw_response, source_file, imported_at
+                ) VALUES (
+                    'NYC', '2026-11-01', 'wu_api', 'America/New_York', 1.5,
+                    '2026-11-01T01:30:00-04:00', ?,
+                    -240, 1, 1, 0, 'zoneinfo',
+                    NULL, 67.0, NULL, 'F',
+                    'KLGA', 1, '{}', 'test', '2026-11-01T07:00:00+00:00'
+                )
+                """,
+                (utc_ts,),
+            )
+        facts = build_day0_residual_facts(conn)
+        written = write_day0_residual_facts(conn, facts, recorded_at="2026-04-11T00:00:00Z")
+        rows = conn.execute("SELECT fact_id, fact_status, missing_reason_json FROM day0_residual_fact ORDER BY fact_id").fetchall()
+        conn.close()
+
+        assert len(facts) == 2
+        assert written == 2
+        assert len(rows) == 2
+        assert rows[0]["fact_id"] != rows[1]["fact_id"]
+        assert all(row["fact_status"] == "missing_inputs" for row in rows)
+        assert all("temp_current" in row["missing_reason_json"] for row in rows)
+        assert all("delta_rate_per_h" in row["missing_reason_json"] for row in rows)
 
     def test_obs_dominates_when_high(self):
         """If observed high exceeds most remaining forecasts → obs_dominates=True."""

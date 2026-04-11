@@ -227,6 +227,28 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL
         );
 
+        -- Independent forecast-event units derived from calibration_pairs.
+        -- Behavior-neutral substrate: active Platt routing still uses existing
+        -- pair APIs until a later cutover packet explicitly switches maturity.
+        CREATE TABLE IF NOT EXISTS calibration_decision_group (
+            group_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            forecast_available_at TEXT NOT NULL,
+            cluster TEXT NOT NULL,
+            season TEXT NOT NULL,
+            lead_days REAL NOT NULL,
+            settlement_value REAL,
+            winning_range_label TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            n_pair_rows INTEGER NOT NULL,
+            n_positive_rows INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(city, target_date, forecast_available_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
+            ON calibration_decision_group(cluster, season, lead_days);
+
         -- Platt model parameters per bucket
         CREATE TABLE IF NOT EXISTS platt_models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -308,6 +330,152 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             p_cal_json TEXT,
             edges_json TEXT,
             lead_hours REAL NOT NULL
+        );
+
+        -- Durable per-decision probability lineage.
+        -- This is not portfolio/lifecycle authority; it records decision-time
+        -- probability vectors and explicit completeness status for replay/audit.
+        CREATE TABLE IF NOT EXISTS probability_trace_fact (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL UNIQUE,
+            decision_snapshot_id TEXT,
+            candidate_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            mode TEXT,
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            discovery_mode TEXT,
+            entry_method TEXT,
+            selected_method TEXT,
+            trace_status TEXT NOT NULL CHECK (trace_status IN (
+                'complete',
+                'degraded_decision_context',
+                'degraded_missing_vectors',
+                'pre_vector_unavailable'
+            )),
+            missing_reason_json TEXT NOT NULL DEFAULT '[]',
+            bin_labels_json TEXT,
+            p_raw_json TEXT,
+            p_cal_json TEXT,
+            p_market_json TEXT,
+            p_posterior_json TEXT,
+            p_posterior REAL,
+            alpha REAL,
+            agreement TEXT,
+            n_edges_found INTEGER,
+            n_edges_after_fdr INTEGER,
+            rejection_stage TEXT,
+            availability_status TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
+            ON probability_trace_fact(city, target_date, recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
+            ON probability_trace_fact(decision_snapshot_id);
+
+        -- Selection-family substrate for later family-wise FDR cutover.
+        CREATE TABLE IF NOT EXISTS selection_family_fact (
+            family_id TEXT PRIMARY KEY,
+            cycle_mode TEXT NOT NULL,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            strategy_key TEXT,
+            discovery_mode TEXT,
+            created_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS selection_hypothesis_fact (
+            hypothesis_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            decision_id TEXT,
+            candidate_id TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            range_label TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            p_value REAL,
+            q_value REAL,
+            ci_lower REAL,
+            ci_upper REAL,
+            edge REAL,
+            tested INTEGER NOT NULL DEFAULT 1 CHECK (tested IN (0, 1)),
+            passed_prefilter INTEGER NOT NULL DEFAULT 0 CHECK (passed_prefilter IN (0, 1)),
+            selected_post_fdr INTEGER NOT NULL DEFAULT 0 CHECK (selected_post_fdr IN (0, 1)),
+            rejection_stage TEXT,
+            recorded_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL,
+            FOREIGN KEY(family_id) REFERENCES selection_family_fact(family_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_selection_hypothesis_family
+            ON selection_hypothesis_fact(family_id, selected_post_fdr, p_value);
+
+        -- Model evaluation and promotion substrate. Behavior-neutral until a
+        -- future packet wires active model selection through promotion state.
+        CREATE TABLE IF NOT EXISTS model_eval_run (
+            run_id TEXT PRIMARY KEY,
+            model_name TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            data_source TEXT NOT NULL,
+            split_method TEXT NOT NULL,
+            train_start TEXT,
+            train_end TEXT,
+            test_start TEXT,
+            test_end TEXT,
+            scorer_json TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('created', 'running', 'completed', 'failed')),
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS model_eval_point (
+            point_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            point_type TEXT NOT NULL CHECK (point_type IN ('calibration_group', 'trade_decision', 'day0_observation', 'forecast_error')),
+            reference_id TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            bucket_key TEXT,
+            lead_days REAL,
+            y_true REAL,
+            p_raw REAL,
+            p_cal REAL,
+            p_post REAL,
+            log_loss REAL,
+            brier REAL,
+            crps REAL,
+            ece_bin TEXT,
+            meta_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES model_eval_run(run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_eval_point_run
+            ON model_eval_point(run_id, point_type, city, target_date);
+
+        CREATE TABLE IF NOT EXISTS promotion_registry (
+            promotion_id TEXT PRIMARY KEY,
+            model_name TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('shadow', 'candidate', 'active', 'rejected', 'retired')),
+            eval_run_id TEXT,
+            decision_reason TEXT NOT NULL,
+            effective_at TEXT,
+            retired_at TEXT,
+            meta_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(model_name, model_version, task_name)
         );
 
         -- Append-only trade chronicle
@@ -394,6 +562,25 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             available_at TEXT NOT NULL,
             UNIQUE(city, target_date, source, lead_days)
         );
+
+        -- Forecast error distribution substrate for future uncertainty correction.
+        CREATE TABLE IF NOT EXISTS forecast_error_profile (
+            profile_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            source TEXT NOT NULL,
+            lead_days INTEGER NOT NULL,
+            n_samples INTEGER NOT NULL,
+            bias REAL NOT NULL,
+            mae REAL NOT NULL,
+            mse REAL NOT NULL,
+            error_variance REAL NOT NULL,
+            error_stddev REAL NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(city, season, source, lead_days)
+        );
+        CREATE INDEX IF NOT EXISTS idx_forecast_error_profile_lookup
+            ON forecast_error_profile(city, source, lead_days, season);
 
         -- Per-model bias correction
         CREATE TABLE IF NOT EXISTS model_bias (
@@ -495,6 +682,35 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             n_obs INTEGER NOT NULL,
             UNIQUE(city, month, hour)
         );
+
+        -- Day0 residual learning substrate.
+        -- Behavior-neutral: current Day0Signal hard-floor runtime remains active.
+        CREATE TABLE IF NOT EXISTS day0_residual_fact (
+            fact_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            local_timestamp TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            local_hour REAL,
+            temp_current REAL,
+            running_max REAL,
+            delta_rate_per_h REAL,
+            daylight_progress REAL,
+            obs_age_minutes REAL,
+            post_peak_confidence REAL,
+            ens_q50_remaining REAL,
+            ens_q90_remaining REAL,
+            ens_spread REAL,
+            settlement_value REAL,
+            residual_upside REAL,
+            has_upside INTEGER CHECK (has_upside IN (0, 1) OR has_upside IS NULL),
+            fact_status TEXT NOT NULL CHECK (fact_status IN ('complete', 'missing_inputs')),
+            missing_reason_json TEXT NOT NULL DEFAULT '[]',
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_day0_residual_city_ts
+            ON day0_residual_fact(city, target_date, utc_timestamp);
 
         -- Historical forecast values (5 NWP models)
         CREATE TABLE IF NOT EXISTS historical_forecasts (
@@ -1020,6 +1236,439 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
     if getattr(edge, "direction", "") == "buy_no":
         probability = 1.0 - probability
     return probability
+
+
+def _json_probability_vector(value) -> tuple[str | None, bool]:
+    if value is None:
+        return None, False
+    try:
+        values = value.tolist() if hasattr(value, "tolist") else list(value)
+    except TypeError:
+        return None, False
+    return json.dumps(values, ensure_ascii=False), len(values) > 0
+
+
+def _candidate_bin_labels(candidate) -> list[str]:
+    labels: list[str] = []
+    try:
+        outcomes = list(getattr(candidate, "outcomes", []) or [])
+    except TypeError:
+        return labels
+    for outcome in outcomes:
+        if outcome.get("range_low") is None and outcome.get("range_high") is None:
+            continue
+        title = str(outcome.get("title", "") or "")
+        if title:
+            labels.append(title)
+    return labels
+
+
+def _trace_direction(decision) -> str:
+    edge = getattr(decision, "edge", None)
+    direction = str(getattr(edge, "direction", "") or "unknown")
+    return direction if direction in {"buy_yes", "buy_no", "unknown"} else "unknown"
+
+
+def _trace_range_label(decision) -> str:
+    edge = getattr(decision, "edge", None)
+    return str(getattr(getattr(edge, "bin", None), "label", "") or "")
+
+
+def _trace_scalar_posterior(decision) -> float | None:
+    edge = getattr(decision, "edge", None)
+    if edge is not None:
+        try:
+            return float(getattr(edge, "p_posterior", None))
+        except (TypeError, ValueError):
+            return None
+    edge_context = getattr(decision, "edge_context", None)
+    if edge_context is not None:
+        try:
+            return float(getattr(edge_context, "p_posterior", None))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _trace_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def log_probability_trace_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate,
+    decision,
+    recorded_at: str,
+    mode: str,
+) -> dict:
+    """Write one durable probability trace row for one decision.
+
+    This helper intentionally stores direct decision-time vectors only. It must
+    not scalar-backfill vector lineage from BinEdge scalar fields.
+    """
+    if conn is None:
+        logger.info("Probability trace write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "probability_trace_fact"}
+    if not _table_exists(conn, "probability_trace_fact"):
+        logger.info("Probability trace table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "probability_trace_fact"}
+
+    decision_id = str(getattr(decision, "decision_id", "") or "").strip()
+    if not decision_id:
+        return {"status": "skipped_missing_decision_id", "table": "probability_trace_fact"}
+
+    p_raw_json, has_p_raw = _json_probability_vector(getattr(decision, "p_raw", None))
+    p_cal_json, has_p_cal = _json_probability_vector(getattr(decision, "p_cal", None))
+    p_market_json, has_p_market = _json_probability_vector(getattr(decision, "p_market", None))
+    p_posterior_json, _has_p_posterior_vector = _json_probability_vector(
+        getattr(decision, "p_posterior_vector", None)
+    )
+
+    missing: list[str] = []
+    for name, present in (
+        ("p_raw_json", has_p_raw),
+        ("p_cal_json", has_p_cal),
+        ("p_market_json", has_p_market),
+    ):
+        if not present:
+            missing.append(name)
+
+    if not has_p_raw and not has_p_cal and not has_p_market:
+        trace_status = "pre_vector_unavailable"
+    elif not (has_p_raw and has_p_cal and has_p_market):
+        trace_status = "degraded_missing_vectors"
+    elif str(getattr(decision, "availability_status", "") or "").strip().upper() not in {"", "OK"}:
+        trace_status = "degraded_decision_context"
+    else:
+        trace_status = "complete"
+
+    rejection_stage = str(getattr(decision, "rejection_stage", "") or "")
+    availability_status = str(getattr(decision, "availability_status", "") or "")
+    missing_reasons = {
+        "missing_vectors": missing,
+        "rejection_stage": rejection_stage,
+        "availability_status": availability_status,
+    }
+    bin_labels = _candidate_bin_labels(candidate)
+    alpha = getattr(decision, "alpha", None)
+    try:
+        alpha = float(alpha) if alpha not in (None, "") else None
+    except (TypeError, ValueError):
+        alpha = None
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO probability_trace_fact (
+            trace_id,
+            decision_id,
+            decision_snapshot_id,
+            candidate_id,
+            city,
+            target_date,
+            range_label,
+            direction,
+            mode,
+            strategy_key,
+            discovery_mode,
+            entry_method,
+            selected_method,
+            trace_status,
+            missing_reason_json,
+            bin_labels_json,
+            p_raw_json,
+            p_cal_json,
+            p_market_json,
+            p_posterior_json,
+            p_posterior,
+            alpha,
+            agreement,
+            n_edges_found,
+            n_edges_after_fdr,
+            rejection_stage,
+            availability_status,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"probtrace:{decision_id}",
+            decision_id,
+            str(getattr(decision, "decision_snapshot_id", "") or "") or None,
+            _opportunity_fact_candidate_id(candidate) or None,
+            _candidate_city_name(candidate) or None,
+            str(getattr(candidate, "target_date", "") or "") or None,
+            _trace_range_label(decision) or None,
+            _trace_direction(decision),
+            str(mode or "") or None,
+            str(getattr(decision, "strategy_key", "") or "").strip() or None,
+            str(getattr(candidate, "discovery_mode", "") or "") or None,
+            str(getattr(decision, "selected_method", "") or getattr(decision, "entry_method", "") or "") or None,
+            str(getattr(decision, "selected_method", "") or "") or None,
+            trace_status,
+            json.dumps(missing_reasons, ensure_ascii=False, sort_keys=True),
+            json.dumps(bin_labels, ensure_ascii=False),
+            p_raw_json,
+            p_cal_json,
+            p_market_json,
+            p_posterior_json,
+            _trace_scalar_posterior(decision),
+            alpha,
+            str(getattr(decision, "agreement", "") or "") or None,
+            _trace_int(getattr(decision, "n_edges_found", None)),
+            _trace_int(getattr(decision, "n_edges_after_fdr", None)),
+            rejection_stage or None,
+            availability_status or None,
+            recorded_at,
+        ),
+    )
+    return {
+        "status": "written",
+        "table": "probability_trace_fact",
+        "trace_status": trace_status,
+    }
+
+
+def query_probability_trace_completeness(conn: sqlite3.Connection | None) -> dict:
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "trace_rows": 0,
+            "with_p_raw_json": 0,
+            "with_p_cal_json": 0,
+            "with_p_market_json": 0,
+            "complete_rows": 0,
+            "degraded_rows": 0,
+            "pre_vector_rows": 0,
+        }
+    if not _table_exists(conn, "probability_trace_fact"):
+        return {
+            "status": "missing_table",
+            "trace_rows": 0,
+            "with_p_raw_json": 0,
+            "with_p_cal_json": 0,
+            "with_p_market_json": 0,
+            "complete_rows": 0,
+            "degraded_rows": 0,
+            "pre_vector_rows": 0,
+        }
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS trace_rows,
+            SUM(CASE WHEN p_raw_json IS NOT NULL AND trim(p_raw_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_raw_json,
+            SUM(CASE WHEN p_cal_json IS NOT NULL AND trim(p_cal_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_cal_json,
+            SUM(CASE WHEN p_market_json IS NOT NULL AND trim(p_market_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_market_json,
+            SUM(CASE WHEN trace_status = 'complete' THEN 1 ELSE 0 END) AS complete_rows,
+            SUM(CASE WHEN trace_status IN ('degraded_missing_vectors', 'degraded_decision_context') THEN 1 ELSE 0 END) AS degraded_rows,
+            SUM(CASE WHEN trace_status = 'pre_vector_unavailable' THEN 1 ELSE 0 END) AS pre_vector_rows
+        FROM probability_trace_fact
+        """
+    ).fetchone()
+    return {
+        "status": "ok",
+        "trace_rows": int(row["trace_rows"] or 0),
+        "with_p_raw_json": int(row["with_p_raw_json"] or 0),
+        "with_p_cal_json": int(row["with_p_cal_json"] or 0),
+        "with_p_market_json": int(row["with_p_market_json"] or 0),
+        "complete_rows": int(row["complete_rows"] or 0),
+        "degraded_rows": int(row["degraded_rows"] or 0),
+        "pre_vector_rows": int(row["pre_vector_rows"] or 0),
+    }
+
+
+def log_model_eval_run(
+    conn: sqlite3.Connection | None,
+    *,
+    run_id: str,
+    model_name: str,
+    model_version: str,
+    task_name: str,
+    data_source: str,
+    split_method: str,
+    scorer: dict,
+    config: dict,
+    metrics: dict,
+    status: str,
+    created_at: str,
+    train_start: str | None = None,
+    train_end: str | None = None,
+    test_start: str | None = None,
+    test_end: str | None = None,
+    completed_at: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "model_eval_run"}
+    if not _table_exists(conn, "model_eval_run"):
+        return {"status": "skipped_missing_table", "table": "model_eval_run"}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO model_eval_run (
+            run_id, model_name, model_version, task_name, data_source,
+            split_method, train_start, train_end, test_start, test_end,
+            scorer_json, config_json, metrics_json, status, created_at, completed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            model_name,
+            model_version,
+            task_name,
+            data_source,
+            split_method,
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            json.dumps(scorer, ensure_ascii=False, sort_keys=True),
+            json.dumps(config, ensure_ascii=False, sort_keys=True),
+            json.dumps(metrics, ensure_ascii=False, sort_keys=True),
+            status,
+            created_at,
+            completed_at,
+        ),
+    )
+    return {"status": "written", "table": "model_eval_run"}
+
+
+def log_model_eval_point(
+    conn: sqlite3.Connection | None,
+    *,
+    point_id: str,
+    run_id: str,
+    point_type: str,
+    reference_id: str,
+    meta: dict,
+    recorded_at: str,
+    city: str | None = None,
+    target_date: str | None = None,
+    bucket_key: str | None = None,
+    lead_days: float | None = None,
+    y_true: float | None = None,
+    p_raw: float | None = None,
+    p_cal: float | None = None,
+    p_post: float | None = None,
+    log_loss: float | None = None,
+    brier: float | None = None,
+    crps: float | None = None,
+    ece_bin: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "model_eval_point"}
+    if not _table_exists(conn, "model_eval_point"):
+        return {"status": "skipped_missing_table", "table": "model_eval_point"}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO model_eval_point (
+            point_id, run_id, point_type, reference_id, city, target_date,
+            bucket_key, lead_days, y_true, p_raw, p_cal, p_post, log_loss,
+            brier, crps, ece_bin, meta_json, recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            point_id,
+            run_id,
+            point_type,
+            reference_id,
+            city,
+            target_date,
+            bucket_key,
+            lead_days,
+            y_true,
+            p_raw,
+            p_cal,
+            p_post,
+            log_loss,
+            brier,
+            crps,
+            ece_bin,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+            recorded_at,
+        ),
+    )
+    return {"status": "written", "table": "model_eval_point"}
+
+
+def upsert_promotion_registry(
+    conn: sqlite3.Connection | None,
+    *,
+    promotion_id: str,
+    model_name: str,
+    model_version: str,
+    task_name: str,
+    status: str,
+    decision_reason: str,
+    meta: dict,
+    recorded_at: str,
+    eval_run_id: str | None = None,
+    effective_at: str | None = None,
+    retired_at: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "promotion_registry"}
+    if not _table_exists(conn, "promotion_registry"):
+        return {"status": "skipped_missing_table", "table": "promotion_registry"}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO promotion_registry (
+            promotion_id, model_name, model_version, task_name, status,
+            eval_run_id, decision_reason, effective_at, retired_at, meta_json,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            promotion_id,
+            model_name,
+            model_version,
+            task_name,
+            status,
+            eval_run_id,
+            decision_reason,
+            effective_at,
+            retired_at,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+            recorded_at,
+        ),
+    )
+    return {"status": "written", "table": "promotion_registry"}
+
+
+DATA_IMPROVEMENT_TABLES = (
+    "probability_trace_fact",
+    "calibration_decision_group",
+    "day0_residual_fact",
+    "forecast_error_profile",
+    "selection_family_fact",
+    "selection_hypothesis_fact",
+    "model_eval_run",
+    "model_eval_point",
+    "promotion_registry",
+)
+
+
+def query_data_improvement_inventory(conn: sqlite3.Connection | None) -> dict:
+    """Return DB-truth readiness/counts for data-improvement substrates."""
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": {}}
+    inventory: dict[str, dict] = {}
+    for table in DATA_IMPROVEMENT_TABLES:
+        if not _table_exists(conn, table):
+            inventory[table] = {"exists": False, "rows": 0}
+            continue
+        count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        inventory[table] = {"exists": True, "rows": count}
+    missing = sorted(table for table, payload in inventory.items() if not payload["exists"])
+    return {
+        "status": "missing_tables" if missing else "ok",
+        "tables": inventory,
+        "missing_tables": missing,
+    }
 
 
 def log_opportunity_fact(

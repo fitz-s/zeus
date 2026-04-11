@@ -635,6 +635,30 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 exc,
             )
 
+    def _record_probability_trace(candidate, decision):
+        try:
+            from src.state.db import log_probability_trace_fact
+
+            result = log_probability_trace_fact(
+                conn,
+                candidate=candidate,
+                decision=decision,
+                recorded_at=decision_time.isoformat(),
+                mode=mode.value,
+            )
+            if result.get("status") != "written":
+                deps.logger.warning(
+                    "Probability trace not written for %s: %s",
+                    getattr(decision, "decision_id", ""),
+                    result.get("status"),
+                )
+        except Exception as exc:
+            deps.logger.warning(
+                "Probability trace write failed for %s: %s",
+                getattr(decision, "decision_id", ""),
+                exc,
+            )
+
     def _availability_scope_key(*, candidate=None, city_name: str = "", target_date: str = "") -> str:
         if candidate is not None:
             event_id = str(getattr(candidate, "event_id", "") or "").strip()
@@ -785,6 +809,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         try:
             decisions = deps.evaluate_candidate(candidate, conn, portfolio, clob, limits, entry_bankroll=entry_bankroll)
             if decisions:
+                for trace_decision in decisions:
+                    _record_probability_trace(candidate, trace_decision)
                 try:
                     from src.engine.time_context import lead_hours_to_target
                     from src.state.db import log_shadow_signal

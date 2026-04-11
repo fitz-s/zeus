@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import sys
 import tempfile
@@ -540,6 +541,13 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         ORDER BY decision_id
         """
     ).fetchall()
+    trace_rows = conn.execute(
+        """
+        SELECT decision_id, trace_status, p_raw_json, p_cal_json, p_market_json
+        FROM probability_trace_fact
+        ORDER BY decision_id
+        """
+    ).fetchall()
     availability_count = conn.execute("SELECT COUNT(*) AS n FROM availability_fact").fetchone()
     execution_rows = conn.execute(
         """
@@ -583,12 +591,249 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert opportunity_rows[1]["strategy_key"] is None
     assert opportunity_rows[1]["snapshot_id"] == "snap-1"
     assert opportunity_rows[1]["rejection_stage"] == "EDGE_INSUFFICIENT"
+    assert [row["decision_id"] for row in trace_rows] == ["d1", "d2"]
+    assert [row["trace_status"] for row in trace_rows] == ["pre_vector_unavailable", "pre_vector_unavailable"]
+    assert trace_rows[0]["p_raw_json"] is None
+    assert trace_rows[0]["p_cal_json"] is None
+    assert trace_rows[0]["p_market_json"] is None
     assert availability_count["n"] == 0
     assert len(execution_rows) == 1
     assert execution_rows[0]["intent_id"] == "rt1:entry"
     assert execution_rows[0]["decision_id"] == "d1"
     assert execution_rows[0]["order_role"] == "entry"
     assert execution_rows[0]["terminal_exec_status"] == "filled"
+
+
+def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, caplog):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    decision = types.SimpleNamespace(
+        should_trade=False,
+        edge=None,
+        decision_id="",
+        rejection_stage="SIGNAL_QUALITY",
+        rejection_reasons=["missing decision id"],
+        selected_method="ens_member_counting",
+        applied_validations=[],
+        decision_snapshot_id="",
+        edge_source="",
+        strategy_key="",
+        availability_status="DATA_UNAVAILABLE",
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {"min_hours_to_resolution": 6}},
+        find_weather_markets=lambda **kwargs: [{
+            "city": NYC,
+            "target_date": "2026-04-01",
+            "hours_since_open": 12.0,
+            "hours_to_resolution": 24.0,
+            "outcomes": [],
+            "event_id": "evt-missing-decision",
+            "slug": "evt-missing-decision",
+        }],
+        MarketCandidate=MarketCandidate,
+        DiscoveryMode=DiscoveryMode,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        logger=logging.getLogger("test_probability_trace_skip"),
+        NoTradeCase=NoTradeCase,
+        _classify_edge_source=lambda mode, edge: "",
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+
+    with caplog.at_level("WARNING"):
+        cycle_runtime.execute_discovery_phase(
+            conn,
+            types.SimpleNamespace(),
+            PortfolioState(),
+            artifact,
+            StrategyTracker(),
+            types.SimpleNamespace(),
+            DiscoveryMode.OPENING_HUNT,
+            summary,
+            150.0,
+            datetime(2026, 4, 3, tzinfo=timezone.utc),
+            deps=deps,
+        )
+    conn.close()
+
+    assert "Probability trace not written" in caplog.text
+    assert "skipped_missing_decision_id" in caplog.text
+
+
+def _trace_status_for_evaluator_decision(tmp_path, candidate):
+    conn = get_connection(tmp_path / "trace-early.db")
+    init_schema(conn)
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn,
+        PortfolioState(),
+        types.SimpleNamespace(),
+        types.SimpleNamespace(),
+        entry_bankroll=150.0,
+        decision_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    assert len(decisions) == 1
+    result = db_module.log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decisions[0],
+        recorded_at="2026-04-01T00:00:00+00:00",
+        mode=candidate.discovery_mode,
+    )
+    conn.close()
+    return decisions[0], result
+
+
+def _three_outcomes():
+    return [
+        {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+        {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
+        {"title": "43-44°F", "range_low": 43, "range_high": 44, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
+    ]
+
+
+def test_day0_missing_observation_is_pre_vector_traceable(tmp_path):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=4.0,
+        observation=None,
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_UNAVAILABLE"
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_unparseable_bin_filter_is_pre_vector_traceable(tmp_path):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {"title": "not a temp market", "range_low": None, "range_high": None, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+        ],
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "MARKET_FILTER"
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_ens_fetch_exception_is_pre_vector_traceable(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ens down")))
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_UNAVAILABLE"
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_ens_validation_failure_is_pre_vector_traceable(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {"n_members": 0})
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: False)
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_UNAVAILABLE"
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def _patch_day0_ens_prefix(monkeypatch):
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 60.0)
+            self.bias_corrected = False
+
+        def spread_float(self):
+            return 0.0
+
+        def is_bimodal(self):
+            return False
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {
+        "members_hourly": np.zeros((51, 24)),
+        "times": ["2026-04-01T00:00:00+00:00"],
+        "fetch_time": datetime(2026, 4, 1, tzinfo=timezone.utc),
+        "model": "ecmwf_ifs025",
+        "n_members": 51,
+    })
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+
+
+def test_day0_solar_context_failure_is_pre_vector_traceable(tmp_path, monkeypatch):
+    _patch_day0_ens_prefix(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "_get_day0_temporal_context", lambda *args, **kwargs: None)
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=4.0,
+        observation={"high_so_far": 60.0, "current_temp": 59.0, "observation_time": "2026-04-01T16:00:00+00:00"},
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_STALE"
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_day0_no_remaining_forecast_hours_is_pre_vector_traceable(tmp_path, monkeypatch):
+    _patch_day0_ens_prefix(monkeypatch)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_get_day0_temporal_context",
+        lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=datetime(2026, 4, 1, 16, tzinfo=timezone.utc)),
+    )
+    monkeypatch.setattr(evaluator_module, "remaining_member_maxes_for_day0", lambda *args, **kwargs: (np.array([]), 0.0))
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=4.0,
+        observation={"high_so_far": 60.0, "current_temp": 59.0, "observation_time": "2026-04-01T16:00:00+00:00"},
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_STALE"
+    assert result["trace_status"] == "pre_vector_unavailable"
 
 
 def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):

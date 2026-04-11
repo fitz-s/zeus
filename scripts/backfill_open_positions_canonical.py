@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.config import STATE_DIR
 from src.state.db import backfill_open_legacy_paper_positions, get_connection
-from src.state.portfolio import load_portfolio
+from src.state.portfolio import _load_portfolio_from_json_data, _load_portfolio_json_payload
 
 
 DEFAULT_DB = STATE_DIR / "zeus.db"
@@ -34,7 +34,13 @@ def main() -> int:
         return 0
 
     os.environ["ZEUS_MODE"] = "paper"
-    portfolio = load_portfolio(args.positions)
+    # This support script is explicitly pointed at a legacy JSON positions
+    # file. Do not use load_portfolio() here: its DB-first behavior can read
+    # the active repo DB instead of the supplied fixture/operator file.
+    portfolio = _load_portfolio_from_json_data(
+        _load_portfolio_json_payload(args.positions),
+        current_mode="paper",
+    )
     conn = get_connection(args.db)
     try:
         report = backfill_open_legacy_paper_positions(

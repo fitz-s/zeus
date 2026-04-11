@@ -13,6 +13,7 @@ The critical design decision: `lead_days` is an **input feature**, not a bucket 
 | `platt.py` | Extended Platt calibrator + bootstrap | HIGH — core calibration engine |
 | `manager.py` | Calibration lifecycle, maturity gates | HIGH — controls when calibration applies |
 | `store.py` | Persistence of calibration parameters | MEDIUM |
+| `effective_sample_size.py` | Decision-group calibration sample accounting | MEDIUM |
 | `drift.py` | Calibration drift detection | MEDIUM |
 
 ## Domain rules

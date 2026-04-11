@@ -30,6 +30,11 @@ from src.calibration.store import (
     save_platt_model,
     load_platt_model,
 )
+from src.calibration.effective_sample_size import (
+    build_decision_groups,
+    summarize_bucket_health,
+    write_decision_groups,
+)
 from src.config import City
 from src.state.db import get_connection, init_schema
 
@@ -149,6 +154,83 @@ class TestStoreRoundTrip:
         assert all("outcome" in p for p in pairs)
 
         conn.close()
+
+
+class TestDecisionGroupAccounting:
+    def test_builds_decision_groups_from_pair_rows(self, tmp_path):
+        conn = get_connection(tmp_path / "test_groups.db")
+        init_schema(conn)
+        for target_date, forecast_available_at in [
+            ("2026-01-01", "2025-12-30T00:00:00Z"),
+            ("2026-01-02", "2025-12-31T00:00:00Z"),
+        ]:
+            for i in range(11):
+                add_calibration_pair(
+                    conn,
+                    "NYC",
+                    target_date,
+                    f"bin_{i}",
+                    p_raw=0.05 * i,
+                    outcome=1 if i == 3 else 0,
+                    lead_days=2.0,
+                    season="DJF",
+                    cluster="US-Northeast",
+                    forecast_available_at=forecast_available_at,
+                    settlement_value=41.0,
+                )
+        conn.commit()
+
+        groups = build_decision_groups(conn)
+        health = summarize_bucket_health(groups)
+        written = write_decision_groups(conn, groups, recorded_at="2026-04-11T00:00:00Z")
+        stored = conn.execute("SELECT COUNT(*) AS n FROM calibration_decision_group").fetchone()
+        conn.close()
+
+        assert len(groups) == 2
+        assert all(group.n_pair_rows == 11 for group in groups)
+        assert all(group.n_positive_rows == 1 for group in groups)
+        assert groups[0].winning_range_label == "bin_3"
+        assert health == [{
+            "bucket_key": "US-Northeast_DJF",
+            "cluster": "US-Northeast",
+            "season": "DJF",
+            "decision_groups": 2,
+            "pair_rows": 22,
+            "positive_rows": 2,
+            "min_lead_days": 2.0,
+            "max_lead_days": 2.0,
+            "rows_per_group": 11.0,
+        }]
+        assert written == 2
+        assert stored["n"] == 2
+
+    def test_decision_group_write_is_idempotent(self, tmp_path):
+        conn = get_connection(tmp_path / "test_groups.db")
+        init_schema(conn)
+        add_calibration_pair(
+            conn,
+            "NYC",
+            "2026-01-01",
+            "39-40°F",
+            p_raw=0.4,
+            outcome=1,
+            lead_days=2.0,
+            season="DJF",
+            cluster="US-Northeast",
+            forecast_available_at="2025-12-30T00:00:00Z",
+            settlement_value=40.0,
+        )
+        groups = build_decision_groups(conn)
+
+        assert write_decision_groups(conn, groups, recorded_at="t1") == 1
+        assert write_decision_groups(conn, groups, recorded_at="t2") == 1
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, MAX(recorded_at) AS recorded_at FROM calibration_decision_group"
+        ).fetchone()
+        conn.close()
+
+        assert row["n"] == 1
+        assert row["recorded_at"] == "t2"
 
 
 class TestGetCalibrator:
