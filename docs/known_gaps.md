@@ -298,3 +298,43 @@ cycle_runner._execute_monitoring_phase()
 **Problem:** The heartbeat cron job was configured with `delivery.mode = none`, so unhealthy runs could complete without announcing anything to Discord.
 **Impact:** A stale RiskGuard / RED healthcheck could run silently, leaving the operator without the expected immediate warning.
 **Fix (2026-04-05):** Switched `zeus-heartbeat-001` to `delivery.mode = announce` and tightened the payload so unhealthy runs must emit a concise alert, while healthy runs must return `NO_REPLY`.
+
+---
+
+## MEDIUM-CRITICAL: Cross-Layer Epistemic Fragmentation (D1–D6)
+
+Six design gaps identified at the signal→strategy→execution boundary. The signal layer's high hit rate does not compose into profit because each cross-layer handoff loses the semantic that makes the upstream number meaningful. These are architecture-level gaps requiring typed contracts at module boundaries (INV-12 territory).
+
+### [OPEN] D1 — Alpha blending optimization target misalignment (CRITICAL)
+**Location:** `src/strategy/market_fusion.py` — `compute_alpha()`
+**Problem:** α adjustments (spread, lead time, freshness, model agreement) are validated against Brier score. But profit requires EV > cost. Brier-optimization converges Zeus toward market consensus, which drives edge → 0. The optimization target (accuracy) conflicts with the business objective (profit).
+**Impact:** Systematic edge compression. Alpha tuning that improves calibration accuracy simultaneously destroys the trading edge.
+**Proposed antibody:** α outputs become a typed `AlphaDecision(value, optimization_target, evidence_basis, ci_bound)` so downstream consumers know whether the number was optimized for accuracy or EV. INV-12 enforcement.
+
+### [OPEN] D2 — TAIL_ALPHA_SCALE breaks buy_no primary edge source (CRITICAL)
+**Location:** `src/strategy/market_fusion.py` — tail alpha scaling
+**Problem:** `TAIL_ALPHA_SCALE=0.5` scales α toward market on tail bins, directly halving the edge that buy_no depends on (retail lottery-effect overpricing of shoulder bins). The scaling serves calibration accuracy (Brier) but destroys the structural edge that Strategy B (Shoulder Bin Sell) exploits.
+**Impact:** Strategy B's primary edge source is systematically attenuated by a calibration-serving parameter.
+**Proposed antibody:** `TailTreatment` contract that declares whether it serves calibration OR profit. Cannot serve both without explicit tradeoff documentation.
+
+### [OPEN] D3 — Entry price uses implied probability, not VWMP+fee (SEVERE)
+**Location:** `src/strategy/market_analysis.py` — `BinEdge.entry_price`
+**Problem:** `BinEdge.entry_price = p_market[i]` (implied probability from mid-price), but actual execution price = ask + taker fee (5%) + slippage. Kelly sizing uses the implied probability as the cost basis, systematically oversizing positions because the real cost is higher.
+**Impact:** Every Kelly-sized position is larger than it should be. The magnitude depends on spread width and fee structure.
+**Proposed antibody:** `ExecutionPrice(vwmp_or_ask, fee_deducted=True/False, currency)` wrapper at the Kelly boundary. Kelly must receive fee-adjusted cost, not implied probability.
+
+### [OPEN] D4 — Entry-exit epistemic asymmetry (CRITICAL)
+**Location:** `src/engine/evaluator.py` (entry), `src/execution/exit_triggers.py` (exit)
+**Problem:** Entry requires BH FDR α=0.10 + bootstrap CI + `ci_lower > 0` — high statistical burden. Exit requires only 2-cycle confirmation — low statistical burden. The system admits edges cautiously but exits aggressively, killing true edges via noise before they mature.
+**Cross-reference:** Several specific manifestations of this asymmetry are tracked in the "Exit/Entry Epistemic Asymmetry" section above (MC count mismatch [FIXED], CI-aware exit [FIXED], hours_since_open [FIXED], divergence threshold [FIXED]). This gap tracks the *structural* asymmetry: entry and exit should share a symmetric `DecisionEvidence` contract with comparable statistical burden.
+**Proposed antibody:** Entry and exit share the same `DecisionEvidence` contract type with symmetric statistical burden. Exit reversal requires bootstrap-grade evidence, not just 2 consecutive point-estimate checks.
+
+### [OPEN] D5 — Vig smearing distorts edge signal (MEDIUM)
+**Location:** `src/strategy/market_fusion.py` — probability blending
+**Problem:** `p_market` includes vig (~0.95–1.05 total probability across bins). Blending model probability with vig-contaminated market probability, then normalizing, smears the vig bias into the posterior. The posterior systematically inherits a vig-driven bias that is not a real probability signal.
+**Proposed antibody:** Vig normalization before blend, under a declared `VigTreatment` contract that makes the vig handling explicit.
+
+### [OPEN] D6 — EV hold calculation ignores funding/correlation cost (MEDIUM)
+**Location:** `src/strategy/kelly.py` — hold value calculation
+**Problem:** `net_hold = shares × p_posterior` assumes free carry. Ignores opportunity cost of locked capital and correlation crowding across simultaneous positions. When holding multiple positions, capital is not fungible, but the sizing treats it as if each position is independent.
+**Proposed antibody:** `HoldValue` contract declaring included costs; minimum = fee + time-cost-to-settlement. Correlation-adjusted portfolio heat already partially addresses this through the Kelly cascade drawdown factor, but the hold value itself remains naïve.

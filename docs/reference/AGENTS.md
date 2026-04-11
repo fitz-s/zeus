@@ -19,7 +19,7 @@ Reference material — domain model, technical orientation, data status, methodo
 
 | File | Purpose |
 |------|---------|
-| `zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, four strategies, alpha decay, settlement semantics (incl. discrete support), worked examples |
+| `zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, four strategies, alpha decay, settlement semantics (incl. discrete support), worked examples, translation loss law, structural decisions methodology, data provenance model, DST case study |
 | `repo_overview.md` | Technical orientation for first-time readers — architecture, runtime, testing, operations |
 | `data_inventory.md` | Current data source status — what's available, what's missing, utilization status, quality assessments |
 | `data_strategy.md` | Data improvement roadmap and priorities |

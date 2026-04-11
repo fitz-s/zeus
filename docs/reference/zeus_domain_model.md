@@ -261,3 +261,50 @@ Zeus's edges fall into four categories with fundamentally different risk/alpha p
 Each strategy's average edge magnitude should be tracked over 30/60/90-day windows. When a strategy's edge trend is negative and sustained for 30+ days, the correct response is to reduce capital allocation to that strategy — not to refine the model. If all four strategies show compressing edges, reduce total position sizing until the trend reverses.
 
 Per-strategy tracking enables: independent win rate, cumulative P&L, edge trend, fill rate, and holding period. RiskGuard monitoring (Brier score, drawdown) should eventually be per-strategy so that Strategy C's deterioration doesn't halt Strategy A.
+
+## 12. Translation loss law
+
+Natural language → code translation has systematic, irreducible information loss. This is not a solvable problem — it is a physical property of attention allocation across context boundaries.
+
+**Survival rates across sessions:**
+- Functions, types, tests: **100%** — they are executable and self-enforcing
+- Design philosophy, architecture rationale: **~20%** — they require understanding, which decays
+
+**Consequence**: Every session should encode insights as code structure (types, tests, contracts), not documentation. `Bin.unit`, `SettlementSemantics.for_city()`, and `test_celsius_cities_get_celsius_semantics()` are executable forms of design intent — they enforce correctness without being understood. Documentation that explains *why* is valuable but fragile; code that *prevents* errors is durable.
+
+**Relationship tests before implementation**: Before writing a new module, write tests for its relationships with existing modules — not "does this function return the right value" but "when this function's output flows into the next function, what properties must hold?" If you cannot express a cross-module relationship as a pytest assertion, you do not yet understand that relationship.
+
+## 13. Structural decisions methodology
+
+When facing N surface-level problems, do not write N patches. Find K structural decisions where K << N.
+
+**Examples from Zeus:**
+- 22 chain-safety mechanisms = 5 structural decisions
+- 10 paper/live isolation mechanisms = 3 structural decisions
+- The `state_path()` function = 1 structural decision that covers all per-process file isolation
+
+The test for a structural decision: does it eliminate a *class* of problems, or just one instance? If one instance, it is a patch. If a class, it is a structural decision.
+
+## 14. Data provenance model
+
+Zeus classifies all persistent data into three layers with distinct isolation semantics:
+
+| Layer | What | Isolation rule | Examples |
+|-------|------|----------------|----------|
+| **World data** | External facts independent of Zeus's trading decisions | Shared across all modes, no mode tag | ENS forecasts, calibration pairs, settlement observations |
+| **Decision data** | Records of Zeus's choices and their outcomes | Shared + `env` column discriminator | `trade_decisions`, `chronicle`, `position_events` |
+| **Process state** | Mutable runtime state of a running instance | Physically isolated via `state_path()` | `positions-{mode}.json`, `strategy_tracker-{mode}.json`, `risk_state` |
+
+**Why this matters**: World data can be safely shared between paper and live modes because it is objective. Decision data must be tagged so paper decisions never contaminate live analytics. Process state must be physically separate because two concurrent instances writing the same file corrupt both.
+
+## 15. Code-data mismatch: the DST case study
+
+Code correctness does not guarantee system correctness. This is not philosophy — it is a concrete bug class that has occurred in Zeus.
+
+**The setup**: Zeus's `diurnal_curves` table aggregates hourly temperature data by `obs_hour` for Day0 peak prediction. The runtime `get_current_local_hour()` correctly uses `ZoneInfo` for DST-aware local time. The ETL pipeline that populated the table also used timezone-aware code.
+
+**The bug**: The inherited historical data stored `local_hour` values derived from UTC, not true local time. Evidence: London 2025-03-30 (spring clock change, hour 1 does not exist in BST) had all 24 hours present in the table, including hour 1. If the data were truly DST-aware, hour 1 would be missing.
+
+**The consequence**: During the entire BST summer period, the runtime queried `diurnal_curves` with hour 14 (correct 2:00 PM BST) but retrieved data aggregated from UTC hour 14 (actually 3:00 PM BST). Systematic 1-hour offset for all DST cities (London, Paris, New York, Chicago). Non-DST cities (Tokyo, Seoul, Shanghai) were unaffected.
+
+**The lesson**: Code review cannot catch this — both the ETL code and the runtime code were individually correct. The failure was at the *semantic boundary* between inherited data and new code. This is why Venus exists: not to check code correctness, but to verify that code assumptions match data reality.

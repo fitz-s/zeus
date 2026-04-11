@@ -104,6 +104,30 @@ Additional rules:
 - waived gates are acceptable only if staged/advisory by law or externally unavailable for a recorded reason
 - convenience is never a valid waiver reason
 
+### 6.1 Anti-vibe checklist (patch review)
+
+Every patch review must answer these questions. If any answer is unfavorable, the patch is rejected or re-scoped.
+
+1. Did this patch shrink or expand truth surfaces?
+2. Did this patch add real actuation or only another report/view?
+3. Did this patch preserve point-in-time truth?
+4. Did this patch reduce or increase attribution ambiguity?
+5. Did this patch preserve paper/live semantic parity?
+6. Did this patch create any new implicit state transition?
+7. Did this patch encode missing-data truth or silently skip it?
+8. Did this patch introduce a new shadow persistence surface?
+9. Did this patch introduce any unregistered numeric constant that composes with other constants in a sizing/edge/probability cascade?
+
+### 6.2 Natural-language landing layer
+
+Human intent names *what must be true*. Coding models act on *what is easiest to change*. Every spec section must be translated into three layers before code:
+
+1. **Truth-layer statement** — what becomes authoritative?
+2. **Control-layer statement** — who can change behavior because of it?
+3. **Evidence-layer statement** — how will we know this is true in runtime?
+
+Until that translation exists, the task is not ready for coding.
+
 ---
 
 ## 7. Autonomy limits
