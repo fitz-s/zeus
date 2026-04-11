@@ -13,7 +13,7 @@ You may enter `$team`, `omx team`, `/team`, or `omc team` only when:
 ## Do NOT teamize
 
 - `architecture/**`
-- `docs/governance/**`
+- `docs/authority/**`
 - Migration cutover decisions
 - `.claude/CLAUDE.md` compatibility policy
 - Supervisor/control-plane semantics

@@ -1,7 +1,7 @@
-File: docs/governance/zeus_autonomous_delivery_constitution.md
+File: docs/authority/zeus_autonomous_delivery_constitution.md
 Disposition: NEW
-Authority basis: docs/architecture/zeus_durable_architecture_spec.md; docs/governance/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; architecture/maturity_model.yaml; current repo runtime truth surfaces (src/config.py, src/state/db.py, src/state/portfolio.py, src/control/control_plane.py, src/observability/status_summary.py, src/supervisor_api/contracts.py, scripts/healthcheck.py, scripts/audit_architecture_alignment.py); Session 1 and Session 2 dossiers as compressed judgment only.
-Supersedes / harmonizes: .claude/CLAUDE.md workflow guidance; WORKSPACE_MAP.md authority claims; docs/specs/zeus_spec.md; docs/architecture/zeus_blueprint_v2.md; docs/architecture/zeus_design_philosophy.md; docs/plans/zeus_live_plan.md; prior-session dossiers as navigation only.
+Authority basis: docs/authority/zeus_durable_architecture_spec.md; docs/authority/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; architecture/maturity_model.yaml; current repo runtime truth surfaces (src/config.py, src/state/db.py, src/state/portfolio.py, src/control/control_plane.py, src/observability/status_summary.py, src/supervisor_api/contracts.py, scripts/healthcheck.py, scripts/audit_architecture_alignment.py); Session 1 and Session 2 dossiers as compressed judgment only.
+Supersedes / harmonizes: .claude/CLAUDE.md workflow guidance; WORKSPACE_MAP.md authority claims; docs/specs/zeus_spec.md; docs/archives/architecture/zeus_blueprint_v2.md; docs/archives/reference/zeus_design_philosophy.md; docs/plans/zeus_live_plan.md; prior-session dossiers as navigation only.
 Why this file exists now: Zeus needs one repo-local delivery law that tells humans and agents how work is allowed to move from request to rollout without manufacturing new parallel authority.
 Current-phase or long-lived: Long-lived, with quarterly review.
 
@@ -377,7 +377,7 @@ The agent may not adapt law.
 - auto-resuming live trading behavior after safety-triggered pause
 
 ### 9.3 Expanded matrix
-See `docs/governance/zeus_top_tier_decision_register.md` for the full randomness matrix.
+See `docs/authority/zeus_top_tier_decision_register.md` for the full randomness matrix.
 That matrix is part of this constitution by reference.
 
 ## 10. Stop / handoff / resume / rollback / escalation doctrine

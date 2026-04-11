@@ -126,7 +126,7 @@ High-sensitivity architecture/governance/schema packets must not self-waive requ
 ## Related documents
 
 - `AGENTS.md` §7 — Working discipline (summary + cross-reference)
-- `docs/governance/zeus_autonomous_delivery_constitution.md` — Full delivery constitution
-- `docs/governance/zeus_change_control_constitution.md` — Change control rules
-- `docs/governance/zeus_autonomy_gates.md` — Team mode and autonomy gate conditions
-- `docs/governance/zeus_micro_event_logging.md` — Micro-event logging format and rules
+- `docs/authority/zeus_autonomous_delivery_constitution.md` — Full delivery constitution
+- `docs/authority/zeus_change_control_constitution.md` — Change control rules
+- `docs/authority/zeus_autonomy_gates.md` — Team mode and autonomy gate conditions
+- `docs/authority/zeus_micro_event_logging.md` — Micro-event logging format and rules

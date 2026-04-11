@@ -103,14 +103,14 @@ Full negative constraint list: `architecture/negative_constraints.yaml`
 |-------|-----------|----------|
 | Math | Stays inside existing semantic contracts | Scoring formulas, calibration logic, signal thresholds, feature generation |
 | Architecture | Changes canonical write/read paths, lifecycle grammar, truth-surface ownership, zone boundaries | DB schema, state authority, event projection, truth contracts |
-| Governance | Changes manifests, constitutions, AGENTS, decision registers, migrations, control-plane semantics | Any file in `architecture/`, `docs/governance/`, `migrations/` |
+| Governance | Changes manifests, constitutions, AGENTS, decision registers, migrations, control-plane semantics | Any file in `architecture/`, `docs/authority/`, `migrations/` |
 
 A math change BECOMES architecture/governance if it touches: lifecycle states, strategy_key grammar, unit semantics, point-in-time snapshot rules, control-plane behavior, DB truth contracts, or supervisor contracts.
 
 ## 6. Planning lock (must stop and plan if touching)
 
 - `architecture/**`
-- `docs/governance/**`
+- `docs/authority/**`
 - `migrations/**`
 - `.github/workflows/**`
 - `src/state/**` truth ownership, schema, projection, or lifecycle write paths
@@ -153,12 +153,12 @@ If you cannot answer, stop and plan.
 ### Governance references (mesh network)
 
 Detailed rules for these topics are extracted to dedicated files:
-- **Packet discipline** (program/packet/slice, closure, pre/post-closeout, capability proof, waivers): `docs/governance/zeus_packet_discipline.md`
-- **Micro-event logging** (format, when to log, template): `docs/governance/zeus_micro_event_logging.md`
-- **Autonomy gates** (post-P0.5 rule, team mode entry, escalation): `docs/governance/zeus_autonomy_gates.md`
-- **Team policy** (team mode usage rules): `docs/governance/team_policy.md`
-- **Change control** (deep packet governance): `docs/governance/zeus_change_control_constitution.md`
-- **Autonomous delivery** (constitution): `docs/governance/zeus_autonomous_delivery_constitution.md`
+- **Packet discipline** (program/packet/slice, closure, pre/post-closeout, capability proof, waivers): `docs/authority/zeus_packet_discipline.md`
+- **Micro-event logging** (format, when to log, template): `docs/authority/zeus_micro_event_logging.md`
+- **Autonomy gates** (post-P0.5 rule, team mode entry, escalation): `docs/authority/zeus_autonomy_gates.md`
+- **Team policy** (team mode usage rules): `docs/authority/team_policy.md`
+- **Change control** (deep packet governance): `docs/authority/zeus_change_control_constitution.md`
+- **Autonomous delivery** (constitution): `docs/authority/zeus_autonomous_delivery_constitution.md`
 
 ### External boundary
 OpenClaw, Venus, and workspace-level docs are outside repo authority. Zeus exposes typed contracts outward. External tools must not mutate repo truth.
@@ -171,17 +171,11 @@ Keep edits delta-shaped. Patch authority drift instead of rewriting everything. 
 
 | Type | Location | Naming |
 |------|----------|--------|
-| Active work packets | `docs/work_packets/` | `<PACKET-ID>.md` |
+| Authority docs (specs, constitutions, boundary law) | `docs/authority/` | `zeus_<topic>.md` |
+| Reference material (domain model, data inventory) | `docs/reference/` | `<topic>.md` |
+| Operations (control, plans, work packets) | `docs/operations/` | varies |
 | Completed work packets | `docs/archives/work_packets/` | same name |
-| Progress snapshots | `docs/progress/` | `<topic>_progress.md` |
-| Plans | `docs/plans/` | `<topic>_plan.md` |
-| Strategy docs | `docs/strategy/` | `<topic>_strategy.md` |
-| Architecture specs | `docs/architecture/` | `zeus_<topic>_spec.md` |
-| Governance docs | `docs/governance/` | `zeus_<topic>_constitution.md` |
-| Reference material | `docs/reference/` | `<topic>.md` |
-| Generated reports | `docs/reports/` | `<date>_<topic>.md` |
 | Archives | `docs/archives/<type>/` | original name |
-| Control surfaces | `docs/control/` | `current_state.md` only |
 | Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
 
 ### Naming rules
@@ -199,22 +193,22 @@ If you need deeper context:
 | If your work is in... | Also read |
 |---|---|
 | K3 math/data (signals, calibration, strategy) | `docs/reference/zeus_domain_model.md` for probability chain details |
-| K0/K1 architecture (state, lifecycle, riskguard) | `docs/architecture/zeus_durable_architecture_spec.md` + `architecture/kernel_manifest.yaml` |
-| Governance (constitutions, packets, authority) | `docs/governance/zeus_autonomous_delivery_constitution.md` + `docs/control/current_state.md` |
-| Data improvement (`data-improve` branch) | `docs/DATA_IMPROVEMENT_PLAN.md` + `docs/strategy/data_inventory.md` |
-| Target-state / endgame decisions | `docs/zeus_FINAL_spec.md` (Part II: P9-P11, Part III: endgame clause) |
+| K0/K1 architecture (state, lifecycle, riskguard) | `docs/authority/zeus_durable_architecture_spec.md` + `architecture/kernel_manifest.yaml` |
+| Governance (constitutions, packets, authority) | `docs/authority/zeus_autonomous_delivery_constitution.md` + `docs/operations/current_state.md` |
+| Data improvement (`data-improve` branch) | `docs/archives/plans/data_improvement_plan.md` + `docs/reference/data_inventory.md` |
+| Target-state / endgame decisions | `docs/authority/target_state_spec.md` (Part II: P9-P11, Part III: endgame clause) |
 | First time in repo | `docs/reference/repo_overview.md` for technical orientation |
 | File/directory structure | `docs/reference/workspace_map.md` for placement rules and directory guide |
 
 ### Current active work
-Check `docs/control/current_state.md` for the current packet and branch.
+Check `docs/operations/current_state.md` for the current packet and branch.
 
 ## 10. Conditional references (loaded on demand, not by default)
 
 These files contain specialized content and should NOT be read unless your task requires them:
 
-- `docs/governance/zeus_change_control_constitution.md` — Deep packet governance rules (Chinese language)
+- `docs/authority/zeus_change_control_constitution.md` — Deep packet governance rules (Chinese language)
 - `docs/reference/model_routing.md` — Codex/GPT model routing policy (Claude/Gemini agents: skip entirely)
-- `docs/governance/team_policy.md` — Team mode usage rules (only when entering team mode)
+- `docs/authority/team_policy.md` — Team mode usage rules (only when entering team mode)
 - `docs/known_gaps.md` — Active operational gap register (when investigating runtime issues)
 - `docs/archives/**` — Historical only, never authoritative
