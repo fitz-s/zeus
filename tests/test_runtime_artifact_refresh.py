@@ -60,6 +60,18 @@ def test_refresh_paper_runtime_artifacts_rebinds_paths_for_explicit_state_dir(mo
     import src.state.strategy_tracker as tracker_module
     import src.riskguard.riskguard as riskguard_module
     import src.observability.status_summary as status_module
+    import src.config as config_module
+
+    # Save originals so monkeypatch auto-restores after the test.
+    # _apply_state_dir_override mutates these module globals directly.
+    monkeypatch.setattr(config_module, "STATE_DIR", config_module.STATE_DIR)
+    monkeypatch.setattr(db_module, "STATE_DIR", db_module.STATE_DIR)
+    monkeypatch.setattr(db_module, "ZEUS_DB_PATH", db_module.ZEUS_DB_PATH)
+    monkeypatch.setattr(db_module, "ZEUS_SHARED_DB_PATH", db_module.ZEUS_SHARED_DB_PATH)
+    monkeypatch.setattr(db_module, "RISK_DB_PATH", db_module.RISK_DB_PATH)
+    monkeypatch.setattr(portfolio_module, "POSITIONS_PATH", portfolio_module.POSITIONS_PATH)
+    monkeypatch.setattr(tracker_module, "TRACKER_PATH", tracker_module.TRACKER_PATH)
+    monkeypatch.setattr(status_module, "STATUS_PATH", status_module.STATUS_PATH)
 
     calls: list[tuple[str, str]] = []
 
