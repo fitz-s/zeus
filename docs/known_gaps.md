@@ -189,7 +189,7 @@ cycle_runner._execute_monitoring_phase()
 4. **Entry and monitor both use real hours_since_open semantics** — FIXED
 5. **Evaluator 传 Bin.unit，monitor_refresh 传 Bin.unit** — FIXED (both use position.unit)
 6. **Harvester 和 evaluator 的 bias correction 设置不同步** — OPEN gap
-7. **Canonical settlement payload path is authoritative** — FIXED (P0-B landed; no stale OPEN claim remains)
+7. **Canonical settlement payload path is authoritative** — FIXED (canonical path landed; no stale OPEN claim remains)
 8. **`status_summary` runtime truth is lane-specific and enum-normalized** — FIXED (no mixed `ChainState.UNKNOWN` vs `unknown` truth)
 
 ---

@@ -17,7 +17,7 @@ If a pattern is forbidden here, it should either already be machine-enforced or 
 4. new writes to `positions.json` or `status_summary.json` outside designated export modules  
    Rationale: derived exports must not become shadow authority.
 
-## Strict-after-P1 patterns
+## Strict patterns (always enforced)
 
 1. raw `phase` / `state` string assignment outside lifecycle fold/manager/projection
 2. `1 - p` complements in engine/state/execution code paths
