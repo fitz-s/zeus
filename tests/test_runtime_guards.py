@@ -2602,8 +2602,9 @@ def test_main_registers_ecmwf_open_data_jobs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_module, "BlockingScheduler", lambda: fake_scheduler)
     monkeypatch.setattr(main_module, "get_shared_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(main_module, "get_trade_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(main_module, "init_schema", lambda conn: None)
-    monkeypatch.setattr(main_module.os, "environ", {})
+    monkeypatch.setattr(main_module.os, "environ", {"ZEUS_MODE": "paper"})
     monkeypatch.setattr(main_module.sys, "argv", ["zeus"])
 
     main_module.main()

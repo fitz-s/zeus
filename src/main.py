@@ -16,7 +16,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from src.config import get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
-from src.state.db import init_schema, get_shared_connection
+from src.state.db import init_schema, get_shared_connection, get_trade_connection
 
 logger = logging.getLogger("zeus")
 
@@ -275,6 +275,11 @@ def main():
 
     conn = get_shared_connection()
     init_schema(conn)
+
+    # Ensure trade DB has all tables (prevents lazy-creation gaps)
+    trade_conn = get_trade_connection()
+    init_schema(trade_conn)
+    trade_conn.close()
 
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
