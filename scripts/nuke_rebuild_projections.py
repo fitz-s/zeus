@@ -111,11 +111,18 @@ def apply_phase_updates(
 ) -> int:
     if dry_run:
         return 0
+    # Use a tz-aware ISO-8601 timestamp with explicit UTC offset, not
+    # SQLite's datetime('now') which returns a naive "YYYY-MM-DD HH:MM:SS"
+    # string. Readers at query_portfolio_loader_view compare this value
+    # against legacy_timestamp which IS tz-aware; a naive value triggers
+    # TypeError and crashes every cycle. (Hit on 2026-04-11 post-nuke.)
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).isoformat()
     cur = conn.cursor()
     for position_id, phase in updates:
         cur.execute(
-            "UPDATE position_current SET phase = ?, updated_at = datetime('now') WHERE position_id = ?",
-            (phase, position_id),
+            "UPDATE position_current SET phase = ?, updated_at = ? WHERE position_id = ?",
+            (phase, now_utc, position_id),
         )
     conn.commit()
     return len(updates)

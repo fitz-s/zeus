@@ -249,7 +249,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             season TEXT NOT NULL,
             cluster TEXT NOT NULL,
             forecast_available_at TEXT NOT NULL,
-            settlement_value REAL
+            settlement_value REAL,
+            decision_group_id TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1))
         );
 
         -- Independent forecast-event units derived from calibration_pairs.
@@ -878,6 +880,23 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         conn.execute("ALTER TABLE shadow_signals ADD COLUMN decision_snapshot_id TEXT;")
     except sqlite3.OperationalError:
         pass
+
+    for ddl in [
+        "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
+        "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
+    ]:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_decision_group ON calibration_pairs(decision_group_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup "
+        "ON calibration_pairs(city, target_date, forecast_available_at)"
+    )
 
     _ensure_runtime_bootstrap_support_tables(conn)
 
@@ -1972,12 +1991,34 @@ def log_availability_fact(
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    """Parse an ISO-8601-ish timestamp string into a tz-AWARE datetime.
+
+    Callers compare these timestamps with `>`/`<` across rows that may
+    come from heterogeneous writers: runtime code uses
+    datetime.now(timezone.utc).isoformat() (tz-aware), SQLite's built-in
+    datetime('now') function returns "YYYY-MM-DD HH:MM:SS" with no tz
+    (naive), and legacy writers sometimes used bare "Z" suffixes.
+    Comparing a naive datetime with an aware one raises TypeError, which
+    on 2026-04-11 crashed query_portfolio_loader_view every cycle after
+    the nuke rebuild script left 7 naive timestamps in position_current.
+
+    Contract: any value that parses at all is returned as UTC-aware. A
+    naive input is assumed to already be UTC (zeus has no local-time
+    writers — every producer is supposed to use UTC) and is upgraded
+    by attaching tzinfo=timezone.utc. Invalid inputs return None.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        # Naive → assume UTC. Zeus's convention is UTC-everywhere; any
+        # producer that writes naive is violating that convention and
+        # the safer assumption is UTC over local time.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _execution_intent_id(*, trade_id: str, order_role: str, explicit_intent_id: str | None = None) -> str:
