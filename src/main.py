@@ -261,6 +261,12 @@ def _startup_data_health_check(conn):
 def main():
     if "ZEUS_MODE" not in os.environ:
         sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=paper or ZEUS_MODE=live")
+    if os.environ["ZEUS_MODE"] not in {"paper", "live"}:
+        sys.exit(
+            f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not a valid mode. "
+            "Must be exactly 'paper' or 'live'. Typos like 'papr' would produce "
+            "ghost state files (positions-papr.json) that no runtime can read."
+        )
     mode = get_mode()
     once = "--once" in sys.argv
     logging.basicConfig(
