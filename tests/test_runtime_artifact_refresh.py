@@ -60,18 +60,13 @@ def test_refresh_paper_runtime_artifacts_rebinds_paths_for_explicit_state_dir(mo
     import src.state.strategy_tracker as tracker_module
     import src.riskguard.riskguard as riskguard_module
     import src.observability.status_summary as status_module
-    import src.config as config_module
 
-    # Save originals so monkeypatch auto-restores after the test.
-    # _apply_state_dir_override mutates these module globals directly.
-    monkeypatch.setattr(config_module, "STATE_DIR", config_module.STATE_DIR)
-    monkeypatch.setattr(db_module, "STATE_DIR", db_module.STATE_DIR)
-    monkeypatch.setattr(db_module, "ZEUS_DB_PATH", db_module.ZEUS_DB_PATH)
-    monkeypatch.setattr(db_module, "ZEUS_SHARED_DB_PATH", db_module.ZEUS_SHARED_DB_PATH)
-    monkeypatch.setattr(db_module, "RISK_DB_PATH", db_module.RISK_DB_PATH)
-    monkeypatch.setattr(portfolio_module, "POSITIONS_PATH", portfolio_module.POSITIONS_PATH)
-    monkeypatch.setattr(tracker_module, "TRACKER_PATH", tracker_module.TRACKER_PATH)
-    monkeypatch.setattr(status_module, "STATUS_PATH", status_module.STATUS_PATH)
+    # Capture originals before the call to verify restore.
+    orig_state_dir = db_module.STATE_DIR
+    orig_db_path = db_module.ZEUS_DB_PATH
+    orig_risk_path = db_module.RISK_DB_PATH
+    orig_positions = portfolio_module.POSITIONS_PATH
+    orig_tracker = tracker_module.TRACKER_PATH
 
     calls: list[tuple[str, str]] = []
 
@@ -94,11 +89,14 @@ def test_refresh_paper_runtime_artifacts_rebinds_paths_for_explicit_state_dir(mo
         "status": "refreshed",
         "state_dir": str(tmp_path.resolve()),
     }
-    assert db_module.STATE_DIR == Path(tmp_path)
-    assert db_module.RISK_DB_PATH == Path(tmp_path) / "risk_state-paper.db"
-    assert portfolio_module.POSITIONS_PATH == Path(tmp_path) / "positions-paper.json"
-    assert tracker_module.TRACKER_PATH == Path(tmp_path) / "strategy_tracker-paper.json"
+    # Paths were overridden during execution (verified via captured calls).
     assert calls == [
         ("tick", str(Path(tmp_path) / "risk_state-paper.db")),
         ("write_status", str(Path(tmp_path) / "status_summary-paper.json")),
     ]
+    # Paths are restored after the call returns (context-manager guard).
+    assert db_module.STATE_DIR == orig_state_dir
+    assert db_module.ZEUS_DB_PATH == orig_db_path
+    assert db_module.RISK_DB_PATH == orig_risk_path
+    assert portfolio_module.POSITIONS_PATH == orig_positions
+    assert tracker_module.TRACKER_PATH == orig_tracker
