@@ -1354,7 +1354,8 @@ def test_day0_buy_no_uses_single_confirmation_observation_reversal():
     assert "day0_observation_gate" in decision.applied_validations
 
 
-def test_day0_observation_can_hold_through_near_settlement_and_panic_signals():
+def test_day0_observation_exits_when_settlement_imminent():
+    """Day0 positions must still exit when settlement is imminent (fallthrough fix)."""
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -1372,9 +1373,10 @@ def test_day0_observation_can_hold_through_near_settlement_and_panic_signals():
         )
     )
 
-    assert decision.should_exit is False
+    assert decision.should_exit is True
+    assert decision.trigger == "SETTLEMENT_IMMINENT"
     assert "day0_observation_authority" in decision.applied_validations
-    assert "near_settlement_gate" not in decision.applied_validations
+    assert "near_settlement_gate" in decision.applied_validations
 
 
 def test_live_execute_exit_blocks_incomplete_context():
