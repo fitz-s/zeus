@@ -47,7 +47,6 @@ files_may_not_change:
   - src/**
   - tests/**
   - scripts/**
-  - migrations/**
   - .github/workflows/**
 schema_changes: false
 ci_gates_required:

@@ -57,7 +57,6 @@ files_may_not_change:
   - docs/authority/zeus_durable_architecture_spec.md
   - docs/authority/target_state_spec.md
   - src/**
-  - migrations/**
 schema_changes: false
 ci_gates_required:
   - python3 scripts/check_work_packets.py

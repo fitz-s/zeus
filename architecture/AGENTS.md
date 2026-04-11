@@ -30,5 +30,21 @@ Changes here are architecture or governance changes, never “just docs.”
 - claim runtime convergence unless current code actually matches
 - widen semantics by convenience
 
+## File registry
+
+| File | Purpose |
+|------|---------|
+| `kernel_manifest.yaml` | Kernel file ownership and protection rules |
+| `invariants.yaml` | 10 invariant definitions (INV-01 through INV-10) |
+| `zones.yaml` | Zone definitions with import rules (K0-K4) |
+| `negative_constraints.yaml` | 10 negative constraint definitions |
+| `maturity_model.yaml` | Maturity model definitions |
+| `lifecycle_grammar.md` | Lifecycle grammar specification |
+| `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |
+| `self_check/zero_context_entry.md` | Zero-context agent entry checklist |
+| `ast_rules/semgrep_zeus.yml` | Semgrep rules for code enforcement |
+| `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
+| `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
+
 ## Review rule
 At least one independent verifier must read the final diff before acceptance.

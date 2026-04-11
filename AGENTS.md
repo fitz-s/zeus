@@ -132,7 +132,7 @@ Full negative constraint list: `architecture/negative_constraints.yaml`
 |-------|-----------|----------|
 | Math | Stays inside existing semantic contracts | Scoring formulas, calibration logic, signal thresholds, feature generation |
 | Architecture | Changes canonical write/read paths, lifecycle grammar, truth-surface ownership, zone boundaries | DB schema, state authority, event projection, truth contracts |
-| Governance | Changes manifests, constitutions, AGENTS, decision registers, migrations, control-plane semantics | Any file in `architecture/`, `docs/authority/`, `migrations/` |
+| Governance | Changes manifests, constitutions, AGENTS, decision registers, control-plane semantics | Any file in `architecture/`, `docs/authority/` |
 
 A math change BECOMES architecture/governance if it touches: lifecycle states, strategy_key grammar, unit semantics, point-in-time snapshot rules, control-plane behavior, DB truth contracts, or supervisor contracts.
 
@@ -140,7 +140,6 @@ A math change BECOMES architecture/governance if it touches: lifecycle states, s
 
 - `architecture/**`
 - `docs/authority/**`
-- `migrations/**`
 - `.github/workflows/**`
 - `src/state/**` truth ownership, schema, projection, or lifecycle write paths
 - `src/control/**`
