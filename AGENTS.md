@@ -7,6 +7,18 @@ Your job is to change only what the active work packet allows while protecting k
 
 ## 1. How Zeus Works (domain model)
 
+### What Zeus is
+
+Zeus is a **fully automated weather-probability trading runtime** on Polymarket. It runs as a daemon (paper or live mode), executing trading cycles every ~30 minutes. Each cycle: fetch forecast data → compute probabilities → find statistical edges → size positions → execute orders → manage lifecycle → report status.
+
+**What it trades**: Polymarket weather markets — binary options on questions like "Will the daily high in Dallas exceed 85°F on April 15?" Zeus trades across ~16 cities, each with multiple temperature bins and two directions (buy_yes / buy_no).
+
+**Where the data comes from**: ECMWF 51-member ensemble forecasts (primary), Weather Underground daily observations (settlement source), Polymarket CLOB (market prices + execution), Open-Meteo (hourly observations for diurnal/solar).
+
+**Where the money flows**: Entry via limit orders on Polymarket CLOB → positions held → exit via triggers or settlement → P&L recorded in DB.
+
+**Key entry points in code**: `src/main.py` (daemon), `src/engine/cycle_runner.py` (cycle orchestrator), `src/engine/evaluator.py` (signal→strategy→sizing pipeline).
+
 ### The probability chain
 
 ```
@@ -17,6 +29,16 @@ P_posterior - P_market → Edge (with double-bootstrap CI)
 Edges → BH FDR filter (220 hypotheses) → Selected edges
 Selected → Fractional Kelly (dynamic mult) → Position size
 ```
+
+**Where each step lives in code**:
+- ENS fetch: `src/data/ecmwf_open_data.py` → `src/data/ensemble_client.py`
+- Monte Carlo P_raw: `src/signal/ensemble_signal.py`
+- Platt calibration: `src/calibration/platt.py` + `src/calibration/manager.py`
+- α-weighted fusion: `src/strategy/market_fusion.py`
+- Edge + bootstrap CI: `src/strategy/market_analysis.py`
+- FDR filter: `src/strategy/fdr_filter.py`
+- Kelly sizing: `src/strategy/kelly.py`
+- Order execution: `src/execution/executor.py`
 
 ### Why settlement is integer
 
@@ -48,6 +70,13 @@ Three reconciliation rules:
 ### Risk levels change behavior (INV-05)
 
 GREEN = normal. YELLOW = no new entries. ORANGE = no entries, exit at favorable prices. RED = cancel all, exit all immediately. Advisory-only risk is explicitly forbidden — if a risk level doesn't change behavior, it violates INV-05.
+
+### External boundaries
+
+Zeus operates within the OpenClaw/Venus ecosystem:
+- **Venus** = supervisor agent (reads Zeus state via `src/supervisor_api/contracts.py`, writes via `src/control/control_plane.py`)
+- **OpenClaw** = workspace orchestrator (manages Zeus + Venus + Rainstorm)
+- Zeus exposes typed contracts outward. External tools must not mutate repo truth.
 
 For full domain model with worked examples: `docs/reference/zeus_domain_model.md`
 
@@ -175,6 +204,17 @@ OpenClaw, Venus, and workspace-level docs are outside repo authority. Zeus expos
 
 Keep edits delta-shaped. Patch authority drift instead of rewriting everything. If you add a new surface, say what it harmonizes, what it supersedes, and why it does not create parallel authority.
 
+### Mesh topology maintenance (MANDATORY)
+
+Zeus uses a mesh topology for agent navigation: `workspace_map.md` (root) → directory-level `AGENTS.md` files → individual files. Every directory has an `AGENTS.md` with a **file registry** listing all files and their purposes.
+
+**When you add, rename, or delete a file, you MUST**:
+1. Update the `AGENTS.md` in that file's directory (add/remove from file registry)
+2. Update `workspace_map.md` if the change affects directory-level structure
+3. If the file is cross-referenced by other `AGENTS.md` files, update those too
+
+This is non-negotiable. An unregistered file is invisible to other agents.
+
 ## 8. File placement rules
 
 | Type | Location | Naming |
@@ -197,7 +237,7 @@ Keep edits delta-shaped. Patch authority drift instead of rewriting everything. 
 
 ## 9. What to read next (zone-keyed)
 
-After this file, read the scoped `AGENTS.md` in the directory you are editing. Then read the code.
+After this file, read `workspace_map.md` (repo root) for the full directory and file topology. Then read the scoped `AGENTS.md` in the directory you are editing. Then read the code.
 
 If you need deeper context:
 
