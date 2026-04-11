@@ -1,10 +1,10 @@
-# Zeus Durable Architecture Spec
+# Zeus Architecture Reference
 
 Version: 2026-04-02 (trimmed 2026-04-10)
 Status: Principal present-tense architecture authority
 Original: `docs/archives/architecture/zeus_durable_architecture_spec_original.md` (1937 lines)
 
-> **Reading note**: This file is trimmed to reference-weight. What remains: P0 decision records (WHY/WHY NOT), invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. For P1–P8 full implementation detail (fact layer schemas, migration plan, coding OS, anti-vibe checklist), see `docs/authority/zeus_p1_p8_implementation_spec.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
+> **Reading note**: This file is trimmed to reference-weight. What remains: P0 decision records (WHY/WHY NOT), invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. For P1–P8 full implementation detail (fact layer schemas, migration plan, coding OS, anti-vibe checklist), see `docs/authority/zeus_implementation_decisions.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
 
 ---
 
@@ -185,7 +185,7 @@ Spec, invariants, tests, and evidence are authority. Generated code is only a pr
 
 ## §4 Priority structure
 
-> Full implementation detail for each priority: `docs/authority/zeus_p1_p8_implementation_spec.md`
+> Full implementation detail for each priority: `docs/authority/zeus_implementation_decisions.md`
 
 - **P0** = bearing-capacity prerequisites (installed) — decision records in §P0 above
 - **P1** = canonical lifecycle authority (installed)

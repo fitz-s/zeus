@@ -243,10 +243,10 @@ If you need deeper context:
 | If your work is in... | Also read |
 |---|---|
 | K3 math/data (signals, calibration, strategy) | `docs/reference/zeus_domain_model.md` for probability chain details |
-| K0/K1 architecture (state, lifecycle, riskguard) | `docs/authority/zeus_durable_architecture_spec.md` + `architecture/kernel_manifest.yaml` |
+| K0/K1 architecture (state, lifecycle, riskguard) | `docs/authority/zeus_architecture.md` + `architecture/kernel_manifest.yaml` |
 | Governance (constitutions, packets, authority) | `docs/authority/zeus_autonomous_delivery_constitution.md` + `docs/operations/current_state.md` |
 | Data improvement (`data-improve` branch) | `docs/reference/data_inventory.md` for current data status |
-| Target-state / endgame decisions | `docs/authority/target_state_spec.md` (Part II: P9-P11, Part III: endgame clause) |
+| Target-state / endgame decisions | `docs/authority/zeus_target_state.md` (Part II: P9-P11, Part III: endgame clause) |
 | First time in repo | `docs/reference/repo_overview.md` for technical orientation |
 | File/directory structure | `workspace_map.md` (repo root) for placement rules and directory guide |
 

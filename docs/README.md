@@ -19,8 +19,8 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 - `../AGENTS.md` — root operating brief (read first, always)
 - `reference/zeus_domain_model.md` — "Zeus in 5 minutes" domain model with WHY explanations
-- `authority/zeus_durable_architecture_spec.md` — architecture spec (DB schema, event spine, truth surfaces)
-- `authority/target_state_spec.md` — target-state spec (P9-P11, endgame clause)
+- `authority/zeus_architecture.md` — architecture reference (DB schema, event spine, truth surfaces)
+- `authority/zeus_target_state.md` — target-state (P9-P11, endgame clause)
 - `known_gaps.md` — active operational gap register
 - `operations/current_state.md` — single live control-entry pointer
 - `../workspace_map.md` — directory guide and file placement rules (repo root)

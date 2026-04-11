@@ -1,10 +1,10 @@
-# Zeus FINAL Spec
+# Zeus Target State
 
 Version: 2026-04-05 (trimmed 2026-04-10)
 Status: **FINAL**. Terminal target-state authority and endgame clause.
 Original: `docs/archives/specs/zeus_FINAL_spec_original.md` (627 lines)
 
-> **Reading note**: This file is trimmed. INV-01..10 and §2 architectural intent live in `docs/authority/zeus_durable_architecture_spec.md`. This file adds INV-11/12/13, defines P9–P11 (the remaining work before live), and contains the binary endgame clause.
+> **Reading note**: This file is trimmed. INV-01..10 and §2 architectural intent live in `docs/authority/zeus_architecture.md`. This file adds INV-11/12/13, defines P9–P11 (the remaining work before live), and contains the binary endgame clause.
 
 ---
 
@@ -25,7 +25,7 @@ Zeus will not expand further. After P9–P11 land, Zeus either trades live under
 
 ## §3 New invariants (INV-11..13)
 
-INV-01..10 are defined in `docs/authority/zeus_durable_architecture_spec.md`. The following are additions from this FINAL spec:
+INV-01..10 are defined in `docs/authority/zeus_architecture.md`. The following are additions from this FINAL spec:
 
 ### INV-11. External assumptions are explicit and verified.
 Every assumption about external market reality (fees, tick size, settlement source, protocol timing, resolution rules) must be a typed `RealityContract` with TTL, verification method, and criticality. Silent assumption drift is forbidden. Hardcoded numeric values mirroring an external fact are INV-11 violations unless wrapped in a contract.
@@ -58,7 +58,7 @@ P11 External audit boundary + retirement readiness    [LANDS WITH P10]
 §Endgame  Binary live gate                            [AFTER P9-P11]
 ```
 
-P0–P8 details live in `docs/authority/zeus_durable_architecture_spec.md`.
+P0–P8 details live in `docs/authority/zeus_architecture.md`.
 
 ---
 

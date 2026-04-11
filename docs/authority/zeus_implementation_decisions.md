@@ -1,10 +1,10 @@
-# Zeus P1–P8 Implementation Spec
+# Zeus P1–P8 Implementation Decisions
 
 Version: 2026-04-02 (extracted 2026-04-10)
-Source: `docs/authority/zeus_durable_architecture_spec.md` (original 1937 lines)
+Source: `docs/authority/zeus_architecture.md` (original 1937 lines)
 Status: Reference — P0-P8 installed; preserved for decision rationale and target-state schemas
 
-> **Reading note**: The trimmed architecture spec (`zeus_durable_architecture_spec.md`) contains canonical tables, events, phases, zones, DB guarantees, and negative constraints. This file preserves the full implementation detail: WHY/WHY NOT decisions for each priority, target-state fact layer schemas, migration plan, coding OS, and anti-vibe checklist.
+> **Reading note**: The architecture reference (`zeus_architecture.md`) contains canonical tables, events, phases, zones, DB guarantees, and negative constraints. This file preserves the full implementation detail: WHY/WHY NOT decisions for each priority, target-state fact layer schemas, migration plan, coding OS, and anti-vibe checklist.
 
 ---
 
@@ -27,7 +27,7 @@ Adopt **append-only lifecycle events + deterministic current projection** as the
 - JSON surfaces (`positions.json`, `status_summary.json`) reclassified as **export-only** — they may never be read back as authority
 - **Transaction rule**: Event append + projection update in same SQLite transaction. No eventual consistency.
 
-Tables and events: see `zeus_durable_architecture_spec.md` §P1.2 and §P1.3.
+Tables and events: see `zeus_architecture.md` §P1.2 and §P1.3.
 
 ---
 
@@ -178,7 +178,7 @@ Learning is represented as three derived fact layers plus explicit data-availabi
 
 ## P5 — Lifecycle phase engine
 
-Phase vocabulary and transition engine: see `zeus_durable_architecture_spec.md` §P5.4 and §P5.5.
+Phase vocabulary and transition engine: see `zeus_architecture.md` §P5.4 and §P5.5.
 
 ### P5.6 Quarantine rule
 Quarantine positions: may not enter standard monitoring economics, may not participate in strategy performance metrics, may not be treated as `holding` or `active`, require dedicated investigation or forced liquidation semantics.
