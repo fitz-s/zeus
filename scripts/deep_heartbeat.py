@@ -24,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import STATE_DIR, mode_state_path, settings
+from src.config import STATE_DIR, get_mode, mode_state_path
 
 
 # Thresholds
@@ -34,7 +34,7 @@ STATUS_SUMMARY_MAX_AGE_SECONDS = 3600  # 1 hour
 
 
 def _mode() -> str:
-    return os.environ.get("ZEUS_MODE", settings.mode)
+    return get_mode()
 
 
 def _trade_db_path(mode: str | None = None) -> Path:

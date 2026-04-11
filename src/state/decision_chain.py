@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from src.config import settings
+from src.config import get_mode
 from src.contracts.semantic_types import Direction, RejectionStage, DirectionAlias
 
 logger = logging.getLogger(__name__)
@@ -192,9 +192,9 @@ class SettlementRecord:
 
 def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> None:
     """Store cycle artifact to decision_log table."""
-    from src.config import settings
+    from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
-    env = env or settings.mode
+    env = env or _get_mode()
     conn.execute("""
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -215,9 +215,9 @@ def store_settlement_records(
     if not records:
         return
 
-    from src.config import settings
+    from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
-    env = settings.mode
+    env = _get_mode()
 
     serialized_records: list[dict] = []
     for record in records:
@@ -276,7 +276,7 @@ def query_legacy_settlement_records(
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     sql = """
         SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'
@@ -395,7 +395,7 @@ def query_no_trade_cases(
     not_before: str | None = None,
 ) -> list[dict]:
     """Query recent NoTradeCase entries for diagnostics."""
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     if not_before:
         try:
             cutoff_dt = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))

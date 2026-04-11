@@ -82,6 +82,18 @@ class SemanticAnalyzer(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute):
         self._check_time_semantics_symbol(node.attr, node.lineno)
+        # Ban direct settings.mode access outside config.py
+        if (
+            node.attr == "mode"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "settings"
+            and self.filepath.name != "config.py"
+        ):
+            self.violations.append(
+                f"{self.filepath}:{node.lineno}:\n"
+                "  [ERROR] Direct `settings.mode` access is banned outside config.py.\n"
+                "  Use `from src.config import get_mode` and call `get_mode()` instead.\n"
+            )
         if self.current_function:
             self.function_attributes[self.current_function].add(node.attr)
         self.generic_visit(node)

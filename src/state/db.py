@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from src.config import STATE_DIR, state_path, settings
+from src.config import STATE_DIR, get_mode, state_path
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
     apply_architecture_kernel_schema,
@@ -31,7 +31,7 @@ def _zeus_trade_db_path(mode: str | None = None) -> Path:
     """Physical path for mode-specific trade database.
     Paper and live trade data live in different files.
     Cross-mode reads are unconstructable — different files."""
-    mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
+    mode = mode or get_mode()
     return STATE_DIR / f"zeus-{mode}.db"
 
 
@@ -1560,6 +1560,115 @@ def log_model_eval_run(
     return {"status": "written", "table": "model_eval_run"}
 
 
+def log_selection_family_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    family_id: str,
+    cycle_mode: str,
+    created_at: str,
+    meta: dict,
+    decision_snapshot_id: str | None = None,
+    city: str | None = None,
+    target_date: str | None = None,
+    strategy_key: str | None = None,
+    discovery_mode: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "selection_family_fact"}
+    if not _table_exists(conn, "selection_family_fact"):
+        return {"status": "skipped_missing_table", "table": "selection_family_fact"}
+    if not family_id:
+        return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO selection_family_fact (
+            family_id, cycle_mode, decision_snapshot_id, city, target_date,
+            strategy_key, discovery_mode, created_at, meta_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            family_id,
+            cycle_mode,
+            decision_snapshot_id,
+            city,
+            target_date,
+            strategy_key,
+            discovery_mode,
+            created_at,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    return {"status": "written", "table": "selection_family_fact"}
+
+
+def log_selection_hypothesis_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    hypothesis_id: str,
+    family_id: str,
+    city: str,
+    target_date: str,
+    range_label: str,
+    direction: str,
+    recorded_at: str,
+    meta: dict,
+    decision_id: str | None = None,
+    candidate_id: str | None = None,
+    p_value: float | None = None,
+    q_value: float | None = None,
+    ci_lower: float | None = None,
+    ci_upper: float | None = None,
+    edge: float | None = None,
+    tested: bool = True,
+    passed_prefilter: bool = False,
+    selected_post_fdr: bool = False,
+    rejection_stage: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
+    if not _table_exists(conn, "selection_hypothesis_fact"):
+        return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
+    if not hypothesis_id:
+        return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
+    if not family_id:
+        return {"status": "skipped_missing_family_id", "table": "selection_hypothesis_fact"}
+    direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO selection_hypothesis_fact (
+            hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
+            range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
+            tested, passed_prefilter, selected_post_fdr, rejection_stage,
+            recorded_at, meta_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hypothesis_id,
+            family_id,
+            decision_id,
+            candidate_id,
+            city,
+            target_date,
+            range_label,
+            direction_value,
+            p_value,
+            q_value,
+            ci_lower,
+            ci_upper,
+            edge,
+            int(bool(tested)),
+            int(bool(passed_prefilter)),
+            int(bool(selected_post_fdr)),
+            rejection_stage,
+            recorded_at,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    return {"status": "written", "table": "selection_hypothesis_fact"}
+
+
 def log_model_eval_point(
     conn: sqlite3.Connection | None,
     *,
@@ -2078,7 +2187,7 @@ def log_outcome_fact(
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", None) or settings.mode
+    env = getattr(pos, "env", None) or get_mode()
     status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
@@ -2309,7 +2418,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         from datetime import datetime
-        env = getattr(pos, "env", None) or settings.mode
+        env = getattr(pos, "env", None) or get_mode()
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
@@ -2598,7 +2707,7 @@ def query_settlement_events(
     _assert_legacy_runtime_position_event_schema(conn)
     legacy_table = _legacy_position_events_table(conn)
     filters = ["event_type = 'POSITION_SETTLED'"]
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     params: list[object] = []
     if query_env:
         filters.append("env = ?")
@@ -3143,7 +3252,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
             if trade_id and parsed is not None:
                 legacy_latest_by_trade[trade_id] = (parsed, str(legacy_row["position_state"] or ""))
 
-    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
+    current_mode = get_mode()
     positions: list[dict] = []
     stale_trade_ids: list[str] = []
     for row in rows:
@@ -3601,7 +3710,7 @@ def query_execution_event_summary(
 ) -> dict:
     _assert_legacy_runtime_position_event_schema(conn)
     legacy_table = _legacy_position_events_table(conn)
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     filters = [
         "env = ?",
         """event_type IN (
@@ -3694,7 +3803,7 @@ def log_position_event(
     if not runtime_trade_id:
         return
 
-    env = getattr(pos, "env", None) or settings.mode
+    env = getattr(pos, "env", None) or get_mode()
     event_timestamp = (
         timestamp
         or getattr(pos, "last_exit_at", "")

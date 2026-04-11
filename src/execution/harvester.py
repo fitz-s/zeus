@@ -18,7 +18,7 @@ import httpx
 
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.store import add_calibration_pair
-from src.config import City, cities_by_name
+from src.config import City, cities_by_name, get_mode
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
@@ -219,7 +219,7 @@ def run_harvester() -> dict:
                 winning_label,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
-                paper_mode=(settings.mode == "paper"),  # Live redemption requires paper_mode=False
+                paper_mode=(get_mode() == "paper"),  # Live redemption requires paper_mode=False
             )
             positions_settled += n_settled
             if n_settled > 0:

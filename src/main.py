@@ -13,7 +13,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from src.config import settings
+from src.config import get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
 from src.state.db import init_schema, get_shared_connection
@@ -259,7 +259,7 @@ def _startup_data_health_check(conn):
 
 
 def main():
-    mode = os.environ.get("ZEUS_MODE", settings.mode)
+    mode = get_mode()
     once = "--once" in sys.argv
     logging.basicConfig(
         level=logging.INFO,

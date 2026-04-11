@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import settings, state_path
+from src.config import get_mode, state_path
 from src.state.db import get_connection
 from src.state.decision_chain import query_no_trade_cases
 
@@ -36,7 +36,7 @@ RISK_DETAILS_REQUIRED_KEYS = (
 
 
 def _mode() -> str:
-    return os.environ.get("ZEUS_MODE", settings.mode)
+    return get_mode()
 
 
 def _launchd_label() -> str:

@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import settings
+from src.config import get_mode
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -34,7 +34,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=(settings.mode == "paper"))
+    clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
     limits = RiskLimits()
 
     summary = {

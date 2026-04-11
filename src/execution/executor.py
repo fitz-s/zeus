@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import settings
+from src.config import get_mode, settings
 from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
@@ -114,7 +114,7 @@ def create_execution_intent(
         limit_price=limit_price,
         toxicity_budget=0.05,
         max_slippage=0.02,
-        is_sandbox=(settings.mode == "paper"),
+        is_sandbox=(get_mode() == "paper"),
         market_id=market_id,
         token_id=order_token,
         timeout_seconds=timeout,

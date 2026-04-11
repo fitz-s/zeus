@@ -46,8 +46,8 @@ def _alerts_disabled() -> bool:
 
 
 def _get_mode() -> str:
-    from src.config import settings
-    return os.environ.get("ZEUS_MODE", settings.mode)
+    from src.config import get_mode
+    return get_mode()
 
 
 def _get_risk_db_path() -> Path:

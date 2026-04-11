@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from src.config import get_mode
 from src.engine.time_context import lead_hours_to_target
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
@@ -252,7 +253,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
-        env=os.environ.get("ZEUS_MODE", deps.settings.mode),
+        env=get_mode(),
     )
 
 

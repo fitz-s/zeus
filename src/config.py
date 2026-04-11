@@ -33,13 +33,25 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
     """
     import os
 
-    mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
+    mode = mode or get_mode()
     dot = filename.rfind(".")
     if dot > 0:
         stem, ext = filename[:dot], filename[dot:]
     else:
         stem, ext = filename, ""
     return STATE_DIR / f"{stem}-{mode}{ext}"
+
+
+def get_mode() -> str:
+    """Canonical mode resolution — the ONLY way to determine paper vs live.
+
+    Priority: ZEUS_MODE env var → settings.json mode field.
+    Every call site that needs to know the current mode MUST use this function.
+    Do NOT read settings.mode directly for mode checks.
+    """
+    import os
+
+    return os.environ.get("ZEUS_MODE", settings.mode)
 
 
 def state_path(filename: str) -> Path:

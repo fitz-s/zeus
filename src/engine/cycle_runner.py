@@ -11,7 +11,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from src.config import cities_by_name, settings
+from src.config import cities_by_name, get_mode, settings
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
@@ -170,7 +170,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=(settings.mode == "paper"))
+    clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
     tracker = get_tracker()
     limits = RiskLimits()
     portfolio_dirty = False

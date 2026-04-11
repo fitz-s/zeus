@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.config import settings, STATE_DIR
+from src.config import get_mode, settings, STATE_DIR
 from src.riskguard.metrics import (
     brier_score,
     directional_accuracy,
@@ -69,7 +69,7 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
         bin_label=str(row.get("bin_label") or ""),
         direction=str(row.get("direction") or "unknown"),
         unit=str(row.get("unit") or "F"),
-        env=str(row.get("env") or settings.mode),
+        env=str(row.get("env") or get_mode()),
         size_usd=float(row.get("size_usd") or 0.0),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
@@ -568,7 +568,7 @@ def tick() -> RiskLevel:
 
     thresholds = settings["riskguard"]
     portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
-    current_env = settings.mode
+    current_env = get_mode()
 
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
     settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})

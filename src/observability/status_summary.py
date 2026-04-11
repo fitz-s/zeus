@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from src.config import settings, state_path
+from src.config import get_mode, settings, state_path
 from src.control.control_plane import (
     get_edge_threshold_multiplier,
     is_entries_paused,
@@ -168,7 +168,7 @@ def write_status(cycle_summary: dict = None) -> None:
         "timestamp": generated_at,
         "process": {
             "pid": os.getpid(),
-            "mode": settings.mode,
+            "mode": get_mode(),
             "version": "zeus_v2",
         },
         "control": {
@@ -326,7 +326,7 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
         bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
         bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
-    status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
+    status = annotate_truth_payload(status, STATUS_PATH, mode=get_mode(), generated_at=generated_at)
     status["truth"]["db_primary_inputs"] = {
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",

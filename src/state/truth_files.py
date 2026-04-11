@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import legacy_state_path, mode_state_path, settings
+from src.config import get_mode, legacy_state_path, mode_state_path
 
 
 LEGACY_STATE_FILES = (
@@ -20,7 +20,7 @@ LEGACY_ARCHIVE_DIR = legacy_state_path("legacy_state_archive")
 
 
 def current_mode(mode: str | None = None) -> str:
-    return mode or os.environ.get("ZEUS_MODE", settings.mode)
+    return mode or get_mode()
 
 
 def build_truth_metadata(

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.config import STATE_DIR, settings, state_path
+from src.config import STATE_DIR, get_mode, settings, state_path
 from src.contracts import (
     HeldSideProbability, 
     NativeSidePrice, 
@@ -795,7 +795,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     path = path or POSITIONS_PATH
 
     import os
-    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
+    current_mode = get_mode()
     json_data = _load_portfolio_json_payload(path)
 
     from src.state.db import (
@@ -942,7 +942,7 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "recent_exits": state.recent_exits,
         "ignored_tokens": state.ignored_tokens,
     }
-    data = annotate_truth_payload(data, path, mode=settings.mode, generated_at=state.updated_at)
+    data = annotate_truth_payload(data, path, mode=get_mode(), generated_at=state.updated_at)
 
     # Atomic write pattern per OpenClaw conventions
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
