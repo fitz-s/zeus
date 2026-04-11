@@ -25,6 +25,30 @@ This means probability mass concentrates at bin boundaries in ways mean-based mo
 
 **Key file**: `src/contracts/settlement_semantics.py`
 
+### Discrete settlement support (mandatory architecture concept)
+
+Discrete settlement support is a **semantic atom**, not an implementation detail. Any work touching uncertainty, calibration, hit-rate analysis, edge math, pricing, or settlement interpretation must treat settlement support as authority before reasoning from continuous physical intuition.
+
+**Three required concepts:**
+
+| Concept | Definition |
+|---------|------------|
+| `bin_contract_kind` | `point` (single integer), `finite_range` (fixed integer set), or `open_shoulder` (unbounded) |
+| `bin_settlement_cardinality` | Number of discrete settled values that resolve the bin to YES |
+| `settlement_support_geometry` | The exact discrete support implied by the venue contract |
+
+**Current Zeus market law:**
+
+1. **Fahrenheit non-shoulder bins** are `finite_range` with cardinality `2` — e.g., `50-51°F` resolves on `{50, 51}`
+2. **Celsius non-shoulder bins** are `point` with cardinality `1` — e.g., `10°C` resolves on `{10}`
+3. **Shoulder bins** are `open_shoulder` — they are NOT ordinary finite bins and must not be reasoned about as symmetric bounded ranges
+
+**Forbidden shortcuts** — no work may infer bin semantics from:
+1. Label punctuation alone
+2. Informal intuition about "1 degree" vs "2 degree" width
+3. Continuous interval width without checking discrete settlement support
+4. Continuous-model variance collapse without justifying discrete contract support
+
 ## 3. Calibration with temporal decay
 
 Raw ensemble probabilities are systematically biased — overconfident at long lead times, underconfident near settlement.

@@ -1,6 +1,6 @@
 File: scripts/AGENTS.md
 Disposition: NEW
-Authority basis: architecture/zones.yaml; architecture/negative_constraints.yaml; docs/authority/zeus_autonomous_delivery_constitution.md; current repo scripts.
+Authority basis: architecture/zones.yaml; architecture/negative_constraints.yaml; docs/authority/zeus_current_delivery.md; current repo scripts.
 Supersedes / harmonizes: informal script scope.
 Why this file exists now: enforcement and audit scripts can quietly overreach or encode stale assumptions.
 Current-phase or long-lived: Long-lived.

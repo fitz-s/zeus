@@ -215,7 +215,7 @@ cycle_runner._execute_monitoring_phase()
 **Live evidence (2026-04-09):** 3 positions (`52280711-260`, `b33ff595-3cb`, `c25e2bfe-769`) still triggering `INCOMPLETE_EXIT_CONTEXT` in day0_capture cycle. Still not confirmed fixed.
 **Proposed antibody:** Make `fresh_prob_is_fresh` a required field for exit evaluation; if it is missing, mark the position as `exit_context_incomplete` and skip exit authority until the next full monitor refresh.
 
-### [P0][OPEN] strategy_tracker can report profit that is not reconstructible from durable DB truth
+### [OPEN] strategy_tracker can report profit that is not reconstructible from durable DB truth
 **Location:** `src/state/strategy_tracker.py`, `zeus/state/strategy_tracker-paper.json`, `zeus/state/positions-paper.json`, `zeus/state/zeus.db`
 **Problem:** `strategy_tracker-paper.json` currently reports `opening_inertia` cumulative PnL of `+247.83`, but the authoritative current-regime cash ledger in `positions-paper.json` only reflects `opening_inertia` realized PnL of `-2.21`. Several large positive `opening_inertia` trades in the tracker (for example `f4e0d2a6-b8a`, `b2086cca-a1a`, `836270b8-2cc`, `8d9071fa-fab`, `eebdb911-99e`, `16a62cac-696`) are not reconstructible from `trade_decisions` or `position_events` in the current DB snapshot.
 **Impact:** A non-authoritative attribution surface can be mistaken for wallet truth, creating a false belief that paper PnL is much higher than the bankroll snapshot actually shows.
@@ -223,40 +223,40 @@ cycle_runner._execute_monitoring_phase()
 
 ---
 
-## 2026-04-03 — P0/P1 triage from failed edge-reversal review
+## 2026-04-03 — edge-reversal follow-up triage
 
-### [P0][OPEN] Paper positions have no token_id → chain_state=unknown → stale_legacy_fallback → RiskGuard RED
+### [OPEN] Paper positions have no token_id → chain_state=unknown → stale_legacy_fallback → RiskGuard RED
 **Location:** `src/execution/executor.py`, `src/state/portfolio.py`, `src/engine/cycle_runtime.py`
 **Problem (filed 2026-04-10):** 12 paper positions entered April 7 with no token_id. All have `chain_state="unknown"`, `token_id=""`. Canonical DB projection returns non-ok status → `load_portfolio()` falls back to stale JSON → RiskGuard sees broken portfolio → RED → all new entries blocked since April 7.
 **Evidence (2026-04-10):** `load_portfolio falling back to JSON because canonical projection is unavailable: stale_legacy_fallback` in both zeus-paper.log and riskguard.err. 12 positions in `positions-paper.json` with empty token_id. No new trades in cycle logs since April 7 despite active April 11 markets.
 **Impact:** Zero new trades for 3 days. Polymarket has 47 active April 11 markets with prices, but system cannot enter due to RED block.
 **Proposed antibody:** Add a canonical projection preflight in `load_portfolio()` that explicitly checks position chain state — if > N positions have `chain_state=unknown`, mark projection as `degraded` instead of `ok`, and require explicit handling rather than silent fallback.
 
-### [P0][OPEN] Entry sizing is too permissive on reconstructed day0 windows with weak CI
+### [OPEN] Entry sizing is too permissive on reconstructed day0 windows with weak CI
 **Location:** `src/engine/evaluator.py`, `src/engine/monitor_refresh.py`, `src/state/portfolio.py`
 **Problem:** Day0 / `update_reaction` entries can still be sized aggressively even when `ci_lower == ci_upper == 0`, `fill_quality = 0`, and the decision is reconstructed rather than directly observed.
 **Impact:** The system can allocate oversized capital to weakly-supported extreme bins, producing large settlement losses before any runtime reversal has a chance to intervene.
 **Proposed antibody:** Add a hard size cap or rejection gate for reconstructed day0 entries with missing / degenerate CI, and require a nonzero confidence band before allowing full-size execution.
 
-### [P0][OPEN] Some positions never develop a usable monitor-to-exit chain before settlement
+### [OPEN] Some positions never develop a usable monitor-to-exit chain before settlement
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`
 **Problem:** A subset of positions reach settlement with only lifecycle + settlement events and no intermediate monitor/reversal chain, so `EDGE_REVERSAL` never has a chance to fire.
 **Impact:** The system cannot protect itself from fast-moving divergence if the monitor phase does not create an actual executable exit path.
 **Proposed antibody:** Require at least one post-entry monitor scan before settlement-sensitive positions are allowed to age out; if monitoring does not occur, flag the position as `monitor_chain_missing` and escalate.
 
-### [P0][OPEN] Exit evaluation hard-fails when best_bid / exit context is missing
+### [OPEN] Exit evaluation hard-fails when best_bid / exit context is missing
 **Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
 **Problem:** `best_bid is None` currently yields `INCOMPLETE_EXIT_CONTEXT` rather than a conservative fallback.
 **Impact:** Thin books or incomplete market snapshots can suppress exits entirely, even when the live edge has clearly reversed.
 **Proposed antibody:** Add a degraded fallback exit path (mid / last-trade / conservative proxy) and only hard-fail when all market evidence sources are unavailable.
 
-### [P1][PARTIALLY FIXED] EDGE_REVERSAL — hard divergence kill-switch at 0.30 added (2026-04-06, math audit)
+### [PARTIALLY FIXED] EDGE_REVERSAL — hard divergence kill-switch at 0.30 added (2026-04-06, math audit)
 **Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
 **Problem:** Reversal requires two negative confirmations plus an EV gate, so a position can become clearly wrong in settlement truth without ever tripping runtime reversal.
 **Impact:** The system may hold losers through large adverse moves when the market changes quickly but not persistently enough for the current confirmation rule.
 **Proposed antibody:** Keep the conservative reversal path, but add a separate hard divergence kill-switch (single-shot on extreme divergence / velocity) for high-confidence failures.
 
-### [P1][FIXED] Settlement `won` ambiguity split into explicit semantic fields (2026-04-06)
+### [FIXED] Settlement `won` ambiguity split into explicit semantic fields (2026-04-06)
 **Location:** `src/state/db.py`, `src/engine/lifecycle_events.py`, `src/state/decision_chain.py`
 **Problem:** Settlement records stored `won=true` alongside negative PnL, conflating market-bin correctness with trade profitability.
 **Fix (2026-04-06):**

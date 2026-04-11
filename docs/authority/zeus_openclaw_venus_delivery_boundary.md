@@ -1,6 +1,6 @@
 File: docs/authority/zeus_openclaw_venus_delivery_boundary.md
 Disposition: NEW
-Authority basis: docs/authority/zeus_autonomous_delivery_constitution.md; current repo boundary surfaces (src/supervisor_api/contracts.py, src/control/control_plane.py, scripts/healthcheck.py, scripts/audit_architecture_alignment.py, scripts/venus_autonomy_gate.py); foundation package direction; external OMX/OMC/OpenClaw docs.
+Authority basis: docs/authority/zeus_current_delivery.md; docs/authority/zeus_current_architecture.md; current repo boundary surfaces (src/supervisor_api/contracts.py, src/control/control_plane.py, scripts/healthcheck.py, scripts/audit_architecture_alignment.py, scripts/venus_autonomy_gate.py).
 Supersedes / harmonizes: docs/architecture/venus_operator_architecture.md; docs/architecture/venus_zeus_audit_integration_plan.md as active boundary law.
 Why this file exists now: Zeus needs one narrow repo-local statement of what Venus and OpenClaw may and may not do.
 Current-phase or long-lived: Long-lived.

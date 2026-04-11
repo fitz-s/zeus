@@ -29,7 +29,7 @@ Shared world data (ensemble forecasts, observations) lives in `zeus-shared.db`.
 | `src/engine/cycle_runner.py` | Main daemon — runs one forecast→trade cycle |
 | `src/riskguard/` | Independent risk process (separate from main daemon) |
 | `scripts/healthcheck.py` | Daemon alive/dead check (Venus cron target) |
-| `scripts/baseline_experiment.py` | Phase 0 GO/NO-GO gate |
+| `scripts/baseline_experiment.py` | Legacy experiment / baseline utility — not a current program-phase gate |
 
 ## Configuration
 

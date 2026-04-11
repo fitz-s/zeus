@@ -1,10 +1,10 @@
-# Zeus P1–P8 Implementation Decisions
+# Zeus P1–P8 Historical Implementation Decisions
 
 Version: 2026-04-02 (extracted 2026-04-10)
 Source: `docs/authority/zeus_architecture.md` (original 1937 lines)
-Status: Reference — P0-P8 installed; preserved for decision rationale and target-state schemas
+Status: Historical implementation reference — preserved for decision rationale, schemas, migration logic, and coding discipline. Not a current-status surface.
 
-> **Reading note**: The architecture reference (`zeus_architecture.md`) contains canonical tables, events, phases, zones, DB guarantees, and negative constraints. This file preserves the full implementation detail: WHY/WHY NOT decisions for each priority, target-state fact layer schemas, migration plan, coding OS, and anti-vibe checklist.
+> **Reading note**: This file preserves historical implementation detail: WHY/WHY NOT decisions for each priority, fact layer schemas, migration plan, coding OS, and anti-vibe checklist. **Do not read this file as evidence that a priority is currently complete, currently active, or still the right next step.** Current status lives in `docs/operations/current_state.md` and `docs/known_gaps.md`. The enduring architecture tables, events, phases, zones, DB guarantees, and negative constraints live in `docs/authority/zeus_architecture.md`.
 
 ---
 

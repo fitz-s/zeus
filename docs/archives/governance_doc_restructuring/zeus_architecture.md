@@ -1,20 +1,20 @@
 # Zeus Architecture Reference
 
 Version: 2026-04-02 (trimmed 2026-04-10)
-Status: Principal present-tense architecture authority
+Status: Principal architecture authority for enduring semantics, invariants, schema, and truth ownership. Not a current-status or live-readiness surface.
 Original: `docs/archives/architecture/zeus_durable_architecture_spec_original.md` (1937 lines)
 
-> **Reading note**: This file is trimmed to reference-weight. What remains: P0 decision records (WHY/WHY NOT), invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. For P1–P8 full implementation detail (fact layer schemas, migration plan, coding OS, anti-vibe checklist), see `docs/authority/zeus_implementation_decisions.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
+> **Reading note**: This file is trimmed to reference-weight. What remains: historical design rationale, enduring invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. **Do not use the P0–P8 language below to infer current implementation completeness, active blockers, or current priorities.** For current work, read `docs/operations/current_state.md` and `docs/known_gaps.md`. For P1–P8 historical implementation detail, see `docs/authority/zeus_implementation_decisions.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
 
 ---
 
-## §0 Executive verdict
+## §0 Historical executive verdict
 
 Zeus should proceed with the architecture upgrade, but only in **compressed form**.
 
 The repo has already crossed the threshold where the correct center exists: `Position`, monitor-first `CycleRunner`, decision-time snapshot carry-through, and semantic type boundaries are real runtime assets rather than document claims. The next decisive gap is not signal math but the institutionalization of **single authority**, **single learning spine**, and **single protective spine**. External research from public trading/workflow/event-sourcing systems reaches the same conclusion: the right move is not to make Zeus larger, but to make it **harder, narrower, and more explicit**.
 
-The current repo structure shows the precise constraints that must be solved: `CycleRunner` still performs local close on exit decisions, state writes are split across JSON and DB surfaces, `control_plane` still has command-theater characteristics, `riskguard` is still mostly portfolio-level, `strategy_tracker.json` is shadow persistence, and reconciliation still flattens lifecycle states.
+The repo snapshot used to write this document showed the precise constraints that had to be solved at that time: `CycleRunner` still performed local close on exit decisions, state writes were split across JSON and DB surfaces, `control_plane` still had command-theater characteristics, `riskguard` was mostly portfolio-level, `strategy_tracker.json` was shadow persistence, and reconciliation still flattened lifecycle states.
 
 This spec therefore defines:
 
@@ -183,7 +183,7 @@ Spec, invariants, tests, and evidence are authority. Generated code is only a pr
 
 ---
 
-## §4 Priority structure
+## §4 Historical priority structure
 
 > Full implementation detail for each priority: `docs/authority/zeus_implementation_decisions.md`
 

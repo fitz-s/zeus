@@ -26,7 +26,7 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 - `position_events` is a real event spine
 - Open-position truth is still mixed (DB + JSON coexist transitionally)
 - JSON/state-object surfaces still exist as transitional runtime reality
-- `position_current` is target-state, not current-state
+- `position_current` reflects intended canonical projection design; do not infer current migration completion or runtime health from that fact alone
 
 ## Domain rules
 

@@ -24,9 +24,10 @@ Mandatory reads:
 2. `architecture/kernel_manifest.yaml`
 3. `architecture/invariants.yaml`
 4. `architecture/zones.yaml`
-5. `docs/authority/zeus_architecture.md` relevant section
-6. `docs/authority/zeus_change_control_constitution.md`
-7. then code files
+5. `docs/authority/zeus_current_architecture.md`
+6. `docs/authority/zeus_current_delivery.md`
+7. `docs/authority/zeus_change_control_constitution.md` when deep governance applies
+8. then code files
 
 ## Step 3 — Answer the routing questions
 

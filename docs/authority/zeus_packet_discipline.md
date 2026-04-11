@@ -123,10 +123,64 @@ High-sensitivity architecture/governance/schema packets must not self-waive requ
 
 ---
 
+## 8. Market-math packet requirements
+
+Any packet touching market math or settlement semantics must include:
+
+1. `domain_assumptions` — stated explicitly
+2. Authority source for each assumption
+3. Invalidation condition if the assumption is false
+
+All review on market-math or calibration packets must verify:
+
+1. Bin contract kind (point / finite_range / open_shoulder)
+2. Settlement cardinality
+3. Shoulder semantics
+4. Whether the packet respects discrete support rather than only continuous intuition
+
+See `docs/reference/zeus_domain_model.md` §2 (discrete settlement support) for the domain definitions.
+
+---
+
+## 9. Micro-event logging
+
+### Separation of concerns
+
+| Surface | Purpose | Who may write |
+|---------|---------|---------------|
+| Packet-level progress tracking | Durable state transitions, blockers, evidence | Packet owner only |
+| `.omx/context/<packet>-worklog.md` | Micro-events, retries, scout findings, experiment breadcrumbs | Any agent |
+
+Small events, retries, scout findings, timeout notes, and experiment breadcrumbs belong in the worklog, not in packet-level tracking. Promote a worklog fact only when it becomes a real state transition, blocker, or accepted evidence item.
+
+### Preferred micro-event format
+
+```md
+## [timestamp local] <packet> <slice-or-event>
+- Author:
+- Lane:
+- Type: scout | retry | timeout | evidence | blocker | note
+- Files:
+- Finding:
+- Evidence:
+- Suggested next slice:
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `Author` | Yes | Agent identity or model name |
+| `Lane` | Yes | Execution lane (main, scout-1, critic, etc.) |
+| `Type` | Yes | One of: `scout`, `retry`, `timeout`, `evidence`, `blocker`, `note` |
+| `Files` | If applicable | Files read or modified |
+| `Finding` | Yes | What was discovered or attempted |
+| `Evidence` | If applicable | Test output, grep result, error message |
+| `Suggested next slice` | Optional | What should happen next |
+
+---
+
 ## Related documents
 
 - `AGENTS.md` §7 — Working discipline (summary + cross-reference)
-- `docs/authority/zeus_autonomous_delivery_constitution.md` — Full delivery constitution
+- `docs/authority/zeus_current_delivery.md` — Current delivery entrypoint and authority order
 - `docs/authority/zeus_change_control_constitution.md` — Change control rules
-- `docs/authority/zeus_autonomy_gates.md` — Team mode and autonomy gate conditions
-- `docs/authority/zeus_micro_event_logging.md` — Micro-event logging format and rules
+- `docs/authority/zeus_autonomy_gates.md` — Autonomy gates and team mode restrictions

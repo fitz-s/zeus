@@ -89,15 +89,15 @@ Zeus 现在已经对时间语义这么做了：
 
 ## Strategic Priority Now
 
-### P0
+### Near-term priorities
 - 提升历史 replay 的 vector compatibility，而不是继续改 replay 主逻辑
 - 继续让新的 `decision_log` / `shadow_signals` 样本稳定进入库
 
-### P1
+### Mid-term priorities
 - 扩大 `historical_forecasts` 覆盖率
 - 让 token price history 在历史 replay 中发挥更强作用
 
-### P2
+### Later priorities
 - 再考虑更大规模地吃 `51 source data` 的原始资产
 - 只在它们能形成 Zeus-owned schema + ETL + runtime consumer 时推进
 

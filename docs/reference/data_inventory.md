@@ -395,3 +395,27 @@ The main unfinished work is not architecture discovery anymore. It is density co
 
 - `TIGGE` historical daily coverage
 - `WU/HKO` seasonal depth
+
+## Data Utilization Status
+
+### Fully load-bearing (no longer "unused")
+
+| Asset | Status |
+|-------|--------|
+| `observation_instants` | Formal time-semantic main chain |
+| `solar_daily` | Formal time-semantic main chain |
+| hourly observations | Consumed via `observation_instants` → `diurnal_curves` / `diurnal_peak_prob` |
+| `settlements` | Calibration / replay / truth main chain |
+| daily `observations` | Persistence / truth logic |
+| `forecast_skill` | Fully imported |
+| `token_price_log` | Monitor velocity, PnL hindsight, partial replay audit |
+
+### Still partially unused
+
+1. **Historical forecast coverage**: `28,006 / 171,003` imported — ~84% still missing. Limits long-term alpha / model skill statistics.
+2. **Historical replay compatibility**: 1,385 settlements total but only 26 vector-compatible snapshots. Core gap is old `p_raw_json` shape, old label normalization, and missing decision-time references — not raw volume.
+3. **Token-price path as replay prior**: Runtime monitor and hindsight audit use it, but full historical replay prior reconstruction is incomplete.
+
+### Not the main problem anymore
+
+DST / sunrise / sunset, hourly observation timing, Day0 time semantics, and semantic snapshot spine are all in the main chain now. Do not describe these as "unused data."

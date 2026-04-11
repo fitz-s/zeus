@@ -1,6 +1,6 @@
 File: architecture/AGENTS.md
 Disposition: NEW
-Authority basis: docs/authority/zeus_architecture.md; docs/authority/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; architecture/maturity_model.yaml.
+Authority basis: docs/authority/zeus_current_architecture.md; docs/authority/zeus_current_delivery.md; docs/authority/zeus_change_control_constitution.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/zones.yaml; architecture/negative_constraints.yaml; architecture/maturity_model.yaml.
 Supersedes / harmonizes: informal architecture claims in historical docs.
 Why this file exists now: this is the K0/K1 law zone and needs narrower instructions than the repo root.
 Current-phase or long-lived: Long-lived.

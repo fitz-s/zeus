@@ -10,8 +10,8 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 | Directory | Purpose | Files |
 |-----------|---------|-------|
-| `authority/` | Architecture specs + governance — constitutions, packet discipline, autonomy gates, boundary law, decision register, architecture specs | 12 |
-| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy | 9 |
+| `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 6 |
+| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy | 7 |
 | `operations/` | Live control-entry pointer + current work packets | 1 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 
@@ -19,10 +19,10 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 - `../AGENTS.md` — root operating brief (read first, always)
 - `reference/zeus_domain_model.md` — "Zeus in 5 minutes" domain model with WHY explanations
-- `authority/zeus_architecture.md` — architecture reference (DB schema, event spine, truth surfaces)
-- `authority/zeus_target_state.md` — target-state (P9-P11, endgame clause)
+- `authority/zeus_current_architecture.md` — active architecture law (truth surfaces, lifecycle, risk, zones)
+- `authority/zeus_current_delivery.md` — active delivery law (authority order, planning lock, packet routing)
 - `known_gaps.md` — active operational gap register
-- `operations/current_state.md` — single live control-entry pointer
+- `operations/current_state.md` — single live control-entry pointer; current branch / packet truth
 - `../workspace_map.md` — directory guide and file placement rules (repo root)
 
 ## Archives

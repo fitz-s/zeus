@@ -1,25 +1,25 @@
 # Zeus Target State
 
 Version: 2026-04-05 (trimmed 2026-04-10)
-Status: **FINAL**. Terminal target-state authority and endgame clause.
+Status: Historical target-state authority. Preserve as design law for intended end-state semantics, not as current runtime/readiness truth.
 Original: `docs/archives/specs/zeus_FINAL_spec_original.md` (627 lines)
 
-> **Reading note**: This file is trimmed. INV-01..10 and §2 architectural intent live in `docs/authority/zeus_architecture.md`. This file adds INV-11/12/13, defines P9–P11 (the remaining work before live), and contains the binary endgame clause.
+> **Reading note**: This file is a trimmed historical design surface. Use it for end-state semantics, invariant intent, and the original endgame hypothesis. **Do not infer current runtime status, live-readiness, active blockers, or current priorities from this file.** Current truth lives in `docs/operations/current_state.md` and `docs/known_gaps.md`.
 
 ---
 
-## §0 Executive frame
+## §0 Historical executive frame
 
 Zeus is a durable, position-governed weather-arbitrage trading runtime on Polymarket.
 
-As of 2026-04-05:
+Historical snapshot as of 2026-04-05:
 - 112 math tests passing, 97.8% high-confidence hit rate in signal layer.
 - 104 paper trades executed, 33 closed positions.
 - Paper P&L: **-$6.82**. Never taken to live.
-- P0–P8 foundation installed; P7R7 is the current autonomous stop boundary.
-- Two failure classes block live: (a) epistemic fragmentation across signal→strategy→execution (P9), (b) implicit external-reality assumption drift (P10).
+- P0–P8 foundation installed; P7R7 was the then-current autonomous stop boundary.
+- Two failure classes were identified as the then-visible live blockers: (a) epistemic fragmentation across signal→strategy→execution (P9), (b) implicit external-reality assumption drift (P10).
 
-Zeus will not expand further. After P9–P11 land, Zeus either trades live under the §Endgame clause or is archived.
+This section captures the historical endgame hypothesis at that time. It is not a present-tense statement of what Zeus will do next.
 
 ---
 
@@ -38,7 +38,7 @@ Any adjustment to α, Kelly multiplier, edge threshold, or sizing fraction must 
 
 ---
 
-## §4 Priority structure
+## §4 Historical priority structure
 
 ```
 P0  Bearing-capacity prerequisites                    [installed]
@@ -62,7 +62,7 @@ P0–P8 details live in `docs/authority/zeus_architecture.md`.
 
 ---
 
-# PART I — Installed foundation (P0–P8) summary
+# PART I — Historical foundation summary (P0–P8)
 
 - **P0**: Exit intent as lifecycle event; 4 strategy keys frozen; single SQLite transaction boundary; data availability as explicit truth; packetized discipline.
 - **P1**: `position_events` + `position_current`; `append_event_and_project()` API; JSON surfaces become derived.
@@ -76,7 +76,7 @@ P0–P8 details live in `docs/authority/zeus_architecture.md`.
 
 ---
 
-# PART II — Final extensions (P9–P11)
+# PART II — Historical final extensions (P9–P11)
 
 ## P9 — Epistemic contract and provenance enforcement
 
@@ -296,7 +296,7 @@ Drift → classify (critical/moderate/low) → antibody (code/config/doc change)
 
 ---
 
-# PART III — §Endgame clause
+# PART III — Historical §Endgame clause
 
 ## §E1 Binary gate
 
@@ -355,4 +355,4 @@ The author has built architecture faster than he has run experiments. This claus
 >
 > Once those exist, this document can disappear. The endgame clause will decide.
 >
-> **This is FINAL. No v2.**
+> This document is intentionally preserved as the last explicit endgame design. It is not a substitute for current-state evidence.

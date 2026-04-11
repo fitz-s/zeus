@@ -1,80 +1,68 @@
 # Zeus Autonomy Gates
 
 Status: Active governance law
-Source: Extracted from root `AGENTS.md` §2 and §7 (committed version, 2026-04-09)
+Supersedes: former `zeus_autonomy_gates.md` + `team_policy.md` (merged 2026-04-10)
 Referenced by: `AGENTS.md` §7 (working discipline)
 
 ---
 
-## 1. Post-P0.5 autonomy rule
+## 1. Destructive operations are always human-gated
 
-### Before P0.5 is complete and accepted
+The following actions require explicit human approval regardless of autonomy level:
 
-- **No** broad autonomous multi-packet team execution.
-- **No** "open team from momentum."
-- P0.5 does not self-authorize team autonomy while it is still the active packet being implemented.
+- Live cutover timing decisions
+- Data/archive/delete transitions
+- Irreversible migration or cutover switches
+- Authority-surface deletion or demotion that changes the active law stack
 
-### After P0.5 is complete, accepted, AND pushed
-
-AND after a later `FOUNDATION-TEAM-GATE` packet is frozen and accepted:
-- Later phases may use autonomous **packet-by-packet** team execution.
-- Still only one frozen packet at a time.
-- Owner, file boundary, acceptance gate, and blocker policy must still be frozen before team launch.
-
-### Even after P0.5 — permanent restrictions
-
-- Final destructive/cutover work remains **human-gated**.
-- P7 is **never fully autonomous** for final cutover/delete transitions.
-- "Destructive" includes, at minimum:
-  - live cutover timing decisions
-  - data/archive/delete transitions
-  - irreversible migration/cutover switches
-  - authority-surface deletion/demotion that changes the active law stack
+**Why**: A 2026-04-07 session lost multiple edits across 50+ files due to zero commits over 12+ hours of unbounded autonomous work. Destructive operations amplify the damage from state loss.
 
 ---
 
 ## 2. Team mode entry conditions
 
-You may enter `$team`, `omx team`, `/team`, or `omc team` only when:
-- there is an approved packet
-- work is parallelizable
-- one owner remains accountable
-- team members are not being asked to redefine authority
+You may enter team mode (`$team`, `omx team`, `/team`, `omc team`) only when:
+- There is an approved work packet
+- Work is parallelizable
+- One owner remains accountable
+- Team members are not being asked to redefine authority
 
-### Do not teamize
+### Do NOT teamize
 
 - `architecture/**`
 - `docs/authority/**`
-- migration cutover decisions
+- Migration cutover decisions
 - `.claude/CLAUDE.md` compatibility policy
-- supervisor/control-plane semantics
-- packet-less exploratory rewrites
+- Supervisor/control-plane semantics
+- Packet-less exploratory rewrites
 
 ### Use advisory lanes instead
 
-- `omx ask ...`
-- `omc ask ...`
+For read-only consultation without team mode:
+- `omx ask ...` / `omc ask ...`
 - `/ccg`
-- read-only critique/review
-
-### Phase gate
-
-- Before P0.5 is complete, do **not** use team mode as a broad execution default for the foundation mainline.
-- After P0.5, team mode becomes allowed for later phases only on one frozen packet at a time and only after `FOUNDATION-TEAM-GATE` is accepted.
+- Read-only critique/review
 
 ---
 
-## 3. Historical lesson
+## 3. One frozen packet at a time
 
-> A 2026-04-07 session lost multiple edits across 50+ files due to zero commits over 12+ hours of work.
+Autonomous multi-packet team execution is not allowed. Team mode operates on exactly one frozen packet at a time. Before team launch, the following must be frozen:
+- Owner
+- File boundary
+- Acceptance gate
+- Blocker policy
 
-This rule exists to prevent unbounded autonomous sessions from creating unrecoverable state loss.
+---
+
+## 4. Serialization rule
+
+When multiple agents edit files in parallel, serialize writes to the same file — one agent per file, or coordinate via SendMessage.
 
 ---
 
 ## Related documents
 
 - `docs/authority/zeus_packet_discipline.md` — Packet discipline and closure rules
-- `docs/authority/team_policy.md` — Team mode usage rules (detailed)
+- `docs/authority/zeus_current_delivery.md` — Current delivery entrypoint and authority order
 - `AGENTS.md` §7 — Working discipline (summary + cross-reference)
-- `docs/authority/zeus_autonomous_delivery_constitution.md` — Full delivery constitution

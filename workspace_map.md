@@ -172,12 +172,14 @@ See `docs/README.md` for the docs index.
 
 | Directory | Files | Purpose | AGENTS.md |
 |-----------|-------|---------|-----------|
-| `docs/authority/` | 12 | Architecture specs + governance — constitutions, boundary law, decision register | `docs/authority/AGENTS.md` |
-| `docs/reference/` | 9 | Domain model, data inventory, quantitative research, methodology | `docs/reference/AGENTS.md` |
+| `docs/authority/` | 6 | Current architecture + current delivery law + packet/autonomy/boundary governance | `docs/authority/AGENTS.md` |
+| `docs/reference/` | 7 | Domain model, repo orientation, data status, and conditional research/methodology | `docs/reference/AGENTS.md` |
 | `docs/operations/` | 1 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
 | `docs/archives/` | many | Historical — never active authority | — |
 
 Root docs: `docs/README.md` (index), `docs/known_gaps.md` (operational gap register).
+
+Default active-law docs: `docs/authority/zeus_current_architecture.md`, `docs/authority/zeus_current_delivery.md`.
 
 ---
 
