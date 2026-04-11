@@ -59,6 +59,6 @@ Small events, retries, scout findings, timeout notes, and experiment breadcrumbs
 
 ## Related documents
 
-- `docs/governance/zeus_packet_discipline.md` — Packet closure and evidence rules
+- `docs/authority/zeus_packet_discipline.md` — Packet closure and evidence rules
 - `AGENTS.md` §7 — Working discipline
 - `AGENTS.md` §8 — File placement rules (`.omx/context/` location)

@@ -44,7 +44,7 @@ You may enter `$team`, `omx team`, `/team`, or `omc team` only when:
 ### Do not teamize
 
 - `architecture/**`
-- `docs/governance/**`
+- `docs/authority/**`
 - migration cutover decisions
 - `.claude/CLAUDE.md` compatibility policy
 - supervisor/control-plane semantics
@@ -74,7 +74,7 @@ This rule exists to prevent unbounded autonomous sessions from creating unrecove
 
 ## Related documents
 
-- `docs/governance/zeus_packet_discipline.md` — Packet discipline and closure rules
-- `docs/governance/team_policy.md` — Team mode usage rules (detailed)
+- `docs/authority/zeus_packet_discipline.md` — Packet discipline and closure rules
+- `docs/authority/team_policy.md` — Team mode usage rules (detailed)
 - `AGENTS.md` §7 — Working discipline (summary + cross-reference)
-- `docs/governance/zeus_autonomous_delivery_constitution.md` — Full delivery constitution
+- `docs/authority/zeus_autonomous_delivery_constitution.md` — Full delivery constitution

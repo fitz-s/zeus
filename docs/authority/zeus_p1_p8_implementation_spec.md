@@ -1,7 +1,7 @@
 # Zeus P1–P8 Implementation Spec
 
 Version: 2026-04-02 (extracted 2026-04-10)
-Source: `docs/architecture/zeus_durable_architecture_spec.md` (original 1937 lines)
+Source: `docs/authority/zeus_durable_architecture_spec.md` (original 1937 lines)
 Status: Reference — P0-P8 installed; preserved for decision rationale and target-state schemas
 
 > **Reading note**: The trimmed architecture spec (`zeus_durable_architecture_spec.md`) contains canonical tables, events, phases, zones, DB guarantees, and negative constraints. This file preserves the full implementation detail: WHY/WHY NOT decisions for each priority, target-state fact layer schemas, migration plan, coding OS, and anti-vibe checklist.
@@ -254,7 +254,7 @@ This is how correct ideas become wrong code without anyone "obviously" violating
 LLMs allowed at step 3 unless explicitly tasked with step 2.
 
 ### P8.4 Work packet template
-See `docs/governance/zeus_packet_discipline.md` for the full template and rules.
+See `docs/authority/zeus_packet_discipline.md` for the full template and rules.
 
 ### P8.5 Hard rules for LLM coding
 1. No task may ask an LLM to "implement P1" or "do the ledger refactor" — must be packetized

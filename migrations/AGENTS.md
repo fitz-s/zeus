@@ -1,6 +1,6 @@
 File: migrations/AGENTS.md
 Disposition: NEW
-Authority basis: docs/architecture/zeus_durable_architecture_spec.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/negative_constraints.yaml; docs/governance/zeus_autonomous_delivery_constitution.md.
+Authority basis: docs/authority/zeus_durable_architecture_spec.md; architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/negative_constraints.yaml; docs/authority/zeus_autonomous_delivery_constitution.md.
 Supersedes / harmonizes: ad hoc schema evolution.
 Why this file exists now: schema work is high-friction and partially irreversible.
 Current-phase or long-lived: Long-lived.

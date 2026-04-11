@@ -20,17 +20,17 @@ required_reads:
   - AGENTS.md
   - ZEUS_AUTHORITY.md
   - architecture/self_check/authority_index.md
-  - docs/architecture/zeus_durable_architecture_spec.md
-  - docs/zeus_FINAL_spec.md
-  - docs/governance/zeus_change_control_constitution.md
-  - docs/governance/zeus_autonomous_delivery_constitution.md
+  - docs/authority/zeus_durable_architecture_spec.md
+  - docs/authority/target_state_spec.md
+  - docs/authority/zeus_change_control_constitution.md
+  - docs/authority/zeus_autonomous_delivery_constitution.md
   - architecture/kernel_manifest.yaml
   - architecture/invariants.yaml
   - architecture/negative_constraints.yaml
-  - docs/control/current_state.md
-  - docs/work_packets/GOV-TOP-LAW-EXPANSION.md
+  - docs/operations/current_state.md
+  - docs/operations/GOV-TOP-LAW-EXPANSION.md
 files_may_change:
-  - docs/work_packets/GOV-TOP-LAW-EXPANSION.md
+  - docs/operations/GOV-TOP-LAW-EXPANSION.md
   - ZEUS_AUTHORITY.md
   - AGENTS.md
   - architecture/self_check/authority_index.md
@@ -38,12 +38,12 @@ files_may_change:
   - docs/reference/repo_overview.md
   - docs/reference/workspace_map.md
 files_may_not_change:
-  - docs/governance/**
+  - docs/authority/**
   - architecture/kernel_manifest.yaml
   - architecture/invariants.yaml
   - architecture/negative_constraints.yaml
-  - docs/architecture/zeus_durable_architecture_spec.md
-  - docs/zeus_FINAL_spec.md
+  - docs/authority/zeus_durable_architecture_spec.md
+  - docs/authority/target_state_spec.md
   - src/**
   - tests/**
   - scripts/**

@@ -4,7 +4,7 @@ Version: 2026-04-02 (trimmed 2026-04-10)
 Status: Principal present-tense architecture authority
 Original: `docs/archives/architecture/zeus_durable_architecture_spec_original.md` (1937 lines)
 
-> **Reading note**: This file is trimmed to reference-weight. What remains: P0 decision records (WHY/WHY NOT), invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. For P1–P8 full implementation detail (fact layer schemas, migration plan, coding OS, anti-vibe checklist), see `docs/architecture/zeus_p1_p8_implementation_spec.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
+> **Reading note**: This file is trimmed to reference-weight. What remains: P0 decision records (WHY/WHY NOT), invariants, DB schema, canonical events, phase vocabulary, zone model, DB guarantees, and negative constraints. For P1–P8 full implementation detail (fact layer schemas, migration plan, coding OS, anti-vibe checklist), see `docs/authority/zeus_p1_p8_implementation_spec.md`. For domain intuition, read `docs/reference/zeus_domain_model.md` first.
 
 ---
 
@@ -120,7 +120,7 @@ P0 exists because the repo cannot safely absorb P1+ if treated like ordinary fea
 - ❌ **Rely on long prompts.** Long prompts do not create execution discipline.
 - ❌ **Trust individual LLM competence.** The failure mode is not intelligence but translation loss, omission, and shallow local optimization.
 
-**Result**: Work packet template, evidence bundle requirement, atomic patch boundaries, mandatory tests and invariant references, no broad "implement the whole spec" prompts. See `docs/governance/zeus_packet_discipline.md`.
+**Result**: Work packet template, evidence bundle requirement, atomic patch boundaries, mandatory tests and invariant references, no broad "implement the whole spec" prompts. See `docs/authority/zeus_packet_discipline.md`.
 
 ---
 
@@ -185,7 +185,7 @@ Spec, invariants, tests, and evidence are authority. Generated code is only a pr
 
 ## §4 Priority structure
 
-> Full implementation detail for each priority: `docs/architecture/zeus_p1_p8_implementation_spec.md`
+> Full implementation detail for each priority: `docs/authority/zeus_p1_p8_implementation_spec.md`
 
 - **P0** = bearing-capacity prerequisites (installed) — decision records in §P0 above
 - **P1** = canonical lifecycle authority (installed)

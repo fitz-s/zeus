@@ -21,26 +21,26 @@ required_reads:
   - ZEUS_AUTHORITY.md
   - architecture/self_check/authority_index.md
   - docs/README.md
-  - docs/control/current_state.md
+  - docs/operations/current_state.md
   - docs/reference/workspace_map.md
   - docs/archives/work_packets/GOV-PACKET-ENTRY-CONTROL-SURFACE.md
   - docs/archives/work_packets/GOV-ROOT-AUTHORITY-GUIDE.md
 files_may_change:
-  - docs/work_packets/GOV-FAST-ARCHIVE-SWEEP.md
+  - docs/operations/GOV-FAST-ARCHIVE-SWEEP.md
   - AGENTS.md
   - architecture/self_check/authority_index.md
   - docs/reference/workspace_map.md
   - .github/workflows/architecture_advisory_gates.yml
   - docs/README.md
-  - docs/control/current_state.md
+  - docs/operations/current_state.md
   - docs/reference/repo_overview.md
-  - docs/control/**
+  - docs/operations/**
   - docs/reference/**
-  - docs/work_packets/**
+  - docs/operations/**
   - scripts/check_work_packets.py
   - scripts/check_advisory_gates.py
   - tests/test_architecture_contracts.py
-  - docs/work_packets/*.md
+  - docs/operations/*.md
   - docs/archives/**
   - docs/ground_truth_pnl.md
   - docs/isolation_design.md
@@ -54,12 +54,12 @@ files_may_change:
   - zeus_data_inventory.xlsx
   - tests/test_day0_exit_gate.py
 files_may_not_change:
-  - docs/governance/**
+  - docs/authority/**
   - architecture/kernel_manifest.yaml
   - architecture/invariants.yaml
   - architecture/negative_constraints.yaml
-  - docs/architecture/zeus_durable_architecture_spec.md
-  - docs/zeus_FINAL_spec.md
+  - docs/authority/zeus_durable_architecture_spec.md
+  - docs/authority/target_state_spec.md
   - src/**
   - migrations/**
 schema_changes: false

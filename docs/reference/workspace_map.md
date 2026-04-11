@@ -38,65 +38,61 @@ Each `src/` package has (or should have) its own `AGENTS.md` with zone-specific 
 
 ### Mesh design principle
 
-`docs/` uses a **flat mesh architecture**: each first-level subdirectory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent context loading fast — agents read only what's linked, not what's adjacent.
+`docs/` uses a **flat mesh architecture**: three active subdirectories plus archives. Each directory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. Agents read only what's linked, not what's adjacent.
 
-### Architecture (active authority)
+### `docs/authority/` — Architecture + Governance (active authority)
 
 | Path | Purpose |
 |------|---------|
-| `docs/architecture/zeus_durable_architecture_spec.md` | Architecture spec — DB schema, event spine, truth surfaces, P0 decisions |
-| `docs/architecture/zeus_p1_p8_implementation_spec.md` | P1-P8 implementation detail — fact layer, migration, coding OS |
-| `docs/architecture/zeus_discrete_settlement_support_amendment.md` | Settlement support as architecture authority |
+| `docs/authority/AGENTS.md` | Authority zone brief |
+| `docs/authority/zeus_durable_architecture_spec.md` | Architecture spec — DB schema, event spine, truth surfaces, P0 decisions |
+| `docs/authority/zeus_p1_p8_implementation_spec.md` | P1-P8 implementation detail — fact layer, migration, coding OS |
+| `docs/authority/zeus_discrete_settlement_support_amendment.md` | Settlement support as architecture authority |
+| `docs/authority/target_state_spec.md` | Target-state spec (P9-P11, endgame clause, INV-11/12/13) |
+| `docs/authority/zeus_change_control_constitution.md` | Packet governance rules (Chinese) |
+| `docs/authority/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority |
+| `docs/authority/team_policy.md` | Team mode usage rules |
+| `docs/authority/zeus_packet_discipline.md` | Packet discipline — closure, pre/post-closeout, waivers |
+| `docs/authority/zeus_micro_event_logging.md` | Micro-event logging format and rules |
+| `docs/authority/zeus_autonomy_gates.md` | Post-P0.5 autonomy rule, team mode entry |
+| `docs/authority/zeus_openclaw_venus_delivery_boundary.md` | Zeus ↔ Venus ↔ OpenClaw boundary law |
+| `docs/authority/zeus_top_tier_decision_register.md` | Auditable register for irreversible choices |
 
-### Reference (load on demand)
+### `docs/reference/` — Reference + Strategy (load on demand)
 
 | Path | Purpose |
 |------|---------|
 | `docs/reference/zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, WHY explanations |
 | `docs/reference/repo_overview.md` | Technical/runtime orientation |
-| `docs/reference/workspace_map.md` | This file |
+| `docs/reference/workspace_map.md` | This file — directory guide and file placement rules |
+| `docs/reference/data_inventory.md` | Current data source status |
+| `docs/reference/data_strategy.md` | Data utilization strategy |
+| `docs/reference/unused_data_inventory.md` | Unused data opportunities |
 | `docs/reference/model_routing.md` | Codex/GPT model routing (Claude/Gemini: skip) |
 | `docs/reference/quantitative_research.md` | Calibration math, Kelly, sample sizes (Chinese) |
 | `docs/reference/market_microstructure.md` | Edge thesis, participant types, entry timing (Chinese) |
 | `docs/reference/statistical_methodology.md` | Three σ, instrument noise, FDR, data versioning (Chinese) |
 
-### Governance (active authority)
+### `docs/operations/` — Control + Active Work
 
 | Path | Purpose |
 |------|---------|
-| `docs/governance/zeus_change_control_constitution.md` | Packet governance rules (Chinese) |
-| `docs/governance/zeus_autonomous_delivery_constitution.md` | Delivery and runtime-governance authority |
-| `docs/governance/team_policy.md` | Team mode usage rules |
-| `docs/governance/zeus_packet_discipline.md` | Packet discipline — closure, pre/post-closeout, waivers |
-| `docs/governance/zeus_micro_event_logging.md` | Micro-event logging format and rules |
-| `docs/governance/zeus_autonomy_gates.md` | Post-P0.5 autonomy rule, team mode entry |
-| `docs/governance/zeus_openclaw_venus_delivery_boundary.md` | Zeus ↔ Venus ↔ OpenClaw boundary law |
-| `docs/governance/zeus_top_tier_decision_register.md` | Auditable register for irreversible choices |
+| `docs/operations/current_state.md` | Current active work packet pointer |
+| `docs/operations/GOV-FAST-ARCHIVE-SWEEP.md` | Work packet (archive sweep) |
+| `docs/operations/GOV-TOP-LAW-EXPANSION.md` | Work packet (top-law expansion) |
 
-### Live documents (docs root)
+### `docs/` root
 
 | Path | Purpose |
 |------|---------|
-| `docs/zeus_FINAL_spec.md` | Target-state spec (P9-P11, endgame clause) |
-| `docs/DATA_IMPROVEMENT_PLAN.md` | Data-improve branch work plan |
+| `docs/README.md` | Docs index |
 | `docs/known_gaps.md` | Active operational gap register |
 
-### Control, strategy, planning
+### `docs/archives/` — Historical (NEVER active authority)
 
-| Path | Purpose |
-|------|---------|
-| `docs/control/current_state.md` | Current active work packet pointer |
-| `docs/strategy/data_inventory.md` | Current data source status |
-| `docs/strategy/data_strategy.md` | Data utilization strategy |
-| `docs/strategy/unused_data_inventory.md` | Unused data opportunities |
-| `docs/work_packets/` | Current live work packet(s) |
-| `docs/plans/` | Execution plans |
+Historical handoffs, audits, findings, sessions, specs, work packets, old architecture, old governance, overlay packages, reality crisis docs.
 
-### Archives (NEVER active authority)
-
-`docs/archives/**` — Historical handoffs, audits, findings, sessions, specs, work packets, old architecture, old governance, overlay packages, reality crisis docs.
-
-Archive subdirectories: `architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`, `governance/`, `handoffs/`, `investigations/`, `math/`, `memory/`, `migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`, `reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`, `traces/`, `work_packets/`.
+Subdirectories: `architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`, `governance/`, `handoffs/`, `investigations/`, `math/`, `memory/`, `migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`, `reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`, `traces/`, `work_packets/`.
 
 Do not treat archived files as live control surfaces unless a work packet explicitly promotes them.
 
@@ -104,10 +100,16 @@ Do not treat archived files as live control surfaces unless a work packet explic
 
 | File | Purpose |
 |------|---------|
-| `kernel_manifest.yaml` | Kernel file ownership and protection rules |
-| `invariants.yaml` | 10 invariant definitions |
-| `zones.yaml` | Zone definitions with import rules |
-| `negative_constraints.yaml` | 10 negative constraint definitions |
+| `architecture/AGENTS.md` | Zone brief for architecture directory |
+| `architecture/kernel_manifest.yaml` | Kernel file ownership and protection rules |
+| `architecture/invariants.yaml` | 10 invariant definitions |
+| `architecture/zones.yaml` | Zone definitions with import rules |
+| `architecture/negative_constraints.yaml` | 10 negative constraint definitions |
+| `architecture/maturity_model.yaml` | Maturity model definitions |
+| `architecture/lifecycle_grammar.md` | Lifecycle grammar specification |
+| `architecture/self_check/zero_context_entry.md` | Zero-context agent entry checklist |
+| `architecture/ast_rules/` | Semgrep rules, forbidden patterns |
+| `architecture/packet_templates/` | Work packet templates (bugfix, feature, refactor, schema) |
 
 ## `config/` — Runtime Parameters
 
@@ -144,17 +146,11 @@ ETL scripts, migration scripts, healthcheck, baseline experiments. Not part of t
 
 | Type | Location | Naming pattern |
 |------|----------|---------------|
-| Active work packets | `docs/work_packets/` | `<PACKET-ID>.md` |
+| Authority docs (specs, constitutions, boundary law) | `docs/authority/` | `zeus_<topic>.md` |
+| Reference material (domain model, data inventory) | `docs/reference/` | `<topic>.md` |
+| Operations (control, plans, work packets) | `docs/operations/` | varies |
 | Completed work packets | `docs/archives/work_packets/` | same name |
-| Progress snapshots | `docs/progress/` | `<topic>_progress.md` |
-| Plans | `docs/plans/` | `<topic>_plan.md` |
-| Strategy docs | `docs/strategy/` | `<topic>_strategy.md` |
-| Architecture specs | `docs/architecture/` | `zeus_<topic>_spec.md` |
-| Governance docs | `docs/governance/` | `zeus_<topic>_constitution.md` |
-| Reference material | `docs/reference/` | `<topic>.md` |
-| Generated reports | `docs/reports/` | `<date>_<topic>.md` |
 | Archives | `docs/archives/<type>/` | original name |
-| Control surfaces | `docs/control/` | `current_state.md` only |
 | Agent micro-logs | `.omx/context/` | `<packet>-worklog.md` |
 
 ## Naming Rules (MANDATORY)

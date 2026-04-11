@@ -1,6 +1,6 @@
-File: docs/governance/zeus_top_tier_decision_register.md
+File: docs/authority/zeus_top_tier_decision_register.md
 Disposition: NEW
-Authority basis: docs/governance/zeus_autonomous_delivery_constitution.md; foundation package; current repo runtime truth surfaces; Session 1 and Session 2 dossiers; official OMX/OMC/OpenClaw/Codex docs.
+Authority basis: docs/authority/zeus_autonomous_delivery_constitution.md; foundation package; current repo runtime truth surfaces; Session 1 and Session 2 dossiers; official OMX/OMC/OpenClaw/Codex docs.
 Supersedes / harmonizes: prior-session compressed judgments as stand-alone decision memory.
 Why this file exists now: high-stakes changes need one auditable register for irreversible choices, not-now boundaries, randomness rules, maintenance economics, and rollback doctrine.
 Current-phase or long-lived: Long-lived, with per-decision review.

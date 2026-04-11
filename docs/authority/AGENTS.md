@@ -1,13 +1,13 @@
-File: docs/governance/AGENTS.md
+File: docs/authority/AGENTS.md
 Disposition: NEW
-Authority basis: docs/governance/zeus_autonomous_delivery_constitution.md; docs/governance/zeus_top_tier_decision_register.md; docs/governance/zeus_foundation_package_map.md; current repo/operator reality.
-Supersedes / harmonizes: scattered workflow guidance; dossier-only delivery rules.
-Why this file exists now: governance docs drift fastest under agentic work unless their scope is explicit.
+Authority basis: docs/authority/zeus_autonomous_delivery_constitution.md; docs/authority/zeus_top_tier_decision_register.md; current repo/operator reality.
+Supersedes / harmonizes: scattered workflow guidance; dossier-only delivery rules; former docs/governance/AGENTS.md.
+Why this file exists now: authority docs drift fastest under agentic work unless their scope is explicit.
 Current-phase or long-lived: Long-lived.
 
-# docs/governance AGENTS
+# docs/authority AGENTS
 
-This directory defines how Zeus is changed, delivered, verified, and operated.
+This directory defines how Zeus is architected, changed, delivered, verified, and operated.
 
 ## Required posture
 - never invent authority that is not backed by spec/manifests/runtime truth
