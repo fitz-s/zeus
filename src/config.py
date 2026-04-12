@@ -51,7 +51,9 @@ def get_mode() -> str:
     """
     import os
 
-    return os.environ.get("ZEUS_MODE", settings.mode)
+    # Phase 2: Zeus is live-only. Hard-coded to 'live'.
+    # Original: return os.environ.get("ZEUS_MODE", settings.mode)
+    return "live"
 
 
 def state_path(filename: str) -> Path:

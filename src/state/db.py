@@ -991,94 +991,16 @@ def _missing_canonical_position_tables(conn: sqlite3.Connection) -> list[str]:
     return missing
 
 
-def backfill_open_legacy_paper_positions(
-    conn: sqlite3.Connection | None,
-    positions: Iterable[object],
-    *,
-    source_module: str = "scripts.backfill_open_positions_canonical",
-) -> dict:
-    positions = list(positions)
-    if conn is None:
-        return {
-            "status": "skipped_no_connection",
-            "seeded_trade_ids": [],
-            "seeded_count": 0,
-        }
-    if not _canonical_position_surface_available(conn):
-        return {
-            "status": "skipped_missing_canonical_tables",
-            "missing_tables": _missing_canonical_position_tables(conn),
-            "seeded_trade_ids": [],
-            "seeded_count": 0,
-        }
+def _DELETED_backfill_open_legacy_paper_positions(*args, **kwargs):
+    """DELETED in Phase 2: completed migration artifact that only processed paper positions.
+    Original: 87 lines at db.py:994-1081. Callers: scripts/backfill_open_positions_canonical.py (dead script),
+    tests/test_architecture_contracts.py (dead test). Both need cleanup."""
+    raise RuntimeError("backfill_open_legacy_paper_positions deleted in Phase 2 — paper migration is complete")
 
-    from src.engine.lifecycle_events import build_entry_canonical_write, canonical_phase_for_position
 
-    seeded_trade_ids: list[str] = []
-    skipped_existing_trade_ids: list[str] = []
-    skipped_non_open_trade_ids: list[str] = []
-    skipped_non_paper_trade_ids: list[str] = []
+# Keep the old name as an alias so imports don't crash at module load time
+backfill_open_legacy_paper_positions = _DELETED_backfill_open_legacy_paper_positions
 
-    for position in positions:
-        trade_id = str(getattr(position, "trade_id", "") or "").strip()
-        if not trade_id:
-            raise ValueError("cannot backfill canonical open position without trade_id")
-
-        env = str(getattr(position, "env", "") or "live").strip()
-        if env != "paper":
-            skipped_non_paper_trade_ids.append(trade_id)
-            continue
-
-        canonical_phase = canonical_phase_for_position(position)
-        if canonical_phase not in OPEN_EXPOSURE_PHASES:
-            skipped_non_open_trade_ids.append(trade_id)
-            continue
-
-        event_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
-                (trade_id,),
-            ).fetchone()[0]
-        )
-        projection_row = conn.execute(
-            """
-            SELECT 1
-            FROM position_current
-            WHERE position_id = ? OR trade_id = ?
-            LIMIT 1
-            """,
-            (trade_id, trade_id),
-        ).fetchone()
-        projection_exists = projection_row is not None
-        if bool(event_count) != projection_exists:
-            raise RuntimeError(
-                f"partial canonical state blocks open-position backfill for {trade_id}"
-            )
-        if event_count and projection_exists:
-            skipped_existing_trade_ids.append(trade_id)
-            continue
-
-        events, projection = build_entry_canonical_write(
-            position,
-            decision_id=None,
-            source_module=source_module,
-        )
-        append_many_and_project(conn, events, projection)
-        seeded_trade_ids.append(trade_id)
-
-    status = "seeded" if seeded_trade_ids else "seeded_empty"
-    return {
-        "status": status,
-        "candidate_count": len(positions),
-        "seeded_trade_ids": seeded_trade_ids,
-        "seeded_count": len(seeded_trade_ids),
-        "skipped_existing_trade_ids": skipped_existing_trade_ids,
-        "skipped_existing_count": len(skipped_existing_trade_ids),
-        "skipped_non_open_trade_ids": skipped_non_open_trade_ids,
-        "skipped_non_open_count": len(skipped_non_open_trade_ids),
-        "skipped_non_paper_trade_ids": skipped_non_paper_trade_ids,
-        "skipped_non_paper_count": len(skipped_non_paper_trade_ids),
-    }
 
 def record_shadow_attribution_trade(
     conn: sqlite3.Connection,
@@ -3670,6 +3592,7 @@ def query_execution_event_summary(
         "EXIT_ORDER_FILLED": "exit_filled",
         "EXIT_ORDER_VOIDED": "exit_fill_confirmed",
         "EXIT_ORDER_REJECTED": "exit_backoff_exhausted",
+        "EXIT_RETRY_SCHEDULED": "exit_retry_scheduled",
     }
 
     for row in rows:
