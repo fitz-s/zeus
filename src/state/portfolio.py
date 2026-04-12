@@ -680,6 +680,18 @@ def _load_portfolio_json_payload(path: Path) -> dict:
     return data
 
 
+def _guard_deprecated_portfolio_json(path: Path) -> None:
+    try:
+        _load_portfolio_json_payload(path)
+    except DeprecatedStateFileError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Ignoring unreadable derived portfolio JSON sidecar while DB authority is unavailable: %s",
+            exc,
+        )
+
+
 def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> PortfolioState:
     position_fields = {f.name for f in fields(Position)}
     positions = []
@@ -719,15 +731,15 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             ", ".join(skipped_terminal[:10]) + ("..." if len(skipped_terminal) > 10 else ""),
         )
 
-    bankroll = data.get("bankroll", 150.0)
+    bankroll = float(settings.capital_base_usd)
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
-        updated_at=data.get("updated_at", ""),
+        updated_at="",
         audit_logging_enabled=True,
-        daily_baseline_total=data.get("daily_baseline_total", bankroll),
-        weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
-        recent_exits=data.get("recent_exits", []),
+        daily_baseline_total=bankroll,
+        weekly_baseline_total=bankroll,
+        recent_exits=[],
         ignored_tokens=[],
     )
 
@@ -821,9 +833,8 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
     path = path or POSITIONS_PATH
 
-    import os
     current_mode = get_mode()
-    json_data = _load_portfolio_json_payload(path)
+    bankroll = float(settings.capital_base_usd)
 
     from src.state.db import (
         get_connection,
@@ -855,9 +866,12 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
             exc_info=True,
         )
+        _guard_deprecated_portfolio_json(path)
         return PortfolioState(
             positions=[],
-            bankroll=json_data.get("bankroll", 150.0),
+            bankroll=bankroll,
+            daily_baseline_total=bankroll,
+            weekly_baseline_total=bankroll,
             portfolio_loader_degraded=True,
         )
 
@@ -889,14 +903,16 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             snapshot.get("status"),
             policy.reason,
         )
+        _guard_deprecated_portfolio_json(path)
         return PortfolioState(
             positions=[],
-            bankroll=json_data.get("bankroll", 150.0),
+            bankroll=bankroll,
+            daily_baseline_total=bankroll,
+            weekly_baseline_total=bankroll,
             ignored_tokens=ignored_tokens,
             portfolio_loader_degraded=True,
         )
 
-    bankroll = json_data.get("bankroll", 150.0)
     positions = [
         _position_from_projection_row(
             row,
@@ -907,10 +923,10 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
-        updated_at=json_data.get("updated_at", ""),
+        updated_at="",
         audit_logging_enabled=True,
-        daily_baseline_total=json_data.get("daily_baseline_total", bankroll),
-        weekly_baseline_total=json_data.get("weekly_baseline_total", bankroll),
+        daily_baseline_total=bankroll,
+        weekly_baseline_total=bankroll,
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
         ignored_tokens=ignored_tokens,
     )

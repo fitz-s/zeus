@@ -36,6 +36,7 @@ from src.state.db import get_connection, init_schema, query_position_events
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
+    DeprecatedStateFileError,
     ExitContext,
     ExitDecision,
     PortfolioState,
@@ -1593,6 +1594,12 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
             "no_token_id": "json-no",
         }],
         "bankroll": 99.0,
+        "recent_exits": [{
+            "city": "NYC",
+            "bin_label": "json-shadow",
+            "target_date": "2026-04-01",
+            "pnl": 99.0,
+        }],
     }))
 
     state = load_portfolio(path)
@@ -1602,7 +1609,10 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     assert state.positions[0].state == "entered"
     assert state.positions[0].token_id == ""
     assert state.positions[0].no_token_id == ""
-    assert state.bankroll == pytest.approx(99.0)
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.daily_baseline_total == pytest.approx(settings.capital_base_usd)
+    assert state.weekly_baseline_total == pytest.approx(settings.capital_base_usd)
+    assert state.recent_exits == []
 
 
 def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, monkeypatch):
@@ -1788,12 +1798,219 @@ def test_json_payload_loader_does_not_hydrate_ignored_tokens():
         {
             "positions": [],
             "bankroll": 99.0,
+            "daily_baseline_total": 88.0,
+            "weekly_baseline_total": 77.0,
+            "recent_exits": [{"pnl": 99.0}],
             "ignored_tokens": ["json-shadow-token"],
         },
         current_mode="live",
     )
 
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.daily_baseline_total == pytest.approx(settings.capital_base_usd)
+    assert state.weekly_baseline_total == pytest.approx(settings.capital_base_usd)
+    assert state.recent_exits == []
     assert state.ignored_tokens == []
+
+
+def test_load_portfolio_ignores_deprecated_json_when_projection_authoritative(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-deprecated-json', 'active', 'db-deprecated-json', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({
+        "truth": {"deprecated": True},
+        "bankroll": 999.0,
+        "positions": [],
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-deprecated-json"]
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+
+
+def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-corrupt-json', 'active', 'db-corrupt-json', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    path.write_text("{not-json")
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-corrupt-json"]
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+
+
+def test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades(tmp_path, monkeypatch):
+    path = tmp_path / "positions-cache.json"
+    path.write_text("{not-json")
+
+    def broken_get_connection(*args, **kwargs):
+        raise OSError("db unavailable")
+
+    monkeypatch.setattr("src.state.db.get_connection", broken_get_connection)
+
+    state = load_portfolio(path)
+
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+
+
+def test_load_portfolio_db_connection_failure_ignores_unreadable_json_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "positions-cache.json"
+    path.write_bytes(b"\xff\xfe")
+
+    def broken_get_connection(*args, **kwargs):
+        raise OSError("db unavailable")
+
+    monkeypatch.setattr("src.state.db.get_connection", broken_get_connection)
+
+    state = load_portfolio(path)
+
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+
+
+def test_load_portfolio_db_connection_failure_rejects_deprecated_json(tmp_path, monkeypatch):
+    path = tmp_path / "positions-cache.json"
+    path.write_text(json.dumps({
+        "truth": {"deprecated": True},
+        "positions": [],
+    }))
+
+    def broken_get_connection(*args, **kwargs):
+        raise OSError("db unavailable")
+
+    monkeypatch.setattr("src.state.db.get_connection", broken_get_connection)
+
+    with pytest.raises(DeprecatedStateFileError):
+        load_portfolio(path)
+
+
+def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    payload = {
+        "contract_version": "position_settled.v1",
+        "winning_bin": "39-40°F",
+        "position_bin": "39-40°F",
+        "won": True,
+        "outcome": 1,
+        "p_posterior": 0.61,
+        "exit_price": 1.0,
+        "pnl": 4.2,
+        "exit_reason": "SETTLEMENT",
+    }
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, order_id, order_status, updated_at
+        ) VALUES (
+            'db-recent-exit', 'active', 'db-recent-exit', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-recent-exit",
+            "db-recent-exit",
+            1,
+            1,
+            "SETTLED",
+            "2026-04-04T01:00:00Z",
+            "pending_exit",
+            "settled",
+            "opening_inertia",
+            "dec-recent-exit",
+            "snap-db",
+            None,
+            None,
+            None,
+            "db-recent-exit:settled:1",
+            None,
+            "test",
+            json.dumps(payload),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({
+        "positions": [],
+        "recent_exits": [{"bin_label": "json-shadow", "pnl": 99.0}],
+    }))
+
+    state = load_portfolio(path)
+
+    assert state.recent_exits == [{
+        "city": "NYC",
+        "bin_label": "39-40°F",
+        "target_date": "2026-04-01",
+        "direction": "buy_yes",
+        "token_id": "",
+        "no_token_id": "",
+        "exit_reason": "SETTLEMENT",
+        "exited_at": "2026-04-04T01:00:00Z",
+        "pnl": 4.2,
+    }]
 
 
 def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, monkeypatch):
@@ -1826,7 +2043,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
     # Empty position_current is canonical healthy truth, not JSON fallback.
     assert state.positions == []
     assert state.portfolio_loader_degraded is False
-    assert state.bankroll == pytest.approx(111.0)
+    assert state.bankroll == pytest.approx(settings.capital_base_usd)
 
 
 def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json(tmp_path, monkeypatch):

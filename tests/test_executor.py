@@ -10,6 +10,7 @@ from src.execution.executor import (
 )
 from src.contracts import EdgeContext, EntryMethod
 import numpy as np
+from src.config import settings
 from src.state.portfolio import (
     Position, PortfolioState, load_portfolio, save_portfolio,
     add_position, remove_position,
@@ -79,7 +80,7 @@ class TestPortfolio:
 
         loaded = load_portfolio(path)
 
-        assert loaded.bankroll == 200.0
+        assert loaded.bankroll == pytest.approx(settings.capital_base_usd)
         assert len(loaded.positions) == 1
         assert loaded.positions[0].trade_id == "t1"
         assert loaded.positions[0].city == "NYC"
