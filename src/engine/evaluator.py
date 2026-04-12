@@ -6,6 +6,7 @@ portfolio state, or execution. Pure function: candidate -> decision.
 
 import json
 import logging
+import hashlib
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -47,6 +48,9 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
+from src.strategy.selection_family import apply_familywise_fdr, make_family_id
+from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import compute_alpha, vwmp
@@ -217,6 +221,267 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     if edge.direction == "buy_yes":
         return "center_buy"
     return "opening_inertia"
+
+
+def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str:
+    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+        return "settlement_capture"
+    if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
+        return "opening_inertia"
+    if hypothesis.is_shoulder:
+        return "shoulder_sell"
+    if hypothesis.direction == "buy_yes":
+        return "center_buy"
+    return "opening_inertia"
+
+
+def _selection_hypothesis_id(
+    *,
+    family_id: str,
+    range_label: str,
+    direction: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "family_id": family_id,
+            "range_label": range_label,
+            "direction": direction,
+        },
+        sort_keys=True,
+    )
+    return "selection_hypothesis:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def _record_selection_family_facts(
+    conn,
+    *,
+    candidate: MarketCandidate,
+    edges: list[BinEdge],
+    filtered: list[BinEdge],
+    hypotheses: list[FullFamilyHypothesis] | None = None,
+    decision_snapshot_id: str,
+    selected_method: str,
+    recorded_at: str,
+) -> dict:
+    """Persist tested selection hypotheses without changing active selection."""
+    if conn is None:
+        return {"status": "skipped_no_connection"}
+    if not edges and not hypotheses:
+        return {"status": "skipped_no_hypotheses"}
+
+    selected_edge_ids = {id(edge) for edge in filtered}
+    selected_edge_keys = {(edge.bin.label, edge.direction) for edge in filtered}
+    cycle_mode = candidate.discovery_mode or "unknown"
+    discovery_mode = candidate.discovery_mode or ""
+    candidate_id = candidate.event_id or candidate.slug or f"{candidate.city.name}|{candidate.target_date}"
+    rows = []
+    if hypotheses is not None:
+        family_id = make_family_id(
+            cycle_mode=cycle_mode,
+            city=candidate.city.name,
+            target_date=candidate.target_date,
+            strategy_key="",
+            discovery_mode=discovery_mode,
+            decision_snapshot_id=decision_snapshot_id,
+        )
+        for hypothesis in hypotheses:
+            strategy_key = _strategy_key_for_hypothesis(candidate, hypothesis)
+            rows.append(
+                {
+                    "family_id": family_id,
+                    "hypothesis_id": _selection_hypothesis_id(
+                        family_id=family_id,
+                        range_label=hypothesis.range_label,
+                        direction=hypothesis.direction,
+                    ),
+                    "strategy_key": "",
+                    "hypothesis_strategy_key": strategy_key,
+                    "candidate_id": candidate_id,
+                    "range_label": hypothesis.range_label,
+                    "direction": hypothesis.direction,
+                    "p_value": float(hypothesis.p_value),
+                    "ci_lower": float(hypothesis.ci_lower),
+                    "ci_upper": float(hypothesis.ci_upper),
+                    "edge": float(hypothesis.edge),
+                    "tested": True,
+                    "passed_prefilter": bool(hypothesis.passed_prefilter),
+                    "active_fdr_selected": (hypothesis.range_label, hypothesis.direction) in selected_edge_keys,
+                    "p_model": float(hypothesis.p_model),
+                    "p_market": float(hypothesis.p_market),
+                    "p_posterior": float(hypothesis.p_posterior),
+                    "entry_price": float(hypothesis.entry_price),
+                }
+            )
+    else:
+        for edge in edges:
+            strategy_key = _strategy_key_for(candidate, edge)
+            family_id = make_family_id(
+                cycle_mode=cycle_mode,
+                city=candidate.city.name,
+                target_date=candidate.target_date,
+                strategy_key=strategy_key,
+                discovery_mode=discovery_mode,
+                decision_snapshot_id=decision_snapshot_id,
+            )
+            rows.append(
+                {
+                    "family_id": family_id,
+                    "hypothesis_id": _selection_hypothesis_id(
+                        family_id=family_id,
+                        range_label=edge.bin.label,
+                        direction=edge.direction,
+                    ),
+                    "strategy_key": strategy_key,
+                    "candidate_id": candidate_id,
+                    "range_label": edge.bin.label,
+                    "direction": edge.direction,
+                    "p_value": float(edge.p_value),
+                    "ci_lower": float(edge.ci_lower),
+                    "ci_upper": float(edge.ci_upper),
+                    "edge": float(edge.edge),
+                    "tested": True,
+                    "passed_prefilter": True,
+                    "active_fdr_selected": id(edge) in selected_edge_ids,
+                    "p_model": float(edge.p_model),
+                    "p_market": float(edge.p_market),
+                    "p_posterior": float(edge.p_posterior),
+                    "entry_price": float(edge.entry_price),
+                }
+            )
+
+    if not rows:
+        return {"status": "skipped_no_hypotheses"}
+
+    selected_rows = apply_familywise_fdr(rows)
+    for row in selected_rows:
+        row["selected_post_fdr"] = int(
+            bool(row.get("selected_post_fdr")) and bool(row.get("passed_prefilter"))
+        )
+    family_meta: dict[str, dict] = {}
+    for row in selected_rows:
+        family_id = make_family_id(
+            cycle_mode=cycle_mode,
+            city=candidate.city.name,
+            target_date=candidate.target_date,
+            strategy_key=row["strategy_key"],
+            discovery_mode=discovery_mode,
+            decision_snapshot_id=decision_snapshot_id,
+        )
+        meta = family_meta.setdefault(
+            family_id,
+            {
+                "tested_hypotheses": 0,
+                "passed_prefilter": 0,
+                "selected_post_fdr": 0,
+                "active_fdr_selected": 0,
+                "selected_method": selected_method,
+            },
+        )
+        meta["tested_hypotheses"] += 1
+        meta["passed_prefilter"] += int(bool(row.get("passed_prefilter")))
+        meta["selected_post_fdr"] += int(row.get("selected_post_fdr") or 0)
+        meta["active_fdr_selected"] += int(bool(row.get("active_fdr_selected")))
+
+    family_writes = 0
+    hypothesis_writes = 0
+    for family_id, meta in family_meta.items():
+        first = next(row for row in selected_rows if row["family_id"] == family_id)
+        result = log_selection_family_fact(
+            conn,
+            family_id=family_id,
+            cycle_mode=cycle_mode,
+            decision_snapshot_id=decision_snapshot_id,
+            city=candidate.city.name,
+            target_date=candidate.target_date,
+            strategy_key=first["strategy_key"],
+            discovery_mode=discovery_mode,
+            created_at=recorded_at,
+            meta=meta,
+        )
+        if result.get("status") == "written":
+            family_writes += 1
+
+    for row in selected_rows:
+        selected_post_fdr = bool(row.get("selected_post_fdr"))
+        result = log_selection_hypothesis_fact(
+            conn,
+            hypothesis_id=row["hypothesis_id"],
+            family_id=row["family_id"],
+            candidate_id=row["candidate_id"],
+            city=candidate.city.name,
+            target_date=candidate.target_date,
+            range_label=row["range_label"],
+            direction=row["direction"],
+            p_value=row["p_value"],
+            q_value=row.get("q_value"),
+            ci_lower=row["ci_lower"],
+            ci_upper=row["ci_upper"],
+            edge=row["edge"],
+            tested=True,
+            passed_prefilter=bool(row.get("passed_prefilter")),
+            selected_post_fdr=selected_post_fdr,
+            rejection_stage=None if selected_post_fdr else "FDR_FILTERED",
+            recorded_at=recorded_at,
+            meta={
+                "active_fdr_selected": bool(row.get("active_fdr_selected")),
+                "hypothesis_strategy_key": row.get("hypothesis_strategy_key", row.get("strategy_key", "")),
+                "p_model": row["p_model"],
+                "p_market": row["p_market"],
+                "p_posterior": row["p_posterior"],
+                "entry_price": row["entry_price"],
+            },
+        )
+        if result.get("status") == "written":
+            hypothesis_writes += 1
+
+    return {
+        "status": "written",
+        "families": family_writes,
+        "hypotheses": hypothesis_writes,
+    }
+
+
+def _selected_edge_keys_from_full_family(
+    candidate: MarketCandidate,
+    hypotheses: list[FullFamilyHypothesis],
+    *,
+    decision_snapshot_id: str,
+) -> set[tuple[str, str]]:
+    if not hypotheses:
+        return set()
+    cycle_mode = candidate.discovery_mode or "unknown"
+    discovery_mode = candidate.discovery_mode or ""
+    rows = []
+    family_id = make_family_id(
+        cycle_mode=cycle_mode,
+        city=candidate.city.name,
+        target_date=candidate.target_date,
+        strategy_key="",
+        discovery_mode=discovery_mode,
+        decision_snapshot_id=decision_snapshot_id,
+    )
+    for hypothesis in hypotheses:
+        rows.append(
+            {
+                "family_id": family_id,
+                "hypothesis_id": _selection_hypothesis_id(
+                    family_id=family_id,
+                    range_label=hypothesis.range_label,
+                    direction=hypothesis.direction,
+                ),
+                "p_value": hypothesis.p_value,
+                "tested": True,
+                "passed_prefilter": hypothesis.passed_prefilter,
+                "range_label": hypothesis.range_label,
+                "direction": hypothesis.direction,
+            }
+        )
+    selected_rows = apply_familywise_fdr(rows)
+    return {
+        (str(row["range_label"]), str(row["direction"]))
+        for row in selected_rows
+        if bool(row.get("selected_post_fdr")) and bool(row.get("passed_prefilter"))
+    }
 
 
 def _availability_status_for_error(exc: Exception) -> str:
@@ -633,12 +898,43 @@ def evaluate_candidate(
         }
     if day0_forecast_context is not None:
         forecast_context["day0"] = day0_forecast_context
-    edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
+    n_bootstrap = edge_n_bootstrap()
+    edges = analysis.find_edges(n_bootstrap=n_bootstrap)
+    try:
+        full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
+    except Exception as exc:
+        logger.warning("Full-family hypothesis scan unavailable; using legacy FDR surface: %s", exc)
+        full_family_hypotheses = []
     entry_validations.append("bootstrap_ci")
 
     # FDR filter
-    filtered = fdr_filter(edges)
+    legacy_filtered = fdr_filter(edges)
+    if full_family_hypotheses:
+        selected_edge_keys = _selected_edge_keys_from_full_family(
+            candidate,
+            full_family_hypotheses,
+            decision_snapshot_id=snapshot_id,
+        )
+        filtered = [
+            edge for edge in edges
+            if (edge.bin.label, edge.direction) in selected_edge_keys
+        ]
+    else:
+        filtered = legacy_filtered
     entry_validations.append("fdr_filter")
+    try:
+        _record_selection_family_facts(
+            conn,
+            candidate=candidate,
+            edges=edges,
+            filtered=filtered,
+            hypotheses=full_family_hypotheses or None,
+            decision_snapshot_id=snapshot_id,
+            selected_method=selected_method,
+            recorded_at=(decision_time or datetime.now(timezone.utc)).isoformat(),
+        )
+    except Exception as exc:
+        logger.warning("Failed to record selection family facts: %s", exc)
 
     if not filtered:
         stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"

@@ -57,6 +57,8 @@ def add_calibration_pair(
     cluster: str,
     forecast_available_at: str,
     settlement_value: Optional[float] = None,
+    decision_group_id: Optional[str] = None,
+    bias_corrected: bool = False,
 ) -> None:
     """Insert a calibration pair (one per bin per settled market).
 
@@ -65,13 +67,17 @@ def add_calibration_pair(
     """
     if settlement_value is not None:
         settlement_value = round(float(settlement_value))
+    if decision_group_id is None:
+        decision_group_id = f"{city}|{target_date}|{forecast_available_at}|lead={lead_days:g}"
     conn.execute("""
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days,
-         season, cluster, forecast_available_at, settlement_value)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         season, cluster, forecast_available_at, settlement_value,
+         decision_group_id, bias_corrected)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (city, target_date, range_label, p_raw, outcome, lead_days,
-          season, cluster, forecast_available_at, settlement_value))
+          season, cluster, forecast_available_at, settlement_value,
+          decision_group_id, int(bool(bias_corrected))))
 
 
 def get_pairs_for_bucket(

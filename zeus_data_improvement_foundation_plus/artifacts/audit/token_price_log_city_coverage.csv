@@ -1,0 +1,17 @@
+city,price_logs,target_days,tokens
+Los Angeles,642100,14,380
+NYC,287707,15,161
+Dallas,279087,14,150
+Seattle,276723,14,154
+Miami,276425,15,154
+San Francisco,254941,14,154
+Chicago,253959,14,154
+Atlanta,253778,14,151
+London,249464,13,139
+Paris,236765,13,139
+Denver,201922,11,118
+Austin,195640,11,121
+Houston,191392,11,121
+Shanghai,166787,10,104
+Seoul,163725,10,102
+Tokyo,161321,10,102

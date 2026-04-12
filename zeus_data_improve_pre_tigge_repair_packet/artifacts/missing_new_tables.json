@@ -1,0 +1,11 @@
+[
+  "probability_trace_fact",
+  "selection_family_fact",
+  "selection_hypothesis_fact",
+  "model_eval_run",
+  "model_eval_point",
+  "promotion_registry",
+  "forecast_error_profile",
+  "day0_residual_fact",
+  "calibration_decision_group"
+]

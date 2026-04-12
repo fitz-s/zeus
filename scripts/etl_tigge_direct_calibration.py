@@ -20,7 +20,7 @@ Target: zeus.db:calibration_pairs + ensemble_snapshots
 import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date
+from src.calibration.effective_sample_size import build_decision_groups, write_decision_groups
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
@@ -40,14 +41,17 @@ TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_e
 # TIGGE dir name → Zeus canonical name
 CITY_MAP = {
     "ankara": "Ankara", "atlanta": "Atlanta", "austin": "Austin",
-    "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+    "auckland": "Auckland", "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+    "busan": "Busan", "cape-town": "Cape Town",
     "chengdu": "Chengdu", "chicago": "Chicago", "chongqing": "Chongqing",
     "dallas": "Dallas", "denver": "Denver",
     "hong-kong": "Hong Kong", "houston": "Houston", "istanbul": "Istanbul",
-    "london": "London", "los-angeles": "Los Angeles", "lucknow": "Lucknow",
+    "jakarta": "Jakarta", "jeddah": "Jeddah",
+    "kuala-lumpur": "Kuala Lumpur", "lagos": "Lagos", "london": "London",
+    "los-angeles": "Los Angeles", "lucknow": "Lucknow",
     "madrid": "Madrid", "mexico-city": "Mexico City", "miami": "Miami",
     "milan": "Milan", "moscow": "Moscow", "munich": "Munich",
-    "nyc": "NYC", "paris": "Paris",
+    "nyc": "NYC", "panama-city": "Panama City", "paris": "Paris",
     "san-francisco": "San Francisco", "sao-paulo": "Sao Paulo",
     "seattle": "Seattle", "seoul": "Seoul", "shanghai": "Shanghai",
     "shenzhen": "Shenzhen", "singapore": "Singapore",
@@ -59,9 +63,48 @@ CITY_MAP = {
 SUPPORTED_TIGGE_CITY_NAMES = frozenset(CITY_MAP.values())
 
 
+def _resolve_city_name(dirname: str) -> str | None:
+    mapped = CITY_MAP.get(dirname)
+    if mapped:
+        return mapped
+    candidate = dirname.replace("-", " ").title()
+    return candidate if candidate in cities_by_name else None
+
+
 def _unsupported_configured_cities() -> list[str]:
     """Return configured cities for which TIGGE data is not available."""
     return sorted(set(cities_by_name) - SUPPORTED_TIGGE_CITY_NAMES)
+
+
+_TIGGE_MEMBER_IDENTITY_FIELDS = (
+    "member",
+    "forecast_type",
+    "short_name",
+    "data_date",
+    "data_time",
+    "step_range",
+)
+
+
+def _normalize_tigge_members(members: list[dict]) -> list[dict]:
+    """Deduplicate repeated TIGGE GRIB messages while preserving 51-member law."""
+    if not members:
+        return []
+    if any(any(field not in member for field in _TIGGE_MEMBER_IDENTITY_FIELDS) for member in members):
+        if len(members) == 51:
+            return list(members)
+        raise ValueError("Cannot deduplicate TIGGE members without identity fields")
+
+    unique: dict[tuple[object, ...], dict] = {}
+    for member in members:
+        key = tuple(member[field] for field in _TIGGE_MEMBER_IDENTITY_FIELDS)
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = member
+            continue
+        if json.dumps(existing, sort_keys=True, default=str) != json.dumps(member, sort_keys=True, default=str):
+            raise ValueError(f"Conflicting duplicate TIGGE member: {key}")
+    return sorted(unique.values(), key=lambda item: (int(item["member"]), str(item["forecast_type"]), str(item["step_range"])))
 
 
 # Cities where T+24h at 00Z is a poor proxy for daily max
@@ -152,12 +195,13 @@ def run_etl(dry_run: bool = False) -> dict:
     skipped_no_json = 0
     skipped_no_settlement = 0
     skipped_already_exists = 0
+    skipped_bad_members = 0
 
     for city_dir in sorted(TIGGE_BASE.iterdir()):
         if not city_dir.is_dir():
             continue
 
-        city_name = CITY_MAP.get(city_dir.name)
+        city_name = _resolve_city_name(city_dir.name)
         if city_name is None:
             skipped_no_city += 1
             continue
@@ -211,8 +255,18 @@ def run_etl(dry_run: bool = False) -> dict:
             except (json.JSONDecodeError, OSError):
                 continue
 
-            members = data.get("members", [])
+            try:
+                members = _normalize_tigge_members(data.get("members", []))
+            except ValueError as e:
+                print(f"  ERROR {city_name} {target_date}: {e}")
+                skipped_bad_members += 1
+                continue
             if len(members) != 51:
+                print(
+                    f"  SKIP {city_name} {target_date}: "
+                    f"{len(members)} unique members from {len(data.get('members', []))} raw (expected 51)"
+                )
+                skipped_bad_members += 1
                 continue
 
             values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
@@ -285,6 +339,14 @@ def run_etl(dry_run: bool = False) -> dict:
 
     if not dry_run:
         conn.commit()
+        groups = build_decision_groups(conn)
+        write_decision_groups(
+            conn,
+            groups,
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            update_pair_rows=True,
+        )
+        conn.commit()
 
     pairs_after = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
     snapshots_after = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
@@ -301,13 +363,14 @@ def run_etl(dry_run: bool = False) -> dict:
         "skipped_no_json": skipped_no_json,
         "skipped_no_settlement": skipped_no_settlement,
         "skipped_already_exists": skipped_already_exists,
+        "skipped_bad_members": skipped_bad_members,
     }
 
     print(f"\nDirect TIGGE Calibration ETL complete:")
     print(f"  Snapshots: {snapshots_before} → {snapshots_after} (+{imported_snapshots})")
     print(f"  Calibration pairs: {pairs_before} → {pairs_after} (+{imported_pairs})")
     print(f"  Skipped: no JSON={skipped_no_json}, no settlement={skipped_no_settlement}, "
-          f"already exists={skipped_already_exists}, no city={skipped_no_city}")
+          f"already exists={skipped_already_exists}, bad members={skipped_bad_members}, no city={skipped_no_city}")
 
     return report
 

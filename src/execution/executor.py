@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.config import get_mode, settings
+from src.riskguard.discord_alerts import alert_trade
 from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
@@ -201,7 +202,7 @@ def _paper_fill(
         intent.direction.value, label, fill_price, intent.limit_price, intent.target_size_usd,
     )
 
-    return OrderResult(
+    result = OrderResult(
         trade_id=trade_id,
         status="filled",
         fill_price=fill_price,
@@ -209,6 +210,19 @@ def _paper_fill(
         submitted_price=intent.limit_price,
         shares=(intent.target_size_usd / fill_price) if fill_price > 0 else 0.0,
     )
+    try:
+        alert_trade(
+            direction="BUY",
+            market=intent.market_id,
+            price=fill_price,
+            size_usd=float(intent.target_size_usd),
+            strategy=label,
+            edge=float(intent.limit_price - fill_price),
+            mode=get_mode(),
+        )
+    except Exception as exc:
+        logger.warning("Discord trade alert failed for paper fill: %s", exc)
+    return result
 
 
 def place_sell_order(
@@ -308,7 +322,7 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             or result.get("id")
             or intent.trade_id
         )
-        return OrderResult(
+        result_obj = OrderResult(
             trade_id=intent.trade_id,
             status="pending",
             reason="sell order posted",
@@ -321,6 +335,19 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=intent.idempotency_key,
         )
+        try:
+            alert_trade(
+                direction="SELL",
+                market=intent.token_id,
+                price=limit_price,
+                size_usd=float(shares * limit_price),
+                strategy="exit_order",
+                edge=float(current_price - limit_price),
+                mode=get_mode(),
+            )
+        except Exception as exc:
+            logger.warning("Discord trade alert failed for exit order: %s", exc)
+        return result_obj
     except Exception as e:
         logger.error("Live exit order failed: %s", e)
         return OrderResult(
@@ -367,7 +394,7 @@ def _live_order(
                 reason="CLOB API returned None",
             )
 
-        return OrderResult(
+        result_obj = OrderResult(
             trade_id=trade_id,
             status="pending",
             reason=f"Order posted, timeout={timeout}s",
@@ -381,6 +408,19 @@ def _live_order(
             submitted_price=intent.limit_price,
             shares=shares,
         )
+        try:
+            alert_trade(
+                direction="BUY",
+                market=intent.market_id,
+                price=intent.limit_price,
+                size_usd=float(shares * intent.limit_price),
+                strategy="live_order",
+                edge=float(intent.limit_price - intent.limit_price),
+                mode=get_mode(),
+            )
+        except Exception as exc:
+            logger.warning("Discord trade alert failed for live order: %s", exc)
+        return result_obj
 
     except Exception as e:
         logger.error("Live order failed: %s", e)

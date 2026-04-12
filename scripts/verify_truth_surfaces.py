@@ -23,7 +23,8 @@ if str(ROOT) not in sys.path:
 
 from src.config import STATE_DIR
 
-DEFAULT_DB = STATE_DIR / "zeus.db"
+DEFAULT_TRADE_DB = STATE_DIR / "zeus-paper.db"
+SHARED_DB = STATE_DIR / "zeus-shared.db"
 RISK_DB = STATE_DIR / "risk_state-paper.db"
 POSITIONS_JSON = STATE_DIR / "positions-paper.json"
 STATUS_JSON = STATE_DIR / "status_summary-paper.json"
@@ -170,11 +171,11 @@ def check_4_status_summary_risk_details() -> tuple[str, str]:
     return status, f"risk.details={detail_summary}"
 
 
-def check_5_settlements_after_mar30(cur) -> tuple[str, str]:
+def check_5_settlements_after_mar30(shared_cur) -> tuple[str, str]:
     """settlements table must have entries for target_date > '2026-03-30'."""
     try:
         count = _scalar(
-            cur,
+            shared_cur,
             "SELECT COUNT(*) FROM settlements WHERE target_date > '2026-03-30'",
         )
     except sqlite3.OperationalError as exc:
@@ -240,7 +241,12 @@ def check_8_no_stale_entered_decisions(cur) -> tuple[str, str]:
     try:
         count = _scalar(
             cur,
-            "SELECT COUNT(*) FROM position_current WHERE target_date < ?",
+            """
+            SELECT COUNT(*)
+            FROM position_current
+            WHERE target_date < ?
+              AND phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+            """,
             TODAY,
         )
     except sqlite3.OperationalError as exc:
@@ -250,18 +256,23 @@ def check_8_no_stale_entered_decisions(cur) -> tuple[str, str]:
         return FAIL, "position_current table missing or query failed"
 
     status = PASS if count == 0 else FAIL
-    return status, f"position_current rows with target_date < {TODAY}: {count}"
+    return status, f"open position_current rows with target_date < {TODAY}: {count}"
 
 
 # ---------------------------------------------------------------------------
 
 def run_checks() -> int:
-    if not DEFAULT_DB.exists():
-        print(f"FATAL: {DEFAULT_DB} not found")
+    if not DEFAULT_TRADE_DB.exists():
+        print(f"FATAL: {DEFAULT_TRADE_DB} not found")
+        return 1
+    if not SHARED_DB.exists():
+        print(f"FATAL: {SHARED_DB} not found")
         return 1
 
-    conn = sqlite3.connect(str(DEFAULT_DB))
+    conn = sqlite3.connect(str(DEFAULT_TRADE_DB))
     cur = conn.cursor()
+    shared_conn = sqlite3.connect(str(SHARED_DB))
+    shared_cur = shared_conn.cursor()
 
     checks = [
         ("1. position_current == trade_decisions[entered]",
@@ -273,7 +284,7 @@ def run_checks() -> int:
         ("4. status_summary risk.details not None",
          check_4_status_summary_risk_details()),
         ("5. settlements has entries after 2026-03-30",
-         check_5_settlements_after_mar30(cur)),
+         check_5_settlements_after_mar30(shared_cur)),
         ("6. risk_state truth_source != working_state_fallback",
          check_6_risk_state_truth_source()),
         ("7. outcome_fact and execution_fact populated",
@@ -283,6 +294,7 @@ def run_checks() -> int:
     ]
 
     conn.close()
+    shared_conn.close()
 
     any_fail = False
     for label, (status, detail) in checks:

@@ -16,7 +16,7 @@ Exit code 0 = healthy, 1 = critical finding.
 
 Usage:
     cd zeus
-    source ../rainstorm/.venv/bin/activate
+    source ../.venv/bin/activate
 
     python scripts/antibody_scan.py              # full scan, human output
     python scripts/antibody_scan.py --json        # JSON for Discord/cron

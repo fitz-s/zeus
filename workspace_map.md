@@ -152,6 +152,7 @@ See `tests/AGENTS.md` for the complete test catalog with invariant mappings.
 | File | Tests |
 |------|-------|
 | `test_ensemble_client.py` | Ensemble data retrieval |
+| `test_backfill_openmeteo_previous_runs.py` | Dynamic-city forecast-history backfill |
 | `test_etl_recalibrate_chain.py` | ETL recalibration chain |
 | `test_observation_*.py` | Observation contracts and instants |
 | `test_solar_etl.py` | Solar time ETL |
@@ -223,14 +224,14 @@ See `config/AGENTS.md` for file registry and rules.
 
 ---
 
-## `scripts/` — Operations & ETL (75 scripts)
+## `scripts/` — Operations & ETL
 
 See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of the runtime.
 
 | Category | Examples |
 |----------|---------|
-| **ETL** | `etl_diurnal_curves.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_solar_times.py`, `etl_tigge_*.py`, `etl_observation_instants.py`, `etl_market_price_history.py` |
-| **Backfill** | `backfill_ens.py`, `backfill_wu_daily_all.py`, `backfill_hourly_openmeteo.py`, `backfill_semantic_snapshots.py`, `backfill_cluster_taxonomy.py`, `backfill_exit_telemetry.py` |
+| **ETL** | `etl_diurnal_curves.py`, `etl_forecast_error_profiles.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_solar_times.py`, `etl_tigge_*.py`, `etl_observation_instants.py`, `etl_market_price_history.py` |
+| **Backfill** | `backfill_ens.py`, `backfill_openmeteo_previous_runs.py`, `backfill_wu_daily_all.py`, `backfill_hourly_openmeteo.py`, `backfill_semantic_snapshots.py`, `backfill_cluster_taxonomy.py`, `backfill_exit_telemetry.py` |
 | **Audit** | `audit_paper_explainability.py`, `audit_realtime_pnl.py`, `audit_replay_*.py`, `audit_divergence_*.py`, `audit_time_semantics.py` |
 | **Architecture checks** | `check_kernel_manifests.py`, `check_module_boundaries.py`, `check_work_packets.py`, `check_advisory_gates.py` |
 | **Analysis** | `analyze_paper_trading.py`, `equity_curve.py`, `baseline_experiment.py`, `automation_analysis.py` |

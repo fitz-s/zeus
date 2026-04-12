@@ -11,7 +11,7 @@ This is the bridge between Phase A (backfill) and Phase B (Platt fitting).
 import json
 import sys
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date
+from src.calibration.effective_sample_size import build_decision_groups, write_decision_groups
 from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import cities_by_name
 from src.data.market_scanner import _parse_temp_range
@@ -120,6 +121,14 @@ def generate_pairs() -> dict:
         by_bucket[bucket_key] += len(bins)
         settlements_processed += 1
 
+    conn.commit()
+    groups = build_decision_groups(conn)
+    write_decision_groups(
+        conn,
+        groups,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
+        update_pair_rows=True,
+    )
     conn.commit()
     conn.close()
 

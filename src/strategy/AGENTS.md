@@ -15,6 +15,7 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `market_analysis.py` | Edge scan + double-bootstrap CI | HIGH — core edge computation |
+| `market_analysis_family_scan.py` | Full tested-family scan for FDR truth | HIGH — FDR accounting |
 | `fdr_filter.py` | Benjamini-Hochberg FDR control | HIGH — false discovery prevention |
 | `kelly.py` | Fractional Kelly sizing + dynamic mult | HIGH — position sizing |
 | `market_fusion.py` | Bayesian P_cal + P_market fusion | HIGH — posterior computation |

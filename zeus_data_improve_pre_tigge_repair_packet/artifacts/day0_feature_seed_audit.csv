@@ -1,0 +1,6 @@
+metric,value
+observation_instants_rows,1107567
+obs_join_missing_solar,55296
+obs_missing_running_max,888084
+obs_missing_delta_rate_per_h,897241
+diurnal_peak_prob_rows,13248

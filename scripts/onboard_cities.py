@@ -6,7 +6,6 @@ achieving data parity with the original 8 cities.
 
 Usage:
     cd zeus
-    source ../rainstorm/.venv/bin/activate
 
     # Auto-discover a new city (looks up ICAO, coords, timezone from name)
     python scripts/onboard_cities.py --discover "Auckland"
@@ -241,9 +240,26 @@ PIPELINE_STEPS = [
         "script": "etl_diurnal_curves.py",
     },
     {
+        "id": "openmeteo_previous_runs",
+        "name": "Backfill historical forecast source rows (Open-Meteo Previous Runs)",
+        "script": "backfill_openmeteo_previous_runs.py",
+        "city_flag": "--cities",
+        "extra_args": ["--days", "95", "--leads", "1,2,3,4,5,6,7"],
+    },
+    {
+        "id": "forecast_skill",
+        "name": "Materialize forecast skill and model bias",
+        "script": "etl_forecast_skill_from_forecasts.py",
+    },
+    {
         "id": "historical_forecasts",
-        "name": "Backfill historical forecast skill",
+        "name": "Materialize historical forecast model skill",
         "script": "etl_historical_forecasts.py",
+    },
+    {
+        "id": "forecast_error_profiles",
+        "name": "Materialize forecast error profiles",
+        "script": "etl_forecast_error_profiles.py",
     },
     {
         "id": "asos_wu_offsets",
@@ -316,19 +332,6 @@ def add_cities_to_config(cities: list[NewCity], dry_run: bool = False) -> list[s
         tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
         tmp.replace(config_path)
         logger.info("  Config updated: %d → %d cities", len(existing_names), len(config["cities"]))
-
-    # Also update rainstorm config if it exists
-    rs_config_path = PROJECT_ROOT.parent / "rainstorm" / "config" / "cities.json"
-    if rs_config_path.exists() and not dry_run and added:
-        rs_config = json.loads(rs_config_path.read_text())
-        rs_existing = {c["name"] for c in rs_config.get("cities", [])}
-        for city in cities:
-            if city.name not in rs_existing and city.name in added:
-                rs_config.setdefault("cities", []).append(_city_to_config_dict(city))
-        tmp = rs_config_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rs_config, indent=2, ensure_ascii=False) + "\n")
-        tmp.replace(rs_config_path)
-        logger.info("  Rainstorm config also updated")
 
     return added
 
@@ -646,17 +649,9 @@ def _print_verification(city_names: list[str]):
         from src.state.db import get_shared_connection
         conn = get_shared_connection()
 
-        tables = [
-            "settlements", "observations", "observation_instants",
-            "market_events", "solar_daily", "temp_persistence",
-            "diurnal_curves", "ensemble_snapshots",
-            "calibration_pairs", "historical_forecasts",
-            "asos_wu_offsets",
-        ]
-
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)
-        for table in tables:
+        for table in _verification_tables():
             try:
                 placeholders = ",".join("?" * len(city_names))
                 row = conn.execute(
@@ -672,6 +667,27 @@ def _print_verification(city_names: list[str]):
         conn.close()
     except Exception as e:
         logger.warning("Verification skipped: %s", e)
+
+
+def _verification_tables() -> list[str]:
+    return [
+        "settlements",
+        "observations",
+        "observation_instants",
+        "market_events",
+        "solar_daily",
+        "temp_persistence",
+        "diurnal_curves",
+        "forecasts",
+        "forecast_skill",
+        "model_bias",
+        "forecast_error_profile",
+        "ensemble_snapshots",
+        "calibration_pairs",
+        "historical_forecasts",
+        "model_skill",
+        "asos_wu_offsets",
+    ]
 
 
 CLUSTER_RULES = [

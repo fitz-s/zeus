@@ -9,7 +9,7 @@ Target: zeus.db:calibration_pairs + ensemble_snapshots
 
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import bucket_key, season_from_date
+from src.calibration.effective_sample_size import build_decision_groups, write_decision_groups
 from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import calibration_clusters, calibration_seasons, cities_by_name
 from src.contracts import SettlementSemantics
@@ -29,15 +30,64 @@ TIGGE_ROOT = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_e
 
 # TIGGE dir name → Zeus canonical name
 CITY_MAP = {
-    "nyc": "NYC", "chicago": "Chicago", "atlanta": "Atlanta",
-    "seattle": "Seattle", "dallas": "Dallas", "miami": "Miami",
-    "los-angeles": "Los Angeles", "san-francisco": "San Francisco",
-    "london": "London", "paris": "Paris", "austin": "Austin",
-    "denver": "Denver", "houston": "Houston",
-    "seoul": "Seoul", "shanghai": "Shanghai", "tokyo": "Tokyo",
-    "buenos-aires": "Buenos Aires", "hong-kong": "Hong Kong",
-    "munich": "Munich", "shenzhen": "Shenzhen", "wellington": "Wellington",
+    "ankara": "Ankara", "atlanta": "Atlanta", "austin": "Austin",
+    "auckland": "Auckland", "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+    "busan": "Busan", "cape-town": "Cape Town",
+    "chengdu": "Chengdu", "chicago": "Chicago", "chongqing": "Chongqing",
+    "dallas": "Dallas", "denver": "Denver",
+    "hong-kong": "Hong Kong", "houston": "Houston", "istanbul": "Istanbul",
+    "jakarta": "Jakarta", "jeddah": "Jeddah",
+    "kuala-lumpur": "Kuala Lumpur", "lagos": "Lagos", "london": "London",
+    "los-angeles": "Los Angeles", "lucknow": "Lucknow",
+    "madrid": "Madrid", "mexico-city": "Mexico City", "miami": "Miami",
+    "milan": "Milan", "moscow": "Moscow", "munich": "Munich",
+    "nyc": "NYC", "panama-city": "Panama City", "paris": "Paris",
+    "san-francisco": "San Francisco", "sao-paulo": "Sao Paulo",
+    "seattle": "Seattle", "seoul": "Seoul", "shanghai": "Shanghai",
+    "shenzhen": "Shenzhen", "singapore": "Singapore",
+    "taipei": "Taipei", "tel-aviv": "Tel Aviv", "tokyo": "Tokyo",
+    "toronto": "Toronto", "warsaw": "Warsaw",
+    "wellington": "Wellington", "wuhan": "Wuhan",
 }
+
+
+def _resolve_city_name(dirname: str) -> str | None:
+    mapped = CITY_MAP.get(dirname)
+    if mapped:
+        return mapped
+    candidate = dirname.replace("-", " ").title()
+    return candidate if candidate in cities_by_name else None
+
+
+_TIGGE_MEMBER_IDENTITY_FIELDS = (
+    "member",
+    "forecast_type",
+    "short_name",
+    "data_date",
+    "data_time",
+    "step_range",
+)
+
+
+def _normalize_tigge_members(members: list[dict]) -> list[dict]:
+    """Deduplicate repeated TIGGE GRIB messages while preserving 51-member law."""
+    if not members:
+        return []
+    if any(any(field not in member for field in _TIGGE_MEMBER_IDENTITY_FIELDS) for member in members):
+        if len(members) == 51:
+            return list(members)
+        raise ValueError("Cannot deduplicate TIGGE members without identity fields")
+
+    unique: dict[tuple[object, ...], dict] = {}
+    for member in members:
+        key = tuple(member[field] for field in _TIGGE_MEMBER_IDENTITY_FIELDS)
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = member
+            continue
+        if json.dumps(existing, sort_keys=True, default=str) != json.dumps(member, sort_keys=True, default=str):
+            raise ValueError(f"Conflicting duplicate TIGGE member: {key}")
+    return sorted(unique.values(), key=lambda item: (int(item["member"]), str(item["forecast_type"]), str(item["step_range"])))
 
 
 def run_etl() -> dict:
@@ -53,12 +103,13 @@ def run_etl() -> dict:
     skipped_no_city = 0
     skipped_no_settlement = 0
     skipped_no_bins = 0
+    skipped_bad_members = 0
 
     for city_dir in sorted(TIGGE_ROOT.iterdir()):
         if not city_dir.is_dir():
             continue
 
-        city_name = CITY_MAP.get(city_dir.name)
+        city_name = _resolve_city_name(city_dir.name)
         if city_name is None:
             skipped_no_city += 1
             continue
@@ -116,8 +167,18 @@ def run_etl() -> dict:
                 except Exception:
                     continue
 
-                members = data.get("members", [])
+                try:
+                    members = _normalize_tigge_members(data.get("members", []))
+                except ValueError as e:
+                    print(f"  ERROR {city_name} {target_date}: {e}")
+                    skipped_bad_members += 1
+                    continue
                 if len(members) != 51:
+                    print(
+                        f"  SKIP {city_name} {target_date} step {step_hours:03d}: "
+                        f"{len(members)} unique members from {len(data.get('members', []))} raw (expected 51)"
+                    )
+                    skipped_bad_members += 1
                     continue
 
                 values = np.array([m["value_native_unit"] for m in members], dtype=np.float64)
@@ -146,7 +207,7 @@ def run_etl() -> dict:
 
                 # Match settlement
                 settlement = conn.execute("""
-                    SELECT winning_bin FROM settlements
+                    SELECT winning_bin, settlement_value FROM settlements
                     WHERE city = ? AND target_date = ?
                 """, (city_name, target_date)).fetchone()
 
@@ -155,6 +216,10 @@ def run_etl() -> dict:
                     continue
 
                 winning_bin = settlement["winning_bin"]
+                settlement_value = settlement["settlement_value"]
+                if winning_bin is None and settlement_value is None:
+                    skipped_no_settlement += 1
+                    continue
                 matched += 1
 
                 # Get bin structure: try market_events first, then synthesize from ENS
@@ -176,8 +241,12 @@ def run_etl() -> dict:
                     else:
                         continue
 
-                    # Match outcome: parse winning temp from winning_bin, check if it falls in this bin
-                    outcome = 1 if _temp_in_bin(winning_bin, low, high) else 0
+                    # Prefer exact settlement_value when available; older rows may
+                    # only carry a winning range label.
+                    if settlement_value is not None:
+                        outcome = 1 if _value_in_bin(float(settlement_value), low, high) else 0
+                    else:
+                        outcome = 1 if _temp_in_bin(str(winning_bin), low, high) else 0
 
                     try:
                         add_calibration_pair(
@@ -196,6 +265,14 @@ def run_etl() -> dict:
                     except Exception:
                         pass  # Duplicate — INSERT OR IGNORE handles this
 
+    conn.commit()
+    groups = build_decision_groups(conn)
+    write_decision_groups(
+        conn,
+        groups,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
+        update_pair_rows=True,
+    )
     conn.commit()
 
     pairs_after = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
@@ -234,6 +311,7 @@ def run_etl() -> dict:
         "skipped_no_city": skipped_no_city,
         "skipped_no_settlement": skipped_no_settlement,
         "skipped_no_bins": skipped_no_bins,
+        "skipped_bad_members": skipped_bad_members,
     }
 
     print(f"\nTIGGE ETL complete:")
@@ -242,6 +320,7 @@ def run_etl() -> dict:
     print(f"  Calibration pairs: {pairs_before} → {pairs_after} (+{pairs_after - pairs_before})")
     print(f"  Ensemble snapshots: {snapshots_before} → {snapshots_after}")
     print(f"  Platt models fitted: {fitted}")
+    print(f"  Bad member files skipped: {skipped_bad_members}")
 
     return report
 
@@ -343,6 +422,16 @@ def _temp_in_bin(winning_range: str, low, high) -> bool:
         return win_temp >= low
     elif low is not None and high is not None:
         return low <= win_temp <= high
+    return False
+
+
+def _value_in_bin(value: float, low, high) -> bool:
+    if low is None and high is not None:
+        return value <= high
+    if high is None and low is not None:
+        return value >= low
+    if low is not None and high is not None:
+        return low <= value <= high
     return False
 
 

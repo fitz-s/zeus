@@ -20,6 +20,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import cities_by_name
+
 
 def season_from_date(date_str: str) -> str:
     """Map date string (YYYY-MM-DD) to season code."""
@@ -45,12 +47,6 @@ SOURCE_MAP = {
     "noaa_ndfd_historical_forecast": "noaa_ndfd",
 }
 
-CELSIUS_CITIES = {
-    "London", "Paris", "Seoul", "Tokyo", "Shanghai", "Shenzhen",
-    "Munich", "Wellington", "Buenos Aires", "Hong Kong", "Singapore",
-    "Taipei", "Beijing",
-}
-
 MODEL_DELAYS = {"ecmwf": 8, "gfs": 6, "icon": 6, "openmeteo": 4, "ukmo": 10, "noaa": 6, "noaa_ndfd": 6}
 
 
@@ -62,8 +58,8 @@ def run_etl() -> dict:
     print(f"historical_forecasts has {existing} existing rows. Running incremental sync...")
 
     rows = zeus.execute("""
-        SELECT city, target_date, source, forecast_high, lead_days,
-               forecast_basis_date
+        SELECT city, target_date, source, forecast_high, forecast_low, lead_days,
+               forecast_basis_date, forecast_issue_time, temp_unit
         FROM forecasts
         WHERE forecast_high IS NOT NULL
     """).fetchall()
@@ -79,7 +75,8 @@ def run_etl() -> dict:
         source_raw = r["source"]
         source = SOURCE_MAP.get(source_raw, source_raw)
         forecast = r["forecast_high"]
-        unit = "C" if city in CELSIUS_CITIES else "F"
+        city_cfg = cities_by_name.get(city)
+        unit = r["temp_unit"] or (city_cfg.settlement_unit if city_cfg else "F")
         lead_days = r["lead_days"]
 
         # Validation: temperature sanity
@@ -91,9 +88,12 @@ def run_etl() -> dict:
             continue
 
         # Reconstruct available_at
-        basis = r["forecast_basis_date"] or r["target_date"]
-        delay_h = MODEL_DELAYS.get(source, 6)
-        available_at = f"{basis}T{delay_h:02d}:00:00Z"
+        if r["forecast_issue_time"]:
+            available_at = r["forecast_issue_time"]
+        else:
+            basis = r["forecast_basis_date"] or r["target_date"]
+            delay_h = MODEL_DELAYS.get(source, 6)
+            available_at = f"{basis}T{delay_h:02d}:00:00Z"
 
         batch.append((
             city, r["target_date"], source, forecast, unit, lead_days, available_at

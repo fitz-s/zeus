@@ -11,6 +11,16 @@ import json
 import sqlite3
 from dataclasses import dataclass
 
+from src.signal.day0_residual_features import (
+    EnsembleContext,
+    daylight_progress,
+    ensemble_remaining_quantiles,
+    latest_ensemble_before,
+    obs_age_minutes,
+    parse_member_values,
+    post_peak_confidence,
+)
+
 
 @dataclass(frozen=True)
 class Day0ResidualFact:
@@ -54,6 +64,27 @@ def _fact_id(city: str, target_date: str, source: str, utc_timestamp: str) -> st
 
 def build_day0_residual_facts(conn: sqlite3.Connection) -> list[Day0ResidualFact]:
     """Build residual facts from observation instants and final settlements."""
+    ensemble_rows = conn.execute(
+        """
+        SELECT city, target_date, available_at, members_json, spread
+        FROM ensemble_snapshots
+        ORDER BY city, target_date, available_at
+        """
+    ).fetchall()
+    ensembles_by_key: dict[tuple[str, str], list[EnsembleContext]] = {}
+    for row in ensemble_rows:
+        members = parse_member_values(row["members_json"])
+        if not members:
+            continue
+        key = (str(row["city"]), str(row["target_date"]))
+        ensembles_by_key.setdefault(key, []).append(
+            EnsembleContext(
+                available_at=str(row["available_at"]),
+                members=members,
+                spread=None if row["spread"] is None else float(row["spread"]),
+            )
+        )
+
     rows = conn.execute(
         """
         SELECT
@@ -66,8 +97,19 @@ def build_day0_residual_facts(conn: sqlite3.Connection) -> list[Day0ResidualFact
             oi.temp_current,
             oi.running_max,
             oi.delta_rate_per_h,
+            oi.imported_at,
+            sd.sunrise_local,
+            sd.sunset_local,
+            dpp.p_high_set AS diurnal_p_high_set,
             s.settlement_value
         FROM observation_instants oi
+        LEFT JOIN solar_daily sd
+          ON sd.city = oi.city
+         AND sd.target_date = oi.target_date
+        LEFT JOIN diurnal_peak_prob dpp
+          ON dpp.city = oi.city
+         AND dpp.month = CAST(strftime('%m', oi.target_date) AS INTEGER)
+         AND dpp.hour = CAST(oi.local_hour AS INTEGER)
         LEFT JOIN settlements s
           ON s.city = oi.city
          AND s.target_date = oi.target_date
@@ -87,6 +129,29 @@ def build_day0_residual_facts(conn: sqlite3.Connection) -> list[Day0ResidualFact
             missing_reasons.append("delta_rate_per_h")
         if row["settlement_value"] is None:
             missing_reasons.append("settlement_value")
+        daylight = daylight_progress(row["local_timestamp"], row["sunrise_local"], row["sunset_local"])
+        if daylight is None:
+            missing_reasons.append("daylight_progress")
+        age_minutes = obs_age_minutes(row["utc_timestamp"], row["imported_at"])
+        if age_minutes is None:
+            missing_reasons.append("obs_age_minutes")
+        peak_confidence = post_peak_confidence(daylight, row["diurnal_p_high_set"])
+        if peak_confidence is None:
+            missing_reasons.append("post_peak_confidence")
+        ensemble = latest_ensemble_before(
+            str(row["utc_timestamp"]),
+            ensembles_by_key.get((str(row["city"]), str(row["target_date"])), []),
+        )
+        q50_remaining, q90_remaining, ensemble_spread = ensemble_remaining_quantiles(
+            row["running_max"],
+            None if ensemble is None else ensemble.members,
+        )
+        if q50_remaining is None:
+            missing_reasons.append("ens_q50_remaining")
+        if q90_remaining is None:
+            missing_reasons.append("ens_q90_remaining")
+        if ensemble_spread is None:
+            missing_reasons.append("ens_spread")
         fact_status = "missing_inputs" if missing_reasons else "complete"
         city = str(row["city"])
         target_date = str(row["target_date"])
@@ -105,12 +170,12 @@ def build_day0_residual_facts(conn: sqlite3.Connection) -> list[Day0ResidualFact
                 temp_current=None if row["temp_current"] is None else float(row["temp_current"]),
                 running_max=None if row["running_max"] is None else float(row["running_max"]),
                 delta_rate_per_h=None if row["delta_rate_per_h"] is None else float(row["delta_rate_per_h"]),
-                daylight_progress=None,
-                obs_age_minutes=None,
-                post_peak_confidence=None,
-                ens_q50_remaining=None,
-                ens_q90_remaining=None,
-                ens_spread=None,
+                daylight_progress=daylight,
+                obs_age_minutes=age_minutes,
+                post_peak_confidence=peak_confidence,
+                ens_q50_remaining=q50_remaining,
+                ens_q90_remaining=q90_remaining,
+                ens_spread=ensemble_spread,
                 settlement_value=None if row["settlement_value"] is None else float(row["settlement_value"]),
                 residual_upside=residual,
                 has_upside=has_upside,

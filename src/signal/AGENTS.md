@@ -13,6 +13,7 @@ If you break the Monte Carlo or remove the sensor noise, P_raw becomes systemati
 | `ensemble_signal.py` | 51 members → P_raw via Monte Carlo | HIGH — core probability engine |
 | `day0_signal.py` | Day-0 observation replaces forecast | MEDIUM — hard floor logic |
 | `day0_residual.py` | Day0 residual target/fact substrate | MEDIUM |
+| `day0_residual_features.py` | Point-in-time Day0 residual feature helpers | MEDIUM |
 | `day0_window.py` | When to enter day-0 mode | LOW |
 | `forecast_uncertainty.py` | Bootstrap σ sources for CI | MEDIUM — feeds double-bootstrap |
 | `forecast_error_distribution.py` | Forecast error distribution substrate | MEDIUM |

@@ -8,7 +8,7 @@ If not configured, alerts are silently skipped (no crash).
 Cooldown tracking in risk_state.db to survive process restarts.
 
 Usage from riskguard.py:
-    from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
+    from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning, alert_redeem, alert_daily_report
 """
 from __future__ import annotations
 
@@ -27,12 +27,15 @@ logger = logging.getLogger("zeus.riskguard.discord")
 COLOR_HALT = 0xFF0000     # Red — trading halted
 COLOR_RESUME = 0x00FF00   # Green — trading resumed
 COLOR_WARNING = 0xFFA500  # Orange — degraded but not halted
+COLOR_REDEEM = 0x00FF00   # Green — redemption completed
+COLOR_DAILY_REPORT = 0x3498DB  # Blue — daily summary
 COLOR_TRADE = 0x3498DB    # Blue — trade notification
 
 # Cooldown periods in seconds
 _COOLDOWN_HALT_RESUME = 1800   # 30 minutes
 _COOLDOWN_WARNING = 600        # 10 minutes
 _COOLDOWN_TRADE = 0            # No cooldown for trade alerts
+_COOLDOWN_DAILY_REPORT = 22 * 3600  # Keep daily summaries to once per day
 
 _KEYCHAIN_RESOLVER = Path.home() / ".openclaw" / "bin" / "keychain_resolver.py"
 _RISK_STATE_DB = Path(__file__).parent.parent.parent / "state" / "risk_state-{mode}.db"
@@ -64,13 +67,11 @@ def _resolve_webhook() -> str | None:
 
     _webhook_resolved = True
 
-    # Try env var first
     env_val = os.environ.get("ZEUS_DISCORD_WEBHOOK")
     if env_val:
         _webhook_url = env_val
         return _webhook_url
 
-    # Try keychain
     if not _KEYCHAIN_RESOLVER.exists():
         logger.debug("Keychain resolver not found; Discord alerts disabled")
         return None
@@ -122,7 +123,7 @@ def _record_sent(db: sqlite3.Connection, alert_key: str) -> None:
     )
 
 
-def _send_embed(level: str, title: str, body: str) -> bool:
+def _send_embed(level: str, title: str, body: str, color: int | None = None) -> bool:
     """Send a Discord webhook embed. Returns True if sent."""
     import httpx
 
@@ -131,8 +132,14 @@ def _send_embed(level: str, title: str, body: str) -> bool:
         logger.debug("Discord webhook not configured; skipping '%s'", title)
         return False
 
-    color = {"halt": COLOR_HALT, "resume": COLOR_RESUME,
-             "warning": COLOR_WARNING, "trade": COLOR_TRADE}.get(level, COLOR_WARNING)
+    color = color if color is not None else {
+        "halt": COLOR_HALT,
+        "resume": COLOR_RESUME,
+        "warning": COLOR_WARNING,
+        "redeem": COLOR_REDEEM,
+        "daily_report": COLOR_DAILY_REPORT,
+        "trade": COLOR_TRADE,
+    }.get(level, COLOR_WARNING)
 
     payload = {
         "embeds": [{
@@ -180,11 +187,7 @@ def _with_cooldown(alert_key: str, cooldown_seconds: int, send_fn) -> bool:
 
 
 def alert_halt(failed_rules: list[dict[str, Any]]) -> bool:
-    """Send halt notification. Cooldown: 30 min.
-
-    Args:
-        failed_rules: list of dicts with 'name', 'value', 'threshold', optional 'detail'
-    """
+    """Send halt notification. Cooldown: 30 min."""
     lines = ["**Trading halted. Failed rules:**\n"]
     for r in failed_rules:
         lines.append(f"- **{r['name']}**: `{r['value']}` (threshold: `{r['threshold']}`)")
@@ -210,6 +213,40 @@ def alert_warning(rule_name: str, value: float, threshold: float, detail: str = 
         body += f"\n{detail}"
     return _with_cooldown(f"warning:{rule_name}", _COOLDOWN_WARNING,
                           lambda: _send_embed("warning", f"WARNING: {rule_name}", body))
+
+
+def alert_redeem(city: str, label: str, condition_id: str, tx_hash: str, gas_used: int | None = None) -> bool:
+    """Send redemption notification for a winning position."""
+    msg_lines = [
+        f"**{city} {label}** (WINNER)",
+        f"Condition: `{condition_id[:24]}...`",
+        f"TX: `{tx_hash[:16]}...`",
+    ]
+    if gas_used is not None:
+        msg_lines.append(f"Gas used: `{gas_used}`")
+    return _send_embed("redeem", "TOKEN REDEEMED", "\n".join(msg_lines))
+
+
+def alert_daily_report(report: dict[str, Any]) -> bool:
+    """Send daily summary notification with PnL-aware coloring."""
+    pnl = float(report.get("total_pnl_usd", 0.0) or 0.0)
+    sign = "+" if pnl >= 0 else ""
+    color = COLOR_DAILY_REPORT if pnl >= 0 else 0xFF4444
+    limit = report.get("loss_limit_usd", 70)
+    calibration = report.get("calibration", {}) or {}
+    brier = calibration.get("brier_score")
+    brier_text = "n/a" if brier is None else f"{float(brier):.3f}"
+    msg = (
+        f"**{report.get('date', 'unknown date')} Zeus Daily Summary**\n"
+        f"PnL: `{sign}${pnl:.2f}` | Trades: `{report.get('total_trades', 0)}`\n"
+        f"W/L: `{report.get('wins', 0)}/{report.get('losses', 0)}` ({float(report.get('win_rate', 0.0) or 0.0):.0%} win rate)\n"
+        f"Runtime: `{report.get('runtime_state') or 'unknown'}` | Gate: `{report.get('trade_gate') or 'normal'}`\n"
+        f"Exposure: `${float(report.get('total_exposure_usd', 0.0) or 0.0):.2f}` | Open positions: `{report.get('open_positions', 0)}`\n"
+        f"Cumulative loss: `${float(report.get('cumulative_loss_usd', 0.0) or 0.0):.2f}` / ${float(limit):.0f}\n"
+        f"Brier: `{brier_text}` | Status: `{'HALTED' if report.get('halted') else 'ACTIVE'}`"
+    )
+    return _with_cooldown("daily_report", _COOLDOWN_DAILY_REPORT,
+                          lambda: _send_embed("daily_report", "Daily Report", msg, color=color))
 
 
 def alert_trade(direction: str, market: str, price: float, size_usd: float,

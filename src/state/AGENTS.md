@@ -12,6 +12,7 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 |------|-------------|--------------|
 | `db.py` | SQLite connection, schema, canonical queries | CRITICAL — truth surface |
 | `portfolio.py` | Position model + portfolio state | CRITICAL — runtime position truth |
+| `portfolio_loader_policy.py` | Explicit DB-vs-fallback portfolio load policy | HIGH — truth source routing |
 | `lifecycle_manager.py` | 9-state lifecycle FSM + `LEGAL_LIFECYCLE_FOLDS` | CRITICAL — INV-01 enforcer |
 | `chain_reconciliation.py` | Chain > Chronicler > Portfolio (3 rules) | HIGH — truth reconciliation |
 | `chronicler.py` | Append-only event log | HIGH — event spine |

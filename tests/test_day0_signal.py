@@ -66,6 +66,40 @@ class TestDay0Signal:
         )
         conn.execute(
             """
+            INSERT INTO solar_daily (
+                city, target_date, timezone, lat, lon, sunrise_local, sunset_local,
+                sunrise_utc, sunset_utc, utc_offset_minutes, dst_active
+            ) VALUES (
+                'NYC', '2026-04-01', 'America/New_York', 40.7, -74.0,
+                '2026-04-01T06:00:00-04:00', '2026-04-01T18:00:00-04:00',
+                '2026-04-01T10:00:00+00:00', '2026-04-01T22:00:00+00:00',
+                -240, 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO diurnal_peak_prob (city, month, hour, p_high_set, n_obs)
+            VALUES ('NYC', 4, 14, 0.75, 100)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots (
+                city, target_date, issue_time, valid_time, available_at, fetch_time,
+                lead_hours, members_json, p_raw_json, spread, is_bimodal,
+                model_version, data_version
+            ) VALUES (
+                'NYC', '2026-04-01',
+                '2026-04-01T12:00:00+00:00', '2026-04-01T18:00:00+00:00',
+                '2026-04-01T17:00:00+00:00', '2026-04-01T17:05:00+00:00',
+                1.0, '[67.0, 68.0, 71.0, 72.0]', '[0.1, 0.9]', 2.0, 0,
+                'test_model', 'test'
+            )
+            """
+        )
+        conn.execute(
+            """
             INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_hour,
                 local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
@@ -94,6 +128,12 @@ class TestDay0Signal:
         assert row["residual_upside"] == pytest.approx(3.0)
         assert row["has_upside"] == 1
         assert row["fact_status"] == "complete"
+        assert row["daylight_progress"] == pytest.approx(2 / 3)
+        assert row["obs_age_minutes"] == pytest.approx(1.0)
+        assert row["post_peak_confidence"] == pytest.approx(0.75)
+        assert row["ens_q50_remaining"] == pytest.approx(2.5)
+        assert row["ens_q90_remaining"] == pytest.approx(4.7)
+        assert row["ens_spread"] is not None
 
     def test_day0_residual_facts_preserve_missing_inputs(self, tmp_path):
         conn = get_connection(tmp_path / "day0_residual_missing.db")
@@ -122,7 +162,7 @@ class TestDay0Signal:
 
         assert len(facts) == 1
         assert facts[0].fact_status == "missing_inputs"
-        assert set(facts[0].missing_reasons) == {"running_max", "settlement_value"}
+        assert {"running_max", "settlement_value"}.issubset(set(facts[0].missing_reasons))
         assert facts[0].residual_upside is None
         assert facts[0].has_upside is None
         assert written == 1

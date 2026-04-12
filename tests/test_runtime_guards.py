@@ -1628,6 +1628,16 @@ def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_pro
     assert state.positions[0].token_id == "yes123"
 
 
+def test_partial_stale_policy_uses_degraded_json_fallback():
+    from src.state.portfolio_loader_policy import choose_portfolio_truth_source
+
+    decision = choose_portfolio_truth_source("partial_stale")
+
+    assert decision.source == "json_fallback"
+    assert decision.escalate is True
+    assert "partial_stale" in decision.reason
+
+
 def test_lead_days_use_city_local_reference_time():
     lead_days = lead_days_to_target(
         "2026-04-01",

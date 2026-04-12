@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 
 from src.calibration.manager import maybe_refit_bucket, season_from_date
+from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name, get_mode
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
@@ -41,6 +42,7 @@ from src.state.portfolio import (
     void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
+from src.riskguard.discord_alerts import alert_redeem
 
 logger = logging.getLogger(__name__)
 
@@ -652,6 +654,21 @@ def harvest_settlement(
 
     logger.info("Harvested %d pairs for %s %s (winner: %s)",
                 count, city.name, target_date, winning_bin_label)
+    if count:
+        group = build_decision_group_for_key(
+            conn,
+            city=city.name,
+            target_date=target_date,
+            forecast_available_at=now,
+            lead_days=lead_days,
+        )
+        if group is not None:
+            write_decision_groups(
+                conn,
+                [group],
+                recorded_at=datetime.now(timezone.utc).isoformat(),
+                update_pair_rows=True,
+            )
     return count
 
 
@@ -743,9 +760,20 @@ def _settle_positions(
             try:
                 from src.data.polymarket_client import PolymarketClient
                 clob = PolymarketClient(paper_mode=False)
-                clob.redeem(pos.condition_id)
+                redeem_result = clob.redeem(pos.condition_id)
                 logger.info("Redeemed winning position %s (condition=%s)",
                             pos.trade_id, pos.condition_id)
+                if redeem_result:
+                    tx_hash = redeem_result.get("tx_hash") or redeem_result.get("hash") or ""
+                    gas_used = redeem_result.get("gas_used")
+                    if tx_hash:
+                        alert_redeem(
+                            city=city,
+                            label=pos.bin_label,
+                            condition_id=pos.condition_id,
+                            tx_hash=tx_hash,
+                            gas_used=gas_used,
+                        )
             except Exception as exc:
                 logger.warning("Redeem failed for %s: %s (USDC still claimable later)",
                                pos.trade_id, exc)

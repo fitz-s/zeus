@@ -28,6 +28,7 @@ from src.state.lifecycle_manager import (
     enter_settled_runtime_state,
     enter_voided_runtime_state,
 )
+from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -887,10 +888,12 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     finally:
         conn.close()
 
-    if snapshot.get("status") not in ("ok", "partial_stale"):
+    policy = choose_portfolio_truth_source(snapshot.get("status"))
+    if policy.source != "canonical_db":
         logger.warning(
-            "load_portfolio falling back to JSON because canonical projection is unavailable: %s",
+            "load_portfolio falling back to JSON because canonical projection is not authoritative: %s (%s)",
             snapshot.get("status"),
+            policy.reason,
         )
         return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
 

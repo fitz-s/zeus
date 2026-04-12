@@ -242,6 +242,23 @@ def test_city_aliases():
     assert "SF" in by_name["San Francisco"].aliases
 
 
+def test_market_scanner_short_aliases_do_not_match_inside_other_city_names():
+    from src.data.market_scanner import _match_city
+
+    assert _match_city(
+        "Highest temperature in Kuala Lumpur on April 12?",
+        "highest-temperature-in-kuala-lumpur-on-april-12-2026",
+    ).name == "Kuala Lumpur"
+    assert _match_city(
+        "Highest temperature in Lagos on April 12?",
+        "highest-temperature-in-lagos-on-april-12-2026",
+    ).name == "Lagos"
+    assert _match_city(
+        "Highest temperature in LA on April 12?",
+        "highest-temperature-in-la-on-april-12-2026",
+    ).name == "Los Angeles"
+
+
 def test_settlement_semantics_matches_city_metadata():
     for city in load_cities():
         sem = SettlementSemantics.for_city(city)

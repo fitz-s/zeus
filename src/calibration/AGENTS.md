@@ -14,6 +14,7 @@ The critical design decision: `lead_days` is an **input feature**, not a bucket 
 | `manager.py` | Calibration lifecycle, maturity gates | HIGH — controls when calibration applies |
 | `store.py` | Persistence of calibration parameters | MEDIUM |
 | `effective_sample_size.py` | Decision-group calibration sample accounting | MEDIUM |
+| `blocked_oos.py` | Blocked out-of-sample calibration evaluation facts | MEDIUM |
 | `drift.py` | Calibration drift detection | MEDIUM |
 
 ## Domain rules

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from src.config import get_mode, settings
+from src.config import cities_by_name, get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
 from src.state.db import init_schema, get_shared_connection, get_trade_connection
@@ -108,9 +108,20 @@ def _etl_recalibrate():
 
     results = {}
 
-    # 1. Refresh ETL tables (diurnal curves, persistence, observations)
+    # 1. Refresh Rainstorm-derived source tables before downstream ETL consumes them.
+    migration_script = scripts_dir / "migrate_rainstorm_full.py"
+    if migration_script.exists():
+        try:
+            r = subprocess.run(
+                [venv_python, str(migration_script)],
+                capture_output=True, text=True, timeout=300,
+            )
+            results["migrate_rainstorm_full"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
+        except Exception as e:
+            results["migrate_rainstorm_full"] = f"ERROR: {e}"
+
+    # 2. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
-        "migrate_rainstorm_full.py",
         "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
@@ -127,7 +138,7 @@ def _etl_recalibrate():
             except Exception as e:
                 results[script] = f"ERROR: {e}"
 
-    # 2. TIGGE direct calibration — pair ENS snapshots with settlement_value
+    # 3. TIGGE direct calibration — pair ENS snapshots with settlement_value
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "etl_tigge_direct_calibration.py")],
@@ -137,7 +148,7 @@ def _etl_recalibrate():
     except Exception as e:
         results["tigge_direct_cal"] = f"ERROR: {e}"
 
-    # 3. Platt refit — critical for calibration accuracy (D5)
+    # 4. Platt refit — critical for calibration accuracy (D5)
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "refit_platt.py")],
@@ -147,7 +158,7 @@ def _etl_recalibrate():
     except Exception as e:
         results["platt_refit"] = f"ERROR: {e}"
 
-    # 4. Replay audit snapshot — track system performance trend
+    # 5. Replay audit snapshot — track system performance trend
     try:
         r = subprocess.run(
             [venv_python, str(scripts_dir / "run_replay.py"),
@@ -214,6 +225,24 @@ def _startup_data_health_check(conn):
                 "correction 2) Refit Platt models 3) Set bias_correction_enabled=true "
                 "4) Run test_cross_module_invariants.py",
                 bias_data,
+            )
+
+        forecast_city_count = conn.execute(
+            "SELECT COUNT(DISTINCT city) FROM forecast_skill"
+        ).fetchone()[0]
+        bias_city_count = conn.execute(
+            "SELECT COUNT(DISTINCT city) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
+        ).fetchone()[0]
+        configured_city_count = len(cities_by_name)
+        if forecast_city_count < configured_city_count or bias_city_count < configured_city_count:
+            logger.warning(
+                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities; "
+                "mature ECMWF model_bias covers %d/%d. Missing bias data falls back "
+                "to raw ensemble member maxes, so paper can run but archive quality is incomplete.",
+                forecast_city_count,
+                configured_city_count,
+                bias_city_count,
+                configured_city_count,
             )
 
         # 2. Data freshness check

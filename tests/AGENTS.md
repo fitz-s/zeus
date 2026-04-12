@@ -77,6 +77,9 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 |------|--------------|
 | `test_ensemble_client.py` | Ensemble data retrieval from DB |
 | `test_etl_recalibrate_chain.py` | ETL recalibration chain |
+| `test_etl_market_price_history.py` | Market price-history attribution ETL |
+| `test_audit_city_data_readiness.py` | City readiness status semantics |
+| `test_backfill_openmeteo_previous_runs.py` | Dynamic-city forecast-history backfill from Open-Meteo Previous Runs |
 | `test_observation_contract.py` | Observation data contracts |
 | `test_observation_instants_etl.py` | Observation instants ETL |
 | `test_solar_etl.py` | Solar time ETL |

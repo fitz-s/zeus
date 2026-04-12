@@ -621,6 +621,75 @@ def test_model_eval_and_promotion_surfaces_write_idempotently(tmp_path):
     assert promotion["decision_reason"] == "downgraded_for_test"
 
 
+def test_selection_family_and_hypothesis_facts_write_idempotently(tmp_path):
+    from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
+
+    conn = get_connection(tmp_path / "selection_family.db")
+    init_schema(conn)
+
+    family_result = log_selection_family_fact(
+        conn,
+        family_id="fam-1",
+        cycle_mode="opening_hunt",
+        decision_snapshot_id="snap-1",
+        city="NYC",
+        target_date="2026-04-01",
+        strategy_key="center_buy",
+        discovery_mode="opening_hunt",
+        created_at="2026-04-01T00:00:00Z",
+        meta={"tested_hypotheses": 2},
+    )
+    hypothesis_result = log_selection_hypothesis_fact(
+        conn,
+        hypothesis_id="hyp-1",
+        family_id="fam-1",
+        decision_id="decision-1",
+        candidate_id="candidate-1",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="39-40°F",
+        direction="buy_yes",
+        p_value=0.01,
+        q_value=0.02,
+        ci_lower=0.01,
+        ci_upper=0.10,
+        edge=0.05,
+        tested=True,
+        passed_prefilter=True,
+        selected_post_fdr=True,
+        recorded_at="2026-04-01T00:00:01Z",
+        meta={"source": "test"},
+    )
+    hypothesis_result_2 = log_selection_hypothesis_fact(
+        conn,
+        hypothesis_id="hyp-1",
+        family_id="fam-1",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="39-40°F",
+        direction="unknown",
+        selected_post_fdr=False,
+        recorded_at="2026-04-01T00:00:02Z",
+        meta={},
+    )
+    rows = {
+        "families": conn.execute("SELECT COUNT(*) FROM selection_family_fact").fetchone()[0],
+        "hypotheses": conn.execute("SELECT COUNT(*) FROM selection_hypothesis_fact").fetchone()[0],
+    }
+    hypothesis = conn.execute(
+        "SELECT direction, selected_post_fdr, recorded_at FROM selection_hypothesis_fact"
+    ).fetchone()
+    conn.close()
+
+    assert family_result == {"status": "written", "table": "selection_family_fact"}
+    assert hypothesis_result == {"status": "written", "table": "selection_hypothesis_fact"}
+    assert hypothesis_result_2 == {"status": "written", "table": "selection_hypothesis_fact"}
+    assert rows == {"families": 1, "hypotheses": 1}
+    assert hypothesis["direction"] == "unknown"
+    assert hypothesis["selected_post_fdr"] == 0
+    assert hypothesis["recorded_at"] == "2026-04-01T00:00:02Z"
+
+
 def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
     from src.state.db import query_data_improvement_inventory
 

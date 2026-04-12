@@ -210,20 +210,23 @@ def _parse_event(
 
 def _match_city(title: str, slug: str) -> Optional[City]:
     """Match event title/slug to a configured city using aliases from cities.json."""
-    from src.config import cities_by_alias, cities
+    from src.config import cities
 
     text = f"{title} {slug}".lower()
+    slug_text = slug.lower()
 
-    # Use aliases from cities.json (validated, includes slug_names)
+    # Use boundary-aware aliases. Short aliases such as "LA" and "SF" must not
+    # match inside longer city names like "Kuala Lumpur" or unrelated words.
+    candidates: list[tuple[str, City, str]] = []
     for city in cities:
-        # Check aliases (case-insensitive)
-        for alias in city.aliases:
-            if alias.lower() in text:
-                return city
-        # Check slug_names
-        for sn in city.slug_names:
-            if sn in slug.lower():
-                return city
+        candidates.extend((alias.lower(), city, "text") for alias in city.aliases)
+        candidates.extend((slug_name.lower(), city, "slug") for slug_name in city.slug_names)
+
+    for alias, city, surface in sorted(candidates, key=lambda item: len(item[0]), reverse=True):
+        haystack = slug_text if surface == "slug" else text
+        pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+        if re.search(pattern, haystack):
+            return city
 
     return None
 

@@ -191,7 +191,46 @@ def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monk
     assert pair_count == 22
 
 
+def test_etl_tigge_calibration_uses_settlement_value_when_winning_bin_missing(tmp_path, monkeypatch):
+    from scripts import etl_tigge_calibration as etl
+    import src.calibration.manager as calibration_manager_module
+    import src.state.db as db_module
+
+    shared_db = tmp_path / "zeus-shared.db"
+    tigge_root = tmp_path / "tigge"
+    date_dir = tigge_root / "nyc" / "20260101"
+    date_dir.mkdir(parents=True)
+    _seed_tigge_members(date_dir / "members_step_024.json", base_value=40.0)
+
+    conn = get_connection(shared_db)
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO settlements (city, target_date, settlement_value) VALUES (?, ?, ?)",
+        ("NYC", "2026-01-02", 40.0),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(etl, "TIGGE_ROOT", tigge_root)
+    monkeypatch.setattr(etl, "get_connection", lambda: db_module.get_connection(shared_db))
+    monkeypatch.setattr(calibration_manager_module, "_fit_from_pairs", lambda conn, cluster, season: None)
+
+    result = etl.run_etl()
+
+    conn = get_connection(shared_db)
+    pair_count = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
+    positive_count = conn.execute("SELECT COUNT(*) FROM calibration_pairs WHERE outcome = 1").fetchone()[0]
+    conn.close()
+
+    assert result["vectors_processed"] == 1
+    assert result["settlements_matched"] == 1
+    assert result["snapshots_after"] - result["snapshots_before"] == 1
+    assert pair_count == 11
+    assert positive_count == 1
+
+
 def test_tigge_scripts_expose_configured_city_coverage_gap():
+    from scripts import etl_tigge_calibration as tigge_cal
     from scripts import etl_tigge_direct_calibration as direct_cal
     from scripts import etl_tigge_ens as tigge_ens
     from src.config import cities_by_name
@@ -200,3 +239,139 @@ def test_tigge_scripts_expose_configured_city_coverage_gap():
 
     assert tigge_ens._unsupported_configured_cities() == expected_gap
     assert direct_cal._unsupported_configured_cities() == expected_gap
+    assert sorted(set(cities_by_name) - set(tigge_cal.CITY_MAP.values())) == expected_gap
+
+
+def test_backfill_observations_from_settlements_uses_namespaced_settlement_source(tmp_path, monkeypatch):
+    from scripts import backfill_observations_from_settlements as backfill
+    import src.state.db as db_module
+
+    shared_db = tmp_path / "zeus-shared.db"
+    conn = get_connection(shared_db)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, settlement_value, settlement_source)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("NYC", "2026-01-01", 42.0, "wu_daily_observed"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(backfill, "get_shared_connection", lambda: db_module.get_connection(shared_db))
+
+    dry = backfill.backfill_observations_from_settlements(dry_run=True)
+    result = backfill.backfill_observations_from_settlements()
+
+    conn = get_connection(shared_db)
+    row = conn.execute("SELECT * FROM observations").fetchone()
+    conn.close()
+
+    assert dry["candidate_rows"] == 1
+    assert dry["inserted"] == 0
+    assert result["inserted"] == 1
+    assert row["city"] == "NYC"
+    assert row["target_date"] == "2026-01-01"
+    assert row["source"] == "settlement_source:wu_daily_observed"
+    assert row["high_temp"] == 42.0
+    assert row["unit"] == "F"
+
+
+def test_etl_forecast_skill_from_forecasts_materializes_bias_for_local_forecasts(tmp_path, monkeypatch):
+    from scripts import etl_forecast_skill_from_forecasts as etl
+    import src.state.db as db_module
+
+    shared_db = tmp_path / "zeus-shared.db"
+    conn = get_connection(shared_db)
+    init_schema(conn)
+    for day in range(1, 7):
+        target_date = f"2026-01-{day:02d}"
+        conn.execute(
+            "INSERT INTO settlements (city, target_date, settlement_value) VALUES (?, ?, ?)",
+            ("NYC", target_date, 40.0),
+        )
+        conn.execute(
+            """
+            INSERT INTO forecasts
+            (city, target_date, source, forecast_basis_date, lead_days, forecast_high, temp_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("NYC", target_date, "ecmwf_previous_runs", "2025-12-31", 1, 42.0, "F"),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(etl, "get_shared_connection", lambda: db_module.get_connection(shared_db))
+
+    dry = etl.run_etl(dry_run=True)
+    result = etl.run_etl()
+
+    conn = get_connection(shared_db)
+    skill_count = conn.execute("SELECT COUNT(*) FROM forecast_skill").fetchone()[0]
+    bias = conn.execute("SELECT * FROM model_bias").fetchone()
+    conn.close()
+
+    assert dry["candidate_rows"] == 6
+    assert dry["forecast_skill_added"] == 0
+    assert result["forecast_skill_added"] == 6
+    assert skill_count == 6
+    assert bias["city"] == "NYC"
+    assert bias["source"] == "ecmwf"
+    assert bias["n_samples"] == 6
+    assert bias["bias"] == 2.0
+
+
+def _tigge_member(member: int, *, forecast_type: str, value: float) -> dict:
+    return {
+        "member": member,
+        "forecast_type": forecast_type,
+        "short_name": "2t",
+        "data_date": 20260101,
+        "data_time": 0,
+        "step_range": "24",
+        "value_native_unit": value,
+    }
+
+
+def test_tigge_etl_member_normalization_deduplicates_identical_grib_messages():
+    from scripts import etl_tigge_calibration as tigge_cal
+    from scripts import etl_tigge_direct_calibration as direct_cal
+    from scripts import etl_tigge_ens as tigge_ens
+
+    members = [_tigge_member(0, forecast_type="cf", value=40.0)]
+    members.extend(_tigge_member(i, forecast_type="pf", value=40.0 + i * 0.1) for i in range(1, 51))
+    members.append(dict(members[-1]))
+
+    for module in (direct_cal, tigge_ens, tigge_cal):
+        normalized = module._normalize_tigge_members(members)
+        assert len(members) == 52
+        assert len(normalized) == 51
+        assert normalized[0]["member"] == 0
+        assert normalized[-1]["member"] == 50
+
+
+def test_tigge_etl_member_normalization_rejects_conflicting_duplicates():
+    from scripts import etl_tigge_calibration as tigge_cal
+    from scripts import etl_tigge_direct_calibration as direct_cal
+    from scripts import etl_tigge_ens as tigge_ens
+
+    duplicate_a = _tigge_member(1, forecast_type="pf", value=41.0)
+    duplicate_b = dict(duplicate_a)
+    duplicate_b["value_native_unit"] = 42.0
+
+    for module in (direct_cal, tigge_ens, tigge_cal):
+        with pytest.raises(ValueError, match="Conflicting duplicate TIGGE member"):
+            module._normalize_tigge_members([duplicate_a, duplicate_b])
+
+
+def test_tigge_etl_member_normalization_rejects_oversized_legacy_records():
+    from scripts import etl_tigge_calibration as tigge_cal
+    from scripts import etl_tigge_direct_calibration as direct_cal
+    from scripts import etl_tigge_ens as tigge_ens
+
+    legacy_members = [{"value_native_unit": 40.0 + i * 0.1} for i in range(52)]
+
+    for module in (direct_cal, tigge_ens, tigge_cal):
+        with pytest.raises(ValueError, match="without identity fields"):
+            module._normalize_tigge_members(legacy_members)

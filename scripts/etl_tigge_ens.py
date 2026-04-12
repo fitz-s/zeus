@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date
+from src.calibration.effective_sample_size import build_decision_groups, write_decision_groups
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name, cities_by_alias
 from src.contracts import SettlementSemantics
@@ -44,14 +45,17 @@ def _resolve_city_name(dirname: str) -> str | None:
     """Map TIGGE directory name to Zeus city name."""
     name_map = {
         "ankara": "Ankara", "atlanta": "Atlanta", "austin": "Austin",
-        "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+        "auckland": "Auckland", "beijing": "Beijing", "buenos-aires": "Buenos Aires",
+        "busan": "Busan", "cape-town": "Cape Town",
         "chengdu": "Chengdu", "chicago": "Chicago", "chongqing": "Chongqing",
         "dallas": "Dallas", "denver": "Denver",
         "hong-kong": "Hong Kong", "houston": "Houston", "istanbul": "Istanbul",
-        "london": "London", "los-angeles": "Los Angeles", "lucknow": "Lucknow",
+        "jakarta": "Jakarta", "jeddah": "Jeddah",
+        "kuala-lumpur": "Kuala Lumpur", "lagos": "Lagos", "london": "London",
+        "los-angeles": "Los Angeles", "lucknow": "Lucknow",
         "madrid": "Madrid", "mexico-city": "Mexico City", "miami": "Miami",
         "milan": "Milan", "moscow": "Moscow", "munich": "Munich",
-        "nyc": "NYC", "paris": "Paris",
+        "nyc": "NYC", "panama-city": "Panama City", "paris": "Paris",
         "san-francisco": "San Francisco", "sao-paulo": "Sao Paulo",
         "seattle": "Seattle", "seoul": "Seoul", "shanghai": "Shanghai",
         "shenzhen": "Shenzhen", "singapore": "Singapore",
@@ -59,15 +63,21 @@ def _resolve_city_name(dirname: str) -> str | None:
         "toronto": "Toronto", "warsaw": "Warsaw",
         "wellington": "Wellington", "wuhan": "Wuhan",
     }
-    return name_map.get(dirname)
+    mapped = name_map.get(dirname)
+    if mapped:
+        return mapped
+    candidate = dirname.replace("-", " ").title()
+    return candidate if candidate in cities_by_name else None
 
 
 _SUPPORTED_TIGGE_CITY_NAMES = frozenset({
     "Ankara", "Atlanta", "Austin", "Beijing", "Buenos Aires",
+    "Auckland", "Busan", "Cape Town",
     "Chengdu", "Chicago", "Chongqing", "Dallas", "Denver",
-    "Hong Kong", "Houston", "Istanbul", "London", "Los Angeles", "Lucknow",
+    "Hong Kong", "Houston", "Istanbul", "Jakarta", "Jeddah",
+    "Kuala Lumpur", "Lagos", "London", "Los Angeles", "Lucknow",
     "Madrid", "Mexico City", "Miami", "Milan", "Moscow", "Munich",
-    "NYC", "Paris", "San Francisco", "Sao Paulo",
+    "NYC", "Panama City", "Paris", "San Francisco", "Sao Paulo",
     "Seattle", "Seoul", "Shanghai", "Shenzhen", "Singapore",
     "Taipei", "Tel Aviv", "Tokyo", "Toronto", "Warsaw",
     "Wellington", "Wuhan",
@@ -77,6 +87,37 @@ _SUPPORTED_TIGGE_CITY_NAMES = frozenset({
 def _unsupported_configured_cities() -> list[str]:
     """Return configured cities for which TIGGE data is not available."""
     return sorted(set(cities_by_name) - _SUPPORTED_TIGGE_CITY_NAMES)
+
+
+_TIGGE_MEMBER_IDENTITY_FIELDS = (
+    "member",
+    "forecast_type",
+    "short_name",
+    "data_date",
+    "data_time",
+    "step_range",
+)
+
+
+def _normalize_tigge_members(members: list[dict]) -> list[dict]:
+    """Deduplicate repeated TIGGE GRIB messages while preserving 51-member law."""
+    if not members:
+        return []
+    if any(any(field not in member for field in _TIGGE_MEMBER_IDENTITY_FIELDS) for member in members):
+        if len(members) == 51:
+            return list(members)
+        raise ValueError("Cannot deduplicate TIGGE members without identity fields")
+
+    unique: dict[tuple[object, ...], dict] = {}
+    for member in members:
+        key = tuple(member[field] for field in _TIGGE_MEMBER_IDENTITY_FIELDS)
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = member
+            continue
+        if json.dumps(existing, sort_keys=True, default=str) != json.dumps(member, sort_keys=True, default=str):
+            raise ValueError(f"Conflicting duplicate TIGGE member: {key}")
+    return sorted(unique.values(), key=lambda item: (int(item["member"]), str(item["forecast_type"]), str(item["step_range"])))
 
 
 def run_etl() -> dict:
@@ -136,9 +177,17 @@ def run_etl() -> dict:
                 skipped += 1
                 continue
 
-            members = data.get("members", [])
+            try:
+                members = _normalize_tigge_members(data.get("members", []))
+            except ValueError as e:
+                print(f"  ERROR {city_name} {target_date}: {e}")
+                skipped += 1
+                continue
             if len(members) != 51:
-                print(f"  SKIP {city_name} {target_date}: {len(members)} members (expected 51)")
+                print(
+                    f"  SKIP {city_name} {target_date}: "
+                    f"{len(members)} unique members from {len(data.get('members', []))} raw (expected 51)"
+                )
                 skipped += 1
                 continue
 
@@ -199,6 +248,14 @@ def run_etl() -> dict:
             print(f"  OK {city_name:15s} {target_date} spread={np.std(values):.2f} "
                   f"quality={quality_note} bins={len(bins) if bins else 0}")
 
+    conn.commit()
+    groups = build_decision_groups(conn)
+    write_decision_groups(
+        conn,
+        groups,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
+        update_pair_rows=True,
+    )
     conn.commit()
     conn.close()
 

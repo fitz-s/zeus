@@ -271,7 +271,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             n_pair_rows INTEGER NOT NULL,
             n_positive_rows INTEGER NOT NULL,
             recorded_at TEXT NOT NULL,
-            UNIQUE(city, target_date, forecast_available_at)
+            UNIQUE(city, target_date, forecast_available_at, lead_days)
         );
         CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
             ON calibration_decision_group(cluster, season, lead_days);
@@ -739,6 +739,27 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_day0_residual_city_ts
             ON day0_residual_fact(city, target_date, utc_timestamp);
 
+        -- Raw forecast source rows. New-city onboarding writes here first;
+        -- skill/bias/profile tables are derived from this table plus settlements.
+        CREATE TABLE IF NOT EXISTS forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            forecast_basis_date TEXT,
+            forecast_issue_time TEXT,
+            lead_days INTEGER,
+            lead_time_hours REAL,
+            forecast_high REAL,
+            forecast_low REAL,
+            temp_unit TEXT DEFAULT 'F',
+            retrieved_at TEXT,
+            imported_at TEXT,
+            UNIQUE(city, target_date, source, forecast_basis_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_forecasts_city_date
+            ON forecasts(city, target_date);
+
         -- Historical forecast values (5 NWP models)
         CREATE TABLE IF NOT EXISTS historical_forecasts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -897,12 +918,57 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup "
         "ON calibration_pairs(city, target_date, forecast_available_at)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup_lead "
+        "ON calibration_pairs(city, target_date, forecast_available_at, lead_days)"
+    )
+    _ensure_calibration_decision_group_lead_key(conn)
 
     _ensure_runtime_bootstrap_support_tables(conn)
 
     if own_conn:
         conn.commit()
         conn.close()
+
+
+def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> None:
+    """Recreate derived calibration groups if the legacy unique key lacks lead_days."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'calibration_decision_group'"
+    ).fetchone()
+    create_sql = str(row[0] if row and row[0] else "")
+    if "UNIQUE(city, target_date, forecast_available_at, lead_days)" in create_sql:
+        return
+    if not create_sql:
+        return
+
+    # This table is a derived projection from calibration_pairs. Keeping the
+    # legacy unique key would collapse multi-step TIGGE samples into one group.
+    conn.execute("DROP TABLE IF EXISTS calibration_decision_group")
+    conn.execute(
+        """
+        CREATE TABLE calibration_decision_group (
+            group_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            forecast_available_at TEXT NOT NULL,
+            cluster TEXT NOT NULL,
+            season TEXT NOT NULL,
+            lead_days REAL NOT NULL,
+            settlement_value REAL,
+            winning_range_label TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            n_pair_rows INTEGER NOT NULL,
+            n_positive_rows INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(city, target_date, forecast_available_at, lead_days)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket "
+        "ON calibration_decision_group(cluster, season, lead_days)"
+    )
 
 
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
