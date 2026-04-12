@@ -106,6 +106,14 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     assert strict.n_replayed == 0
     assert relaxed.n_replayed == 1
     assert relaxed.outcomes[0].snapshot_id.startswith("forecast_rows:Ankara")
+    assert relaxed.limitations["decision_reference_source_counts"] == {"forecasts_table": 1}
+    assert relaxed.limitations["diagnostic_replay_subjects"] == 1
+    assert relaxed.limitations["diagnostic_replay_subject_rate"] == 1.0
+    assert any(
+        "diagnostic_reference" in decision.applied_validations
+        for outcome in relaxed.outcomes
+        for decision in outcome.replay_decisions
+    )
 
 
 def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monkeypatch):
@@ -455,6 +463,139 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
     assert captured["hours_since_open"] == 48.0
 
 
+def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path, monkeypatch):
+    db_path = tmp_path / "replay-provenance.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
+        VALUES
+        ('Paris', '2026-04-08', '12°C', 12.0),
+        ('Paris', '2026-04-09', '12°C', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES
+        (81, 'Paris', '2026-04-08', '2026-04-07T00:00:00Z', '2026-04-08T00:00:00Z',
+         '2026-04-07T08:00:00Z', '2026-04-07T08:05:00Z', 24.0, '[12.0, 13.0]',
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1'),
+        (82, 'Paris', '2026-04-09', '2026-04-08T00:00:00Z', '2026-04-09T00:00:00Z',
+         '2026-04-08T08:00:00Z', '2026-04-08T08:05:00Z', 24.0, '[12.0, 13.0]',
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value)
+        VALUES
+        ('Paris', '2026-04-08', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-07T08:00:00Z', 12.0),
+        ('Paris', '2026-04-08', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-07T08:00:00Z', 12.0),
+        ('Paris', '2026-04-09', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-08T08:00:00Z', 12.0),
+        ('Paris', '2026-04-09', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-08T08:00:00Z', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions
+        (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
+         p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status,
+         edge_source, runtime_trade_id, market_hours_open, env)
+        VALUES ('mkt-provenance-1', '12°C', 'buy_yes', 5.0, 0.4, '2026-04-07T08:10:00+00:00', 81,
+                0.9, 0.9, 0.5, 0.2, 0.6, 0.0, 'entered',
+                'center_buy', 'pos-provenance-1', 2.5, 'live')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "opening_hunt",
+            "2026-04-08T08:10:00+00:00",
+            "2026-04-08T08:11:00+00:00",
+            """{
+              "trade_cases": [],
+              "no_trade_cases": [{
+                "decision_id": "nt-provenance",
+                "city": "Paris",
+                "target_date": "2026-04-09",
+                "range_label": "12°C",
+                "direction": "buy_yes",
+                "rejection_stage": "FDR_FILTERED",
+                "decision_snapshot_id": "82",
+                "bin_labels": ["12°C", "13°C"],
+                "p_raw_vector": [0.9, 0.1],
+                "p_cal_vector": [0.9, 0.1],
+                "p_market_vector": [0.5, 0.5],
+                "alpha": 0.0,
+                "agreement": "AGREE",
+                "timestamp": "2026-04-08T08:10:00+00:00"
+              }]
+            }""",
+            "2026-04-08T08:11:00+00:00",
+            "live",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
+
+    summary = run_replay(
+        "2026-04-08",
+        "2026-04-09",
+        mode="audit",
+    )
+
+    assert summary.n_replayed == 2
+    assert summary.limitations["decision_reference_source_counts"] == {
+        "decision_log.no_trade_cases": 1,
+        "trade_decisions": 1,
+    }
+    assert summary.limitations["hours_since_open_source_counts"] == {
+        "fallback_48.0": 1,
+        "market_hours_open": 1,
+    }
+    assert summary.limitations["hours_since_open_fallback_subjects"] == 1
+    assert summary.limitations["hours_since_open_fallback_rate"] == 0.5
+    assert summary.limitations["diagnostic_replay_subjects"] == 0
+    assert summary.limitations["diagnostic_replay_subject_rate"] == 0.0
+
+    sources = {outcome.decision_reference_source for outcome in summary.outcomes}
+    assert sources == {"trade_decisions", "decision_log.no_trade_cases"}
+    assert any(outcome.hours_since_open_fallback for outcome in summary.outcomes)
+    assert any(
+        "decision_reference_source:trade_decisions" in decision.applied_validations
+        for outcome in summary.outcomes
+        for decision in outcome.replay_decisions
+    )
+    assert any(
+        "hours_since_open_source:fallback_48.0" in decision.applied_validations
+        for outcome in summary.outcomes
+        for decision in outcome.replay_decisions
+    )
+    assert any(
+        "hours_since_open_fallback=48.0" in decision.applied_validations
+        for outcome in summary.outcomes
+        for decision in outcome.replay_decisions
+    )
+
+
 def test_cli_formats_unpriced_replay_pnl_as_unavailable():
     summary = SimpleNamespace(
         replay_total_pnl=0.0,
@@ -467,6 +608,69 @@ def test_cli_formats_unpriced_replay_pnl_as_unavailable():
     )
 
     assert _format_total_pnl(summary) == "N/A (market price unavailable for 298/298 replayed subjects)"
+
+
+def test_cli_prints_replay_provenance_counts(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "cli-provenance.db"
+
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+        return SimpleNamespace(
+            run_id="run-2",
+            n_settlements=2,
+            n_replayed=2,
+            coverage_pct=100.0,
+            n_would_trade=1,
+            replay_win_rate=0.0,
+            replay_total_pnl=9.0,
+            limitations={
+                "pnl_available": False,
+                "pnl_requires_market_price_linkage": True,
+                "pnl_unavailable_reason": "partial_market_price_linkage",
+                "market_price_linked_subjects": 1,
+                "market_price_unavailable_subjects": 1,
+                "decision_reference_source_counts": {
+                    "decision_log.no_trade_cases": 1,
+                    "trade_decisions": 1,
+                },
+                "diagnostic_replay_subjects": 1,
+                "hours_since_open_source_counts": {
+                    "fallback_48.0": 1,
+                    "market_hours_open": 1,
+                },
+                "hours_since_open_fallback_subjects": 1,
+            },
+            per_city={
+                "Paris": {"n_dates": 2, "n_trades": 1, "total_pnl": 9.0, "win_rate": 0.0},
+            },
+            outcomes=[],
+        )
+
+    import src.engine.replay as replay_module
+
+    monkeypatch.setattr(cli_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(replay_module, "run_replay", _run_replay)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_replay.py",
+            "--mode",
+            "audit",
+            "--start",
+            "2026-04-03",
+            "--end",
+            "2026-04-04",
+        ],
+    )
+
+    cli_module.main()
+    output = capsys.readouterr().out
+
+    assert "Replay provenance:" in output
+    assert "decision reference sources: decision_log.no_trade_cases=1, trade_decisions=1" in output
+    assert "hours-since-open sources: fallback_48.0=1, market_hours_open=1" in output
+    assert "diagnostic replay references: 1/2 replayed subjects" in output
+    assert "hours-since-open fallback: 1/2 replayed subjects" in output
 
 
 def test_replay_market_price_linkage_limitations_distinguish_full_partial_none():

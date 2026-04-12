@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -36,6 +37,11 @@ BACKTEST_AUTHORITY_SCOPE = "diagnostic_non_promotion"
 WU_SWEEP_LANE = "wu_settlement_sweep"
 TRADE_HISTORY_LANE = "trade_history_audit"
 PROBABILITY_EPS = 1e-12
+DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
+    "shadow_signals",
+    "ensemble_snapshots.available_at",
+    "forecasts_table",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +86,9 @@ class ReplayOutcome:
     snapshot_id: Optional[str] = None
     lead_hours: float = 0.0
     n_members: int = 0
+    decision_reference_source: str = ""
+    hours_since_open_source: str = ""
+    hours_since_open_fallback: bool = False
 
 
 @dataclass
@@ -135,6 +144,38 @@ def _market_price_linkage_limitations(
         "pnl_available": full_linkage,
         "pnl_subject_scope": pnl_scope,
         "pnl_unavailable_reason": unavailable_reason,
+    }
+
+
+def _replay_provenance_limitations(outcomes: list[ReplayOutcome]) -> dict:
+    decision_reference_source_counts = Counter(
+        outcome.decision_reference_source or "unknown"
+        for outcome in outcomes
+    )
+    hours_since_open_source_counts = Counter(
+        outcome.hours_since_open_source or "unknown"
+        for outcome in outcomes
+    )
+    fallback_subjects = sum(1 for outcome in outcomes if outcome.hours_since_open_fallback)
+    diagnostic_subjects = sum(
+        1
+        for outcome in outcomes
+        if outcome.decision_reference_source in DIAGNOSTIC_REPLAY_REFERENCE_SOURCES
+    )
+    total_subjects = len(outcomes)
+    return {
+        "decision_reference_source_counts": dict(sorted(decision_reference_source_counts.items())),
+        "hours_since_open_source_counts": dict(sorted(hours_since_open_source_counts.items())),
+        "diagnostic_replay_subjects": diagnostic_subjects,
+        "diagnostic_replay_subject_rate": round(
+            diagnostic_subjects / max(1, total_subjects),
+            6,
+        ),
+        "hours_since_open_fallback_subjects": fallback_subjects,
+        "hours_since_open_fallback_rate": round(
+            fallback_subjects / max(1, total_subjects),
+            6,
+        ),
     }
 
 
@@ -1023,6 +1064,7 @@ def _replay_one_settlement(
     decision_ref = ctx.get_decision_reference_for(city.name, target_date)
     if decision_ref is None:
         return None
+    decision_reference_source = str(decision_ref.get("source") or "unknown")
     selected_method = "ens_member_counting"
     if decision_ref.get("source") == "decision_log.trade_cases":
         selected_method = "ens_member_counting"
@@ -1086,16 +1128,23 @@ def _replay_one_settlement(
 
     # Compute alpha (with overrides if any)
     override_alpha = ctx.overrides.get("alpha", {}).get(city.name, {}).get(season)
+    hours_since_open_source = "market_hours_open"
+    hours_since_open_fallback = False
     if override_alpha is not None:
         alpha = float(override_alpha)
+        hours_since_open_source = "override_alpha"
     elif decision_ref.get("alpha", 0.0):
         alpha = float(decision_ref["alpha"])
+        hours_since_open_source = "decision_ref_alpha"
     else:
         hours_since_open = decision_ref.get("market_hours_open")
         try:
             hours_since_open = float(hours_since_open)
+            hours_since_open_source = "market_hours_open"
         except (TypeError, ValueError):
             hours_since_open = 48.0
+            hours_since_open_source = "fallback_48.0"
+            hours_since_open_fallback = True
         alpha = compute_alpha(
             calibration_level=cal_level,
             ensemble_spread=TemperatureDelta(float(snapshot["spread"] or 3.0), city.settlement_unit),
@@ -1156,6 +1205,14 @@ def _replay_one_settlement(
     best_edge = 0.0
     would_trade = False
     replay_pnl = 0.0
+    provenance_validations = [
+        f"decision_reference_source:{decision_reference_source}",
+        f"hours_since_open_source:{hours_since_open_source}",
+    ]
+    if decision_reference_source in DIAGNOSTIC_REPLAY_REFERENCE_SOURCES:
+        provenance_validations.append("diagnostic_reference")
+    if hours_since_open_fallback:
+        provenance_validations.append("hours_since_open_fallback=48.0")
 
     if filtered:
         for edge in filtered:
@@ -1205,6 +1262,7 @@ def _replay_one_settlement(
                     selected_method,
                     "bootstrap_ci",
                     "fdr_filter",
+                    *provenance_validations,
                     "kelly_sizing",
                     "market_price_linked" if market_price_linked else "market_price_unavailable",
                 ],
@@ -1245,6 +1303,7 @@ def _replay_one_settlement(
                     selected_method,
                     "bootstrap_ci",
                     "fdr_filter",
+                    *provenance_validations,
                     "market_price_linked" if market_price_linked else "market_price_unavailable",
                 ],
             )
@@ -1262,6 +1321,9 @@ def _replay_one_settlement(
         snapshot_id=str(snapshot["snapshot_id"]),
         lead_hours=snapshot["lead_hours"],
         n_members=snapshot["n_members"],
+        decision_reference_source=decision_reference_source,
+        hours_since_open_source=hours_since_open_source,
+        hours_since_open_fallback=hours_since_open_fallback,
     )
 
 
@@ -1927,6 +1989,7 @@ def run_replay(
             market_price_linked_subjects=priced_subjects,
             market_price_unavailable_subjects=unpriced_subjects,
         ),
+        **_replay_provenance_limitations(summary.outcomes),
         "forecast_rows_fallback": allow_snapshot_only_reference,
         "promotion_authority": False,
     }

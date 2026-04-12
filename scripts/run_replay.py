@@ -180,6 +180,33 @@ def _print_wu_health_report(summary) -> None:
         )
 
 
+def _print_replay_provenance_report(summary) -> None:
+    source_counts = summary.limitations.get("decision_reference_source_counts") or {}
+    hours_source_counts = summary.limitations.get("hours_since_open_source_counts") or {}
+    diagnostic_subjects = int(summary.limitations.get("diagnostic_replay_subjects") or 0)
+    fallback_subjects = int(summary.limitations.get("hours_since_open_fallback_subjects") or 0)
+    if not source_counts and not hours_source_counts and diagnostic_subjects == 0 and fallback_subjects == 0:
+        return
+
+    total = int(summary.n_replayed or 0)
+    print("Replay provenance:")
+    if source_counts:
+        source_text = ", ".join(f"{key}={value}" for key, value in sorted(source_counts.items()))
+        print(f"  decision reference sources: {source_text}")
+    if hours_source_counts:
+        hours_text = ", ".join(f"{key}={value}" for key, value in sorted(hours_source_counts.items()))
+        print(f"  hours-since-open sources: {hours_text}")
+    if total:
+        print(f"  diagnostic replay references: {diagnostic_subjects}/{total} replayed subjects")
+    elif diagnostic_subjects:
+        print(f"  diagnostic replay references: {diagnostic_subjects}")
+    if total:
+        print(f"  hours-since-open fallback: {fallback_subjects}/{total} replayed subjects")
+    else:
+        print(f"  hours-since-open fallback: {fallback_subjects}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Zeus Decision Replay Engine")
     parser.add_argument("--mode", choices=[
@@ -239,6 +266,7 @@ def main():
     if args.mode == "wu_settlement_sweep":
         _print_wu_health_report(summary)
     else:
+        _print_replay_provenance_report(summary)
         pnl_label = "PnL" if _pnl_available(summary) else "PnL*"
         print(f"{'City':15} {'Dates':>6} {'Trades':>7} {pnl_label:>10} {'Win%':>6}")
         print("-" * 48)
