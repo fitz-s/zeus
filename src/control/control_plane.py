@@ -67,6 +67,28 @@ def is_entries_paused() -> bool:
 
 
 
+def alert_auto_pause(reason_code: str) -> None:
+    """Emit a structured log warning when entries are auto-paused by exception."""
+    logger.warning(
+        "auto_pause_entries",
+        extra={"reason_code": reason_code},
+    )
+
+
+
+def pause_entries(reason_code: str) -> None:
+    """Auto-pause entries after an unhandled exception in the entry path.
+
+    Sets entries_paused and records the machine-readable reason_code in
+    _control_state, then emits an alert. Operator must explicitly resume
+    to re-enable entries.
+    """
+    _control_state["entries_paused"] = True
+    _control_state["entries_pause_reason"] = reason_code
+    alert_auto_pause(reason_code)
+
+
+
 def get_edge_threshold_multiplier() -> float:
     return _control_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
 

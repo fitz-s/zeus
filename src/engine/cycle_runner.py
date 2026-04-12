@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 
 from src.config import cities_by_name, get_mode, settings
-from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
+from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -242,9 +242,16 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     entries_paused = is_entries_paused()
     if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:
-        p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
-        portfolio_dirty = portfolio_dirty or p_dirty
-        tracker_dirty = tracker_dirty or t_dirty
+        try:
+            p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
+            portfolio_dirty = portfolio_dirty or p_dirty
+            tracker_dirty = tracker_dirty or t_dirty
+        except Exception as exc:
+            reason_code = f"auto_pause:{type(exc).__name__}"
+            pause_entries(reason_code)
+            logger.error("Entry path raised %s -- entries auto-paused: %s", type(exc).__name__, exc)
+            summary["entries_paused"] = True
+            summary["entries_pause_reason"] = reason_code
     else:
         if entries_paused:
             summary["entries_paused"] = True
