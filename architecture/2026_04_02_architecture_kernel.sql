@@ -185,6 +185,22 @@ CREATE TABLE IF NOT EXISTS control_overrides (
     precedence INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS token_suppression (
+    token_id TEXT PRIMARY KEY,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+    ON token_suppression(suppression_reason, updated_at);
+
 CREATE TABLE IF NOT EXISTS opportunity_fact (
     decision_id TEXT PRIMARY KEY,
     candidate_id TEXT,

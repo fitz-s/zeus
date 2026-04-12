@@ -728,7 +728,7 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
         daily_baseline_total=data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
         recent_exits=data.get("recent_exits", []),
-        ignored_tokens=data.get("ignored_tokens", []),
+        ignored_tokens=[],
     )
 
 
@@ -830,6 +830,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         get_trade_connection_with_world,
         query_authoritative_settlement_rows,
         query_portfolio_loader_view,
+        query_token_suppression_tokens,
     )
 
     mode_override = None
@@ -861,9 +862,11 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         )
 
     settlement_rows: list[dict] = []
+    ignored_tokens: list[str] = []
     try:
         snapshot = query_portfolio_loader_view(conn)
-        if snapshot.get("status") in ("ok", "partial_stale"):
+        ignored_tokens = query_token_suppression_tokens(conn)
+        if snapshot.get("status") in ("ok", "partial_stale", "empty"):
             try:
                 settlement_rows = query_authoritative_settlement_rows(
                     conn,
@@ -889,6 +892,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         return PortfolioState(
             positions=[],
             bankroll=json_data.get("bankroll", 150.0),
+            ignored_tokens=ignored_tokens,
             portfolio_loader_degraded=True,
         )
 
@@ -908,7 +912,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         daily_baseline_total=json_data.get("daily_baseline_total", bankroll),
         weekly_baseline_total=json_data.get("weekly_baseline_total", bankroll),
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
-        ignored_tokens=json_data.get("ignored_tokens", []),
+        ignored_tokens=ignored_tokens,
     )
 
 

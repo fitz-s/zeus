@@ -135,6 +135,10 @@ def _is_semantic_advance(current_runtime: str, legacy_state: str) -> bool:
     return leg_ord > cur_ord
 
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
+TOKEN_SUPPRESSION_REASONS = frozenset({
+    "operator_quarantine_clear",
+    "settled_position",
+})
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -3191,6 +3195,80 @@ def upsert_control_override(
         ),
     )
     return {"status": "written", "table": "control_overrides", "override_id": override_id}
+
+
+def record_token_suppression(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    suppression_reason: str,
+    source_module: str,
+    condition_id: str | None = None,
+    created_at: str | None = None,
+    evidence: dict | None = None,
+) -> dict:
+    """Persist a token-level reconciliation suppression fact in canonical DB truth."""
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "token_suppression"}
+    if not _table_exists(conn, "token_suppression"):
+        return {"status": "skipped_missing_table", "table": "token_suppression"}
+    normalized_token = str(token_id or "").strip()
+    if not normalized_token:
+        raise ValueError("token suppression requires token_id")
+    normalized_reason = str(suppression_reason or "").strip()
+    if normalized_reason not in TOKEN_SUPPRESSION_REASONS:
+        raise ValueError(f"unknown token suppression reason: {suppression_reason!r}")
+    normalized_source = str(source_module or "").strip()
+    if not normalized_source:
+        raise ValueError("token suppression requires source_module")
+    now = created_at or datetime.now(timezone.utc).isoformat()
+    evidence_json = json.dumps(evidence or {}, sort_keys=True)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(token_id) DO UPDATE SET
+            condition_id = CASE
+                WHEN excluded.condition_id IS NULL OR excluded.condition_id = ''
+                THEN token_suppression.condition_id
+                ELSE excluded.condition_id
+            END,
+            suppression_reason = excluded.suppression_reason,
+            source_module = excluded.source_module,
+            updated_at = excluded.updated_at,
+            evidence_json = excluded.evidence_json
+        """,
+        (
+            normalized_token,
+            str(condition_id or ""),
+            normalized_reason,
+            normalized_source,
+            now,
+            now,
+            evidence_json,
+        ),
+    )
+    return {
+        "status": "written",
+        "table": "token_suppression",
+        "token_id": normalized_token,
+    }
+
+
+def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]:
+    """Return tokens that reconciliation must not resurrect from chain-only state."""
+    if conn is None or not _table_exists(conn, "token_suppression"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT token_id
+        FROM token_suppression
+        ORDER BY created_at ASC, token_id ASC
+        """
+    ).fetchall()
+    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
 
 
 def expire_control_override(

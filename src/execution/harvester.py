@@ -33,6 +33,7 @@ from src.state.db import (
     log_settlement_event,
     query_authoritative_settlement_rows,
     query_settlement_events,
+    record_token_suppression,
 )
 from src.state.portfolio import (
     PortfolioState,
@@ -817,7 +818,22 @@ def _settle_positions(
         # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)
         token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
         if token_id and token_id not in portfolio.ignored_tokens:
-            portfolio.ignored_tokens.append(token_id)
+            suppression_result = record_token_suppression(
+                conn,
+                token_id=token_id,
+                condition_id=getattr(pos, "condition_id", ""),
+                suppression_reason="settled_position",
+                source_module="src.execution.harvester",
+                evidence={"trade_id": pos.trade_id, "target_date": target_date},
+            )
+            if suppression_result.get("status") == "written":
+                portfolio.ignored_tokens.append(token_id)
+            else:
+                logger.warning(
+                    "Settlement token suppression was not persisted for %s: %s",
+                    pos.trade_id,
+                    suppression_result,
+                )
 
         log_event(conn, "SETTLEMENT", pos.trade_id, {
             "city": city, "target_date": target_date,

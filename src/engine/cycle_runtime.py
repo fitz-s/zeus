@@ -273,7 +273,7 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     return summary
 
 
-def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps) -> bool:
+def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps, conn=None) -> bool:
     portfolio_dirty = False
     for pos in list(portfolio.positions):
         if pos.chain_state not in {"quarantined", "quarantine_expired"}:
@@ -284,6 +284,24 @@ def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps) -> 
         if token_id in getattr(portfolio, "ignored_tokens", []):
             continue
         if not deps.has_acknowledged_quarantine_clear(token_id):
+            continue
+        result = deps.record_token_suppression(
+            conn,
+            token_id=token_id,
+            condition_id=getattr(pos, "condition_id", ""),
+            suppression_reason="operator_quarantine_clear",
+            source_module="src.engine.cycle_runtime",
+            evidence={"trade_id": getattr(pos, "trade_id", "")},
+        )
+        if result.get("status") != "written":
+            summary["operator_clears_suppression_failed"] = (
+                summary.get("operator_clears_suppression_failed", 0) + 1
+            )
+            deps.logger.warning(
+                "Quarantine clear for %s was acknowledged but token suppression was not persisted: %s",
+                token_id,
+                result,
+            )
             continue
         portfolio.ignored_tokens.append(token_id)
         summary["operator_clears_applied"] = summary.get("operator_clears_applied", 0) + 1
@@ -364,7 +382,12 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
+    portfolio_dirty = _apply_acknowledged_quarantine_clears(
+        portfolio,
+        summary,
+        deps=deps,
+        conn=conn,
+    )
     tracker_dirty = False
 
     exit_stats = check_pending_exits(portfolio, clob, conn=conn)

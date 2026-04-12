@@ -66,6 +66,13 @@ def test_strategy_policy_tables_exist_in_schema():
     assert "CREATE TABLE IF NOT EXISTS control_overrides" in sql
 
 
+def test_token_suppression_table_exists_in_kernel_schema():
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS token_suppression" in sql
+    assert "suppression_reason" in sql
+    assert "source_module" in sql
+
+
 def test_schema_has_append_only_triggers():
     sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     assert "position_events is append-only" in sql
@@ -330,6 +337,10 @@ def test_init_schema_bootstraps_additive_canonical_support_tables():
         row["name"]
         for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
     }
+    token_suppression_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(token_suppression)").fetchall()
+    }
 
     assert {"position_id", "phase", "strategy_key", "updated_at"}.issubset(
         current_columns
@@ -347,6 +358,12 @@ def test_init_schema_bootstraps_additive_canonical_support_tables():
         "action_type",
         "precedence",
     }.issubset(control_override_columns)
+    assert {
+        "token_id",
+        "suppression_reason",
+        "source_module",
+        "created_at",
+    }.issubset(token_suppression_columns)
     conn.close()
 
 
@@ -420,6 +437,10 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
         row["name"]
         for row in conn.execute("PRAGMA table_info(control_overrides)").fetchall()
     }
+    token_suppression_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(token_suppression)").fetchall()
+    }
 
     assert {
         "strategy_key",
@@ -443,6 +464,12 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
         "action_type",
         "precedence",
     }.issubset(control_override_columns)
+    assert {
+        "token_id",
+        "suppression_reason",
+        "source_module",
+        "created_at",
+    }.issubset(token_suppression_columns)
 
     conn.close()
 
@@ -3048,6 +3075,7 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     pos.exit_reason = "forward edge failed"
     pos.exit_price = 0.46
     pos.pnl = 1.5
+    pos.token_id = "tok-settled"
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
         decision_id="dec-1",
@@ -3073,6 +3101,17 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     assert dict(event_row) == {
         "phase_before": "pending_exit",
         "phase_after": "settled",
+    }
+    suppression_row = conn.execute(
+        """
+        SELECT suppression_reason, source_module
+        FROM token_suppression
+        WHERE token_id = 'tok-settled'
+        """
+    ).fetchone()
+    assert dict(suppression_row) == {
+        "suppression_reason": "settled_position",
+        "source_module": "src.execution.harvester",
     }
     conn.close()
 

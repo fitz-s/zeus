@@ -1293,6 +1293,19 @@ def test_operator_clear_ack_applies_ignored_token_only_after_explicit_ack(monkey
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
     assert portfolio.ignored_tokens == ["tok-clear"]
     assert summary["operator_clears_applied"] == 1
+    conn = get_connection(db_path)
+    row = conn.execute(
+        """
+        SELECT suppression_reason, source_module
+        FROM token_suppression
+        WHERE token_id = 'tok-clear'
+        """
+    ).fetchone()
+    conn.close()
+    assert dict(row) == {
+        "suppression_reason": "operator_quarantine_clear",
+        "source_module": "src.engine.cycle_runtime",
+    }
 
     payload = control_plane_module.read_control_payload()
     assert payload["acks"][-1]["command"] == "acknowledge_quarantine_clear"
@@ -1646,7 +1659,144 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
     assert state.positions[0].condition_id == "condition-db"
 
 
-def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monkeypatch):
+def test_load_portfolio_reads_ignored_tokens_from_canonical_suppression(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+        ) VALUES (
+            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, suppression_reason, source_module, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "db-suppressed-token",
+            "operator_quarantine_clear",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [],
+        "bankroll": 99.0,
+        "ignored_tokens": ["json-shadow-token"],
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-token"]
+    assert state.ignored_tokens == ["db-suppressed-token"]
+
+
+def test_load_portfolio_reads_canonical_suppression_when_projection_empty(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, suppression_reason, source_module, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "db-empty-suppressed-token",
+            "operator_quarantine_clear",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [],
+        "bankroll": 99.0,
+        "ignored_tokens": ["json-shadow-token"],
+    }))
+
+    state = load_portfolio(path)
+
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is False
+    assert state.ignored_tokens == ["db-empty-suppressed-token"]
+
+
+def test_load_portfolio_preserves_canonical_suppression_when_projection_degraded(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, suppression_reason, source_module, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "db-degraded-suppressed-token",
+            "operator_quarantine_clear",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+        ),
+    )
+    conn.execute("DROP TABLE position_current")
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [],
+        "bankroll": 99.0,
+        "ignored_tokens": ["json-shadow-token"],
+    }))
+
+    state = load_portfolio(path)
+
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
+    assert state.ignored_tokens == ["db-degraded-suppressed-token"]
+
+
+def test_json_payload_loader_does_not_hydrate_ignored_tokens():
+    from src.state import portfolio as portfolio_module
+
+    state = portfolio_module._load_portfolio_from_json_data(
+        {
+            "positions": [],
+            "bankroll": 99.0,
+            "ignored_tokens": ["json-shadow-token"],
+        },
+        current_mode="live",
+    )
+
+    assert state.ignored_tokens == []
+
+
+def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
@@ -1673,16 +1823,13 @@ def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monke
 
     state = load_portfolio(path)
 
-    # P4 (Tier 2.1): JSON fallback deleted. When DB projection is empty,
-    # load_portfolio returns empty PortfolioState with degraded flag instead
-    # of falling back to JSON data. This is the live-only axiom in action:
-    # JSON is never an authority source.
+    # Empty position_current is canonical healthy truth, not JSON fallback.
     assert state.positions == []
-    assert state.portfolio_loader_degraded is True
+    assert state.portfolio_loader_degraded is False
     assert state.bankroll == pytest.approx(111.0)
 
 
-def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_projection(tmp_path, monkeypatch):
+def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
@@ -1713,10 +1860,10 @@ def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_pro
 
     state = load_portfolio(path)
 
-    # P4 (Tier 2.1): JSON fallback deleted. Legacy-events-newer-than-projection
-    # now returns empty portfolio with degraded flag, not JSON data.
+    # Empty position_current remains canonical even when a stale JSON cache has
+    # legacy positions. JSON is not promoted back into authority.
     assert state.positions == []
-    assert state.portfolio_loader_degraded is True
+    assert state.portfolio_loader_degraded is False
 
 
 def test_partial_stale_policy_uses_degraded_json_fallback():

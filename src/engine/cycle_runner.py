@@ -23,7 +23,7 @@ from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level, get_force_exit_review
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
-from src.state.db import get_trade_connection_with_world
+from src.state.db import get_trade_connection_with_world, record_token_suppression
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
