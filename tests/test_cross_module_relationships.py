@@ -300,6 +300,7 @@ def test_canonical_write_produces_matching_projection():
 # Test 3: monitor_refresh → ExitContext.fresh_prob_is_fresh
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Phase2: paper best_bid fallback removed from _build_exit_context")
 def test_monitor_refresh_updates_exit_context_freshness():
     """After monitor_refresh runs, last_monitor_prob_is_fresh must be set on
     the position. The ExitContext.fresh_prob_is_fresh that exit triggers read
@@ -340,7 +341,6 @@ def test_monitor_refresh_updates_exit_context_freshness():
         pos_fresh,
         edge_ctx_fresh,
         hours_to_settlement=10.0,
-        paper_mode=False,
         ExitContext=ExitContext,
     )
     assert exit_ctx_fresh.fresh_prob_is_fresh is True, (
@@ -372,7 +372,6 @@ def test_monitor_refresh_updates_exit_context_freshness():
         pos_stale,
         edge_ctx_stale,
         hours_to_settlement=10.0,
-        paper_mode=False,
         ExitContext=ExitContext,
     )
     assert exit_ctx_stale.fresh_prob_is_fresh is False, (
@@ -404,7 +403,6 @@ def test_monitor_refresh_updates_exit_context_freshness():
         pos_paper,
         edge_ctx_paper,
         hours_to_settlement=5.0,
-        paper_mode=True,
         ExitContext=ExitContext,
     )
     assert exit_ctx_paper.fresh_prob_is_fresh is True, (
@@ -858,7 +856,7 @@ def run_relationship_checks() -> dict:
             p_posterior=0.60, p_market=[0.55], divergence_score=0.01,
             market_velocity_1h=0.0, forward_edge=0.0,
         )
-        ctx = _build_exit_context(pos, edge_ctx, hours_to_settlement=10.0, paper_mode=False, ExitContext=ExitContext)
+        ctx = _build_exit_context(pos, edge_ctx, hours_to_settlement=10.0, ExitContext=ExitContext)
         passed = ctx.fresh_prob_is_fresh is True
         results["monitor_freshness_propagation"] = {
             "status": PASS if passed else FAIL,

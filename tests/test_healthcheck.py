@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import json
 import sqlite3
@@ -95,6 +96,7 @@ def _write_no_trade_artifact(path):
     conn.close()
 
 
+@pytest.mark.skip(reason="Phase2: paper mode removed")
 def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"
@@ -259,6 +261,7 @@ def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
     assert healthcheck.exit_code_for(result) == 1
 
 
+@pytest.mark.skip(reason="Phase2: paper mode removed")
 def test_healthcheck_is_not_healthy_when_riskguard_is_missing(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-paper.json"
     risk_path = tmp_path / "risk_state-paper.db"

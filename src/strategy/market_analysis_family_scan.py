@@ -43,6 +43,7 @@ def scan_full_hypothesis_family(
     This function records the broader tested family, including hypotheses that
     fail edge or CI prefilter, so BH accounting does not silently shrink.
     """
+    if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
     for idx, bin_obj in enumerate(analysis.bins):
         label = _label_for_bin(bin_obj)

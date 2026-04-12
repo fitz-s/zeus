@@ -8,6 +8,7 @@ state/*-paper.db
 state/*.db-shm
 state/*.db-wal
 state/legacy_state_archive/
+docs/archives/
 logs/*.log
 logs/*.err
 .omx/

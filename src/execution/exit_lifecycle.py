@@ -58,7 +58,6 @@ class ExitIntent:
     shares: float
     current_market_price: float
     best_bid: float | None
-    paper_mode: bool
 
 
 def place_sell_order(
@@ -210,7 +209,7 @@ def _dual_write_canonical_economic_close_if_available(
     return True
 
 
-def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mode: bool) -> ExitIntent:
+def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
     return ExitIntent(
@@ -220,11 +219,10 @@ def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mo
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
-        paper_mode=paper_mode,
     )
 
 
-def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_intent: ExitIntent, *, paper_mode: bool) -> None:
+def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_intent: ExitIntent) -> None:
     if exit_intent.trade_id != position.trade_id:
         raise ValueError("exit_intent trade_id mismatch")
     expected_token = position.token_id if position.direction == "buy_yes" else position.no_token_id
@@ -234,8 +232,6 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent shares mismatch")
     if exit_context.current_market_price is not None and abs(exit_intent.current_market_price - float(exit_context.current_market_price)) > 1e-9:
         raise ValueError("exit_intent current_market_price mismatch")
-    if exit_intent.paper_mode is not paper_mode:
-        raise ValueError("exit_intent paper_mode mismatch")
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -268,7 +264,6 @@ def execute_exit(
     portfolio: PortfolioState,
     position: Position,
     exit_context: ExitContext,
-    paper_mode: bool,
     clob=None,
     conn: sqlite3.Connection | None = None,
     exit_intent: ExitIntent | None = None,
@@ -280,36 +275,14 @@ def execute_exit(
     NEVER close a live position without confirmed fill.
     """
     if exit_context.current_market_price is None:
-        if not paper_mode:
-            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
-            _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
-            return "exit_blocked: incomplete_context"
-        return "paper_exit_failed: incomplete_context"
+        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
+        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
+        return "exit_blocked: incomplete_context"
 
-    exit_intent = exit_intent or build_exit_intent(position, exit_context, paper_mode=paper_mode)
-    _validate_exit_intent(position, exit_context, exit_intent, paper_mode=paper_mode)
+    exit_intent = exit_intent or build_exit_intent(position, exit_context)
+    _validate_exit_intent(position, exit_context, exit_intent)
 
-    if paper_mode:
-        _mark_pending_exit(position)
-        position.exit_state = "exit_intent"
-        phase_before = _canonical_phase_before_for_economic_close(position)
-        closed = compute_economic_close(
-            portfolio,
-            position.trade_id,
-            exit_intent.current_market_price,
-            exit_intent.reason,
-        )
-        if closed is not None:
-            closed.exit_state = "sell_filled"
-            _dual_write_canonical_economic_close_if_available(
-                conn,
-                closed,
-                phase_before=phase_before,
-            )
-            return f"paper_exit: {exit_intent.reason}"
-        return "paper_exit_failed: position_not_found"
-
-    # Live mode: sell order lifecycle
+    # Live path: sell order lifecycle
     return _execute_live_exit(
         portfolio,
         position,

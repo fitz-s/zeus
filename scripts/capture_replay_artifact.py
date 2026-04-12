@@ -34,7 +34,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
+    clob = PolymarketClient()
     limits = RiskLimits()
 
     summary = {

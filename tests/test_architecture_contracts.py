@@ -714,6 +714,7 @@ def test_replay_parity_on_init_schema_bootstrap_advances_beyond_missing_tables(
     assert payload["canonical"]["open_positions"] == 0
 
 
+@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advances_parity(
     tmp_path,
 ):
@@ -794,6 +795,7 @@ def test_open_position_canonical_backfill_seeds_legacy_paper_positions_and_advan
     assert parity_payload["legacy_exports"][0]["comparison"]["status"] == "match"
 
 
+@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_path):
     db_path = tmp_path / "zeus.db"
     legacy_path = tmp_path / "positions-paper.json"
@@ -830,6 +832,7 @@ def test_open_position_canonical_backfill_reports_missing_canonical_tables(tmp_p
     assert "position_current" in payload["missing_tables"]
 
 
+@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_positions(
     tmp_path,
 ):
@@ -881,6 +884,7 @@ def test_open_position_canonical_backfill_is_idempotent_for_already_seeded_posit
     assert second_payload["skipped_existing_count"] == 1
 
 
+@pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -2652,7 +2656,6 @@ def test_harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -2696,7 +2699,6 @@ def test_harvester_settlement_path_skips_canonical_write_without_prior_canonical
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -2726,7 +2728,6 @@ def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -2771,7 +2772,6 @@ def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(
             winning_label="39-40°F",
             settlement_records=[],
             strategy_tracker=None,
-            paper_mode=True,
         )
     except RuntimeError as exc:
         assert "canonical settlement dual-write failed" in str(exc)
@@ -2820,7 +2820,6 @@ def test_harvester_settlement_path_uses_day0_window_as_phase_before_when_applica
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -2866,7 +2865,6 @@ def test_harvester_settlement_path_uses_economically_closed_phase_before_when_ap
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -2935,7 +2933,6 @@ def test_harvester_settlement_path_skips_pending_exit_positions():
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 0
@@ -2975,7 +2972,6 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     assert settled == 1
@@ -3032,7 +3028,6 @@ def test_harvester_settlement_skips_stale_in_memory_pos_when_position_current_sh
         winning_label="39-40\u00b0F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     # P6 guard: stale in-memory economically_closed must NOT produce a second settlement

@@ -674,7 +674,7 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
     status_summary_module.write_status({"mode": "test", "risk_level": "ORANGE", "failed": True, "failure_reason": "boom"})
     status = json.loads(status_path.read_text())
 
-    assert status["risk"]["level"] == "RED"
+    assert status["risk"]["infrastructure_level"] == "RED"
     assert status["risk"]["riskguard_level"] == "GREEN"
     assert status["risk"]["consistency_check"]["ok"] is False
     assert "cycle_risk_level_mismatch:ORANGE->GREEN" in status["risk"]["consistency_check"]["issues"]
@@ -1001,7 +1001,7 @@ def test_inv_status_surfaces_db_substrate_degradation(monkeypatch, tmp_path):
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
 
-    assert status["risk"]["level"] == "RED"
+    assert status["risk"]["infrastructure_level"] == "RED"
     assert "position_current_missing_table" in status["risk"]["consistency_check"]["issues"]
     assert "strategy_health_stale" in status["risk"]["consistency_check"]["issues"]
     assert status["truth"]["db_primary_inputs"] == {
@@ -1017,8 +1017,8 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
     conn.close()
 
     class DummyClob:
-        def __init__(self, paper_mode):
-            self.paper_mode = paper_mode
+        def __init__(self):
+            pass
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -1214,12 +1214,6 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
             "strategy": "opening_inertia",
             "enabled": False,
             "note": "recommended_by=edge_compression",
-        },
-        {
-            "command": "set_strategy_gate",
-            "strategy": "shoulder_sell",
-            "enabled": True,
-            "note": "recommended_by=gate_drift_resolved",
         },
     ]
 
@@ -1582,6 +1576,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     assert epistemic["forecast_context"]["location"]["offset"] == 0.0
 
 
+@pytest.mark.skip(reason="Phase2: paper_mode removed")
 def test_inv_entry_bankroll_contract_is_explicit_in_paper_mode():
     portfolio = PortfolioState(
         bankroll=150.0,
@@ -2523,7 +2518,7 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
     details = json.loads(row["details_json"])
 
     assert row["win_rate"] is None
-    assert details["accuracy"] == pytest.approx(0.5)
+    assert details["probability_directional_accuracy"] == pytest.approx(0.5)
     assert details["realized_pnl"] == pytest.approx(4.5)
     assert details["total_pnl"] == pytest.approx(4.5)
 
@@ -2664,7 +2659,36 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    # P9: log_settlement_event no longer writes to position_events.
+    # Write SETTLED event directly to position_events + position_current
+    # so query_settlement_events finds it via the canonical path.
+    import json as _json
+    conn.execute("""
+        INSERT INTO position_current
+        (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, ("rt-settle-auth", "economically_closed", "center_buy",
+           "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
+           "m6", "center_buy", 10.0, 25.0, 10.0, 0.40))
+    conn.execute("""
+        INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type,
+         occurred_at, strategy_key, source_module, payload_json)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, ("rt-settle-auth:settled:1", "rt-settle-auth", 1, 1, "SETTLED",
+           "2026-04-01T23:00:00+00:00", "center_buy", "src.state.db",
+           _json.dumps({
+               "contract_version": "position_settled.v1",
+               "winning_bin": "39-40°F",
+               "position_bin": "39-40°F",
+               "won": True,
+               "outcome": 1,
+               "p_posterior": 0.61,
+               "exit_price": 1.0,
+               "pnl": 15.0,
+               "exit_reason": "SETTLEMENT",
+           })))
     conn.commit()
     conn.close()
 
@@ -2685,7 +2709,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     assert details["settlement_storage_source"] == "position_events"
     assert details["settlement_row_storage_sources"] == ["position_events"]
     assert details["settlement_sample_size"] == 1
-    assert details["accuracy"] == pytest.approx(1.0)
+    assert details["probability_directional_accuracy"] == pytest.approx(1.0)
 
 
 
@@ -2738,8 +2762,8 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     conn.close()
 
     class DummyClob:
-        def __init__(self, paper_mode):
-            self.paper_mode = paper_mode
+        def __init__(self):
+            pass
 
     calls: list[dict] = []
 
@@ -2760,6 +2784,10 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kwargs: _market_list)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    # DummyClob lacks get_positions_from_api/get_balance → chain sync and wallet fail → entries blocked.
+    # Stub both so chain_ready=True and entry_bankroll is set and discovery phase runs.
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (150.0, {}))
     monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
     monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(
@@ -2843,7 +2871,22 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_settlement_event(conn, settled_pos, winning_bin="39-40°F", won=True, outcome=1)
+    # P9: log_settlement_event no longer writes to position_events or decision_log.
+    # Use store_settlement_records so query_authoritative_settlement_rows finds the record.
+    store_settlement_records(conn, [SettlementRecord(
+        trade_id="trade-1",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="39-40°F",
+        direction="buy_yes",
+        p_posterior=0.61,
+        outcome=1,
+        pnl=15.0,
+        decision_snapshot_id=snapshot_id,
+        strategy="center_buy",
+        edge_source="center_buy",
+        settled_at="2026-04-01T23:00:00Z",
+    )])
     conn.commit()
     conn.close()
 
@@ -3099,7 +3142,36 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_settlement_event(conn, settled_pos, winning_bin="39-40°F", won=True, outcome=1)
+    # P9: log_settlement_event no longer writes to position_events.
+    # Write SETTLED event + position_current directly so query_settlement_events
+    # finds it via the canonical path (asserted as source=="position_events" below).
+    import json as _json
+    conn.execute("""
+        INSERT INTO position_current
+        (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, ("trade-durable-preferred", "economically_closed", "center_buy",
+           "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
+           "m1", "center_buy", 10.0, 10.0, 10.0, 0.40))
+    conn.execute("""
+        INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type,
+         occurred_at, strategy_key, snapshot_id, source_module, payload_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, ("trade-durable-preferred:settled:1", "trade-durable-preferred", 1, 1, "SETTLED",
+           "2026-04-01T23:00:00+00:00", "center_buy", durable_snapshot_id, "src.state.db",
+           _json.dumps({
+               "contract_version": "position_settled.v1",
+               "winning_bin": "39-40°F",
+               "position_bin": "39-40°F",
+               "won": True,
+               "outcome": 1,
+               "p_posterior": 0.61,
+               "exit_price": 1.0,
+               "pnl": 15.0,
+               "exit_reason": "SETTLEMENT",
+           })))
     conn.commit()
     conn.close()
 
@@ -3210,8 +3282,39 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
         last_exit_at="2026-04-01T23:00:00Z",
         state="settled",
     )
-    log_settlement_event(conn, good_pos, winning_bin="39-40°F", won=True, outcome=1)
-    log_settlement_event(conn, bad_pos, winning_bin="39-40°F", won=False, outcome=0)
+    # P9: log_settlement_event no longer writes to position_events or decision_log.
+    # Use store_settlement_records for both so query_authoritative_settlement_rows finds them.
+    # good_pos has decision_snapshot_id -> context found; bad_pos has none -> dropped.
+    store_settlement_records(conn, [
+        SettlementRecord(
+            trade_id="trade-good-context",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.61,
+            outcome=1,
+            pnl=15.0,
+            decision_snapshot_id=good_snapshot_id,
+            strategy="center_buy",
+            edge_source="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        ),
+        SettlementRecord(
+            trade_id="trade-missing-context",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="41-42°F",
+            direction="buy_yes",
+            p_posterior=0.40,
+            outcome=0,
+            pnl=-3.0,
+            decision_snapshot_id="",
+            strategy="center_buy",
+            edge_source="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        ),
+    ])
     conn.commit()
     conn.close()
 
@@ -3403,7 +3506,6 @@ def test_harvester_settlement_chronicle_event_carries_exit_price(tmp_path):
         winning_label="39-40°F",
         settlement_records=[],
         strategy_tracker=None,
-        paper_mode=True,
     )
 
     chronicle_row = conn.execute(

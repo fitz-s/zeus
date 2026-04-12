@@ -170,7 +170,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=False)
+    clob = PolymarketClient()
     tracker = get_tracker()
     limits = RiskLimits()
     portfolio_dirty = False

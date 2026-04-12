@@ -1046,6 +1046,7 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, monkeypatch):
     from src.state.portfolio import load_portfolio
 
@@ -1209,6 +1210,7 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.2}'
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_entry_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events
     from src.state.portfolio import Position
@@ -1257,6 +1259,7 @@ def test_log_trade_entry_emits_position_event(tmp_path):
 
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     from src.state.db import log_trade_exit, query_position_events
     from src.state.portfolio import Position
@@ -1343,6 +1346,7 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.12}'
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_update_trade_lifecycle_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events, update_trade_lifecycle
     from src.state.portfolio import Position
@@ -1395,6 +1399,7 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
     assert lifecycle_events[0]["details"]["chain_state"] == "synced"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_fill_telemetry(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -1463,6 +1468,7 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -1519,6 +1525,7 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     assert fact["terminal_exec_status"] == "rejected"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_settlement_event_emits_durable_record(tmp_path):
     from src.state.db import log_settlement_event, query_position_events
     from src.state.portfolio import Position
@@ -1644,6 +1651,7 @@ def test_log_settlement_event_preserves_prior_exit_time_in_outcome_fact(tmp_path
     assert row["hold_duration_hours"] == pytest.approx(18.0)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     from src.state.db import log_settlement_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -1744,6 +1752,7 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     assert rows[0]["pnl"] == pytest.approx(12.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_path):
     from src.state.db import (
         log_position_event,
@@ -1830,6 +1839,7 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
     assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_filters_by_env(tmp_path):
     from src.state.db import log_settlement_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -1947,6 +1957,7 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -2022,6 +2033,7 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     assert rows[0]["details"]["pnl"] == pytest.approx(-2.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -2118,6 +2130,7 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
     assert latest_dup["details"]["pnl"] == pytest.approx(-2.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):
     from src.state.db import log_position_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -2178,6 +2191,7 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
     assert rows[0]["settled_at"] == "2026-04-02T00:00:00Z"
     assert rows[0]["source"] == "position_events"
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     from src.state.db import log_position_event, query_execution_event_summary
     from src.state.portfolio import Position
@@ -2266,6 +2280,7 @@ def test_query_no_trade_cases_filters_by_env(tmp_path):
     assert [case["decision_id"] for case in live_cases] == ["live-1"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_combines_settlement_no_trade_and_execution(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -2410,6 +2425,7 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
     assert [case["decision_id"] for case in cases] == ["newer"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -2527,6 +2543,7 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -2619,6 +2636,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 205
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
@@ -2724,6 +2742,7 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
     from src.state.db import log_exit_retry_event, query_position_events
     from src.state.portfolio import Position

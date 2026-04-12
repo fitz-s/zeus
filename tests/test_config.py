@@ -29,6 +29,7 @@ from src.config import (
 from src.contracts.settlement_semantics import SettlementSemantics
 
 
+@pytest.mark.skip(reason="Phase2: paper mode removed")
 def test_settings_loads_all_required_keys():
     s = Settings()
     assert s.mode == "paper"

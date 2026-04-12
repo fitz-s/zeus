@@ -231,9 +231,7 @@ def _startup_wallet_check(clob=None):
     """
     if clob is None:
         from src.data.polymarket_client import PolymarketClient
-        clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
-    if getattr(clob, "paper_mode", False):
-        return
+        clob = PolymarketClient()
     try:
         balance = float(clob.get_balance())
         logger.info("Startup wallet check: $%.2f USDC available", balance)

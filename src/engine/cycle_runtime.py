@@ -104,9 +104,6 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 
 def run_chain_sync(portfolio, clob, conn=None, *, deps):
-    if getattr(clob, "paper_mode", False):
-        return {"skipped": "paper_mode"}, True
-
     try:
         api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     except Exception as exc:
@@ -118,7 +115,7 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
 
 
 def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
-    if getattr(clob, "paper_mode", False) or not hasattr(clob, "get_open_orders"):
+    if not hasattr(clob, "get_open_orders"):
         return 0
 
     tracked_order_ids = set()
@@ -143,18 +140,6 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     config_cap = float(deps.settings.capital_base_usd)
-
-    if getattr(clob, "paper_mode", False):
-        effective = max(0.0, float(portfolio.initial_bankroll))
-        bankroll = min(config_cap, effective) if effective > 0 else 0.0
-        return bankroll, {
-            "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
-            "dynamic_cap_usd": min(config_cap, effective) if effective > 0 else 0.0,
-            "entry_bankroll_contract": "paper_effective_bankroll_capped_by_config",
-            "bankroll_truth_source": "portfolio.initial_bankroll",
-            "wallet_balance_used": False,
-        }
 
     # P7: Live — wallet_balance is the PRIMARY bankroll source.
     # config_cap acts as an upper-bound safety cap only.
@@ -273,9 +258,6 @@ def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | No
 
 def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     summary = {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False}
-    if getattr(clob, "paper_mode", False):
-        return summary
-
     from src.execution.fill_tracker import check_pending_entries
 
     stats = check_pending_entries(
@@ -314,7 +296,7 @@ def _position_state_value(pos) -> str:
     return getattr(state, "value", state) or ""
 
 
-def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitContext):
+def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
     if False:
         _ = pos.entry_method
         _ = pos.selected_method
@@ -325,8 +307,6 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitC
         p_market = float(pos.last_monitor_market_price)
 
     best_bid = getattr(pos, "last_monitor_best_bid", None)
-    if paper_mode and best_bid is None and p_market is not None:
-        best_bid = p_market
 
     position_state = _position_state_value(pos)
     return ExitContext(
@@ -341,7 +321,7 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitC
         position_state=position_state,
         day0_active=position_state == "day0_window",
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
-        chain_is_fresh=None if paper_mode else pos.chain_state == "synced",
+        chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
     )
@@ -384,27 +364,25 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    paper_mode = getattr(clob, "paper_mode", False)
     portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
     tracker_dirty = False
 
-    if not paper_mode:
-        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
-        if exit_stats["filled"] or exit_stats["retried"]:
-            portfolio_dirty = True
+    exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+    if exit_stats["filled"] or exit_stats["retried"]:
+        portfolio_dirty = True
 
-        for filled_pos in exit_stats.get("filled_positions", []):
-            artifact.add_exit(
-                filled_pos.trade_id,
-                filled_pos.exit_reason or "DEFERRED_SELL_FILL",
-                filled_pos.exit_price or 0.0,
-                "sell_filled",
-            )
-            tracker.record_exit(filled_pos)
-            tracker_dirty = True
+    for filled_pos in exit_stats.get("filled_positions", []):
+        artifact.add_exit(
+            filled_pos.trade_id,
+            filled_pos.exit_reason or "DEFERRED_SELL_FILL",
+            filled_pos.exit_price or 0.0,
+            "sell_filled",
+        )
+        tracker.record_exit(filled_pos)
+        tracker_dirty = True
 
-        summary["pending_exits_filled"] = exit_stats["filled"]
-        summary["pending_exits_retried"] = exit_stats["retried"]
+    summary["pending_exits_filled"] = exit_stats["filled"]
+    summary["pending_exits_retried"] = exit_stats["retried"]
 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
@@ -521,7 +499,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos,
                 edge_ctx,
                 hours_to_settlement=hours_to_settlement,
-                paper_mode=paper_mode,
                 ExitContext=ExitContext,
             )
             p_market = exit_context.current_market_price
@@ -558,13 +535,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
-                    paper_mode=paper_mode,
                 )
                 outcome = execute_exit(
                     portfolio=portfolio,
                     position=pos,
                     exit_context=replace(exit_context, exit_reason=exit_reason),
-                    paper_mode=paper_mode,
                     clob=clob,
                     conn=conn,
                     exit_intent=exit_intent,

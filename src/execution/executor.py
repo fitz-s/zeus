@@ -253,7 +253,7 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
     )
 
     try:
-        client = PolymarketClient(paper_mode=False)
+        client = PolymarketClient()
         result = client.place_limit_order(
             token_id=intent.token_id,
             price=limit_price,
@@ -335,7 +335,7 @@ def _live_order(
     )
 
     try:
-        client = PolymarketClient(paper_mode=False)
+        client = PolymarketClient()
         result = client.place_limit_order(
             token_id=intent.token_id,
             price=intent.limit_price,

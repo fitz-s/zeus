@@ -273,7 +273,6 @@ def run_harvester() -> dict:
                 winning_label,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
-                paper_mode=False,
             )
             positions_settled += n_settled
             if n_settled > 0:
@@ -679,7 +678,6 @@ def _settle_positions(
     city: str, target_date: str, winning_label: str,
     settlement_records: Optional[list[SettlementRecord]] = None,
     strategy_tracker=None,
-    paper_mode: bool = False,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     # Semantic Provenance Guard
@@ -794,10 +792,10 @@ def _settle_positions(
                 strategy_tracker.record_settlement(closed)
 
         # T2-G: Redemption — claim winning USDC on-chain
-        if exit_price > 0 and not paper_mode and pos.condition_id:
+        if exit_price > 0 and pos.condition_id:
             try:
                 from src.data.polymarket_client import PolymarketClient
-                clob = PolymarketClient(paper_mode=False)
+                clob = PolymarketClient()
                 redeem_result = clob.redeem(pos.condition_id)
                 logger.info("Redeemed winning position %s (condition=%s)",
                             pos.trade_id, pos.condition_id)

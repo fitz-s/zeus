@@ -2,7 +2,7 @@
 """Backfill hourly observations from Open-Meteo Archive API.
 
 Fetches historical hourly temperature_2m for cities missing hourly data
-and writes directly to zeus-shared.db observation_instants + hourly_observations.
+and writes directly to zeus-world.db observation_instants + hourly_observations.
 
 Open-Meteo Archive: free, no API key, global coverage, hourly since 1940.
 Rate limit: ~10,000 calls/day. Each call = 1 city × 90 days.
@@ -26,7 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import httpx
 
 from src.config import cities as ALL_CITIES, City
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 OPENMETEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 CHUNK_DAYS = 90  # Open-Meteo allows up to ~1 year per request, but 90 days is safer
@@ -96,11 +96,14 @@ def backfill_city(
     city: City,
     days_back: int = 440,
     conn=None,
+    *,
+    chunk_days: int = CHUNK_DAYS,
+    sleep_seconds: float = SLEEP_BETWEEN_REQUESTS,
 ) -> dict:
     """Backfill hourly observations for one city."""
     own_conn = conn is None
     if own_conn:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         init_schema(conn)
 
     # Check existing coverage
@@ -114,14 +117,14 @@ def backfill_city(
     print(f"  {city.name}: {existing_dates} existing dates in observation_instants")
 
     end_date = date.today() - timedelta(days=2)  # Archive has ~2 day delay
-    start_date = end_date - timedelta(days=days_back)
+    start_date = end_date - timedelta(days=days_back - 1)
 
     total_inserted = 0
     total_skipped = 0
 
     current = start_date
     while current <= end_date:
-        chunk_end = min(current + timedelta(days=CHUNK_DAYS - 1), end_date)
+        chunk_end = min(current + timedelta(days=chunk_days - 1), end_date)
 
         try:
             rows = _fetch_hourly_chunk(city, current, chunk_end)
@@ -160,7 +163,8 @@ def backfill_city(
             print(f"    {current} → {chunk_end}: ERROR {e}")
 
         current = chunk_end + timedelta(days=1)
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
     if own_conn:
         conn.close()
@@ -201,7 +205,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cities", nargs="+", default=None, help="Cities to backfill (default: all missing)")
     parser.add_argument("--days", type=int, default=440, help="Days to look back (default: 440)")
-    parser.add_argument("--all-zeus", action="store_true", help="Backfill all 21 Zeus cities")
+    parser.add_argument("--chunk-days", type=int, default=CHUNK_DAYS, help=f"Days per Open-Meteo request (default: {CHUNK_DAYS})")
+    parser.add_argument("--sleep", type=float, default=SLEEP_BETWEEN_REQUESTS, help=f"Seconds between requests (default: {SLEEP_BETWEEN_REQUESTS})")
+    parser.add_argument("--all-zeus", action="store_true", help="Backfill all configured Zeus cities")
     parser.add_argument("--all-manifest", action="store_true", help="Backfill all 38 TIGGE manifest cities")
     args = parser.parse_args()
 
@@ -214,7 +220,7 @@ def main() -> int:
     pool_map = {c.name: c for c in all_pool}
 
     # Cities that already have hourly in zeus
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     covered = {r[0] for r in conn.execute(
         "SELECT DISTINCT city FROM observation_instants WHERE source = 'openmeteo_archive_hourly'"
@@ -236,7 +242,13 @@ def main() -> int:
     results = []
     for city in targets:
         print(f"\n[{city.name}]")
-        r = backfill_city(city, days_back=args.days, conn=conn)
+        r = backfill_city(
+            city,
+            days_back=args.days,
+            conn=conn,
+            chunk_days=args.chunk_days,
+            sleep_seconds=args.sleep,
+        )
         results.append(r)
 
     conn.close()

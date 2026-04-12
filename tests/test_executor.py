@@ -86,6 +86,7 @@ class TestPortfolio:
 
 
 class TestExecutor:
+    @pytest.mark.skip(reason="Phase2: paper mode removed")
     def test_paper_fill(self):
         edge = BinEdge(
             bin=Bin(low=39, high=40, label="39-40", unit="F"),
@@ -144,8 +145,8 @@ class TestExecutor:
         captured = {}
 
         class DummyClient:
-            def __init__(self, paper_mode):
-                assert paper_mode is False
+            def __init__(self):
+                pass
 
             def place_limit_order(self, *, token_id, price, size, side):
                 captured.update(

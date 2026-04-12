@@ -47,12 +47,9 @@ def _resolve_credentials() -> dict:
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
-    def __init__(self, paper_mode: bool = False):
-        self.paper_mode = paper_mode
+    def __init__(self):
         self._clob_client = None
-
-        if not paper_mode:
-            self._init_live_client()
+        self._init_live_client()
 
     def _init_live_client(self):
         """Initialize py-clob-client with keychain credentials."""
@@ -129,9 +126,6 @@ class PolymarketClient:
 
         Returns: order result dict or None on failure
         """
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'place_limit_order' cannot be called in paper mode")
-
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -149,17 +143,12 @@ class PolymarketClient:
 
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'cancel_order' cannot be called in paper mode")
         result = self._clob_client.cancel(order_id)
         logger.info("Order cancelled: %s → %s", order_id, result.get("status"))
         return result
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'get_order_status' cannot be called in paper mode")
-
         try:
             if hasattr(self._clob_client, "get_order"):
                 result = self._clob_client.get_order(order_id)
@@ -177,9 +166,6 @@ class PolymarketClient:
 
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'get_open_orders' cannot be called in paper mode")
-
         try:
             try:
                 from py_clob_client.clob_types import OpenOrderParams
@@ -197,9 +183,6 @@ class PolymarketClient:
 
     def get_positions_from_api(self) -> Optional[list[dict]]:
         """Fetch authoritative live positions from Polymarket's data API."""
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'get_positions_from_api' cannot be called in paper mode")
-
         try:
             creds = _resolve_credentials()
             address = creds.get("funder_address", "")
@@ -251,8 +234,6 @@ class PolymarketClient:
 
     def get_balance(self) -> float:
         """Get USDC balance."""
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'get_balance' cannot be called in paper mode")
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
         resp = self._clob_client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -265,8 +246,6 @@ class PolymarketClient:
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
         """
-        if self.paper_mode:  # Phase 2: delete guard when paper_mode parameter is removed
-            raise RuntimeError("Live API 'redeem' cannot be called in paper mode")
         try:
             result = self._clob_client.redeem(condition_id)
             logger.info("Redeemed condition %s → %s", condition_id, result)

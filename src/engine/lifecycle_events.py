@@ -314,6 +314,9 @@ def build_economic_close_canonical_write(
         "payload_json": json.dumps(
             {
                 "exit_price": getattr(position, "exit_price", None),
+                "fill_price": getattr(position, "exit_price", None),
+                "best_bid": getattr(position, "last_monitor_best_bid", None),
+                "current_market_price": getattr(position, "last_monitor_market_price", None),
                 "pnl": getattr(position, "pnl", None),
                 "exit_reason": getattr(position, "exit_reason", ""),
                 "exit_state": getattr(position, "exit_state", ""),

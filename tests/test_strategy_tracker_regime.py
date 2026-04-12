@@ -1,3 +1,4 @@
+import pytest
 import json
 from pathlib import Path
 
@@ -5,6 +6,7 @@ import scripts.rebuild_strategy_tracker_current_regime as rebuild
 import src.state.strategy_tracker as strategy_tracker_module
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tmp_path, monkeypatch):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -73,6 +75,7 @@ def test_rebuild_strategy_tracker_creates_current_regime_and_archives_history(tm
     assert rebuilt["strategies"]["shoulder_sell"]["trades"][0]["trade_id"] == "exit1"
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_edge_compression_requires_enough_time_span(monkeypatch):
     class FrozenDatetime(strategy_tracker_module.datetime):
         @classmethod
@@ -99,6 +102,7 @@ def test_edge_compression_requires_enough_time_span(monkeypatch):
     assert tracker.edge_compression_check(window_days=30) == []
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_edge_compression_still_triggers_with_enough_samples_and_span(monkeypatch):
     class FrozenDatetime(strategy_tracker_module.datetime):
         @classmethod
@@ -130,6 +134,7 @@ def test_edge_compression_still_triggers_with_enough_samples_and_span(monkeypatc
     assert alerts[0].startswith("EDGE_COMPRESSION: opening_inertia edge shrinking at -")
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_tracker_backfills_current_regime_started_at_from_loaded_trades():
     tracker = strategy_tracker_module.StrategyTracker.from_dict(
         {
@@ -152,6 +157,7 @@ def test_tracker_backfills_current_regime_started_at_from_loaded_trades():
     assert tracker.accounting["current_regime_started_at"] == "2026-04-01T00:00:00+00:00"
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_tracker_record_trade_updates_current_regime_started_at():
     tracker = strategy_tracker_module.StrategyTracker()
 
@@ -177,6 +183,7 @@ def test_tracker_record_trade_updates_current_regime_started_at():
     assert tracker.accounting["current_regime_started_at"] == "2026-04-01T00:00:00+00:00"
 
 
+@pytest.mark.skip(reason="K1: strategy_tracker migrated to no-op; from_dict/datetime/regime tracking removed")
 def test_tracker_from_dict_normalizes_legacy_compatibility_metadata():
     tracker = strategy_tracker_module.StrategyTracker.from_dict(
         {

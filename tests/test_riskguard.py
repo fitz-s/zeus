@@ -440,7 +440,7 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_truth_source"] == "working_state_fallback"
         assert details["portfolio_loader_status"] == "missing_table"
         assert details["portfolio_fallback_active"] is True
-        assert details["portfolio_fallback_reason"] == "missing_table"
+        assert details["portfolio_fallback_reason"] == "canonical snapshot unavailable: missing_table"
         assert details["portfolio_position_count"] == 0
         assert details["portfolio_capital_source"] == "working_state_metadata"
         assert details["initial_bankroll"] == pytest.approx(150.0)
@@ -543,7 +543,7 @@ class TestRiskGuardSettlementSource:
 
         assert details["strategy_settlement_summary"]["center_buy"]["count"] == 2
         assert details["strategy_settlement_summary"]["center_buy"]["pnl"] == pytest.approx(3.0)
-        assert details["strategy_settlement_summary"]["center_buy"]["accuracy"] == pytest.approx(0.5)
+        assert details["strategy_settlement_summary"]["center_buy"]["trade_profitability_rate"] == pytest.approx(0.5)
         assert details["strategy_settlement_summary"]["opening_inertia"]["count"] == 1
 
     def test_tick_records_entry_execution_summary(self, monkeypatch, tmp_path):
@@ -615,10 +615,17 @@ class TestRiskGuardSettlementSource:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        # Post-K1: record_trade / set_accounting_metadata are no-ops; tracker.summary()
+        # reads from position_events via query_authoritative_settlement_rows. Stub
+        # summary() to return fixed data so this test stays focused on riskguard's
+        # serialization of the tracker diagnostics, not on the tracker's own projection.
         tracker = strategy_tracker_module.StrategyTracker()
-        tracker.record_trade({"trade_id": "t1", "strategy": "center_buy", "pnl": 3.0, "entered_at": "2026-04-01T00:00:00Z", "edge": 0.12})
-        tracker.record_trade({"trade_id": "t2", "strategy": "center_buy", "pnl": -1.0, "entered_at": "2026-04-02T00:00:00Z", "edge": 0.08})
-        tracker.set_accounting_metadata(current_regime_started_at="2026-04-01T00:00:00Z")
+        tracker.summary = lambda conn=None: {
+            "center_buy": {"trades": 2, "pnl": 2.0},
+            "shoulder_sell": {"trades": 0, "pnl": 0.0},
+            "opening_inertia": {"trades": 0, "pnl": 0.0},
+            "settlement_capture": {"trades": 0, "pnl": 0.0},
+        }
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
@@ -637,7 +644,8 @@ class TestRiskGuardSettlementSource:
 
         assert details["strategy_tracker_summary"]["center_buy"]["trades"] == 2
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
-        assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
+        # Post-K1: set_accounting_metadata is a no-op; current_regime_started_at is always ""
+        assert details["strategy_tracker_accounting"]["current_regime_started_at"] == ""
         assert details["recommended_strategy_gates"] == []
 
 

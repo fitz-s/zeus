@@ -27,7 +27,7 @@ class TestLiveOrderHappyPath:
         mock_client.place_limit_order.return_value = {"orderID": "ord-123"}
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
-            lambda paper_mode: mock_client,
+            lambda: mock_client,
         )
         monkeypatch.setattr(
             "src.execution.executor.alert_trade",
@@ -47,7 +47,7 @@ class TestLiveOrderHappyPath:
         mock_client.place_limit_order.return_value = {"id": "fallback-id"}
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
-            lambda paper_mode: mock_client,
+            lambda: mock_client,
         )
         monkeypatch.setattr(
             "src.execution.executor.alert_trade",
@@ -64,7 +64,7 @@ class TestLiveOrderErrorModes:
         mock_client.place_limit_order.return_value = None
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
-            lambda paper_mode: mock_client,
+            lambda: mock_client,
         )
 
         result = _live_order("trade-3", _make_intent(), shares=10.0)
@@ -77,7 +77,7 @@ class TestLiveOrderErrorModes:
         mock_client.place_limit_order.side_effect = ConnectionError("CLOB down")
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
-            lambda paper_mode: mock_client,
+            lambda: mock_client,
         )
 
         result = _live_order("trade-4", _make_intent(), shares=10.0)
@@ -90,7 +90,7 @@ class TestLiveOrderErrorModes:
         mock_client.place_limit_order.return_value = {"orderID": "ord-ok"}
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
-            lambda paper_mode: mock_client,
+            lambda: mock_client,
         )
         monkeypatch.setattr(
             "src.execution.executor.alert_trade",
@@ -110,6 +110,7 @@ class TestModeIsolation:
     refactor from accidentally re-introducing cross-mode leakage.
     """
 
+    @pytest.mark.skip(reason="Phase2: paper_mode param removed")
     def test_live_order_always_uses_paper_mode_false(self, monkeypatch):
         """PolymarketClient is ALWAYS constructed with paper_mode=False in _live_order."""
         captured_paper_mode = []
