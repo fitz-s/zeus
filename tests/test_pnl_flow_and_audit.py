@@ -3354,7 +3354,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     assert details["dropped_rows"][0]["reason"] == "missing_decision_snapshot_id"
 
 
-def test_query_position_current_status_view_excludes_terminal_trade_decision_rows(tmp_path):
+def test_query_position_current_status_view_ignores_terminal_trade_decision_shadow_rows(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     apply_architecture_kernel_schema(conn)
@@ -3404,14 +3404,15 @@ def test_query_position_current_status_view_excludes_terminal_trade_decision_row
     loader_view = query_portfolio_loader_view(conn)
     conn.close()
 
-    assert status_view["open_positions"] == 0
-    assert status_view["positions"] == []
+    assert status_view["open_positions"] == 1
+    assert status_view["positions"][0]["trade_id"] == "trade-exited"
+    assert status_view["positions"][0]["state"] == "active"
     assert loader_view["status"] == "ok"
     assert loader_view["positions"][0]["trade_id"] == "trade-exited"
-    assert loader_view["positions"][0]["state"] == "economically_closed"
+    assert loader_view["positions"][0]["state"] == "entered"
 
 
-def test_position_current_views_consult_legacy_terminal_trade_status_when_current_db_lags(tmp_path, monkeypatch):
+def test_position_current_views_ignore_terminal_trade_decision_shadow_status_when_current_db_lags(tmp_path, monkeypatch):
     import src.state.db as db_module
 
     current_db = tmp_path / "zeus-paper.db"
@@ -3471,10 +3472,11 @@ def test_position_current_views_consult_legacy_terminal_trade_status_when_curren
     loader_view = query_portfolio_loader_view(current_conn)
     current_conn.close()
 
-    assert status_view["open_positions"] == 0
-    assert status_view["positions"] == []
+    assert status_view["open_positions"] == 1
+    assert status_view["positions"][0]["trade_id"] == "trade-lagged"
+    assert status_view["positions"][0]["state"] == "active"
     assert loader_view["positions"][0]["trade_id"] == "trade-lagged"
-    assert loader_view["positions"][0]["state"] == "economically_closed"
+    assert loader_view["positions"][0]["state"] == "entered"
 
 
 def test_harvester_settlement_chronicle_event_carries_exit_price(tmp_path):
