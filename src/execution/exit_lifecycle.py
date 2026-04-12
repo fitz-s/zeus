@@ -678,8 +678,14 @@ def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> Order
             sell_result.get("orderID")
             or sell_result.get("orderId")
             or sell_result.get("id")
-            or trade_id
         )
+        if not order_id:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="missing_order_id",
+                order_role="exit",
+            )
         return OrderResult(
             trade_id=trade_id,
             status="pending",

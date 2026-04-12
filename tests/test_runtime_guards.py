@@ -3870,6 +3870,20 @@ def test_build_exit_intent_carries_boundary_fields():
     assert intent.best_bid == pytest.approx(0.45)
 
 
+def test_sell_result_without_order_id_is_rejected_not_trade_id_fallback():
+    result = exit_lifecycle_module._coerce_sell_result(
+        "trade-1",
+        {"status": "OPEN", "price": 0.44, "shares": 25.0},
+    )
+
+    assert result.status == "rejected"
+    assert result.order_id in (None, "")
+    assert result.external_order_id in (None, "")
+    assert result.order_id != "trade-1"
+    assert result.external_order_id != "trade-1"
+    assert result.reason == "missing_order_id"
+
+
 def test_execute_exit_routes_live_sell_through_executor_exit_path(monkeypatch):
     pos = _position(state="day0_window")
     portfolio = PortfolioState(positions=[pos])
