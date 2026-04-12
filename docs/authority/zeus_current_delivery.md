@@ -17,14 +17,18 @@ This file is the current delivery entrypoint. It replaces historical constitutio
 
 When deciding what may land, use this order:
 
-1. machine-checkable authority (`architecture/*.yaml`, kernel manifest, invariants, zones, negative constraints)
-2. current authority docs in `docs/authority/`
-3. current repo/runtime truth surfaces
-4. operations pointer (`docs/operations/current_state.md`)
-5. current blockers (`docs/known_gaps.md`)
-6. historical archives for rationale only
+1. **Code, tests, and runtime behavior** — what the system actually does is the highest authority. If code and docs disagree, trust code, question docs.
+2. **Machine-checkable manifests** (`architecture/*.yaml`, kernel manifest, invariants, zones, negative constraints)
+3. **Current authority docs** in `docs/authority/`
+4. **Operations pointer** (`docs/operations/current_state.md`)
+5. **Current blockers** (`docs/known_gaps.md`)
+6. **Historical archives** for rationale only — never for current truth
 
 Chat memory, hook behavior, outer-host memory, and convenience summaries never outrank repo law.
+
+### 2.1 Current-phase rule
+
+Zeus is live-only. Paper mode was decommissioned in Phase 1. Any code, test, doc, or field that presupposes paper as a peer mode is a violation, not technical debt. The live/backtest/shadow boundary is defined in `docs/authority/zeus_live_backtest_shadow_boundary.md`.
 
 ---
 
@@ -112,7 +116,7 @@ Every patch review must answer these questions. If any answer is unfavorable, th
 2. Did this patch add real actuation or only another report/view?
 3. Did this patch preserve point-in-time truth?
 4. Did this patch reduce or increase attribution ambiguity?
-5. Did this patch preserve paper/live semantic parity?
+5. Did this patch respect the live/backtest/shadow boundary?
 6. Did this patch create any new implicit state transition?
 7. Did this patch encode missing-data truth or silently skip it?
 8. Did this patch introduce a new shadow persistence surface?
@@ -207,4 +211,5 @@ Historical design files are **not** part of the default path.
 - `docs/authority/zeus_packet_discipline.md`
 - `docs/authority/zeus_autonomy_gates.md`
 - `docs/authority/zeus_openclaw_venus_delivery_boundary.md`
+- `docs/authority/zeus_live_backtest_shadow_boundary.md`
 - `docs/authority/zeus_change_control_constitution.md` (deep governance; load only when needed)

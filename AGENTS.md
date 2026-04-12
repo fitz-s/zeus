@@ -9,7 +9,7 @@ Your job is to change only what the active work packet allows while protecting k
 
 ### What Zeus is
 
-Zeus is a **fully automated weather-probability trading runtime** on Polymarket. It runs as a daemon (paper or live mode), executing trading cycles every ~30 minutes. Each cycle: fetch forecast data → compute probabilities → find statistical edges → size positions → execute orders → manage lifecycle → report status.
+Zeus is a **fully automated weather-probability trading runtime** on Polymarket. It runs as a live-only daemon, executing trading cycles every ~30 minutes. Each cycle: fetch forecast data → compute probabilities → find statistical edges → size positions → execute orders → manage lifecycle → report status.
 
 **What it trades**: Polymarket weather markets — binary options on questions like "Will the daily high in Dallas exceed 85°F on April 15?" Zeus trades across ~16 cities, each with multiple temperature bins and two directions (buy_yes / buy_no).
 
@@ -193,6 +193,16 @@ Detailed rules for these topics are extracted to dedicated files:
 - **Autonomy gates** (destructive-ops human gate, team mode entry/restrictions, one-packet-at-a-time rule): `docs/authority/zeus_autonomy_gates.md`
 - **Change control** (deep packet governance): `docs/authority/zeus_change_control_constitution.md`
 - **Current delivery law** (authority order, planning lock, packet routing, completion protocol): `docs/authority/zeus_current_delivery.md`
+
+### Current-phase rule (Phase 1 complete)
+
+Zeus is live-only. Paper mode was decommissioned in Phase 1. Any code, test, field, or doc that presupposes paper as a peer mode is a violation. Three execution contexts exist with strict boundaries:
+
+- **Live** may act (execute orders, mutate canonical DB truth)
+- **Backtest** may evaluate (report metrics, compare strategies) but NOT authorize live changes
+- **Shadow** may observe (collect instrumentation facts) but NOT gate live execution
+
+Full boundary rules: `docs/authority/zeus_live_backtest_shadow_boundary.md`
 
 ### External boundary
 OpenClaw, Venus, and workspace-level docs are outside repo authority. Zeus exposes typed contracts outward. External tools must not mutate repo truth.

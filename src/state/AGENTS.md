@@ -22,12 +22,13 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 | `strategy_tracker.py` | Derived strategy attribution tracking (not runtime authority) | MEDIUM |
 | `truth_files.py` | Mode-aware truth-file helpers + legacy-state deprecation tooling | LOW |
 
-## Current reality
+## Current reality (post-Phase 1)
 
-- `position_events` is a real event spine
-- Open-position truth is still mixed (DB + JSON coexist transitionally)
-- JSON/state-object surfaces still exist as transitional runtime reality
-- `position_current` reflects intended canonical projection design; do not infer current migration completion or runtime health from that fact alone
+- `position_events` is the canonical event spine
+- `position_current` is the canonical projection surface
+- **Live reads must come from canonical DB truth.** JSON fallback was eliminated in P4 (commit 1fc14ab). `load_portfolio` reads from DB projection only; JSON exports (`positions-live.json`) are write-only caches, never read back as authority.
+- Settlement iteration queries `position_current` for authoritative phase (P6, commit 189912a) before processing
+- DB is `zeus_trades.db` (live trade state) and `zeus_world.db` (weather/calibration data)
 
 ## Domain rules
 

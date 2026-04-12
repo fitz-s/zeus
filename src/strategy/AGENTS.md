@@ -31,6 +31,13 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 - All probabilities at cross-layer seams must carry provenance (INV-12)
 - Unregistered numeric constants in Kelly cascades are forbidden (INV-13)
 
+## Live selection rules (post-Phase 1)
+
+- **Full tested hypothesis family is the FDR budget basis.** `attempted` = COUNT of ALL hypotheses tested, not just those with positive CI. Legacy prefiltered-edge paths under-count the family, creating false statistical significance. (IR-02 pending)
+- Live Kelly output is hard-clipped to `config.live_safety_cap_usd` ($5 in Phase 1 canary)
+- Strategy gates carry `GateDecision` provenance with `ReasonCode` enum — no bare bool gates
+- `reason_refuted()` returns False for all codes in Phase 1 (conservative); auto-un-gate recommendations require explicit refutation logic
+
 ## Common mistakes
 
 - Using normal approximation for p-values instead of bootstrap empirical distribution
