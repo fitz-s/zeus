@@ -115,10 +115,49 @@ def test_trade_history_audit_reports_orphan_runtime_trade_id(tmp_path, monkeypat
     conn = get_connection(backtest_db)
     row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
     conn.close()
-    assert summary.n_settlements == 1
+    assert summary.n_settlements == 0
     assert summary.n_replayed == 0
     assert row["divergence_status"] == "orphan_trade_decision"
     assert "orphan_trade_decision" in row["missing_reason_json"]
+
+
+def test_trade_history_audit_coverage_counts_only_requested_window(tmp_path, monkeypatch):
+    trade, trade_db, world_db, backtest_db = _init_trade_world(tmp_path)
+    _insert_position_and_outcome(trade)
+    trade.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+         direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+         last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+         decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+         chain_state, order_id, order_status, updated_at)
+        VALUES ('pos-out', 'settled', 'pos-out', 'mkt', 'NYC', 'US-Northeast', '2026-04-10',
+                '39-40°F', 'buy_yes', 'F', 5.0, 10.0, 5.0, 0.5, 0.6,
+                0.6, 0.1, 0.5, 'snap-2', 'entry', 'center_buy', 'edge',
+                'opening_hunt', 'on_chain', 'ord-2', 'filled', '2026-04-09T00:00:00Z')
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO trade_decisions
+        (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
+         p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status,
+         edge_source, runtime_trade_id, env)
+        VALUES ('mkt', '39-40°F', 'buy_yes', 5.0, 0.4, '2026-04-10T12:00:00+00:00', NULL,
+                0.6, 0.6, 0.2, 0.55, 0.65, 0.0, 'entered',
+                'center_buy', 'orphan-outside-window', 'live')
+        """
+    )
+    trade.commit()
+    trade.close()
+    _patch_connections(monkeypatch, trade_db, world_db, backtest_db)
+
+    summary = replay_module.run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+
+    assert summary.n_settlements == 1
+    assert summary.n_replayed == 1
+    assert summary.coverage_pct == 100.0
 
 
 def test_replay_fidelity_counts_orphan_runtime_trade_id_subjects(tmp_path, monkeypatch):

@@ -1686,6 +1686,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         target_date = current["target_date"]
         if target_date < start_date or target_date > end_date:
             continue
+        summary.n_settlements += 1
         city = cities_by_name.get(city_name)
         unit = current["unit"] or (city.settlement_unit if city else "")
         bin = bin_from_range_label(current["bin_label"], unit) if unit else None
@@ -1741,7 +1742,6 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         if outcome is not None:
             summary.n_actual_traded += 1
 
-    summary.n_settlements = len(subject_refs)
     summary.coverage_pct = round(summary.n_replayed / max(1, summary.n_settlements) * 100, 1)
     _insert_backtest_run(backtest_conn, summary)
     backtest_conn.commit()
