@@ -22,10 +22,12 @@ def choose_portfolio_truth_source(
     merge_supported: bool = False,
 ) -> LoaderPolicyDecision:
     status = (snapshot_status or "unknown").strip().lower()
-    if status == "ok":
+    if status in ("ok", "empty"):
+        # "empty" is a valid canonical state (zero positions, e.g. post-nuke
+        # or fresh start). An empty DB is healthy, not degraded.
         return LoaderPolicyDecision(
             source="canonical_db",
-            reason="canonical snapshot fully healthy",
+            reason="canonical snapshot healthy" if status == "ok" else "canonical DB healthy but empty (zero positions)",
         )
     if status == "partial_stale":
         if merge_supported:
