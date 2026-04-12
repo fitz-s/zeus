@@ -1305,6 +1305,74 @@ def test_kernel_schema_adds_token_identity_columns_to_existing_position_current(
     conn.close()
 
 
+def test_kernel_schema_migrates_existing_token_suppression_reason_check():
+    from src.state.ledger import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE token_suppression (
+            token_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear',
+                'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "resolved-token",
+            "cond-resolved",
+            "operator_quarantine_clear",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            "{}",
+        ),
+    )
+
+    apply_architecture_kernel_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chain-only-token",
+            "cond-chain",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            "{}",
+        ),
+    )
+    rows = conn.execute(
+        "SELECT token_id, suppression_reason FROM token_suppression ORDER BY token_id"
+    ).fetchall()
+
+    assert [dict(row) for row in rows] == [
+        {"token_id": "chain-only-token", "suppression_reason": "chain_only_quarantined"},
+        {"token_id": "resolved-token", "suppression_reason": "operator_quarantine_clear"},
+    ]
+    conn.close()
+
+
 def test_settlement_builder_emits_settled_event_and_projection_that_append_cleanly():
     from src.engine.lifecycle_events import (
         build_entry_canonical_write,

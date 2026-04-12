@@ -181,6 +181,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     ) -> bool:
         if conn is None:
             return False
+        # Race: if the fill just landed, the position is still in pending_entry
+        # phase when chain reconciliation runs. The fill event will set the
+        # correct size in its own path — skip canonical size correction here
+        # to avoid colliding with fill detection. On the next cycle the phase
+        # will be 'active' and real size corrections can proceed normally.
+        try:
+            _phase_row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (getattr(position, "trade_id", ""),),
+            ).fetchone()
+        except Exception:
+            _phase_row = None
+        if _phase_row is not None and str(_phase_row[0] or "") == "pending_entry":
+            return False
         expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
         if not _canonical_size_correction_baseline_available(
             getattr(position, "trade_id", ""),
@@ -443,6 +457,37 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 condition_id=chain.condition_id,
                 quarantined_at=now,
             )
+            if conn is not None:
+                try:
+                    from src.state.db import record_token_suppression
+
+                    result = record_token_suppression(
+                        conn,
+                        token_id=tid,
+                        condition_id=chain.condition_id,
+                        suppression_reason="chain_only_quarantined",
+                        source_module="src.state.chain_reconciliation",
+                        evidence={
+                            "size": chain.size,
+                            "avg_price": chain.avg_price,
+                            "cost": chain.cost or (chain.size * chain.avg_price),
+                            "condition_id": chain.condition_id,
+                            "first_seen_at": now,
+                        },
+                    )
+                    if result.get("status") != "written":
+                        stats["quarantine_fact_write_skipped"] = (
+                            stats.get("quarantine_fact_write_skipped", 0) + 1
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist chain-only quarantine fact for %s: %s",
+                        tid,
+                        exc,
+                    )
+                    stats["quarantine_fact_write_failed"] = (
+                        stats.get("quarantine_fact_write_failed", 0) + 1
+                    )
             portfolio.positions.append(quarantine_pos)
             stats["quarantined"] += 1
 

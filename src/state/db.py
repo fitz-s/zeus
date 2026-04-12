@@ -138,7 +138,12 @@ DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
     "operator_quarantine_clear",
     "settled_position",
+    "chain_only_quarantined",
 })
+RESOLVED_TOKEN_SUPPRESSION_REASONS = (
+    "operator_quarantine_clear",
+    "settled_position",
+)
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -3262,13 +3267,30 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     if conn is None or not _table_exists(conn, "token_suppression"):
         return []
     rows = conn.execute(
-        """
+        f"""
         SELECT token_id
         FROM token_suppression
+        WHERE suppression_reason IN ({", ".join(["?"] * len(RESOLVED_TOKEN_SUPPRESSION_REASONS))})
+        ORDER BY created_at ASC, token_id ASC
+        """,
+        RESOLVED_TOKEN_SUPPRESSION_REASONS,
+    ).fetchall()
+    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+
+
+def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
+    """Return unresolved chain-only quarantine facts for runtime cache hydration."""
+    if conn is None or not _table_exists(conn, "token_suppression"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT token_id, condition_id, created_at, updated_at, evidence_json
+        FROM token_suppression
+        WHERE suppression_reason = 'chain_only_quarantined'
         ORDER BY created_at ASC, token_id ASC
         """
     ).fetchall()
-    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+    return [dict(row) for row in rows]
 
 
 def expire_control_override(

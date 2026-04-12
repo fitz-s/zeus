@@ -24,6 +24,7 @@ from src.contracts import (
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
+    enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
     enter_settled_runtime_state,
     enter_voided_runtime_state,
@@ -829,6 +830,50 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
+def _chain_only_quarantine_position_from_row(row: dict) -> Position:
+    token_id = str(row.get("token_id") or "")
+    evidence = {}
+    try:
+        evidence = json.loads(str(row.get("evidence_json") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        evidence = {}
+    shares = float(evidence.get("size") or evidence.get("chain_shares") or 0.0)
+    avg_price = float(evidence.get("avg_price") or 0.0)
+    cost = float(evidence.get("cost") or (shares * avg_price))
+    first_seen = str(
+        evidence.get("first_seen_at")
+        or row.get("created_at")
+        or row.get("updated_at")
+        or ""
+    )
+    condition_id = str(row.get("condition_id") or evidence.get("condition_id") or "")
+    return Position(
+        trade_id=f"quarantine_{token_id[:8]}",
+        market_id=condition_id,
+        city="UNKNOWN",
+        cluster="Other",
+        target_date="UNKNOWN",
+        bin_label="UNKNOWN",
+        direction="unknown",
+        size_usd=cost,
+        entry_price=avg_price,
+        p_posterior=avg_price,
+        edge=0.0,
+        entered_at=first_seen,
+        token_id=token_id,
+        state=enter_chain_quarantined_runtime_state(),
+        strategy="",
+        edge_source="",
+        cost_basis_usd=cost,
+        shares=shares,
+        chain_state="quarantined",
+        chain_shares=shares,
+        chain_verified_at=str(row.get("updated_at") or first_seen),
+        condition_id=condition_id,
+        quarantined_at=first_seen,
+    )
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
     path = path or POSITIONS_PATH
@@ -839,6 +884,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     from src.state.db import (
         get_connection,
         get_trade_connection_with_world,
+        query_chain_only_quarantine_rows,
         query_authoritative_settlement_rows,
         query_portfolio_loader_view,
         query_token_suppression_tokens,
@@ -877,9 +923,11 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
 
     settlement_rows: list[dict] = []
     ignored_tokens: list[str] = []
+    chain_only_quarantines: list[dict] = []
     try:
         snapshot = query_portfolio_loader_view(conn)
         ignored_tokens = query_token_suppression_tokens(conn)
+        chain_only_quarantines = query_chain_only_quarantine_rows(conn)
         if snapshot.get("status") in ("ok", "partial_stale", "empty"):
             try:
                 settlement_rows = query_authoritative_settlement_rows(
@@ -920,6 +968,17 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         )
         for row in snapshot.get("positions", [])
     ]
+    represented_tokens = {
+        token
+        for pos in positions
+        for token in (getattr(pos, "token_id", ""), getattr(pos, "no_token_id", ""))
+        if token
+    }
+    positions.extend(
+        _chain_only_quarantine_position_from_row(row)
+        for row in chain_only_quarantines
+        if str(row.get("token_id") or "") not in represented_tokens
+    )
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,

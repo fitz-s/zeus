@@ -40,6 +40,16 @@ CANONICAL_POSITION_EVENT_COLUMNS = (
     "payload_json",
 )
 
+TOKEN_SUPPRESSION_COLUMNS = (
+    "token_id",
+    "condition_id",
+    "suppression_reason",
+    "source_module",
+    "created_at",
+    "updated_at",
+    "evidence_json",
+)
+
 
 def load_architecture_kernel_sql() -> str:
     return ARCHITECTURE_KERNEL_SQL_PATH.read_text()
@@ -58,6 +68,52 @@ def assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
         raise RuntimeError("canonical position_current schema not installed")
 
 
+def _ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
+    ).fetchone()
+    create_sql = str(row[0] if row and row[0] else "")
+    if not create_sql or "chain_only_quarantined" in create_sql:
+        return
+
+    with conn:
+        conn.execute("ALTER TABLE token_suppression RENAME TO token_suppression_old")
+        conn.execute(
+            """
+            CREATE TABLE token_suppression (
+                token_id TEXT PRIMARY KEY,
+                condition_id TEXT,
+                suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                    'operator_quarantine_clear',
+                    'chain_only_quarantined',
+                    'settled_position'
+                )),
+                source_module TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        old_columns = table_columns(conn, "token_suppression_old")
+        shared_columns = [column for column in TOKEN_SUPPRESSION_COLUMNS if column in old_columns]
+        if shared_columns:
+            conn.execute(
+                f"""
+                INSERT INTO token_suppression ({", ".join(shared_columns)})
+                SELECT {", ".join(shared_columns)}
+                FROM token_suppression_old
+                """
+            )
+        conn.execute("DROP TABLE token_suppression_old")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+                ON token_suppression(suppression_reason, updated_at)
+            """
+        )
+
+
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     """Apply the canonical architecture schema only when no legacy collision exists."""
     event_columns = table_columns(conn, "position_events")
@@ -70,6 +126,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
         )
 
     conn.executescript(load_architecture_kernel_sql())
+    _ensure_token_suppression_reason_schema(conn)
     for column in ("token_id", "no_token_id", "condition_id"):
         if column not in table_columns(conn, "position_current"):
             conn.execute(f"ALTER TABLE position_current ADD COLUMN {column} TEXT;")
