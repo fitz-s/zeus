@@ -28,7 +28,8 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 - `position_current` is the canonical projection surface
 - **Live reads must come from canonical DB truth.** JSON fallback was eliminated in P4 (commit 1fc14ab). `load_portfolio` reads from DB projection only; JSON exports (`positions-live.json`) are write-only caches, never read back as authority.
 - Settlement iteration queries `position_current` for authoritative phase (P6, commit 189912a) before processing
-- DB is `zeus_trades.db` (live trade state) and `zeus_world.db` (weather/calibration data)
+- DB is `zeus_trades.db` (live trade state) and `zeus-world.db` (weather/calibration data)
+- `zeus_backtest.db` is derived diagnostic output only. It is for `wu_settlement_sweep` and `trade_history_audit` reports, carries `authority_scope='diagnostic_non_promotion'`, and must never become live trade or world-data authority.
 
 ## Domain rules
 

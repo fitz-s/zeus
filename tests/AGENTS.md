@@ -120,6 +120,10 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 | `test_runtime_artifact_refresh.py` | Runtime artifact refresh |
 | `test_run_replay_cli.py` | Replay CLI invocation |
 | `test_replay_time_provenance.py` | Replay time provenance |
+| `test_backtest_settlement_value_outcome.py` | WU settlement-value outcome scoring for backtest lanes |
+| `test_backtest_trade_subject_identity.py` | Canonical trade-history subject identity for backtest audit |
+| `test_backtest_outcome_comparison.py` | Derived backtest comparison rows and non-promotion authority |
+| `test_tigge_snapshot_p_raw_backfill.py` | TIGGE member snapshots materialize replay-compatible p_raw_json |
 | `test_auto_pause_entries.py` | P2 — auto-pause entries on entry-path exception; reason_code, alert, DB persistence, DB-failure resilience, post-entry path continuity (K1+K3) |
 | `test_gate_decision.py` | P3 — GateDecision round-trip, reason_refuted conservatism, is_strategy_enabled integration, backward-compat bool gates, set_strategy_gate provenance (K1) |
 

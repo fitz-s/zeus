@@ -46,7 +46,7 @@ from src.state.portfolio import (
     is_token_on_cooldown,
     portfolio_heat_for_bankroll,
 )
-from src.strategy.fdr_filter import fdr_filter
+from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import apply_familywise_fdr, make_family_id
@@ -478,7 +478,7 @@ def _selected_edge_keys_from_full_family(
                 "direction": hypothesis.direction,
             }
         )
-    selected_rows = apply_familywise_fdr(rows)
+    selected_rows = apply_familywise_fdr(rows, q=DEFAULT_FDR_ALPHA)
     return {
         (str(row["range_label"]), str(row["direction"]))
         for row in selected_rows

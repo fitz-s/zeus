@@ -15,7 +15,7 @@ Critical invariant: **engine may coordinate work, but may not redefine truth**. 
 | `cycle_runtime.py` | Heavy runtime helpers extracted from cycle_runner (keeps orchestrator clean) | HIGH |
 | `lifecycle_events.py` | Lifecycle event recording — settlement, phase transitions | HIGH — state mutations |
 | `monitor_refresh.py` | Position monitoring — stale detection, exit signal refresh | HIGH |
-| `replay.py` | Decision replay engine — audit, counterfactual, walk-forward modes | MEDIUM |
+| `replay.py` | Decision replay/backtest engine — legacy audit/counterfactual/walk-forward plus diagnostic `wu_settlement_sweep` and `trade_history_audit` lanes | MEDIUM |
 | `time_context.py` | Lead-time helpers — timezone-aware target date calculations | MEDIUM |
 | `discovery_mode.py` | Discovery mode enum (opening_hunt, update_reaction, day0_capture) | LOW |
 | `process_lock.py` | Process-level lock to prevent double-daemon launches (fcntl.flock) | LOW |
@@ -27,6 +27,7 @@ Critical invariant: **engine may coordinate work, but may not redefine truth**. 
 - No direct lifecycle terminalization from orchestration
 - No ad hoc phase reassignment — only `LifecyclePhase` enum values (INV-08)
 - No silent write-path bypass around canonical truth evolution
+- Backtest output is diagnostic only. `wu_settlement_sweep` scores from WU `settlement_value` plus typed `Bin`; `trade_history_audit` uses canonical `position_id` trade subjects and only reports WU-vs-trade divergence.
 
 ## Common mistakes
 
@@ -35,3 +36,4 @@ Critical invariant: **engine may coordinate work, but may not redefine truth**. 
 - Patching around missing kernel work by inventing new local state
 - Performing "local close" on exit decisions instead of expressing exit intent → INV-01 violation
 - Skipping chain reconciliation before trading in live mode → truth divergence
+- Treating WU settlement coverage as strategy/PnL replay coverage. Strategy replay also needs forecast references, vector-compatible snapshots, and parseable typed bins.

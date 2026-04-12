@@ -56,7 +56,7 @@ See `src/AGENTS.md` for the zone map and navigation guide. Each package has its 
 | Package | Files | Purpose | Key entry point |
 |---------|-------|---------|-----------------|
 | `src/contracts/` | 17 | Typed semantic boundaries — settlement semantics, execution prices, edge context, provenance registry, reality contracts | `settlement_semantics.py`, `edge_context.py` |
-| `src/state/` | 10 | Truth surface — DB, portfolio, lifecycle FSM, chronicler, chain reconciliation, strategy tracker | `db.py`, `lifecycle_manager.py` |
+| `src/state/` | 10 | Truth surface — DB, portfolio, lifecycle FSM, chronicler, chain reconciliation, strategy tracker; also defines derived backtest DB bootstrap | `db.py`, `lifecycle_manager.py` |
 
 ### Zone K1 — Protective (risk, control)
 
@@ -76,7 +76,7 @@ See `src/AGENTS.md` for the zone map and navigation guide. Each package has its 
 
 | Package | Files | Purpose | Key entry point |
 |---------|-------|---------|-----------------|
-| `src/engine/` | 9 | Cycle orchestration — trading cycle runner, evaluator pipeline, replay, discovery modes | `cycle_runner.py`, `evaluator.py` |
+| `src/engine/` | 9 | Cycle orchestration — trading cycle runner, evaluator pipeline, dual-lane diagnostic backtest/replay, discovery modes | `cycle_runner.py`, `evaluator.py`, `replay.py` |
 | `src/signal/` | 6 | Probability generation — 51-member Monte Carlo, day-0 signal, diurnal, model agreement | `ensemble_signal.py` |
 | `src/calibration/` | 4 | Extended Platt calibration — 3-param logistic with temporal decay, maturity gates, drift detection | `platt.py`, `manager.py` |
 | `src/strategy/` | 6 | Trading decisions — edge computation, α-weighted fusion, FDR filter, Kelly sizing, correlation | `market_analysis.py`, `kelly.py` |
@@ -181,7 +181,7 @@ See `docs/AGENTS.md` for the docs root index, or `docs/README.md` for the detail
 | Directory | Files | Purpose | AGENTS.md |
 |-----------|-------|---------|-----------|
 | `docs/authority/` | 6 | Current architecture + current delivery law + packet/autonomy/boundary governance | `docs/authority/AGENTS.md` |
-| `docs/reference/` | 7 | Domain model, repo orientation, data status, and conditional research/methodology | `docs/reference/AGENTS.md` |
+| `docs/reference/` | 10 | Domain model, repo orientation, data status, pending diagnostic project plans, and conditional research/methodology | `docs/reference/AGENTS.md` |
 | `docs/operations/` | 1 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
 | `docs/archives/` | many | Historical — never active authority | `docs/archives/AGENTS.md` |
 
@@ -231,11 +231,11 @@ See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of 
 | Category | Examples |
 |----------|---------|
 | **ETL** | `etl_diurnal_curves.py`, `etl_forecast_error_profiles.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_solar_times.py`, `etl_tigge_*.py`, `etl_observation_instants.py`, `etl_market_price_history.py` |
-| **Backfill** | `backfill_ens.py`, `backfill_openmeteo_previous_runs.py`, `backfill_wu_daily_all.py`, `backfill_hourly_openmeteo.py`, `backfill_semantic_snapshots.py`, `backfill_cluster_taxonomy.py`, `backfill_exit_telemetry.py` |
+| **Backfill** | `backfill_ens.py`, `backfill_tigge_snapshot_p_raw.py`, `backfill_openmeteo_previous_runs.py`, `backfill_wu_daily_all.py`, `backfill_hourly_openmeteo.py`, `backfill_semantic_snapshots.py`, `backfill_cluster_taxonomy.py`, `backfill_exit_telemetry.py` |
 | **Audit** | `audit_paper_explainability.py`, `audit_realtime_pnl.py`, `audit_replay_*.py`, `audit_divergence_*.py`, `audit_time_semantics.py` |
 | **Architecture checks** | `check_kernel_manifests.py`, `check_module_boundaries.py`, `check_work_packets.py`, `check_advisory_gates.py` |
 | **Analysis** | `analyze_paper_trading.py`, `equity_curve.py`, `baseline_experiment.py`, `automation_analysis.py` |
-| **Replay** | `run_replay.py`, `replay_parity.py`, `capture_replay_artifact.py`, `profit_validation_replay.py` |
+| **Replay / backtest** | `run_replay.py` (`audit`, `counterfactual`, `walk_forward`, `wu_settlement_sweep`, `trade_history_audit`), `replay_parity.py`, `capture_replay_artifact.py`, `profit_validation_replay.py` |
 | **Operations** | `healthcheck.py`, `heartbeat_dispatcher.py`, `live_smoke_test.py`, `auto_pause_live.sh`, `force_lifecycle.py`, `cleanup_ghost_positions.py` |
 | **Venus integration** | `venus_autonomy_gate.py`, `venus_sensing_report.py` |
 | **Calibration** | `refit_platt.py`, `generate_calibration_pairs.py`, `validate_dynamic_alpha.py` |
@@ -248,8 +248,10 @@ See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of 
 
 | File/Dir | Purpose |
 |----------|---------|
-| `zeus-paper.db` / `zeus-live.db` | Mode-specific trade databases |
-| `zeus-world.db` | Shared world-data database |
+| `zeus_trades.db` | Live trade-state database: canonical position/event/execution/outcome truth |
+| `zeus-world.db` | Shared world-data database: settlements, forecasts, observations, calibration, market data |
+| `zeus_backtest.db` | Derived diagnostic backtest output; non-promotion, never runtime authority |
+| `zeus-paper.db` / `zeus-live.db` | Legacy/obsolete mode-specific trade databases; do not use as current authority |
 | `risk_state-*.db` | Mode-specific RiskGuard state |
 | `positions-*.json` | Mode-qualified position files |
 | `ensemble-log/` | ENS snapshots (append-only) |

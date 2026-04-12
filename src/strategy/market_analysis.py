@@ -94,6 +94,7 @@ class MarketAnalysis:
             lead_days=lead_days,
             ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
+        self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
 
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
@@ -194,6 +195,9 @@ class MarketAnalysis:
         Returns: (ci_lower, ci_upper, p_value)
         p_value = np.mean(edges <= 0) — exact, NOT approximated.
         """
+        cache_key = ("yes", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -239,12 +243,17 @@ class MarketAnalysis:
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("yes", bin_idx, n)] = result
+        return result
 
     def _bootstrap_bin_no(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
         """Double bootstrap CI for buy_no direction. Same procedure, inverted."""
+        cache_key = ("no", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -288,7 +297,9 @@ class MarketAnalysis:
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("no", bin_idx, n)] = result
+        return result
 
     @staticmethod
     def _bin_probability(measured: np.ndarray, b: Bin) -> float:
