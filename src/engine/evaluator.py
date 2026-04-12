@@ -1255,20 +1255,31 @@ def _snapshot_valid_time_value(target_date: str, ens_result: dict) -> str:
     return f"UNSPECIFIED_FORECAST_VALID_TIME(target_date={target_date})"
 
 
+def _ensemble_snapshots_table(conn) -> str:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots'"
+        ).fetchone()
+    except Exception:
+        return "ensemble_snapshots"
+    return "world.ensemble_snapshots" if row is not None else "ensemble_snapshots"
+
+
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
     import json
 
     try:
+        snapshots_table = _ensemble_snapshots_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
         if fetch_time_value is None:
             raise ValueError("ENS snapshot missing fetch_time")
 
-        conn.execute("""
-            INSERT OR IGNORE INTO ensemble_snapshots
+        conn.execute(f"""
+            INSERT OR IGNORE INTO {snapshots_table}
             (city, target_date, issue_time, valid_time, available_at, fetch_time,
              lead_hours, members_json, spread, is_bimodal, model_version, data_version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1293,8 +1304,8 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             ens_result["model"],
             "live_v1",
         ))
-        row = conn.execute("""
-            SELECT snapshot_id FROM ensemble_snapshots
+        row = conn.execute(f"""
+            SELECT snapshot_id FROM {snapshots_table}
             WHERE city = ? AND target_date = ? AND issue_time = ? AND data_version = ?
             LIMIT 1
         """, (
@@ -1319,8 +1330,9 @@ def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray) -> None:
     import json
 
     try:
+        snapshots_table = _ensemble_snapshots_table(conn)
         conn.execute(
-            "UPDATE ensemble_snapshots SET p_raw_json = ? WHERE snapshot_id = ?",
+            f"UPDATE {snapshots_table} SET p_raw_json = ? WHERE snapshot_id = ?",
             (json.dumps(p_raw.tolist()), snapshot_id),
         )
         conn.commit()

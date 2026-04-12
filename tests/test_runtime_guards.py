@@ -2979,6 +2979,63 @@ def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
     assert row["fetch_time"] == "2026-01-14T06:05:00+00:00"
 
 
+def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade_conn = get_connection(trade_db)
+    init_schema(trade_conn)
+    trade_conn.close()
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    world_conn.close()
+
+    conn = get_connection(trade_db)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    ens = type(
+        "DummyEns",
+        (),
+        {
+            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "spread_float": lambda self: 1.25,
+            "is_bimodal": lambda self: False,
+        },
+    )()
+    ens_result = {
+        "issue_time": datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+        "fetch_time": fetch_time,
+        "model": "ecmwf_ifs025",
+    }
+
+    snapshot_id = evaluator_module._store_ens_snapshot(
+        conn,
+        NYC,
+        "2026-01-15",
+        ens,
+        ens_result,
+    )
+    evaluator_module._store_snapshot_p_raw(conn, snapshot_id, np.array([0.2, 0.3, 0.5]))
+
+    main_count = conn.execute(
+        "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
+    ).fetchone()[0]
+    world_row = conn.execute(
+        """
+        SELECT p_raw_json
+        FROM world.ensemble_snapshots
+        WHERE snapshot_id = ? AND city = 'NYC'
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    conn.close()
+
+    assert snapshot_id
+    assert main_count == 0
+    assert world_row is not None
+    assert json.loads(world_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+
+
 def test_open_ens_collection_stores_snapshots(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
