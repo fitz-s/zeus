@@ -2,7 +2,7 @@
 """
 Diagnostic script: verify canonical truth surface consistency.
 
-Checks LIVE state of zeus.db, risk_state-paper.db, and JSON state files.
+Checks LIVE state of zeus.db, risk_state-live.db, and JSON state files.
 NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 
 Usage:
@@ -23,11 +23,11 @@ if str(ROOT) not in sys.path:
 
 from src.config import STATE_DIR
 
-DEFAULT_TRADE_DB = STATE_DIR / "zeus-paper.db"
+DEFAULT_TRADE_DB = STATE_DIR / "zeus-live.db"
 SHARED_DB = STATE_DIR / "zeus-world.db"
-RISK_DB = STATE_DIR / "risk_state-paper.db"
-POSITIONS_JSON = STATE_DIR / "positions-paper.json"
-STATUS_JSON = STATE_DIR / "status_summary-paper.json"
+RISK_DB = STATE_DIR / "risk_state-live.db"
+POSITIONS_JSON = STATE_DIR / "positions.json"
+STATUS_JSON = STATE_DIR / "status_summary.json"
 
 TODAY = date.today().isoformat()
 
@@ -119,7 +119,7 @@ def check_2_position_events_coverage(cur) -> tuple[str, str]:
 
 
 def check_3_json_active_vs_position_current(cur) -> tuple[str, str]:
-    """positions-paper.json active count must match position_current count."""
+    """positions.json active count must match position_current count."""
     if not POSITIONS_JSON.exists():
         return FAIL, f"{POSITIONS_JSON} not found"
 
@@ -152,7 +152,7 @@ def check_3_json_active_vs_position_current(cur) -> tuple[str, str]:
 
 
 def check_4_status_summary_risk_details() -> tuple[str, str]:
-    """status_summary-paper.json risk.details must not be None/null."""
+    """status_summary.json risk.details must not be None/null."""
     if not STATUS_JSON.exists():
         return FAIL, f"{STATUS_JSON} not found"
 

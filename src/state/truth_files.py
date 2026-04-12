@@ -99,7 +99,7 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    return read_truth_json(mode_state_path(filename, current_mode(mode)))
+    return read_truth_json(mode_state_path(filename))
 
 
 def legacy_tombstone_payload(
@@ -121,7 +121,7 @@ def legacy_tombstone_payload(
                 archived_to=archived_to,
             ),
             "replacement_paths": {
-                "live": str(mode_state_path(filename, "live")),
+                "live": str(mode_state_path(filename)),
             },
         },
     }
@@ -155,7 +155,7 @@ def deprecate_legacy_truth_files() -> list[dict[str, Any]]:
 
 
 def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
-    path = mode_state_path(filename, mode)
+    path = mode_state_path(filename)
     if not path.exists():
         return {"path": str(path), "updated": False, "missing": True}
 

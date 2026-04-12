@@ -1,6 +1,6 @@
 """Daemon heartbeat staleness check.
 
-Checks state/daemon-heartbeat-{mode}.json and alerts if the daemon has
+Checks state/daemon-heartbeat.json and alerts if the daemon has
 not written a heartbeat in more than STALE_THRESHOLD_SECONDS.
 
 Exit codes:
@@ -8,11 +8,9 @@ Exit codes:
   1 = heartbeat stale or file missing (daemon may be dead)
 
 Usage:
-  python scripts/check_daemon_heartbeat.py [--mode live|paper]
-  python scripts/check_daemon_heartbeat.py --all
+  python scripts/check_daemon_heartbeat.py
 """
 
-import argparse
 import json
 import sys
 from datetime import datetime, timezone
@@ -29,31 +27,31 @@ def _state_dir() -> Path:
     return Path(STATE_DIR)
 
 
-def check_mode(mode: str) -> tuple[bool, str]:
-    """Check heartbeat for a single mode.
+def check_heartbeat() -> tuple[bool, str]:
+    """Check daemon heartbeat freshness.
 
     Returns (is_fresh, message).
     """
-    path = _state_dir() / f"daemon-heartbeat-{mode}.json"
+    path = _state_dir() / "daemon-heartbeat.json"
 
     if not path.exists():
-        return False, f"[{mode}] MISSING: {path} not found (daemon never started or crashed)"
+        return False, f"MISSING: {path} not found (daemon never started or crashed)"
 
     try:
         data = json.loads(path.read_text())
     except Exception as exc:
-        return False, f"[{mode}] UNREADABLE: {path}: {exc}"
+        return False, f"UNREADABLE: {path}: {exc}"
 
     raw_ts = data.get("timestamp")
     if not raw_ts:
-        return False, f"[{mode}] MALFORMED: no 'timestamp' field in {path}"
+        return False, f"MALFORMED: no 'timestamp' field in {path}"
 
     try:
         ts = datetime.fromisoformat(raw_ts)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
     except Exception as exc:
-        return False, f"[{mode}] BAD_TIMESTAMP: cannot parse {raw_ts!r}: {exc}"
+        return False, f"BAD_TIMESTAMP: cannot parse {raw_ts!r}: {exc}"
 
     now = datetime.now(timezone.utc)
     age_seconds = (now - ts).total_seconds()
@@ -62,37 +60,17 @@ def check_mode(mode: str) -> tuple[bool, str]:
         stale_minutes = age_seconds / 60
         return (
             False,
-            f"[{mode}] STALE: last heartbeat {stale_minutes:.1f}m ago"
+            f"STALE: last heartbeat {stale_minutes:.1f}m ago"
             f" (threshold {STALE_THRESHOLD_SECONDS // 60}m), ts={raw_ts}",
         )
 
-    return True, f"[{mode}] OK: last heartbeat {age_seconds:.0f}s ago (ts={raw_ts})"
+    return True, f"OK: last heartbeat {age_seconds:.0f}s ago (ts={raw_ts})"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check daemon heartbeat staleness")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--mode", choices=["live", "paper"], help="Check a specific mode")
-    group.add_argument("--all", action="store_true", help="Check both live and paper")
-    args = parser.parse_args()
-
-    if args.all:
-        modes = ["live", "paper"]
-    elif args.mode:
-        modes = [args.mode]
-    else:
-        # Default: use current ZEUS_MODE env
-        from src.config import get_mode
-        modes = [get_mode()]
-
-    any_stale = False
-    for mode in modes:
-        fresh, msg = check_mode(mode)
-        print(msg)
-        if not fresh:
-            any_stale = True
-
-    return 1 if any_stale else 0
+    fresh, msg = check_heartbeat()
+    print(msg)
+    return 0 if fresh else 1
 
 
 if __name__ == "__main__":

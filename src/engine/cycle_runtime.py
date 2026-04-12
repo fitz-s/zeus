@@ -778,6 +778,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         try:
             decisions = deps.evaluate_candidate(candidate, conn, portfolio, clob, limits, entry_bankroll=entry_bankroll)
             if decisions:
+                # Accumulate FDR health metrics into cycle summary
+                if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):
+                    summary["fdr_fallback_fired"] = True
+                family_sizes = [getattr(d, "fdr_family_size", 0) for d in decisions if getattr(d, "fdr_family_size", 0) > 0]
+                if family_sizes:
+                    summary["fdr_family_size"] = summary.get("fdr_family_size", 0) + family_sizes[0]
                 for trace_decision in decisions:
                     _record_probability_trace(candidate, trace_decision)
                 try:

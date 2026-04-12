@@ -1554,11 +1554,13 @@ def test_contamination_guard_blocks_wrong_env():
         tmp.unlink(missing_ok=True)
 
 
-def test_state_path_includes_mode():
-    """state_path must produce mode-qualified filenames."""
-    from src.config import state_path, settings
+def test_state_path_resolves_directly():
+    """Phase 2: state_path returns STATE_DIR/filename directly (mode prefix eliminated)."""
+    from src.config import state_path, STATE_DIR
     path = state_path("positions.json")
-    assert f"-{settings.mode}" in path.name
+    assert path == STATE_DIR / "positions.json"
+    assert "-live" not in path.name
+    assert "-paper" not in path.name
 
 
 @pytest.mark.skip(reason="P4: contamination guard was in _load_portfolio_from_json_data (now deleted); needs relocation to canonical load path")

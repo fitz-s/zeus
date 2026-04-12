@@ -93,15 +93,15 @@ def _runtime_status(*, runtime_blockers: list[str]) -> str:
         return "data_unavailable"
     if "no_market_events" in runtime_blockers:
         return "no_active_market"
-    return "paper_ready"
+    return "live_ready"
 
 
-def _paper_status(*, runtime_blockers: list[str], archive_gaps: list[str]) -> str:
+def _live_status(*, runtime_blockers: list[str], archive_gaps: list[str]) -> str:
     runtime_status = _runtime_status(runtime_blockers=runtime_blockers)
-    if runtime_status != "paper_ready":
+    if runtime_status != "live_ready":
         return runtime_status
     if archive_gaps:
-        return "shadow_only"
+        return "archive_pending"
     return "tradable"
 
 
@@ -183,7 +183,7 @@ def audit_city_data_readiness() -> dict:
             "archive_gaps": archive_gaps,
             "blockers": blockers,
             "runtime_status": _runtime_status(runtime_blockers=runtime_blockers),
-            "paper_status": _paper_status(runtime_blockers=runtime_blockers, archive_gaps=archive_gaps),
+            "live_status": _live_status(runtime_blockers=runtime_blockers, archive_gaps=archive_gaps),
         }
         rows.append(row)
 
@@ -193,7 +193,7 @@ def audit_city_data_readiness() -> dict:
     runtime_blocker_counts: dict[str, int] = {}
     archive_gap_counts: dict[str, int] = {}
     for row in rows:
-        summary_counts[row["paper_status"]] = summary_counts.get(row["paper_status"], 0) + 1
+        summary_counts[row["live_status"]] = summary_counts.get(row["live_status"], 0) + 1
         runtime_status_counts[row["runtime_status"]] = runtime_status_counts.get(row["runtime_status"], 0) + 1
         for blocker in row["blockers"]:
             blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
@@ -207,13 +207,13 @@ def audit_city_data_readiness() -> dict:
         "configured_cities": len(cities_by_name),
         "rows": rows,
         "summary": {
-            "paper_status_counts": dict(sorted(summary_counts.items())),
+            "live_status_counts": dict(sorted(summary_counts.items())),
             "runtime_status_counts": dict(sorted(runtime_status_counts.items())),
             "blocker_counts": dict(sorted(blocker_counts.items())),
             "runtime_blocker_counts": dict(sorted(runtime_blocker_counts.items())),
             "archive_gap_counts": dict(sorted(archive_gap_counts.items())),
             "uncategorized_cities": [
-                row["city"] for row in rows if row["paper_status"] not in {"tradable", "shadow_only", "data_unavailable", "no_active_market"}
+                row["city"] for row in rows if row["live_status"] not in {"tradable", "archive_pending", "data_unavailable", "no_active_market"}
             ],
             "tigge_coverage": {
                 key: value for key, value in tigge_coverage.items() if key != "city_missing_counts"
