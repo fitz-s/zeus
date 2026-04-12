@@ -10,24 +10,30 @@ from datetime import date, datetime, time, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from src.calibration.manager import hemisphere_for_lat, season_from_month
 from src.types import Day0TemporalContext, ObservationInstant, SolarDay
 
 logger = logging.getLogger(__name__)
 
 
-_SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
+def _is_missing_local_hour(local_dt: datetime, tz: ZoneInfo) -> bool:
+    """True if the wall-clock hour does not exist in the given timezone (spring-forward gap).
 
-
-def season_from_month(month: int, lat: float = 90.0) -> str:
-    if month in (12, 1, 2):
-        season = "DJF"
-    elif month in (3, 4, 5):
-        season = "MAM"
-    elif month in (6, 7, 8):
-        season = "JJA"
+    Example: London 2025-03-30 01:30 does not exist because clocks jumped 01:00 -> 02:00.
+    """
+    # Take the naive local datetime; try to localize in the tz; round-trip through UTC.
+    # If the round-trip shifts the hour or the date, the original hour was in a DST gap.
+    if local_dt.tzinfo is not None:
+        local_naive = local_dt.replace(tzinfo=None)
     else:
-        season = "SON"
-    return _SH_FLIP[season] if lat < 0 else season
+        local_naive = local_dt
+    # Localize with fold=0 (the "earlier" option) — in a gap, this produces a post-gap instant
+    localized = local_naive.replace(tzinfo=tz)
+    # Round-trip through UTC
+    utc = localized.astimezone(ZoneInfo("UTC"))
+    back = utc.astimezone(tz)
+    # If the hour or date changed, the original wall-clock hour does not exist
+    return back.hour != local_naive.hour or back.date() != local_naive.date()
 
 
 def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
@@ -319,7 +325,7 @@ def _instant_from_local_hour(
         utc_offset_minutes=int(local_ts.utcoffset().total_seconds() / 60.0),
         dst_active=bool(dst_delta and dst_delta.total_seconds() != 0.0),
         is_ambiguous_local_hour=bool(getattr(local_ts, "fold", 0)),
-        is_missing_local_hour=False,
+        is_missing_local_hour=_is_missing_local_hour(local_ts, tz),
         time_basis=time_basis,
         local_hour=float(local_hour),
     )
@@ -394,7 +400,7 @@ def _parse_runtime_observation_instant(
         utc_offset_minutes=int(local_ts.utcoffset().total_seconds() / 60.0),
         dst_active=bool(dst_delta and dst_delta.total_seconds() != 0.0),
         is_ambiguous_local_hour=bool(getattr(local_ts, "fold", 0)),
-        is_missing_local_hour=False,
+        is_missing_local_hour=_is_missing_local_hour(local_ts, tz),
         time_basis=time_basis,
         local_hour=_fractional_local_hour(local_ts),
     )

@@ -39,6 +39,24 @@ def bucket_key(cluster: str, season: str) -> str:
 _SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
 
 
+def season_from_month(month: int, lat: float = 90.0) -> str:
+    """Map month integer to meteorological season code, hemisphere-aware."""
+    if month in (12, 1, 2):
+        season = "DJF"
+    elif month in (3, 4, 5):
+        season = "MAM"
+    elif month in (6, 7, 8):
+        season = "JJA"
+    else:
+        season = "SON"
+    return _SH_FLIP[season] if lat < 0 else season
+
+
+def hemisphere_for_lat(lat: float) -> str:
+    """Return 'N' for Northern Hemisphere, 'S' for Southern (equator = N)."""
+    return "N" if lat >= 0 else "S"
+
+
 def season_from_date(date_str: str, lat: float = 90.0) -> str:
     """Map date string to meteorological season code, hemisphere-aware.
 
