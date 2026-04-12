@@ -11,6 +11,7 @@ The control plane allows Venus/OpenClaw to change Zeus's runtime behavior WITHOU
 | File | Purpose | Watch out for |
 |------|---------|---------------|
 | `control_plane.py` | Command processing (6 supported commands), edge threshold multiplier, strategy gates | Adding new commands changes the external contract |
+| `gate_decision.py` | `GateDecision` frozen dataclass + `ReasonCode` enum + `reason_refuted()` — machine-readable gate provenance | `reason_refuted()` returns False for all codes in Phase 1 (conservative); do not add per-code refutation logic without a Phase 2 plan |
 
 ## Domain rules
 

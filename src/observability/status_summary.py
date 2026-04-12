@@ -18,6 +18,7 @@ from src.control.control_plane import (
     review_required_commands_from_status,
     strategy_gates,
 )
+from src.control.gate_decision import reason_refuted
 from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import (
     get_trade_connection_with_shared,
@@ -87,12 +88,22 @@ def write_status(cycle_summary: dict = None) -> None:
     current_strategy_gates = strategy_gates()
     recommended_but_not_gated = sorted(
         strategy for strategy in recommended_strategy_gates
-        if current_strategy_gates.get(strategy, True)
+        if not (d := current_strategy_gates.get(strategy)) or d.enabled
     )
     gated_but_not_recommended = sorted(
-        strategy for strategy, enabled in current_strategy_gates.items()
-        if enabled is False and strategy not in recommended_strategy_gates
+        strategy for strategy, decision in current_strategy_gates.items()
+        if not decision.enabled and strategy not in recommended_strategy_gates
     )
+    review_required_gate_recommendations = [
+        {
+            "command": "set_strategy_gate",
+            "strategy": strategy,
+            "enabled": True,
+            "note": f"recommended_by=reason_refuted:{decision.reason_code.value}",
+        }
+        for strategy, decision in current_strategy_gates.items()
+        if not decision.enabled and reason_refuted(decision, current_data={})
+    ]
     recommended_controls = list(risk_details.get("recommended_controls", []))
     recommended_control_reasons = {
         str(control): list(reasons)
@@ -160,7 +171,8 @@ def write_status(cycle_summary: dict = None) -> None:
         )
         bucket["open_positions"] = int(open_count)
     for name, bucket in strategy_summary.items():
-        bucket["gated"] = not current_strategy_gates.get(name, True)
+        _gate = current_strategy_gates.get(name)
+        bucket["gated"] = _gate is not None and not _gate.enabled
         bucket["recommended_gate"] = name in recommended_strategy_gates
         bucket["recommended_gate_reasons"] = list(recommended_strategy_gate_reasons.get(name, []))
 
@@ -174,7 +186,7 @@ def write_status(cycle_summary: dict = None) -> None:
         "control": {
             "entries_paused": is_entries_paused(),
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
-            "strategy_gates": strategy_gates(),
+            "strategy_gates": {k: v.to_dict() for k, v in current_strategy_gates.items()},
             "recommended_controls": recommended_controls,
             "recommended_control_reasons": recommended_control_reasons,
             "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
@@ -182,6 +194,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "recommended_but_not_gated": recommended_but_not_gated,
             "gated_but_not_recommended": gated_but_not_recommended,
             "recommended_controls_not_applied": recommended_controls_not_applied,
+            "review_required_gate_recommendations": review_required_gate_recommendations,
         },
         "risk": {
             "level": riskguard_level,
@@ -335,6 +348,7 @@ def write_status(cycle_summary: dict = None) -> None:
 
     learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
     for name, learning_bucket in learning_by_strategy.items():
+        _lgate = current_strategy_gates.get(name)
         bucket = strategy_summary.setdefault(
             name,
             {
@@ -343,7 +357,7 @@ def write_status(cycle_summary: dict = None) -> None:
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "total_pnl": 0.0,
-                "gated": not current_strategy_gates.get(name, True),
+                "gated": _lgate is not None and not _lgate.enabled,
                 "recommended_gate": name in recommended_strategy_gates,
                 "recommended_gate_reasons": list(recommended_strategy_gate_reasons.get(name, [])),
             },

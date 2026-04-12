@@ -1,15 +1,17 @@
-"""P2 — Auto-Pause Entries on Exception.
+"""P2 u2014 Auto-Pause Entries on Exception.
 
 Tests that any unhandled exception in the entry discovery path auto-pauses
 entries (with a machine-readable reason_code), emits the alert, and leaves
 monitoring/exit/settlement paths unaffected.
 
 Closeout criteria covered:
-  #2 — auto-pause fires on ValueError injected into _execute_discovery_phase
-  #3 — reason_code recorded in control state
-  #4 — alert_auto_pause called exactly once
-  #5 — post-entry paths (save, close, summary completion) still run
-  #6 — clearing entries_paused via resume semantics
+  #2 u2014 auto-pause fires on ValueError injected into _execute_discovery_phase
+  #3 u2014 reason_code recorded in control state
+  #4 u2014 alert_auto_pause called exactly once
+  #5 u2014 post-entry paths (save, close, summary completion) still run
+  #6 u2014 clearing entries_paused via resume semantics
+  #7 u2014 pause_entries() persists to DB via upsert_control_override
+  #8 u2014 DB persistence failure does not break in-memory pause
 """
 
 import sqlite3
@@ -133,3 +135,52 @@ class TestAutoRauseEntries:
 
         # Cycle completed — post-entry bookkeeping executed
         assert summary.get("completed_at") is not None
+
+    def test_pause_entries_persists_to_db(self, monkeypatch):
+        """Criterion #7: pause_entries() calls upsert_control_override with the
+        correct override_id and value so the pause survives a daemon restart."""
+        monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
+
+        import sqlite3 as _sqlite3
+        mem_conn = _sqlite3.connect(":memory:")
+        monkeypatch.setattr(cp, "get_shared_connection", lambda: mem_conn)
+
+        upsert_calls = []
+
+        def _capture_upsert(conn, *, override_id, target_type, target_key,
+                            action_type, value, issued_by, issued_at, reason,
+                            precedence, **kw):
+            upsert_calls.append({
+                "override_id": override_id,
+                "value": value,
+                "issued_by": issued_by,
+                "reason": reason,
+            })
+            return {"status": "written"}
+
+        monkeypatch.setattr(cp, "upsert_control_override", _capture_upsert)
+
+        cp.pause_entries("auto_pause:ValueError")
+
+        assert cp.is_entries_paused() is True
+        assert len(upsert_calls) == 1
+        call = upsert_calls[0]
+        assert call["override_id"] == "control_plane:global:entries_paused"
+        assert call["value"] == "true"
+        assert call["issued_by"] == "auto:auto_pause:ValueError"
+        assert call["reason"] == "auto_pause:ValueError"
+
+    def test_pause_entries_db_failure_does_not_break_in_memory_pause(self, monkeypatch):
+        """Criterion #8: If DB persistence raises, in-memory entries_paused is
+        still True — the auto-pause is not lost."""
+        monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
+        monkeypatch.setattr(
+            cp, "get_shared_connection",
+            lambda: (_ for _ in ()).throw(RuntimeError("db_unavailable")),
+        )
+
+        cp.pause_entries("auto_pause:RuntimeError")
+
+        # In-memory pause must survive the DB failure
+        assert cp.is_entries_paused() is True
+        assert cp._control_state.get("entries_pause_reason") == "auto_pause:RuntimeError"

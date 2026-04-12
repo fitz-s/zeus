@@ -119,7 +119,8 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 | `test_runtime_artifact_refresh.py` | Runtime artifact refresh |
 | `test_run_replay_cli.py` | Replay CLI invocation |
 | `test_replay_time_provenance.py` | Replay time provenance |
-| `test_auto_pause_entries.py` | P2 — auto-pause entries on entry-path exception; reason_code, alert, post-entry path continuity (K1+K3) |
+| `test_auto_pause_entries.py` | P2 — auto-pause entries on entry-path exception; reason_code, alert, DB persistence, DB-failure resilience, post-entry path continuity (K1+K3) |
+| `test_gate_decision.py` | P3 — GateDecision round-trip, reason_refuted conservatism, is_strategy_enabled integration, backward-compat bool gates, set_strategy_gate provenance (K1) |
 
 ### Type/unit tests
 
