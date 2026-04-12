@@ -2435,6 +2435,8 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
     runtime_trade_id = getattr(pos, "trade_id", "")
     if not runtime_trade_id:
         return
+    if not _table_exists(conn, "trade_decisions"):
+        return
 
     row = conn.execute(
         """

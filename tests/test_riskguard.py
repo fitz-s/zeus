@@ -564,35 +564,31 @@ class TestRiskGuardSettlementSource:
         )
 
         conn = get_connection(zeus_db)
-        from src.state.db import init_schema, log_position_event
+        from src.state.db import init_schema
         init_schema(conn)
-        pos = Position(
-            trade_id="exec-1",
-            market_id="m1",
-            city="NYC",
-            cluster="US-Northeast",
-            target_date="2026-04-01",
-            bin_label="39-40°F",
-            direction="buy_yes",
-            strategy="center_buy",
-            edge_source="center_buy",
-            env="paper",
-        )
-        log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
-        log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
-        reject_pos = Position(
-            trade_id="exec-2",
-            market_id="m2",
-            city="NYC",
-            cluster="US-Northeast",
-            target_date="2026-04-01",
-            bin_label="41-42°F",
-            direction="buy_yes",
-            strategy="opening_inertia",
-            edge_source="opening_inertia",
-            env="paper",
-        )
-        log_position_event(conn, "ORDER_REJECTED", reject_pos, details={"status": "rejected"}, source="execution")
+        # Insert canonical position_events directly (P9: log_position_event deleted)
+        import json as _json
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-1:intent:1", "exec-1", 1, 1, "POSITION_OPEN_INTENT",
+               "2026-04-01T10:00:00Z", "center_buy", "test", '{}'))
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-1:filled:2", "exec-1", 1, 2, "ENTRY_ORDER_FILLED",
+               "2026-04-01T10:01:00Z", "center_buy", "test", '{}'))
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
+               "2026-04-01T10:02:00Z", "opening_inertia", "test", '{}'))
         conn.commit()
         conn.close()
 
@@ -1095,22 +1091,18 @@ class TestStrategyPolicyResolver:
         )
 
         conn = get_connection(zeus_db)
-        from src.state.db import init_schema, log_position_event
+        from src.state.db import init_schema
         init_schema(conn)
+        # Insert 10 ENTRY_ORDER_REJECTED canonical events (P9: log_position_event deleted)
         for i in range(10):
-            pos = Position(
-                trade_id=f"reject-{i}",
-                market_id="m1",
-                city="NYC",
-                cluster="US-Northeast",
-                target_date="2026-04-01",
-                bin_label="39-40°F",
-                direction="buy_yes",
-                strategy="center_buy",
-                edge_source="center_buy",
-                env="paper",
-            )
-            log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
+            conn.execute("""
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (f"reject-{i}:rejected:1", f"reject-{i}", 1, 1,
+                   "ENTRY_ORDER_REJECTED", "2026-04-01T10:00:00Z",
+                   "center_buy", "test", '{}'))
         conn.commit()
         conn.close()
 

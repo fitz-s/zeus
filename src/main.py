@@ -232,7 +232,7 @@ def _startup_wallet_check(clob=None):
     if clob is None:
         from src.data.polymarket_client import PolymarketClient
         clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
-    if getattr(clob, "paper_mode", True):
+    if getattr(clob, "paper_mode", False):
         return
     try:
         balance = float(clob.get_balance())
@@ -326,12 +326,17 @@ def _startup_data_health_check(conn):
 
 def main():
     if "ZEUS_MODE" not in os.environ:
-        sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=paper or ZEUS_MODE=live")
-    if os.environ["ZEUS_MODE"] not in {"paper", "live"}:
+        sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=live")
+    if os.environ["ZEUS_MODE"] == "paper":
+        logger.critical(
+            "ZEUS_MODE='paper' is no longer supported. Zeus is designed only for live. "
+            "Paper mode was decommissioned in Phase 1. Set ZEUS_MODE=live."
+        )
+        sys.exit("FATAL: ZEUS_MODE='paper' rejected — Zeus is live-only.")
+    if os.environ["ZEUS_MODE"] != "live":
         sys.exit(
-            f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not a valid mode. "
-            "Must be exactly 'paper' or 'live'. Typos like 'papr' would produce "
-            "ghost state files (positions-papr.json) that no runtime can read."
+            f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not valid. "
+            "Must be exactly 'live'."
         )
     mode = get_mode()
     once = "--once" in sys.argv

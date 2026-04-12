@@ -115,7 +115,7 @@ def create_execution_intent(
         limit_price=limit_price,
         toxicity_budget=0.05,
         max_slippage=0.02,
-        is_sandbox=(get_mode() == "paper"),
+        is_sandbox=False,
         market_id=market_id,
         token_id=order_token,
         timeout_seconds=timeout,
@@ -126,19 +126,19 @@ def create_execution_intent(
 
 def execute_intent(
     intent: ExecutionIntent,
-    edge_vwmp: float, # VWMP needed for paper fill simulation
-    label: str, # Label used for logging
+    edge_vwmp: float,  # Phase 2: remove when _paper_fill callers are cleaned up
+    label: str,
 ) -> OrderResult:
-    """Execute the instantiated domain intent (paper or live)."""
-    
+    """Execute the instantiated live domain intent."""
+
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
 
     # Phase 3: Adversarial Execution Evolutions
-    if intent.liquidity_guard and not intent.is_sandbox:
+    if intent.liquidity_guard:
         logger.info(f"Liquidity guard active. Monitoring toxic sweep parameters against {intent.target_size_usd}")
-        
+
     if intent.slice_policy == "iceberg":
         logger.info(f"Iceberg slice policy active: Will break {intent.target_size_usd} into micro-orders")
 
@@ -146,18 +146,15 @@ def execute_intent(
     shares = intent.target_size_usd / limit_price if limit_price > 0 else 0
     shares = math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
 
-    if intent.is_sandbox:
-        return _paper_fill(trade_id, intent, edge_vwmp, label)
-    else:
-        if not intent.token_id:
-            return OrderResult(
-                trade_id=trade_id, status="rejected",
-                reason=f"No token_id provided for intent",
-            )
-
-        return _live_order(
-            trade_id, intent, shares
+    if not intent.token_id:
+        return OrderResult(
+            trade_id=trade_id, status="rejected",
+            reason=f"No token_id provided for intent",
         )
+
+    return _live_order(
+        trade_id, intent, shares
+    )
 
 
 def create_exit_order_intent(
@@ -181,48 +178,6 @@ def create_exit_order_intent(
     )
 
 
-def _paper_fill(
-    trade_id: str,
-    intent: ExecutionIntent,
-    edge_vwmp: float,
-    label: str,
-) -> OrderResult:
-    """Paper mode: simulate fill at VWMP. Spec §6.4.
-
-    BinEdge.vwmp is ALREADY in native space for the direction:
-    - buy_yes: vwmp = YES-side price
-    - buy_no: vwmp = NO-side price
-    DO NOT flip it again — that's the churn bug root cause.
-    """
-    fill_price = edge_vwmp  # Already native space. NEVER flip here.
-    now = datetime.now(timezone.utc).isoformat()
-
-    logger.info(
-        "PAPER FILL: %s %s @ %.3f (limit=%.3f, size=$%.2f)",
-        intent.direction.value, label, fill_price, intent.limit_price, intent.target_size_usd,
-    )
-
-    result = OrderResult(
-        trade_id=trade_id,
-        status="filled",
-        fill_price=fill_price,
-        filled_at=now,
-        submitted_price=intent.limit_price,
-        shares=(intent.target_size_usd / fill_price) if fill_price > 0 else 0.0,
-    )
-    try:
-        alert_trade(
-            direction="BUY",
-            market=intent.market_id,
-            price=fill_price,
-            size_usd=float(intent.target_size_usd),
-            strategy=label,
-            edge=float(intent.limit_price - fill_price),
-            mode=get_mode(),
-        )
-    except Exception as exc:
-        logger.warning("Discord trade alert failed for paper fill: %s", exc)
-    return result
 
 
 def place_sell_order(

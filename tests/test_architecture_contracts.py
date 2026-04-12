@@ -301,13 +301,9 @@ def test_transaction_boundary_helper_rejects_legacy_init_schema():
     projection_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[
         0
     ]
-    legacy_count = conn.execute(
-        "SELECT COUNT(*) FROM position_events_legacy"
-    ).fetchone()[0]
 
     assert event_count == 1
     assert projection_count == 1
-    assert legacy_count == 0
 
     conn.close()
 
@@ -448,6 +444,7 @@ def test_apply_architecture_kernel_schema_bootstraps_strategy_policy_tables():
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_events():
     from src.state.db import apply_architecture_kernel_schema, init_schema
 
@@ -473,6 +470,7 @@ def test_apply_architecture_kernel_schema_coexists_with_legacy_runtime_position_
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_canonical_bootstrap_is_not_runtime_ready_for_legacy_position_event_helpers():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -916,6 +914,7 @@ def test_open_position_canonical_backfill_fails_loud_for_pending_exit_positions(
 
 
 def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
+    """P9: position_events_legacy deleted. Only canonical position_events remains."""
     from src.state.db import init_schema
 
     conn = sqlite3.connect(":memory:")
@@ -929,17 +928,12 @@ def test_init_schema_creates_legacy_and_canonical_event_tables_side_by_side():
         ).fetchall()
     }
     assert "position_events" in tables
-    assert "position_events_legacy" in tables
+    assert "position_events_legacy" not in tables
 
-    legacy_columns = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(position_events_legacy)").fetchall()
-    }
     canonical_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
     }
-    assert {"runtime_trade_id", "details_json", "timestamp"}.issubset(legacy_columns)
     assert {"event_id", "position_id", "sequence_no", "payload_json"}.issubset(
         canonical_columns
     )
@@ -1632,6 +1626,7 @@ def test_log_execution_report_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_trade_entry
 
@@ -1656,6 +1651,7 @@ def test_log_trade_entry_still_fails_loudly_on_malformed_legacy_position_events_
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_execution_report_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_execution_report
 
@@ -1749,6 +1745,7 @@ def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_settlement_event
 
@@ -1776,6 +1773,7 @@ def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_ev
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -1798,6 +1796,7 @@ def test_log_reconciled_entry_event_degrades_cleanly_on_canonical_bootstrap_db()
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_reconciled_entry_event
 
@@ -1827,6 +1826,7 @@ def test_log_reconciled_entry_event_still_fails_loudly_on_malformed_legacy_posit
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_log_reconciled_entry_event_still_fails_loudly_on_hybrid_drift_schema():
     from src.state.db import (
         apply_architecture_kernel_schema,
@@ -1955,6 +1955,7 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
@@ -2038,6 +2039,7 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before_in_memory_mutation(
     monkeypatch,
 ):
@@ -2077,6 +2079,7 @@ def test_reconciliation_pending_fill_path_legacy_sync_failure_is_explicit_before
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_before_in_memory_mutation(
     monkeypatch,
 ):
@@ -2122,6 +2125,7 @@ def test_reconciliation_pending_fill_path_legacy_event_failure_is_explicit_befor
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_still_fails_loudly_on_hybrid_drift_schema():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
@@ -2219,6 +2223,7 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
@@ -2281,6 +2286,7 @@ def test_reconciliation_size_correction_path_skips_canonical_write_without_prior
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_rows():
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -2399,6 +2405,7 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_pending_fill_path_hybrid_drift_fails_before_new_canonical_rows():
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -2585,6 +2592,7 @@ def test_chronicler_log_event_still_fails_loudly_when_chronicle_missing_outside_
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_chronicler_log_event_still_fails_loudly_on_hybrid_drift_schema_without_chronicle():
     from src.state.chronicler import log_event
     from src.state.db import apply_architecture_kernel_schema
@@ -2697,6 +2705,7 @@ def test_harvester_settlement_path_skips_canonical_write_without_prior_canonical
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_harvester_settlement_path_preserves_legacy_behavior_on_legacy_db():
     from src.execution.harvester import _settle_positions
     from src.state.db import init_schema, query_position_events
@@ -3115,6 +3124,7 @@ def test_cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_sche
     conn.close()
 
 
+@pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_on_canonical_db():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import (

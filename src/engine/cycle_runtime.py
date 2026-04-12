@@ -104,7 +104,7 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 
 def run_chain_sync(portfolio, clob, conn=None, *, deps):
-    if getattr(clob, "paper_mode", True):
+    if getattr(clob, "paper_mode", False):
         return {"skipped": "paper_mode"}, True
 
     try:
@@ -118,7 +118,7 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
 
 
 def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
-    if getattr(clob, "paper_mode", True) or not hasattr(clob, "get_open_orders"):
+    if getattr(clob, "paper_mode", False) or not hasattr(clob, "get_open_orders"):
         return 0
 
     tracked_order_ids = set()
@@ -144,7 +144,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     config_cap = float(deps.settings.capital_base_usd)
 
-    if getattr(clob, "paper_mode", True):
+    if getattr(clob, "paper_mode", False):
         effective = max(0.0, float(portfolio.initial_bankroll))
         bankroll = min(config_cap, effective) if effective > 0 else 0.0
         return bankroll, {
@@ -384,7 +384,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    paper_mode = getattr(clob, "paper_mode", True)
+    paper_mode = getattr(clob, "paper_mode", False)
     portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
     tracker_dirty = False
 

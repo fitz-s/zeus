@@ -160,13 +160,15 @@ def _dual_write_canonical_settlement_if_available(
         )
         return False
 
-    # Prefer the DB-authoritative phase_before when available; fall back to the
-    # pos-object-derived value only when the DB has no row yet (e.g. very first
-    # lifecycle event for a canonical-bootstrap migration).
+    # The terminal dedup above uses db_phase authoritatively. For phase_before
+    # metadata, prefer the runtime pos state: db_phase reflects last canonical
+    # write but pos may have advanced further (e.g. economically_closed or
+    # pending_exit) without intermediate canonical writes.
     resolved_phase_before = (
-        db_phase
-        if db_phase is not None
-        else (phase_before or _canonical_phase_before_for_settlement(pos))
+        phase_before
+        or _canonical_phase_before_for_settlement(pos)
+        or db_phase
+        or "active"
     )
 
     try:
@@ -271,7 +273,7 @@ def run_harvester() -> dict:
                 winning_label,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
-                paper_mode=(get_mode() == "paper"),  # Live redemption requires paper_mode=False
+                paper_mode=False,
             )
             positions_settled += n_settled
             if n_settled > 0:
@@ -677,7 +679,7 @@ def _settle_positions(
     city: str, target_date: str, winning_label: str,
     settlement_records: Optional[list[SettlementRecord]] = None,
     strategy_tracker=None,
-    paper_mode: bool = True,
+    paper_mode: bool = False,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     # Semantic Provenance Guard

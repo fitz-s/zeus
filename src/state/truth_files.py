@@ -45,8 +45,6 @@ def build_truth_metadata(
 
 def infer_mode_from_path(path: Path) -> str | None:
     stem = path.stem
-    if stem.endswith("-paper"):
-        return "paper"
     if stem.endswith("-live"):
         return "live"
     return None
@@ -123,7 +121,6 @@ def legacy_tombstone_payload(
                 archived_to=archived_to,
             ),
             "replacement_paths": {
-                "paper": str(mode_state_path(filename, "paper")),
                 "live": str(mode_state_path(filename, "live")),
             },
         },
@@ -174,7 +171,7 @@ def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
     return {"path": str(path), "updated": True, "missing": False}
 
 
-def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ("paper", "live")) -> list[dict[str, Any]]:
+def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ("live",)) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for mode in modes:
         for filename in LEGACY_STATE_FILES:

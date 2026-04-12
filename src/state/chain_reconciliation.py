@@ -297,9 +297,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
-            legacy_rescue_query_available = conn is None or _legacy_rescue_query_available()
             canonical_rescue_baseline_available = _canonical_rescue_baseline_available(getattr(pos, "trade_id", ""))
-            if not legacy_rescue_query_available and not canonical_rescue_baseline_available:
+            if not canonical_rescue_baseline_available:
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
                 continue
@@ -328,9 +327,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 rescued.entered_at = now
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
-            if legacy_rescue_query_available:
-                _sync_reconciled_trade_lifecycle(rescued)
-                _emit_rescue_event(rescued, rescued_at=rescued.entered_at or now)
+            _sync_reconciled_trade_lifecycle(rescued)
+            _emit_rescue_event(rescued, rescued_at=rescued.entered_at or now)
             pos.entry_order_id = rescued.entry_order_id
             pos.order_id = rescued.order_id
             pos.chain_state = rescued.chain_state
@@ -394,7 +392,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 if not _append_canonical_size_correction_if_available(
                     corrected,
                     local_shares_before=local_shares,
-                ) and not _legacy_rescue_query_available():
+                ):
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )

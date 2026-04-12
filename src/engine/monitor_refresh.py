@@ -462,7 +462,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # 1. Refresh market price
     market_refreshed = False
-    if getattr(clob, "paper_mode", True):
+    if getattr(clob, "paper_mode", False):
         try:
             gamma_yes = get_current_yes_price(pos.market_id)
             if gamma_yes is not None:
