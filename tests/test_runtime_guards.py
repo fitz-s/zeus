@@ -920,7 +920,9 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
 
     cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
-    assert captured["entry_bankroll"] == pytest.approx(120.0)
+    # P7: wallet_balance is primary; config_cap is upper bound. Exposure no longer added.
+    # wallet=$100, config_cap=$200 u2192 effective_bankroll=min(100, 200)=100.
+    assert captured["entry_bankroll"] == pytest.approx(100.0)
 
 
 def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch, tmp_path):

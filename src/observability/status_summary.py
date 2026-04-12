@@ -246,6 +246,8 @@ def write_status(cycle_summary: dict = None) -> None:
         total_pnl = round(float(realized_pnl or 0.0) + float(unrealized_pnl or 0.0), 2)
     initial_bankroll = risk_details.get("initial_bankroll")
     if initial_bankroll is None:
+        initial_bankroll = (cycle_summary or {}).get("wallet_balance_usd")
+    if initial_bankroll is None:
         initial_bankroll = round(float(settings.capital_base_usd), 2)
     if effective_bankroll is None:
         effective_bankroll = round(float(initial_bankroll or 0.0) + float(total_pnl or 0.0), 2)

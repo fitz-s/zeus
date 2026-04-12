@@ -143,10 +143,9 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     config_cap = float(deps.settings.capital_base_usd)
-    effective = max(0.0, float(portfolio.initial_bankroll))
-    exposure = deps.total_exposure_usd(portfolio)
 
     if getattr(clob, "paper_mode", True):
+        effective = max(0.0, float(portfolio.initial_bankroll))
         bankroll = min(config_cap, effective) if effective > 0 else 0.0
         return bankroll, {
             "config_cap_usd": config_cap,
@@ -157,47 +156,41 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "wallet_balance_used": False,
         }
 
+    # P7: Live — wallet_balance is the PRIMARY bankroll source.
+    # config_cap acts as an upper-bound safety cap only.
     try:
         balance = float(clob.get_balance())
     except Exception as exc:
         deps.logger.warning("Wallet balance fetch failed: %s", exc)
         return None, {
             "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
             "wallet_balance_usd": None,
             "dynamic_cap_usd": None,
-            "entry_block_reason": "wallet_balance_unavailable",
-            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+            "entry_block_reason": "wallet_query_failed",
+            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
 
-    if balance <= 0.0 and exposure > 0:
-        deps.logger.warning(
-            "SUSPICIOUS: wallet balance $%.2f but exposure $%.2f — possible API error. Blocking new entries.",
-            balance,
-            exposure,
-        )
+    if balance <= 0.0:
+        deps.logger.warning("Wallet balance $%.2f — blocking new entries.", balance)
         return None, {
             "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
             "wallet_balance_usd": balance,
             "dynamic_cap_usd": None,
-            "entry_block_reason": "wallet_balance_zero_with_exposure",
-            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+            "entry_block_reason": "wallet_query_failed",
+            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
 
-    dynamic_cap = min(config_cap, balance + exposure)
-    bankroll = min(dynamic_cap, effective) if effective > 0 else dynamic_cap
-    return max(0.0, bankroll), {
+    effective_bankroll = min(balance, config_cap)
+    return max(0.0, effective_bankroll), {
         "config_cap_usd": config_cap,
-        "effective_bankroll_usd": effective,
         "wallet_balance_usd": balance,
-        "dynamic_cap_usd": dynamic_cap,
-        "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-        "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+        "dynamic_cap_usd": effective_bankroll,
+        "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+        "bankroll_truth_source": "wallet_balance",
         "wallet_balance_used": True,
     }
 
