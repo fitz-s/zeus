@@ -125,7 +125,7 @@ def test_representative_shared_scripts_import_from_outside_repo_cwd(script_rel, 
     payload = json.loads(result.stdout.strip())
     assert payload == {
         "project_root": str(ROOT),
-        "get_connection_name": "get_shared_connection",
+        "get_connection_name": "get_world_connection",
     }
 
 
@@ -134,7 +134,7 @@ def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monk
     import src.calibration.manager as calibration_manager_module
     import src.state.db as db_module
 
-    shared_db = tmp_path / "zeus-shared.db"
+    shared_db = tmp_path / "zeus-world.db"
     tigge_root = tmp_path / "tigge"
     date_dir = tigge_root / "nyc" / "20260101"
     date_dir.mkdir(parents=True)
@@ -196,7 +196,7 @@ def test_etl_tigge_calibration_uses_settlement_value_when_winning_bin_missing(tm
     import src.calibration.manager as calibration_manager_module
     import src.state.db as db_module
 
-    shared_db = tmp_path / "zeus-shared.db"
+    shared_db = tmp_path / "zeus-world.db"
     tigge_root = tmp_path / "tigge"
     date_dir = tigge_root / "nyc" / "20260101"
     date_dir.mkdir(parents=True)
@@ -246,7 +246,7 @@ def test_backfill_observations_from_settlements_uses_namespaced_settlement_sourc
     from scripts import backfill_observations_from_settlements as backfill
     import src.state.db as db_module
 
-    shared_db = tmp_path / "zeus-shared.db"
+    shared_db = tmp_path / "zeus-world.db"
     conn = get_connection(shared_db)
     init_schema(conn)
     conn.execute(
@@ -259,7 +259,7 @@ def test_backfill_observations_from_settlements_uses_namespaced_settlement_sourc
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(backfill, "get_shared_connection", lambda: db_module.get_connection(shared_db))
+    monkeypatch.setattr(backfill, "get_world_connection", lambda: db_module.get_connection(shared_db))
 
     dry = backfill.backfill_observations_from_settlements(dry_run=True)
     result = backfill.backfill_observations_from_settlements()
@@ -282,7 +282,7 @@ def test_etl_forecast_skill_from_forecasts_materializes_bias_for_local_forecasts
     from scripts import etl_forecast_skill_from_forecasts as etl
     import src.state.db as db_module
 
-    shared_db = tmp_path / "zeus-shared.db"
+    shared_db = tmp_path / "zeus-world.db"
     conn = get_connection(shared_db)
     init_schema(conn)
     for day in range(1, 7):
@@ -302,7 +302,7 @@ def test_etl_forecast_skill_from_forecasts_materializes_bias_for_local_forecasts
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(etl, "get_shared_connection", lambda: db_module.get_connection(shared_db))
+    monkeypatch.setattr(etl, "get_world_connection", lambda: db_module.get_connection(shared_db))
 
     dry = etl.run_etl(dry_run=True)
     result = etl.run_etl()

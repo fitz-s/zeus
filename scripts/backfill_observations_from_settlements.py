@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import cities_by_name
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 
 def _source_name(raw_source: str | None) -> str:
@@ -27,7 +27,7 @@ def _source_name(raw_source: str | None) -> str:
 
 
 def backfill_observations_from_settlements(*, dry_run: bool = False, limit: int | None = None) -> dict:
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     query = """
         SELECT s.city, s.target_date, s.settlement_value, s.settlement_source

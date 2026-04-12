@@ -33,9 +33,9 @@ def season_from_month(month: int, lat: float = 90.0) -> str:
 def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
     """Load DST-aware solar context for one city/day from Zeus-owned storage."""
     try:
-        from src.state.db import get_shared_connection
+        from src.state.db import get_world_connection
 
-        conn = get_shared_connection()
+        conn = get_world_connection()
         row = conn.execute(
             """
             SELECT timezone, sunrise_local, sunset_local, sunrise_utc, sunset_utc,
@@ -125,9 +125,9 @@ def get_peak_hour_context(
     solar_day = get_solar_day(city_name, target_date)
 
     try:
-        from src.state.db import get_shared_connection
+        from src.state.db import get_world_connection
 
-        conn = get_shared_connection()
+        conn = get_world_connection()
 
         # Peak hour from seasonal avg_temp curve (unchanged)
         season_rows = conn.execute(
@@ -210,9 +210,9 @@ def post_peak_confidence(
     solar_day = get_solar_day(city_name, target_date)
 
     try:
-        from src.state.db import get_shared_connection
+        from src.state.db import get_world_connection
 
-        conn = get_shared_connection()
+        conn = get_world_connection()
 
         # 1. Monthly lookup
         monthly_row = conn.execute(

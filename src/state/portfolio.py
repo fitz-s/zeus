@@ -840,7 +840,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
 
     from src.state.db import (
         get_connection,
-        get_trade_connection_with_shared,
+        get_trade_connection_with_world,
         query_authoritative_settlement_rows,
         query_portfolio_loader_view,
     )
@@ -860,7 +860,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             if sibling_mode_db.exists():
                 conn = get_connection(sibling_mode_db)
             else:
-                conn = get_trade_connection_with_shared(mode_override)
+                conn = get_trade_connection_with_world(mode_override)
         else:
             sibling_mode_db = path.parent / f"zeus-{current_mode}.db"
             if sibling_mode_db.exists():

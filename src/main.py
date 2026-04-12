@@ -16,7 +16,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from src.config import cities_by_name, get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
-from src.state.db import init_schema, get_shared_connection, get_trade_connection
+from src.state.db import init_schema, get_world_connection, get_trade_connection
 
 logger = logging.getLogger("zeus")
 
@@ -327,7 +327,7 @@ def main():
                 settings.capital_base_usd,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
 
     # Ensure trade DB has all tables (prevents lazy-creation gaps)

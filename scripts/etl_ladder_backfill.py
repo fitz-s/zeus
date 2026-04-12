@@ -1,9 +1,9 @@
 """ETL: Ladder backfill → forecast_skill + model_bias tables.
 
 Source: rainstorm.db:settlement_forecast_ladder_backfill (53,600 rows)
-  — table does not exist in zeus-shared.db; this script is a no-op
+  — table does not exist in zeus-world.db; this script is a no-op
   when rainstorm.db is absent. Data was already ETL'd on initial run.
-Target: zeus-shared.db:forecast_skill + model_bias
+Target: zeus-world.db:forecast_skill + model_bias
 
 Validates:
 - London/Paris → unit must be 'C'. Values > 50 for London winter → REJECT.
@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date, lat_for_city
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,7 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
-ZEUS_SHARED_DB_PATH = STATE_DIR / "zeus-shared.db"  # Shared world data (settlements, calibration, ENS)
+ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
 RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
 
 
@@ -50,15 +50,15 @@ def get_trade_connection(mode: str | None = None) -> sqlite3.Connection:
     return _connect(_zeus_trade_db_path(mode))
 
 
-def get_shared_connection() -> sqlite3.Connection:
+def get_world_connection() -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
-    return _connect(ZEUS_SHARED_DB_PATH)
+    return _connect(ZEUS_WORLD_DB_PATH)
 
 
-def get_trade_connection_with_shared(mode: str | None = None) -> sqlite3.Connection:
+def get_trade_connection_with_world(mode: str | None = None) -> sqlite3.Connection:
     """Trade connection with shared DB ATTACHed for cross-DB joins."""
     conn = get_trade_connection(mode)
-    conn.execute("ATTACH DATABASE ? AS shared", (str(ZEUS_SHARED_DB_PATH),))
+    conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     return conn
 
 

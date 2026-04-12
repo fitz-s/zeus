@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def get_conn() -> sqlite3.Connection:
-    from src.state.db import get_shared_connection as get_connection
+    from src.state.db import get_world_connection as get_connection
     return get_connection()
 
 

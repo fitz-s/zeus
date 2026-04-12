@@ -33,7 +33,7 @@ from src.calibration.effective_sample_size import build_decision_groups, write_d
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 
 
 TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"

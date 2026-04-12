@@ -16,11 +16,11 @@ from src.signal.forecast_error_distribution import (
     build_forecast_error_profiles,
     write_forecast_error_profiles,
 )
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 
 def run_etl(*, dry_run: bool = False) -> dict:
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     before_rows = conn.execute("SELECT COUNT(*) FROM forecast_error_profile").fetchone()[0]
     before_cities = conn.execute("SELECT COUNT(DISTINCT city) FROM forecast_error_profile").fetchone()[0]

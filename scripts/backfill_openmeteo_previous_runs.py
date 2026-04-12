@@ -26,12 +26,21 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import httpx
 
 from src.config import City, cities, cities_by_name
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 SOURCE = "openmeteo_previous_runs"
+MODEL_SOURCE_MAP = {
+    "best_match": "openmeteo_previous_runs",
+    "gfs_global": "gfs_previous_runs",
+    "ecmwf_ifs025": "ecmwf_previous_runs",
+    "icon_global": "icon_previous_runs",
+    "ukmo_global_deterministic_10km": "ukmo_previous_runs",
+}
+DEFAULT_MODELS = tuple(MODEL_SOURCE_MAP)
 DEFAULT_CHUNK_DAYS = 90
 DEFAULT_LEADS = tuple(range(1, 8))
+MAX_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -74,22 +83,36 @@ def _fetch_previous_runs_chunk(
     end: date,
     *,
     leads: tuple[int, ...],
+    models: tuple[str, ...],
 ) -> dict:
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
     hourly_vars = [_hourly_variable_for_lead(lead) for lead in leads]
-    response = httpx.get(
-        PREVIOUS_RUNS_URL,
-        params={
-            "latitude": city.lat,
-            "longitude": city.lon,
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "hourly": hourly_vars,
-            "temperature_unit": temp_unit,
-            "timezone": city.timezone,
-        },
-        timeout=60.0,
-    )
+    params = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": hourly_vars,
+        "temperature_unit": temp_unit,
+        "timezone": city.timezone,
+        "models": list(models),
+    }
+    for attempt in range(1, MAX_RETRIES + 1):
+        response = httpx.get(
+            PREVIOUS_RUNS_URL,
+            params=params,
+            timeout=60.0,
+        )
+        if response.status_code == 429 and attempt < MAX_RETRIES:
+            retry_after = response.headers.get("retry-after")
+            try:
+                sleep_seconds = float(retry_after) if retry_after else 15.0 * attempt
+            except ValueError:
+                sleep_seconds = 15.0 * attempt
+            time.sleep(sleep_seconds)
+            continue
+        response.raise_for_status()
+        return response.json()
     response.raise_for_status()
     return response.json()
 
@@ -99,6 +122,7 @@ def _rows_from_payload(
     payload: dict,
     *,
     leads: tuple[int, ...],
+    models: tuple[str, ...],
     retrieved_at: str,
     imported_at: str,
 ) -> tuple[list[ForecastBackfillRow], Counter]:
@@ -109,29 +133,37 @@ def _rows_from_payload(
         counters["missing_time"] += 1
         return [], counters
 
-    by_date: dict[tuple[str, int], list[float]] = {}
-    for lead in leads:
-        variable = _hourly_variable_for_lead(lead)
-        values = hourly.get(variable) or []
-        if len(values) != len(times):
-            counters[f"{variable}_length_mismatch"] += 1
-            continue
-        for raw_time, value in zip(times, values):
-            if value is None:
-                counters[f"{variable}_null"] += 1
+    by_date: dict[tuple[str, int, str], list[float]] = {}
+    for model in models:
+        source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+        for lead in leads:
+            base_variable = _hourly_variable_for_lead(lead)
+            variable = f"{base_variable}_{model}"
+            values = hourly.get(variable)
+            if values is None and model == "best_match":
+                values = hourly.get(base_variable)
+            if values is None:
+                counters[f"{variable}_missing"] += 1
                 continue
-            target_date = str(raw_time)[:10]
-            by_date.setdefault((target_date, lead), []).append(float(value))
+            if len(values) != len(times):
+                counters[f"{variable}_length_mismatch"] += 1
+                continue
+            for raw_time, value in zip(times, values):
+                if value is None:
+                    counters[f"{variable}_null"] += 1
+                    continue
+                target_date = str(raw_time)[:10]
+                by_date.setdefault((target_date, lead, source), []).append(float(value))
 
     rows: list[ForecastBackfillRow] = []
-    for (target_date, lead), temps in sorted(by_date.items()):
+    for (target_date, lead, source), temps in sorted(by_date.items()):
         target = date.fromisoformat(target_date)
         basis = target - timedelta(days=lead)
         rows.append(
             ForecastBackfillRow(
                 city=city.name,
                 target_date=target_date,
-                source=SOURCE,
+                source=source,
                 forecast_basis_date=basis.isoformat(),
                 forecast_issue_time=None,
                 lead_days=lead,
@@ -193,7 +225,7 @@ def _resolve_cities(names: list[str] | None, *, only_missing_forecast_skill: boo
     selected = [cities_by_name[name] for name in names] if names else list(cities)
     if not only_missing_forecast_skill:
         return selected
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     covered = {
         row[0]
@@ -210,6 +242,7 @@ def run_backfill(
     end_date: str | None = None,
     days: int = 95,
     leads: tuple[int, ...] = DEFAULT_LEADS,
+    models: tuple[str, ...] = DEFAULT_MODELS,
     chunk_days: int = DEFAULT_CHUNK_DAYS,
     sleep_seconds: float = 0.5,
     dry_run: bool = False,
@@ -222,7 +255,7 @@ def run_backfill(
         raise ValueError("start_date must be <= end_date")
 
     selected = _resolve_cities(city_names, only_missing_forecast_skill=only_missing_forecast_skill)
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     before = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
 
@@ -238,11 +271,13 @@ def run_backfill(
                     chunk_start,
                     chunk_end,
                     leads=leads,
+                    models=models,
                 )
                 rows, counters = _rows_from_payload(
                     city,
                     payload,
                     leads=leads,
+                    models=models,
                     retrieved_at=retrieved_at,
                     imported_at=retrieved_at,
                 )
@@ -270,6 +305,7 @@ def run_backfill(
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "leads": list(leads),
+        "models": list(models),
         "city_count": len(selected),
         "forecasts_before": int(before),
         "forecasts_after": int(after),
@@ -289,6 +325,18 @@ def _parse_leads(raw: str) -> tuple[int, ...]:
     return tuple(sorted(set(leads)))
 
 
+def _parse_models(raw: str) -> tuple[str, ...]:
+    models = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if not models:
+        raise argparse.ArgumentTypeError("model list cannot be empty")
+    unknown = [model for model in models if model not in MODEL_SOURCE_MAP]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown Open-Meteo model(s): {', '.join(unknown)}"
+        )
+    return tuple(dict.fromkeys(models))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cities", nargs="+", default=None)
@@ -297,6 +345,7 @@ def main() -> int:
     parser.add_argument("--end-date")
     parser.add_argument("--days", type=int, default=95)
     parser.add_argument("--leads", type=_parse_leads, default=DEFAULT_LEADS)
+    parser.add_argument("--models", type=_parse_models, default=DEFAULT_MODELS)
     parser.add_argument("--chunk-days", type=int, default=DEFAULT_CHUNK_DAYS)
     parser.add_argument("--sleep", type=float, default=0.5)
     parser.add_argument("--dry-run", action="store_true")
@@ -309,6 +358,7 @@ def main() -> int:
                 end_date=args.end_date,
                 days=args.days,
                 leads=args.leads,
+                models=args.models,
                 chunk_days=args.chunk_days,
                 sleep_seconds=args.sleep,
                 dry_run=args.dry_run,

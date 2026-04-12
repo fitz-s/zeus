@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.market_scanner import find_weather_markets
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 
 def _snapshot_rows(*, min_hours_to_resolution: float = 0.0) -> list[tuple]:
@@ -55,7 +55,7 @@ def run_backfill(*, dry_run: bool = False, min_hours_to_resolution: float = 0.0)
     rows = _snapshot_rows(min_hours_to_resolution=min_hours_to_resolution)
     cities = sorted({row[1] for row in rows})
     if not dry_run and rows:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         init_schema(conn)
         conn.executemany(
             """

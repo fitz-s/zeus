@@ -3,7 +3,7 @@
 
 Reads state/zeus.db (legacy shared DB) and creates:
   - state/zeus-paper.db: trade tables filtered to env='paper'
-  - state/zeus-shared.db: world data tables (no env column)
+  - state/zeus-world.db: world data tables (no env column)
 
 DRY RUN by default. Pass --apply to execute.
 
@@ -21,7 +21,7 @@ from pathlib import Path
 STATE_DIR = Path(__file__).resolve().parent.parent / "state"
 SOURCE_DB = STATE_DIR / "zeus.db"
 PAPER_DB = STATE_DIR / "zeus-paper.db"
-SHARED_DB = STATE_DIR / "zeus-shared.db"
+SHARED_DB = STATE_DIR / "zeus-world.db"
 
 # Tables that go into zeus-paper.db (trade-facing, have env column).
 # Filtered to env='paper' only.
@@ -39,7 +39,7 @@ PAPER_TABLES = [
     "shadow_signals",
 ]
 
-# Tables that go into zeus-shared.db (world data, no env filtering).
+# Tables that go into zeus-world.db (world data, no env filtering).
 SHARED_TABLES = [
     "settlements",
     "observations",

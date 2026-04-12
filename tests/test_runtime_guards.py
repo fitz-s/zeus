@@ -140,7 +140,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: load_portfolio(portfolio_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: save_portfolio(state, portfolio_path))
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
@@ -169,7 +169,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
 
 def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus-paper.db"
-    shared_db = tmp_path / "zeus-shared.db"
+    shared_db = tmp_path / "zeus-world.db"
     conn = get_connection(trade_db)
     init_schema(conn)
     conn.close()
@@ -179,9 +179,9 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
     shared_conn.commit()
     shared_conn.close()
 
-    monkeypatch.setattr(db_module, "ZEUS_SHARED_DB_PATH", shared_db)
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", shared_db)
     monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda mode=None: trade_db)
-    assert cycle_runner.get_connection is db_module.get_trade_connection_with_shared
+    assert cycle_runner.get_connection is db_module.get_trade_connection_with_world
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
@@ -193,7 +193,7 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
     monkeypatch.setattr(cycle_runner, "_execute_discovery_phase", lambda *args, **kwargs: (False, False))
 
     def fake_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=None):
-        assert conn.execute("SELECT name FROM shared.sqlite_master WHERE type = 'table' AND name = 'shared_sentinel'").fetchone() is not None
+        assert conn.execute("SELECT name FROM world.sqlite_master WHERE type = 'table' AND name = 'shared_sentinel'").fetchone() is not None
         summary["monitor_incomplete_exit_context"] = 0
         return False, False
 
@@ -516,7 +516,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -969,7 +969,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
@@ -1496,7 +1496,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -1550,7 +1550,7 @@ def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monke
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     conn.close()
 
     path.write_text(json.dumps({
@@ -1586,7 +1586,7 @@ def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_pro
     path = tmp_path / "positions-paper.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    monkeypatch.setattr("src.state.db.get_trade_connection_with_shared", lambda mode: get_connection(db_path))
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
     conn.execute(
         """
         INSERT INTO position_current (
@@ -2631,7 +2631,7 @@ def test_main_registers_ecmwf_open_data_jobs(monkeypatch, tmp_path):
     fake_scheduler = FakeScheduler()
 
     monkeypatch.setattr(main_module, "BlockingScheduler", lambda: fake_scheduler)
-    monkeypatch.setattr(main_module, "get_shared_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(main_module, "get_world_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(main_module, "get_trade_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(main_module, "init_schema", lambda conn: None)
     monkeypatch.setattr(main_module.os, "environ", {"ZEUS_MODE": "paper"})

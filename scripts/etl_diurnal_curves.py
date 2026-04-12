@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 
 
 def season_from_date(date_str: str, city_name: str = "") -> str:

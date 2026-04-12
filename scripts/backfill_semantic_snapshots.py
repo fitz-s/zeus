@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
-from src.state.db import get_trade_connection_with_shared as get_connection, init_schema
+from src.state.db import get_trade_connection_with_world as get_connection, init_schema
 
 POSITIONS_PATH = PROJECT_ROOT / "state" / "positions-paper.json"
 
@@ -108,7 +108,7 @@ def run_backfill(positions_path: Path = POSITIONS_PATH) -> dict:
     init_schema(conn)
 
     try:
-        conn.execute("SELECT 1 FROM shared.ensemble_snapshots LIMIT 0")
+        conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
         _sp = "shared."
     except Exception:
         _sp = ""

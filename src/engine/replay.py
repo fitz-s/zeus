@@ -56,7 +56,7 @@ from typing import Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
-from src.state.db import get_trade_connection_with_shared
+from src.state.db import get_trade_connection_with_world
 from src.types import Bin
 from src.types.temperature import TemperatureDelta
 
@@ -148,7 +148,7 @@ class ReplayContext:
         self._decision_ref_cache: dict[tuple[str, str], Optional[dict]] = {}
         # Detect whether shared DB is attached (production) or monolithic (tests)
         try:
-            self.conn.execute("SELECT 1 FROM shared.ensemble_snapshots LIMIT 0")
+            self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
             self._sp = "shared."  # shared DB attached
         except Exception:
             self._sp = ""  # monolithic DB (tests)
@@ -673,7 +673,7 @@ def run_replay(
         ReplaySummary with per-city breakdown and PnL
     """
     run_id = str(uuid.uuid4())[:12]
-    conn = get_trade_connection_with_shared()
+    conn = get_trade_connection_with_world()
     ctx = ReplayContext(
         conn,
         overrides=overrides,

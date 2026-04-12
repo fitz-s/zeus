@@ -13,7 +13,7 @@ from src.control.gate_decision import GateDecision, ReasonCode
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
-    get_shared_connection,
+    get_world_connection,
     query_control_override_state,
     upsert_control_override,
 )
@@ -89,7 +89,7 @@ def pause_entries(reason_code: str) -> None:
     alert_auto_pause(reason_code)
     # Persist so a daemon restart does not silently lose the pause.
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         upsert_control_override(
             conn,
             override_id="control_plane:global:entries_paused",
@@ -165,7 +165,7 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         durable_state = query_control_override_state(conn)
     except Exception:
         durable_state = {"status": "query_error"}
@@ -246,7 +246,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
     effective_until = cmd.get("effective_until")
     precedence = int(cmd.get("precedence") or DEFAULT_CONTROL_OVERRIDE_PRECEDENCE)
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
     except Exception:
         conn = None
     try:

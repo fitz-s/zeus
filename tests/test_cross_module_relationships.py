@@ -27,9 +27,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def _zeus_conn():
     from src.config import settings
-    from src.state.db import get_trade_connection_with_shared, init_schema
+    from src.state.db import get_trade_connection_with_world, init_schema
 
-    conn = get_trade_connection_with_shared(settings.mode)
+    conn = get_trade_connection_with_world(settings.mode)
     init_schema(conn)
     return conn
 

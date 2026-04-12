@@ -17,7 +17,7 @@ from datetime import timedelta
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_trade_connection_with_shared as get_connection
+from src.state.db import get_trade_connection_with_world as get_connection
 from src.state.portfolio import load_portfolio, Position
 from src.config import state_path
 from src.contracts.edge_context import EdgeContext
@@ -73,7 +73,7 @@ def run_profit_validation_replay():
         # Replay tick history from SQLite
         ticks = conn.execute('''
             SELECT price, timestamp 
-            FROM shared.token_price_log
+            FROM world.token_price_log
             WHERE token_id = ?
             ORDER BY timestamp ASC
         ''', (token_id,)).fetchall()
@@ -160,7 +160,7 @@ def run_profit_validation_replay():
             tick_dt = datetime.fromisoformat(tick["timestamp"].replace("Z", "+00:00"))
             one_hour_ago = (tick_dt - timedelta(hours=1)).isoformat()
             row = conn.execute(
-                "SELECT price FROM shared.token_price_log WHERE token_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+                "SELECT price FROM world.token_price_log WHERE token_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
                 (token_id, one_hour_ago)
             ).fetchone()
             if row:

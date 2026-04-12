@@ -1,12 +1,12 @@
-"""ETL: Historical forecasts from zeus-shared.db → historical_forecasts + model_skill.
+"""ETL: Historical forecasts from zeus-world.db → historical_forecasts + model_skill.
 
-Source: zeus-shared.db:forecasts (migrated from rainstorm, 171K+ rows, 5 NWP models)
+Source: zeus-world.db:forecasts (migrated from rainstorm, 171K+ rows, 5 NWP models)
   - ecmwf_previous_runs: 35,518 (lead 0-7)
   - gfs_previous_runs: 35,518 (lead 0-7)
   - openmeteo_previous_runs: 34,939 (lead 0-7)
   - icon_previous_runs: 30,502 (lead 0-6)
   - ukmo_previous_runs: 30,148 (lead 0-6)
-Target: zeus-shared.db:historical_forecasts + model_skill
+Target: zeus-world.db:historical_forecasts + model_skill
 
 Validates:
 - Temperature range per unit (C/F)
@@ -34,7 +34,7 @@ def season_from_date_with_city(date_str: str, city_name: str) -> str:
     from src.calibration.manager import season_from_date as _sfd, lat_for_city
     return _sfd(date_str, lat=lat_for_city(city_name))
 
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 
 # Source name normalization
 SOURCE_MAP = {

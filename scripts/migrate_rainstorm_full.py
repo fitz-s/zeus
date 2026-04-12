@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Rainstorm → zeus-shared.db migration (COMPLETE).
+"""Rainstorm → zeus-world.db migration (COMPLETE).
 
-All rainstorm.db data has been fully migrated to zeus-shared.db.
+All rainstorm.db data has been fully migrated to zeus-world.db.
 This script is retained as a no-op because src/main.py calls it
 from _etl_recalibrate().
 """
@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 def run_migration(dry_run: bool = False) -> dict:
-    """No-op: rainstorm.db migration is complete — all data in zeus-shared.db."""
-    logger.info("Rainstorm migration complete — all data in zeus-shared.db. Skipping.")
-    print("Rainstorm migration complete — all data in zeus-shared.db. Skipping.")
+    """No-op: rainstorm.db migration is complete — all data in zeus-world.db."""
+    logger.info("Rainstorm migration complete — all data in zeus-world.db. Skipping.")
+    print("Rainstorm migration complete — all data in zeus-world.db. Skipping.")
     return {"status": "noop", "reason": "migration_complete"}
 
 

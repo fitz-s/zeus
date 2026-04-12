@@ -28,7 +28,7 @@ c.close()
 print()
 
 # Shared DB
-c = sqlite3.connect("state/zeus-shared.db")
+c = sqlite3.connect("state/zeus-world.db")
 c.row_factory = sqlite3.Row
 for tbl in ["position_current", "position_events", "position_events_legacy", "trade_decisions"]:
     envs = c.execute(f"SELECT env, COUNT(*) as n FROM {tbl} GROUP BY env").fetchall()
@@ -56,7 +56,7 @@ c.row_factory = sqlite3.Row
 live_in_paper = c.execute("SELECT COUNT(*) FROM position_current WHERE env = 'live'").fetchone()[0]
 c.close()
 
-c2 = sqlite3.connect("state/zeus-shared.db")
+c2 = sqlite3.connect("state/zeus-world.db")
 c2.row_factory = sqlite3.Row
 live_in_shared_pel = c2.execute("SELECT COUNT(*) FROM position_events_legacy WHERE env = 'live'").fetchone()[0]
 live_in_shared_td = c2.execute("SELECT COUNT(*) FROM trade_decisions WHERE env = 'live'").fetchone()[0]

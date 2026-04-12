@@ -40,18 +40,43 @@ def test_rows_from_previous_runs_payload_aggregates_daily_highs_by_lead():
         _city(),
         payload,
         leads=(1, 2),
+        models=("best_match",),
         retrieved_at="2026-04-11T00:00:00+00:00",
         imported_at="2026-04-11T00:00:00+00:00",
     )
 
     by_key = {(row.target_date, row.lead_days): row for row in rows}
-    assert counters["temperature_2m_previous_day2_null"] == 1
+    assert counters["temperature_2m_previous_day2_best_match_null"] == 1
     assert by_key[("2024-01-03", 1)].forecast_high == 21.5
     assert by_key[("2024-01-03", 1)].forecast_low == 18.0
     assert by_key[("2024-01-03", 1)].forecast_basis_date == "2024-01-02"
     assert by_key[("2024-01-03", 2)].forecast_basis_date == "2024-01-01"
     assert by_key[("2024-01-04", 2)].forecast_high == 22.0
     assert by_key[("2024-01-04", 2)].forecast_low == 22.0
+
+
+def test_rows_from_previous_runs_payload_preserves_model_source():
+    payload = {
+        "hourly": {
+            "time": ["2025-01-03T00:00", "2025-01-03T12:00"],
+            "temperature_2m_previous_day1_gfs_global": [18.0, 23.0],
+            "temperature_2m_previous_day1_ecmwf_ifs025": [17.0, 22.0],
+        }
+    }
+
+    rows, counters = backfill._rows_from_payload(
+        _city(),
+        payload,
+        leads=(1,),
+        models=("gfs_global", "ecmwf_ifs025"),
+        retrieved_at="2026-04-11T00:00:00+00:00",
+        imported_at="2026-04-11T00:00:00+00:00",
+    )
+
+    by_source = {row.source: row for row in rows}
+    assert not counters
+    assert by_source["gfs_previous_runs"].forecast_high == 23.0
+    assert by_source["ecmwf_previous_runs"].forecast_high == 22.0
 
 
 def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
@@ -68,7 +93,7 @@ def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
             "temperature_2m_previous_day1": [18.0, 21.5],
         }
     }
-    monkeypatch.setattr(backfill, "get_shared_connection", _conn)
+    monkeypatch.setattr(backfill, "get_world_connection", _conn)
     monkeypatch.setattr(backfill, "_resolve_cities", lambda *args, **kwargs: [_city()])
     monkeypatch.setattr(backfill, "_fetch_previous_runs_chunk", lambda *args, **kwargs: payload)
 
@@ -105,10 +130,17 @@ def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
 
 def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill():
     step_ids = [step["id"] for step in onboard_cities.PIPELINE_STEPS]
+    steps = {step["id"]: step for step in onboard_cities.PIPELINE_STEPS}
 
     assert step_ids.index("openmeteo_previous_runs") < step_ids.index("forecast_skill")
     assert step_ids.index("forecast_skill") < step_ids.index("historical_forecasts")
     assert step_ids.index("historical_forecasts") < step_ids.index("forecast_error_profiles")
+    assert "900" in steps["wu_daily"]["extra_args"]
+    assert "900" in steps["hourly_openmeteo"]["extra_args"]
+    assert "900" in steps["openmeteo_previous_runs"]["extra_args"]
+    assert "ukmo_global_deterministic_10km" in ",".join(
+        steps["openmeteo_previous_runs"]["extra_args"]
+    )
     assert "forecasts" in onboard_cities._verification_tables()
     assert "forecast_skill" in onboard_cities._verification_tables()
     assert "model_bias" in onboard_cities._verification_tables()

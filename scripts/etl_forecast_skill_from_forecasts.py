@@ -18,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import lat_for_city, season_from_date
 from src.config import cities_by_name
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 SOURCE_MAP = {
     "ecmwf_previous_runs": "ecmwf",
@@ -95,7 +95,7 @@ def _recompute_model_bias(conn: sqlite3.Connection) -> int:
 
 
 def run_etl(*, dry_run: bool = False) -> dict:
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     before = conn.execute("SELECT COUNT(*) FROM forecast_skill").fetchone()[0]
     rows = conn.execute(

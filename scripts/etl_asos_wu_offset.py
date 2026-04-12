@@ -1,7 +1,7 @@
 """P1 ETL: ASOS→WU offset calibration per city×season.
 
-Source: zeus-shared.db observations (wu_daily_observed + iem_asos on same date)
-Target: zeus-shared.db:asos_wu_offsets
+Source: zeus-world.db observations (wu_daily_observed + iem_asos on same date)
+Target: zeus-world.db:asos_wu_offsets
 
 When using ASOS as Day0 observation (WU not available),
 apply this offset to correct for station differences.
@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date, lat_for_city
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 
 
 def run_etl() -> dict:

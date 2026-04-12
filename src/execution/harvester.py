@@ -28,7 +28,7 @@ from src.state.decision_chain import (
     store_settlement_records,
 )
 from src.state.db import (
-    get_shared_connection,
+    get_world_connection,
     get_trade_connection,
     log_settlement_event,
     query_authoritative_settlement_rows,
@@ -196,7 +196,7 @@ def run_harvester() -> dict:
     # Split connections: trade DB for position/settlement events, shared DB for
     # ensemble snapshots and calibration pairs.
     trade_conn = get_trade_connection()
-    shared_conn = get_shared_connection()
+    shared_conn = get_world_connection()
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()

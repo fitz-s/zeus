@@ -1,7 +1,7 @@
 """WU Daily High Temperature Collector — Zeus-native.
 
 Fetches the previous day's daily high temperature from Weather Underground
-for all active cities and writes to zeus-shared.db.
+for all active cities and writes to zeus-world.db.
 
 Critical: WU timeseries API only keeps ~36 hours of data.
 If we don't collect TODAY, yesterday's data is lost forever.
@@ -17,7 +17,7 @@ import httpx
 
 from src.config import cities as CITIES, City
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.state.db import get_shared_connection
+from src.state.db import get_world_connection
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def collect_daily_highs(
     if cities is None:
         cities = CITIES
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     results = {"collected": 0, "skipped": 0, "errors": 0, "details": []}
 
     for city in cities:

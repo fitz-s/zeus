@@ -17,7 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 
 def _missing_reasons(row: sqlite3.Row) -> list[str]:
@@ -46,7 +46,7 @@ def _posterior(row: sqlite3.Row) -> float | None:
 
 
 def run_backfill(*, dry_run: bool = False) -> dict:
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     rows = conn.execute(
         """

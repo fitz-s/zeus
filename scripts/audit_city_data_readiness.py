@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import cities_by_name
-from src.state.db import get_shared_connection, init_schema
+from src.state.db import get_world_connection, init_schema
 
 SOURCE_DATA_ROOT = PROJECT_ROOT.parent / "51 source data"
 TIGGE_MANIFEST = SOURCE_DATA_ROOT / "docs" / "tigge_city_coordinate_manifest_full_20260330.json"
@@ -106,7 +106,7 @@ def _paper_status(*, runtime_blockers: list[str], archive_gaps: list[str]) -> st
 
 
 def audit_city_data_readiness() -> dict:
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
     tigge_cities = _load_tigge_manifest_cities()
     tigge_coverage = _load_tigge_coverage()

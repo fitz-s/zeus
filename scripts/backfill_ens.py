@@ -26,7 +26,7 @@ from src.contracts import SettlementSemantics
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.engine.time_context import lead_hours_to_target
 from src.signal.ensemble_signal import EnsembleSignal
-from src.state.db import get_shared_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema
 from src.types import Bin
 
 

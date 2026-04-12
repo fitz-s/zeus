@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 from src.config import STATE_DIR
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus-paper.db"
-SHARED_DB = STATE_DIR / "zeus-shared.db"
+SHARED_DB = STATE_DIR / "zeus-world.db"
 RISK_DB = STATE_DIR / "risk_state-paper.db"
 POSITIONS_JSON = STATE_DIR / "positions-paper.json"
 STATUS_JSON = STATE_DIR / "status_summary-paper.json"

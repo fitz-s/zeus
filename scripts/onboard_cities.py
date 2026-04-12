@@ -2,7 +2,7 @@
 """One-click city onboarding pipeline for Zeus.
 
 Adds new cities to config and runs all backfill ETLs in dependency order,
-achieving data parity with the original 8 cities.
+bringing them to the same archive window as the configured city universe.
 
 Usage:
     cd zeus
@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -214,7 +216,7 @@ PIPELINE_STEPS = [
         "name": "Backfill WU daily observations + settlements",
         "script": "backfill_wu_daily_all.py",
         "city_flag": "--cities",
-        "extra_args": ["--days", "90"],
+        "extra_args": ["--days", "900", "--chunk-days", "31", "--sleep", "0.2"],
         "rate_limited": True,
     },
     {
@@ -222,7 +224,7 @@ PIPELINE_STEPS = [
         "name": "Backfill hourly observations (OpenMeteo)",
         "script": "backfill_hourly_openmeteo.py",
         "city_flag": "--cities",
-        "extra_args": ["--days", "440"],
+        "extra_args": ["--days", "900", "--chunk-days", "90", "--sleep", "0.2"],
     },
     {
         "id": "solar_daily",
@@ -244,7 +246,18 @@ PIPELINE_STEPS = [
         "name": "Backfill historical forecast source rows (Open-Meteo Previous Runs)",
         "script": "backfill_openmeteo_previous_runs.py",
         "city_flag": "--cities",
-        "extra_args": ["--days", "95", "--leads", "1,2,3,4,5,6,7"],
+        "extra_args": [
+            "--days",
+            "900",
+            "--leads",
+            "1,2,3,4,5,6,7",
+            "--models",
+            "best_match,gfs_global,ecmwf_ifs025,icon_global,ukmo_global_deterministic_10km",
+            "--chunk-days",
+            "90",
+            "--sleep",
+            "0.2",
+        ],
     },
     {
         "id": "forecast_skill",
@@ -342,12 +355,12 @@ def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = 
         logger.info("  [DRY RUN] Would scaffold %d days × %d cities", days, len(city_names))
         return
 
-    from src.state.db import get_shared_connection, init_schema
+    from src.state.db import get_world_connection, init_schema
     from src.contracts import SettlementSemantics
     from src.config import cities_by_name
     from datetime import date, timedelta
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     init_schema(conn)
 
     today = date.today()
@@ -392,9 +405,9 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         return
 
     from src.data.market_scanner import find_weather_markets
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     city_set = set(city_names)
 
     try:
@@ -447,8 +460,46 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         logger.info("  (These cities will skip calibration until markets are created)")
 
 
+def _noaa_sunrise_sunset_utc(target: date, lat: float, lon: float) -> tuple[datetime, datetime]:
+    """Approximate sunrise/sunset UTC using the NOAA solar equations."""
+    day_of_year = target.timetuple().tm_yday
+    gamma = 2.0 * math.pi / 365.0 * (day_of_year - 1)
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2 * gamma)
+        - 0.040849 * math.sin(2 * gamma)
+    )
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2 * gamma)
+        + 0.000907 * math.sin(2 * gamma)
+        - 0.002697 * math.cos(3 * gamma)
+        + 0.00148 * math.sin(3 * gamma)
+    )
+    lat_rad = math.radians(lat)
+    zenith = math.radians(90.833)
+    cos_hour_angle = (
+        math.cos(zenith) / (math.cos(lat_rad) * math.cos(decl))
+        - math.tan(lat_rad) * math.tan(decl)
+    )
+    cos_hour_angle = max(-1.0, min(1.0, cos_hour_angle))
+    hour_angle = math.degrees(math.acos(cos_hour_angle))
+    solar_noon_utc_minutes = 720.0 - 4.0 * lon - eqtime
+    sunrise_minutes = solar_noon_utc_minutes - 4.0 * hour_angle
+    sunset_minutes = solar_noon_utc_minutes + 4.0 * hour_angle
+    midnight = datetime(target.year, target.month, target.day, tzinfo=timezone.utc)
+    return (
+        midnight + timedelta(minutes=sunrise_minutes),
+        midnight + timedelta(minutes=sunset_minutes),
+    )
+
+
 def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = False):
-    """Compute sunrise/sunset times using the astral library.
+    """Compute sunrise/sunset times using astral or a built-in NOAA fallback.
 
     Generates solar_daily entries for each city × date from coordinates alone.
     No external JSONL file needed.
@@ -457,34 +508,43 @@ def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = 
         logger.info("  [DRY RUN] Would compute solar times for %d cities × %d days", len(cities), days)
         return
 
+    use_astral = True
     try:
         from astral import Observer
         from astral.sun import sun
     except ImportError:
-        logger.warning("  astral not installed — skipping solar_daily")
-        logger.warning("  Install with: pip install astral")
-        return
+        use_astral = False
+        logger.info("  astral not installed — using NOAA solar fallback")
 
-    from datetime import date, timedelta, timezone as tz
-    from zoneinfo import ZoneInfo
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     today = date.today()
     inserted = 0
 
     for city in cities:
-        observer = Observer(latitude=city.lat, longitude=city.lon, elevation=0)
+        observer = Observer(latitude=city.lat, longitude=city.lon, elevation=0) if use_astral else None
         local_tz = ZoneInfo(city.timezone)
 
         for d in range(days):
             target = today - timedelta(days=d)
             try:
-                s = sun(observer, date=target, tzinfo=local_tz)
-                sunrise_local = s["sunrise"].strftime("%Y-%m-%dT%H:%M:%S%z")
-                sunset_local = s["sunset"].strftime("%Y-%m-%dT%H:%M:%S%z")
-                sunrise_utc = s["sunrise"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                sunset_utc = s["sunset"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if use_astral:
+                    s = sun(observer, date=target, tzinfo=local_tz)
+                    sunrise_dt = s["sunrise"]
+                    sunset_dt = s["sunset"]
+                else:
+                    sunrise_dt, sunset_dt = _noaa_sunrise_sunset_utc(
+                        target,
+                        city.lat,
+                        city.lon,
+                    )
+                    sunrise_dt = sunrise_dt.astimezone(local_tz)
+                    sunset_dt = sunset_dt.astimezone(local_tz)
+                sunrise_local = sunrise_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunset_local = sunset_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunrise_utc = sunrise_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                sunset_utc = sunset_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 # DST detection
                 target_dt = datetime(target.year, target.month, target.day, 12, tzinfo=local_tz)
@@ -608,7 +668,7 @@ def run_pipeline(
             continue
 
         if step_id == "settlements_scaffold":
-            scaffold_settlements(city_names, days=90, dry_run=dry_run)
+            scaffold_settlements(city_names, days=900, dry_run=dry_run)
             continue
 
         if step_id == "market_events":
@@ -616,7 +676,7 @@ def run_pipeline(
             continue
 
         if step_id == "solar_daily":
-            compute_solar_daily(cities, days=440, dry_run=dry_run)
+            compute_solar_daily(cities, days=900, dry_run=dry_run)
             continue
 
         # Script-based steps
@@ -646,8 +706,8 @@ def run_pipeline(
 def _print_verification(city_names: list[str]):
     """Print data coverage summary for newly onboarded cities."""
     try:
-        from src.state.db import get_shared_connection
-        conn = get_shared_connection()
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)

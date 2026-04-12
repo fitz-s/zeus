@@ -34,9 +34,9 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     import src.engine.replay as replay_module
     import src.state.db as db_module
 
-    original_get_connection = replay_module.get_trade_connection_with_shared
+    original_get_connection = replay_module.get_trade_connection_with_world
     try:
-        replay_module.get_trade_connection_with_shared = lambda: db_module.get_connection(db_path)
+        replay_module.get_trade_connection_with_world = lambda: db_module.get_connection(db_path)
         strict = run_replay("2026-04-03", "2026-04-03", mode="audit")
         relaxed = run_replay(
             "2026-04-03",
@@ -45,7 +45,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
             allow_snapshot_only_reference=True,
         )
     finally:
-        replay_module.get_trade_connection_with_shared = original_get_connection
+        replay_module.get_trade_connection_with_world = original_get_connection
 
     assert strict.n_replayed == 0
     assert relaxed.n_replayed >= 1

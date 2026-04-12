@@ -174,13 +174,13 @@ class EnsembleSignal:
         test_calibration_pairs_use_same_bias_correction_as_live enforces this.
         """
         try:
-            from src.state.db import get_shared_connection
+            from src.state.db import get_world_connection
 
             from src.calibration.manager import season_from_date
 
             season = season_from_date(target_date.isoformat(), lat=city.lat)
 
-            conn = get_shared_connection()
+            conn = get_world_connection()
             row = conn.execute(
                 "SELECT bias, discount_factor, n_samples FROM model_bias "
                 "WHERE city = ? AND season = ? AND source = 'ecmwf'",

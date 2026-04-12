@@ -24,7 +24,7 @@ from src.riskguard.risk_level import RiskLevel, overall_level
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
-    get_trade_connection_with_shared,
+    get_trade_connection_with_world,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
@@ -50,7 +50,7 @@ TRAILING_LOSS_STATUSES = {
 def _get_runtime_trade_connection() -> sqlite3.Connection:
     if get_connection.__module__ != "src.state.db":
         return get_connection()
-    return get_trade_connection_with_shared()
+    return get_trade_connection_with_world()
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:

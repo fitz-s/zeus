@@ -143,7 +143,7 @@ class TestAutoRauseEntries:
 
         import sqlite3 as _sqlite3
         mem_conn = _sqlite3.connect(":memory:")
-        monkeypatch.setattr(cp, "get_shared_connection", lambda: mem_conn)
+        monkeypatch.setattr(cp, "get_world_connection", lambda: mem_conn)
 
         upsert_calls = []
 
@@ -175,7 +175,7 @@ class TestAutoRauseEntries:
         still True — the auto-pause is not lost."""
         monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
         monkeypatch.setattr(
-            cp, "get_shared_connection",
+            cp, "get_world_connection",
             lambda: (_ for _ in ()).throw(RuntimeError("db_unavailable")),
         )
 

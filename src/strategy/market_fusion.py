@@ -154,8 +154,8 @@ def _get_alpha_override(city_name: str, season: str) -> float | None:
         return _alpha_override_cache[key]
 
     try:
-        from src.state.db import get_shared_connection
-        conn = get_shared_connection()
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
         row = conn.execute(
             "SELECT alpha FROM alpha_overrides "
             "WHERE city = ? AND season = ? AND source = 'validated_optimal'",

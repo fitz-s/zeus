@@ -26,7 +26,7 @@ def _apply_state_dir_override(state_dir: Path, *, mode: str) -> dict[str, Any]:
         "config.STATE_DIR": config_module.STATE_DIR,
         "db.STATE_DIR": db_module.STATE_DIR,
         "db.ZEUS_DB_PATH": db_module.ZEUS_DB_PATH,
-        "db.ZEUS_SHARED_DB_PATH": db_module.ZEUS_SHARED_DB_PATH,
+        "db.ZEUS_WORLD_DB_PATH": db_module.ZEUS_WORLD_DB_PATH,
         "db.RISK_DB_PATH": db_module.RISK_DB_PATH,
         "portfolio.POSITIONS_PATH": portfolio_module.POSITIONS_PATH,
         "tracker.TRACKER_PATH": tracker_module.TRACKER_PATH,
@@ -37,7 +37,7 @@ def _apply_state_dir_override(state_dir: Path, *, mode: str) -> dict[str, Any]:
     config_module.STATE_DIR = state_dir
     db_module.STATE_DIR = state_dir
     db_module.ZEUS_DB_PATH = state_dir / "zeus.db"
-    db_module.ZEUS_SHARED_DB_PATH = state_dir / "zeus-shared.db"
+    db_module.ZEUS_WORLD_DB_PATH = state_dir / "zeus-world.db"
     db_module.RISK_DB_PATH = state_dir / f"risk_state-{mode}.db"
     portfolio_module.POSITIONS_PATH = state_dir / f"positions-{mode}.json"
     tracker_module.TRACKER_PATH = state_dir / f"strategy_tracker-{mode}.json"
@@ -58,7 +58,7 @@ def _restore_state_dir(snapshot: dict[str, Any]) -> None:
     config_module.STATE_DIR = snapshot["config.STATE_DIR"]
     db_module.STATE_DIR = snapshot["db.STATE_DIR"]
     db_module.ZEUS_DB_PATH = snapshot["db.ZEUS_DB_PATH"]
-    db_module.ZEUS_SHARED_DB_PATH = snapshot["db.ZEUS_SHARED_DB_PATH"]
+    db_module.ZEUS_WORLD_DB_PATH = snapshot["db.ZEUS_WORLD_DB_PATH"]
     db_module.RISK_DB_PATH = snapshot["db.RISK_DB_PATH"]
     portfolio_module.POSITIONS_PATH = snapshot["portfolio.POSITIONS_PATH"]
     tracker_module.TRACKER_PATH = snapshot["tracker.TRACKER_PATH"]
