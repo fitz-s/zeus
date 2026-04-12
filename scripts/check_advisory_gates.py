@@ -25,6 +25,8 @@ REQUIRED_ADVISORY_JOBS = {
 REQUIRED_TRIGGER_PATHS = {
     "AGENTS.md",
     ".github/workflows/**",
+    "docs/authority/**",
+    "docs/operations/**",
     "scripts/_yaml_bootstrap.py",
     "scripts/check_*",
     "scripts/replay_parity.py",

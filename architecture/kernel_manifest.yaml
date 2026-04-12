@@ -2,8 +2,8 @@ schema_version: 1
 project: zeus
 
 principal_authority:
-  architecture_spec: docs/architecture/zeus_durable_architecture_spec.md
-  change_control_constitution: docs/governance/zeus_change_control_constitution.md
+  architecture_spec: docs/authority/zeus_current_architecture.md
+  change_control_constitution: docs/authority/zeus_change_control_constitution.md
   operator_brief: .claude/CLAUDE.md
   historical_references:
     - docs/architecture/zeus_blueprint_v2.md

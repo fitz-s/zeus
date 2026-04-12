@@ -1,6 +1,6 @@
 File: .github/workflows/AGENTS.md
 Disposition: NEW
-Authority basis: docs/governance/zeus_autonomous_delivery_constitution.md; architecture/maturity_model.yaml; architecture/negative_constraints.yaml; scripts/check_*.py; tests/test_architecture_contracts.py.
+Authority basis: docs/authority/zeus_change_control_constitution.md; architecture/maturity_model.yaml; architecture/negative_constraints.yaml; scripts/check_*.py; tests/test_architecture_contracts.py.
 Supersedes / harmonizes: implicit CI policy.
 Why this file exists now: CI is a law-enforcement surface and must not drift into either theater or excessive friction.
 Current-phase or long-lived: Long-lived.

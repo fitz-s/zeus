@@ -102,6 +102,15 @@ def main():
     print()
     print(f"Results stored in replay_results table (run_id={summary.run_id})")
 
+    # Authority declaration — always shown
+    print(f"\n{'='*80}")
+    print("AUTHORITY: APPROXIMATE AUDIT ONLY — not promotion-eligible")
+    print("Limitations:")
+    for key, value in summary.limitations.items():
+        flag = "TRUE" if value else "FALSE"
+        print(f"  {key}: {flag}")
+    print(f"{'='*80}")
+
     # Show sample decisions for interesting outcomes
     interesting = [o for o in summary.outcomes if o.replay_would_trade][:5]
     if interesting:

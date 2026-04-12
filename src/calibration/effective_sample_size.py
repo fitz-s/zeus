@@ -1,3 +1,4 @@
+# Shadow-only: outputs are additive facts, not live blockers
 """Decision-group calibration accounting.
 
 `calibration_pairs` is a bin-row table. A single forecast event usually emits

@@ -1,3 +1,4 @@
+# Shadow-only: outputs are additive facts, not live blockers
 """Blocked out-of-sample calibration evaluation.
 
 This module turns `model_eval_run` / `model_eval_point` from inert schema into a

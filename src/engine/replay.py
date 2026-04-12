@@ -1,3 +1,4 @@
+# REPLAY IS APPROXIMATE AUDIT ONLY. See docs/authority/zeus_live_backtest_shadow_boundary.md
 """Decision Replay Engine: re-execute the evaluator pipeline against historical data.
 
 Three modes:
@@ -128,6 +129,7 @@ class ReplaySummary:
     # Overrides applied
     overrides: dict = field(default_factory=dict)
     outcomes: list[ReplayOutcome] = field(default_factory=list)
+    limitations: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +754,14 @@ def run_replay(
     if traded_outcomes:
         wins = sum(1 for o in traded_outcomes if o.replay_pnl > 0)
         summary.replay_win_rate = round(wins / len(traded_outcomes), 3)
+
+    summary.limitations = {
+        "uniform_prior": True,
+        "flat_sizing": True,
+        "no_bootstrap_fdr": True,
+        "market_price_linkage": False,
+        "promotion_authority": False,
+    }
 
     # Store results
     _store_replay_results(conn, summary)

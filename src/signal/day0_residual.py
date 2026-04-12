@@ -1,3 +1,4 @@
+# Shadow-only: outputs are additive facts, not live blockers
 """Day0 residual learning substrate.
 
 This module builds training facts for a future Day0 residual model without

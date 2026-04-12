@@ -5,8 +5,8 @@ on:
     paths:
       - "AGENTS.md"
       - "architecture/**"
-      - "docs/architecture/**"
-      - "docs/governance/**"
+      - "docs/authority/**"
+      - "docs/operations/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
@@ -19,8 +19,8 @@ on:
     paths:
       - "AGENTS.md"
       - "architecture/**"
-      - "docs/architecture/**"
-      - "docs/governance/**"
+      - "docs/authority/**"
+      - "docs/operations/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
