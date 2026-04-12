@@ -274,6 +274,185 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
     assert captured["hours_since_open"] == 2.5
 
 
+def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
+    db_path = tmp_path / "no-trade-market-hours-open.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
+        VALUES ('Paris', '2026-04-06', '12°C', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES (61, 'Paris', '2026-04-06', '2026-04-05T00:00:00Z', '2026-04-06T00:00:00Z',
+                '2026-04-05T08:00:00Z', '2026-04-05T08:05:00Z', 24.0, '[12.0, 13.0]',
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value)
+        VALUES
+        ('Paris', '2026-04-06', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-05T08:00:00Z', 12.0),
+        ('Paris', '2026-04-06', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-05T08:00:00Z', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "opening_hunt",
+            "2026-04-05T08:10:00+00:00",
+            "2026-04-05T08:11:00+00:00",
+            """{
+              "trade_cases": [],
+              "no_trade_cases": [{
+                "decision_id": "nt-1",
+                "city": "Paris",
+                "target_date": "2026-04-06",
+                "range_label": "12°C",
+                "direction": "buy_yes",
+                "rejection_stage": "FDR_FILTERED",
+                "decision_snapshot_id": "61",
+                "bin_labels": ["12°C", "13°C"],
+                "p_raw_vector": [0.9, 0.1],
+                "p_cal_vector": [0.9, 0.1],
+                "p_market_vector": [],
+                "alpha": 0.0,
+                "market_hours_open": 3.5,
+                "agreement": "AGREE",
+                "timestamp": "2026-04-05T08:10:00+00:00"
+              }]
+            }""",
+            "2026-04-05T08:11:00+00:00",
+            "live",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+    import src.strategy.market_fusion as market_fusion_module
+
+    captured = {}
+
+    def _compute_alpha(**kwargs):
+        captured["hours_since_open"] = kwargs["hours_since_open"]
+        return SimpleNamespace(value=0.5)
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
+    monkeypatch.setattr(market_fusion_module, "compute_alpha", _compute_alpha)
+
+    run_replay(
+        "2026-04-06",
+        "2026-04-06",
+        mode="audit",
+    )
+
+    assert captured["hours_since_open"] == 3.5
+
+
+def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy-no-trade-market-hours.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
+        VALUES ('Paris', '2026-04-07', '12°C', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES (71, 'Paris', '2026-04-07', '2026-04-06T00:00:00Z', '2026-04-07T00:00:00Z',
+                '2026-04-06T08:00:00Z', '2026-04-06T08:05:00Z', 24.0, '[12.0, 13.0]',
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value)
+        VALUES
+        ('Paris', '2026-04-07', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-06T08:00:00Z', 12.0),
+        ('Paris', '2026-04-07', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+         '2026-04-06T08:00:00Z', 12.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "opening_hunt",
+            "2026-04-06T08:10:00+00:00",
+            "2026-04-06T08:11:00+00:00",
+            """{
+              "trade_cases": [],
+              "no_trade_cases": [{
+                "decision_id": "nt-legacy",
+                "city": "Paris",
+                "target_date": "2026-04-07",
+                "range_label": "12°C",
+                "direction": "buy_yes",
+                "rejection_stage": "FDR_FILTERED",
+                "decision_snapshot_id": "71",
+                "bin_labels": ["12°C", "13°C"],
+                "p_raw_vector": [0.9, 0.1],
+                "p_cal_vector": [0.9, 0.1],
+                "p_market_vector": [],
+                "alpha": 0.0,
+                "agreement": "AGREE",
+                "timestamp": "2026-04-06T08:10:00+00:00"
+              }]
+            }""",
+            "2026-04-06T08:11:00+00:00",
+            "live",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+    import src.strategy.market_fusion as market_fusion_module
+
+    captured = {}
+
+    def _compute_alpha(**kwargs):
+        captured["hours_since_open"] = kwargs["hours_since_open"]
+        return SimpleNamespace(value=0.5)
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
+    monkeypatch.setattr(market_fusion_module, "compute_alpha", _compute_alpha)
+
+    run_replay(
+        "2026-04-07",
+        "2026-04-07",
+        mode="audit",
+    )
+
+    assert captured["hours_since_open"] == 48.0
+
+
 def test_cli_formats_unpriced_replay_pnl_as_unavailable():
     summary = SimpleNamespace(
         replay_total_pnl=0.0,

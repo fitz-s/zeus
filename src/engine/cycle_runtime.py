@@ -778,6 +778,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         edge_source="",
                         availability_status=availability_status,
                         rejection_reasons=[str(e)],
+                        market_hours_open=market.get("hours_since_open"),
                         timestamp=decision_time.isoformat(),
                     )
                 )
@@ -882,6 +883,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                                 p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                                 alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
                                 agreement=getattr(d, "agreement", ""),
                                 timestamp=decision_time.isoformat(),
                             )
@@ -928,6 +930,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                                 p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                                 alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
                                 agreement=getattr(d, "agreement", ""),
                                 timestamp=decision_time.isoformat(),
                             )
@@ -1091,6 +1094,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                             p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                             alpha=getattr(d, "alpha", 0.0),
+                            market_hours_open=candidate.hours_since_open,
                             agreement=getattr(d, "agreement", ""),
                             timestamp=decision_time.isoformat(),
                         )

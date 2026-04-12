@@ -320,6 +320,7 @@ class ReplayContext:
                             "p_cal_vector": list(no_trade.get("p_cal_vector") or []),
                             "p_market_vector": list(no_trade.get("p_market_vector") or []),
                             "alpha": float(no_trade.get("alpha", 0.0) or 0.0),
+                            "market_hours_open": no_trade.get("market_hours_open"),
                             "agreement": no_trade.get("agreement", ""),
                             "should_trade": False,
                             "rejection_stage": no_trade.get("rejection_stage", ""),

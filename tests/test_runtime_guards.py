@@ -1104,6 +1104,7 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     assert payload["no_trade_cases"][0]["strategy"] == "opening_inertia"
     assert payload["no_trade_cases"][0]["edge_source"] == "opening_inertia"
     assert payload["no_trade_cases"][0]["rejection_reasons"] == ["strategy_gate_disabled:opening_inertia"]
+    assert payload["no_trade_cases"][0]["market_hours_open"] == 1.0
 
 
 def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
