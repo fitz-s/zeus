@@ -44,26 +44,26 @@ from src.state.db import get_connection, init_schema
 
 NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
-    timezone="America/New_York", cluster="US-Northeast",
+    timezone="America/New_York", cluster="NYC",
     settlement_unit="F", wu_station="KLGA",
 )
 
 LONDON = City(
     name="London", lat=51.4775, lon=-0.4614,
-    timezone="Europe/London", cluster="Europe-Maritime",
+    timezone="Europe/London", cluster="London",
     settlement_unit="C", wu_station="EGLL",
 )
 
 
 class TestBucketRouting:
     def test_nyc_winter(self):
-        assert route_to_bucket(NYC, "2026-01-15") == "US-Northeast_DJF"
+        assert route_to_bucket(NYC, "2026-01-15") == "NYC_DJF"
 
     def test_nyc_summer(self):
-        assert route_to_bucket(NYC, "2026-07-15") == "US-Northeast_JJA"
+        assert route_to_bucket(NYC, "2026-07-15") == "NYC_JJA"
 
     def test_london_spring(self):
-        assert route_to_bucket(LONDON, "2026-04-10") == "Europe-Maritime_MAM"
+        assert route_to_bucket(LONDON, "2026-04-10") == "London_MAM"
 
     def test_december_is_winter(self):
         assert season_from_date("2026-12-01") == "DJF"
@@ -511,10 +511,10 @@ class TestGetCalibrator:
         conn = get_connection(db_path)
         init_schema(conn)
 
-        # Store a pre-fitted model
+        # Store a pre-fitted model under K3 bucket key (city.name_season)
         bootstrap = [(1.0, 0.1, -0.5)] * 50
         save_platt_model(
-            conn, "US-Northeast_DJF",
+            conn, "NYC_DJF",
             A=1.0, B=0.1, C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,

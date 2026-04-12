@@ -23,7 +23,6 @@ from src.config import (
     ensemble_n_mc,
     ensemble_unimodal_range_epsilon,
     load_cities,
-    correlation_matrix,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -78,14 +77,15 @@ def test_city_settlement_units():
 def test_city_clusters():
     cities = load_cities()
     by_name = {c.name: c for c in cities}
-    assert by_name["NYC"].cluster == "US-Northeast"
-    assert by_name["Chicago"].cluster == "US-GreatLakes"
-    assert by_name["Atlanta"].cluster == "US-Southeast-Inland"
-    assert by_name["London"].cluster == "Europe-Maritime"
-    assert by_name["Paris"].cluster == "Europe-Continental"
-    assert by_name["Seoul"].cluster == "Asia-Northeast"
-    assert by_name["Shanghai"].cluster == "Asia-East-China"
-    assert by_name["Denver"].cluster == "US-Rockies"
+    # K3: cluster == city name for all cities
+    assert by_name["NYC"].cluster == "NYC"
+    assert by_name["Chicago"].cluster == "Chicago"
+    assert by_name["Atlanta"].cluster == "Atlanta"
+    assert by_name["London"].cluster == "London"
+    assert by_name["Paris"].cluster == "Paris"
+    assert by_name["Seoul"].cluster == "Seoul"
+    assert by_name["Shanghai"].cluster == "Shanghai"
+    assert by_name["Denver"].cluster == "Denver"
     assert set(calibration_clusters()) == set(ALL_CLUSTERS)
 
 
@@ -148,17 +148,19 @@ def test_risk_limit_defaults_are_single_sourced_from_settings():
     assert limits.max_portfolio_heat_pct == defaults["max_portfolio_heat_pct"]
     assert limits.max_correlated_pct == defaults["max_correlated_pct"]
     assert limits.max_city_pct == defaults["max_city_pct"]
-    assert limits.max_region_pct == defaults["max_region_pct"]
     assert limits.min_order_usd == defaults["min_order_usd"]
 
 
 def test_correlation_matrix_covers_all_configured_clusters():
-    matrix = correlation_matrix()
-    assert set(matrix) == set(ALL_CLUSTERS)
-    for cluster, mapping in matrix.items():
-        assert cluster in ALL_CLUSTERS
-        assert set(mapping).issubset(set(ALL_CLUSTERS))
-        assert cluster not in mapping
+    # K3: correlation_matrix() removed from src.config — matrix is now in
+    # config/city_correlation_matrix.json, accessed via src.strategy.correlation.
+    # Coverage: test_cluster_collapse.py::test_correlation_self_is_one and
+    # test_correlation_function_returns_float_in_01.
+    # Verify get_correlation is importable and returns sane values for all clusters.
+    from src.strategy.correlation import get_correlation
+    for cluster in ALL_CLUSTERS:
+        r = get_correlation(cluster, cluster)
+        assert r == 1.0, f"{cluster} self-correlation should be 1.0"
 
 
 def test_signal_constants_are_single_sourced_from_settings():

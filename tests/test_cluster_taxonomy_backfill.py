@@ -36,7 +36,7 @@ def test_backfill_calibration_pairs_updates_cluster_and_clears_models(tmp_path, 
 
     assert report["calibration_pairs_updated"] == 1
     assert report["platt_models_cleared"] == 1
-    assert cluster == "Europe-Continental"
+    assert cluster == "Paris"  # K3: cluster == city name
     assert remaining_models == 0
 
 
@@ -61,7 +61,7 @@ def test_backfill_portfolio_state_updates_positions_and_recent_exits(tmp_path, m
     updated = json.loads(portfolio_path.read_text())
     assert report["portfolio_cluster_rows_updated"] == 4
     assert report["portfolio_files_touched"] == 1
-    assert updated["positions"][0]["cluster"] == "US-GreatLakes"
-    assert updated["positions"][1]["cluster"] == "US-Rockies"
-    assert updated["recent_exits"][0]["cluster"] == "US-California-Coast"
-    assert updated["recent_exits"][1]["cluster"] == "Europe-Continental"
+    assert updated["positions"][0]["cluster"] == "Chicago"  # K3: cluster == city name
+    assert updated["positions"][1]["cluster"] == "Denver"   # K3: cluster == city name
+    assert updated["recent_exits"][0]["cluster"] == "Los Angeles"   # K3: cluster == city name
+    assert updated["recent_exits"][1]["cluster"] == "Paris"  # K3: cluster == city name
