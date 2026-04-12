@@ -145,13 +145,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     try:
         from src.data.ensemble_client import _clear_cache as _clear_ensemble_cache
         _clear_ensemble_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("ensemble cache clear failed: %s", exc)
     try:
         from src.data.market_scanner import _clear_active_events_cache
         _clear_active_events_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("market scanner cache clear failed: %s", exc)
     try:
         from src.control.control_plane import process_commands
         process_commands()
@@ -236,6 +236,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "entry_bankroll_non_positive"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
+    elif getattr(portfolio, 'portfolio_loader_degraded', False):
+        entries_blocked_reason = "portfolio_loader_degraded"
 
     if has_quarantine:
         summary["portfolio_quarantined"] = True
