@@ -11,7 +11,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 | Directory | Purpose | Files |
 |-----------|---------|-------|
 | `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 6 |
-| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy | 7 |
+| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, pending diagnostic project plans | 10 |
 | `operations/` | Live control-entry pointer + current work packets | 1 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 

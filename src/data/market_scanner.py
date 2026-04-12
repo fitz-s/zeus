@@ -7,6 +7,7 @@ Parses bin structure, token IDs, and prices from market data.
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +25,29 @@ TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "cel
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
+
+
+def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, retries: int = 3) -> httpx.Response:
+    """GET a Gamma API path with retries on transient connection errors.
+
+    The proxy path to gamma-api.polymarket.com periodically returns
+    'Connection reset by peer' (errno 54). Retrying with a short backoff
+    recovers reliably without masking real failures — after `retries`
+    attempts the last exception propagates.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = httpx.get(f"{GAMMA_BASE}{path}", params=params, timeout=timeout)
+            return resp
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def find_weather_markets(
@@ -100,7 +124,7 @@ def _fetch_events_by_tags() -> list[dict]:
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
-            resp = httpx.get(f"{GAMMA_BASE}/tags/slug/{tag_slug}", timeout=15.0)
+            resp = _gamma_get(f"/tags/slug/{tag_slug}")
             if resp.status_code != 200:
                 continue
             tag_data = resp.json()
@@ -112,9 +136,9 @@ def _fetch_events_by_tags() -> list[dict]:
             events = []
             offset = 0
             while True:
-                resp = httpx.get(f"{GAMMA_BASE}/events", params={
+                resp = _gamma_get("/events", params={
                     "tag_id": tag_id, "closed": "false", "limit": 50, "offset": offset
-                }, timeout=15.0)
+                })
                 resp.raise_for_status()
                 batch = resp.json()
                 if not batch:
@@ -136,9 +160,9 @@ def _fetch_events_by_tags() -> list[dict]:
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:
     """Fallback: fetch events by keyword search."""
     try:
-        resp = httpx.get(f"{GAMMA_BASE}/events", params={
+        resp = _gamma_get("/events", params={
             "closed": "false", "limit": 100, "title": keyword
-        }, timeout=15.0)
+        })
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:

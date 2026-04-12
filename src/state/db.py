@@ -24,6 +24,7 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
 ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
+ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
 
@@ -50,6 +51,15 @@ def get_trade_connection() -> sqlite3.Connection:
 def get_world_connection() -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
     return _connect(ZEUS_WORLD_DB_PATH)
+
+
+def get_backtest_connection() -> sqlite3.Connection:
+    """Derived backtest DB connection.
+
+    This DB is a reporting/audit surface only. Live runtime execution must not
+    read it as authority or write trade/world truth through it.
+    """
+    return _connect(ZEUS_BACKTEST_DB_PATH)
 
 
 def get_trade_connection_with_world() -> sqlite3.Connection:
@@ -137,8 +147,8 @@ def _is_semantic_advance(current_runtime: str, legacy_state: str) -> bool:
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
     "operator_quarantine_clear",
-    "settled_position",
     "chain_only_quarantined",
+    "settled_position",
 })
 RESOLVED_TOKEN_SUPPRESSION_REASONS = (
     "operator_quarantine_clear",
@@ -961,6 +971,83 @@ def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> Non
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
     """Apply canonical architecture kernel schema."""
     apply_architecture_kernel_schema(conn)
+
+
+def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
+    """Create derived backtest/reporting tables. Idempotent."""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_backtest_connection()
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            run_id TEXT PRIMARY KEY,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            authority_scope TEXT NOT NULL CHECK (
+                authority_scope = 'diagnostic_non_promotion'
+            ),
+            config_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS backtest_outcome_comparison (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            subject_id TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            settlement_value REAL,
+            settlement_unit TEXT,
+            derived_wu_outcome INTEGER,
+            actual_trade_outcome INTEGER,
+            actual_pnl REAL,
+            truth_source TEXT NOT NULL,
+            divergence_status TEXT NOT NULL CHECK (
+                divergence_status IN (
+                    'not_applicable',
+                    'match',
+                    'wu_win_trade_loss',
+                    'wu_loss_trade_win',
+                    'trade_unresolved',
+                    'wu_missing',
+                    'bin_unparseable',
+                    'ambiguous_subject',
+                    'orphan_trade_decision'
+                )
+            ),
+            decision_reference_source TEXT,
+            forecast_reference_id TEXT,
+            evidence_json TEXT NOT NULL,
+            missing_reason_json TEXT NOT NULL,
+            authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
+                CHECK (authority_scope = 'diagnostic_non_promotion'),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_lane_city_date
+            ON backtest_outcome_comparison(lane, city, target_date);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_subject
+            ON backtest_outcome_comparison(subject_id);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_divergence
+            ON backtest_outcome_comparison(divergence_status);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_run
+            ON backtest_outcome_comparison(run_id);
+    """)
+    conn.commit()
+    if own_conn:
+        conn.close()
 
 
 
@@ -3140,11 +3227,11 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "edge_source": str(row["edge_source"] or row["strategy_key"] or ""),
                 "discovery_mode": str(row["discovery_mode"] or ""),
                 "chain_state": str(row["chain_state"] or "unknown"),
-                "order_id": str(row["order_id"] or ""),
-                "order_status": str(row["order_status"] or ""),
                 "token_id": str(row["token_id"] or ""),
                 "no_token_id": str(row["no_token_id"] or ""),
                 "condition_id": str(row["condition_id"] or ""),
+                "order_id": str(row["order_id"] or ""),
+                "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
                 "env": "live",
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
@@ -3925,5 +4012,3 @@ def log_pending_exit_recovery_event(
         error=error,
         timestamp=timestamp,
     )
-
-

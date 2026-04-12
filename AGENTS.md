@@ -19,6 +19,55 @@ Zeus is a **fully automated weather-probability trading runtime** on Polymarket.
 
 **Key entry points in code**: `src/main.py` (daemon), `src/engine/cycle_runner.py` (cycle orchestrator), `src/engine/evaluator.py` (signal→strategy→sizing pipeline).
 
+### Backtest lanes are derived, not authority
+
+Zeus has two diagnostic backtest lanes:
+
+- `wu_settlement_sweep`: high-volume WU settlement-value scoring. WU `settlement_value` is the only weather outcome truth; stored `settlements.winning_bin` is not used for scoring.
+- `trade_history_audit`: real trade-history audit over canonical `position_id` subjects. It compares actual trade outcome/PnL with WU-derived outcome and reports divergences without mutating settlement or trade truth.
+
+Backtest output is written to `state/zeus_backtest.db`, a derived reporting surface with `authority_scope='diagnostic_non_promotion'`. It must never be promoted into `zeus-world.db` or `zeus_trades.db`, and it must not authorize live strategy changes by itself. Existing `replay_results` remains compatibility storage for legacy `audit/counterfactual/walk_forward` replay modes only.
+
+### How to use backtest without poisoning decisions
+
+Backtest is Zeus's main mathematical weapon. Treat it as an evidence system with hard eligibility gates, not as a scoreboard. A wrong backtest result is worse than no backtest result because it pushes model, calibration, and strategy work in the wrong direction.
+
+Use the lanes in this order:
+
+1. **Forecast skill first**:
+   `python scripts/run_replay.py --mode wu_settlement_sweep --start YYYY-MM-DD --end YYYY-MM-DD`
+   This answers whether the weather probability chain is coherent against WU `settlement_value`. It does not answer whether the strategy made money.
+2. **Replay fidelity next**:
+   `python scripts/audit_replay_fidelity.py`
+   This answers whether enough point-in-time forecast references, parseable bins, compatible vectors, and market-price links exist for deeper replay.
+3. **Trading economics only after price linkage**:
+   `python scripts/run_replay.py --mode audit --allow-snapshot-only-reference --start YYYY-MM-DD --end YYYY-MM-DD`
+   Interpret PnL only when the report says market price linkage exists. If PnL prints `N/A`, do not coerce it to zero and do not infer profitability.
+4. **Real trade audit separately**:
+   `python scripts/run_replay.py --mode trade_history_audit --start YYYY-MM-DD --end YYYY-MM-DD`
+   This compares canonical `position_id` trade outcomes with WU-derived outcomes. It is a divergence audit, not simulated strategy PnL.
+
+Read `wu_settlement_sweep` as follows:
+
+- `settlement_value` is the only weather truth. Stored `winning_bin` is evidence only and may be wrong or absent.
+- `forecast-bin rows` are binary bin rows. They are heavily class-imbalanced; compare threshold accuracy to `majority_baseline`.
+- `positive prediction precision`, `Brier`, `log_loss`, and `Brier skill score vs climatology` are more useful than raw accuracy.
+- `top-bin` and `top-3` are multiclass-style diagnostics. They are valid only for probability groups that pass integrity checks.
+- `probability groups` must be checked before interpreting top-k metrics. If invalid groups exist, inspect reasons such as `duplicate_labels`, `p_sum_not_one`, and `yes_count_not_one` before changing model math.
+- A healthy probability group has unique bin labels, total probability mass near 1, and exactly one WU-derived YES bin. If this fails, the issue is data/bin topology before it is strategy math.
+- When invalid probability groups exist, prefer `valid-group binary skill` for clean-subset Brier/log-loss and treat all-row Brier/log-loss as contaminated diagnostics until the group integrity defect is fixed.
+- If `mean_p_raw_on_actual_yes` is lower than `mean_p_raw_on_actual_no`, assume bin alignment or probability generation is broken until proven otherwise.
+- High-probability buckets with low actual rates indicate calibration/bin mapping failure. Do not tune Kelly, FDR, or alpha to compensate for this.
+
+Mandatory backtest hygiene before changing mathematical/statistical logic:
+
+- Run `wu_settlement_sweep` on a recent representative window and save the run id.
+- Run `audit_replay_fidelity.py` and confirm there are no temporal violations.
+- Verify `probability_group_integrity` before interpreting top-bin/top-3 results.
+- Verify PnL is not being reported from synthetic/uniform market prices. `N/A` is the correct result when market prices are missing.
+- Check per-city outliers before changing global calibration or strategy thresholds.
+- If the report reveals data topology defects, fix data/bin/vector alignment before changing model formulas.
+
 ### The probability chain
 
 ```
@@ -203,6 +252,8 @@ Zeus is live-only. Paper mode was decommissioned in Phase 1. Any code, test, fie
 - **Shadow** may observe (collect instrumentation facts) but NOT gate live execution
 
 Full boundary rules: `docs/authority/zeus_live_backtest_shadow_boundary.md`
+
+Backtest coverage requires more than settlement rows. A WU settlement sample may cover all configured cities, while strategy/PnL replay may cover fewer cities because it also requires decision-time forecast references, vector-compatible `ensemble_snapshots.p_raw_json`, and parseable typed bin labels. Do not interpret WU settlement coverage as strategy replay coverage.
 
 ### External boundary
 OpenClaw, Venus, and workspace-level docs are outside repo authority. Zeus exposes typed contracts outward. External tools must not mutate repo truth.

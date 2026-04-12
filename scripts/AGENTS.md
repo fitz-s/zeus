@@ -25,3 +25,4 @@ Scripts here are enforcement, audit, runtime support, or operator tools.
 | Script | Purpose |
 |--------|---------|
 | `check_daemon_heartbeat.py` | Check staleness of `state/daemon-heartbeat-{mode}.json`; exit 1 if >5 min stale or missing |
+| `backfill_tigge_snapshot_p_raw.py` | Materialize replay-compatible `ensemble_snapshots.p_raw_json` from existing TIGGE `members_json` and typed bin labels |
