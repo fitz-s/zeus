@@ -163,7 +163,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
             "config_cap_usd": config_cap,
             "wallet_balance_usd": balance,
             "dynamic_cap_usd": None,
-            "entry_block_reason": "wallet_query_failed",
+            "entry_block_reason": "entry_bankroll_non_positive",
             "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
             "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
