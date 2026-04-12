@@ -1107,7 +1107,8 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     assert payload["no_trade_cases"][0]["market_hours_open"] == 1.0
 
 
-def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
+@pytest.mark.parametrize("risk_level", [RiskLevel.YELLOW, RiskLevel.ORANGE])
+def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatch, tmp_path, risk_level):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -1129,7 +1130,7 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
 
     monitored: list[str] = []
 
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.ORANGE)
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: risk_level)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
@@ -1163,14 +1164,14 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cycle_runner,
         "evaluate_candidate",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked at ORANGE")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked at elevated risk")),
     )
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert monitored == ["t1"]
     assert summary["monitors"] == 1
-    assert summary["entries_blocked_reason"] == "risk_level=ORANGE"
+    assert summary["entries_blocked_reason"] == f"risk_level={risk_level.value}"
     assert summary["candidates"] == 0
 
 

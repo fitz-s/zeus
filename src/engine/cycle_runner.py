@@ -251,7 +251,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
-    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
+    elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED):
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
