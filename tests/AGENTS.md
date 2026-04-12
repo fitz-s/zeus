@@ -122,6 +122,8 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 | `test_auto_pause_entries.py` | P2 — auto-pause entries on entry-path exception; reason_code, alert, DB persistence, DB-failure resilience, post-entry path continuity (K1+K3) |
 | `test_gate_decision.py` | P3 — GateDecision round-trip, reason_refuted conservatism, is_strategy_enabled integration, backward-compat bool gates, set_strategy_gate provenance (K1) |
 
+Note: P6 settlement iterator guard test lives in `test_architecture_contracts.py::test_harvester_settlement_skips_stale_in_memory_pos_when_position_current_shows_settled`.
+
 ### Type/unit tests
 
 | File | What it tests |

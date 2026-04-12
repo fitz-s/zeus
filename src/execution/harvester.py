@@ -687,9 +687,45 @@ def _settle_positions(
     settled = 0
     _canonical_exit = _get_canonical_exit_flag()
     settlement_records = settlement_records if settlement_records is not None else []
+
+    # P6: Load the authoritative phase from position_current for each trade in
+    # this market. Positions already in a terminal DB phase are excluded before
+    # any other logic, making settlement idempotent even when the in-memory
+    # portfolio snapshot is stale (e.g. loaded from a JSON fallback cache).
+    # Positions without a position_current row (pre-canonical history) are NOT
+    # excluded u2014 they fall through to the existing skip logic unchanged.
+    try:
+        pc_rows = conn.execute(
+            "SELECT trade_id, phase FROM position_current WHERE city = ? AND target_date = ?",
+            (city, target_date),
+        ).fetchall()
+        pc_phase_by_id: dict[str, str] | None = {
+            (row["trade_id"] if hasattr(row, "keys") else row[0]):
+            (row["phase"] if hasattr(row, "keys") else row[1])
+            for row in pc_rows
+        }
+    except Exception as exc:
+        logger.warning(
+            "position_current query failed for %s %s, using portfolio-only skip logic: %s",
+            city, target_date, exc,
+        )
+        pc_phase_by_id = None
+
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
             continue
+
+        # P6 iterator-level dedup: skip positions whose DB phase is already
+        # terminal even when the in-memory snapshot shows otherwise.
+        if pc_phase_by_id is not None:
+            _db_phase = pc_phase_by_id.get(pos.trade_id)
+            if _db_phase in _TERMINAL_PHASES:
+                logger.info(
+                    "Skipping settlement for %s: position_current.phase=%s already terminal",
+                    pos.trade_id, _db_phase,
+                )
+                continue
+
         state_name = getattr(pos.state, "value", getattr(pos, "state", ""))
         exit_state = getattr(pos, "exit_state", "")
         chain_state = getattr(pos, "chain_state", "")

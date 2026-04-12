@@ -2980,6 +2980,61 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     conn.close()
 
 
+def test_harvester_settlement_skips_stale_in_memory_pos_when_position_current_shows_settled():
+    """P6 u2014 settlement iterator from position_current.
+
+    When the in-memory portfolio shows a position as economically_closed but
+    position_current already shows phase=settled, _settle_positions must NOT
+    write a new SETTLED event or decrement the portfolio.
+    """
+    from src.execution.harvester import _settle_positions
+    from src.state.db import apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    # Stale in-memory position: snapshot says economically_closed
+    pos = _runtime_position(state="economically_closed", chain_state="synced")
+    pos.exit_price = 0.92
+    pos.exit_reason = "forward edge failed"
+    pos.pnl = 4.2
+    pos.last_exit_at = "2026-04-03T01:00:00Z"
+
+    # position_current (authoritative) already shows this position as settled
+    conn.execute(
+        """INSERT INTO position_current
+           (position_id, trade_id, city, target_date, bin_label, direction,
+            size_usd, entry_price, p_posterior, strategy_key, phase, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("rt-pos-1", "rt-pos-1", "NYC", "2026-04-03", "39-40\u00b0F", "buy_yes",
+         10.0, 0.5, 0.6, "center_buy", "settled", "2026-04-03T01:00:00Z"),
+    )
+    conn.commit()
+
+    portfolio = PortfolioState(positions=[pos])
+
+    settled = _settle_positions(
+        conn,
+        portfolio,
+        city="NYC",
+        target_date="2026-04-03",
+        winning_label="39-40\u00b0F",
+        settlement_records=[],
+        strategy_tracker=None,
+        paper_mode=True,
+    )
+
+    # P6 guard: stale in-memory economically_closed must NOT produce a second settlement
+    assert settled == 0, "position_current phase=settled must prevent re-settlement"
+    # The in-memory position was NOT removed from the portfolio
+    assert len(portfolio.positions) == 1, "portfolio must be unchanged when settlement skipped"
+    # No canonical SETTLED event written
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    conn.close()
+
+
 def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import init_schema
