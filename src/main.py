@@ -205,6 +205,25 @@ def run_single_cycle():
     logger.info("=== SINGLE CYCLE COMPLETE ===")
 
 
+def _startup_wallet_check(clob=None):
+    """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
+
+    Accepts an optional clob for testing. In production, creates a live
+    PolymarketClient. Paper mode skips the check (no on-chain wallet).
+    """
+    if clob is None:
+        from src.data.polymarket_client import PolymarketClient
+        clob = PolymarketClient(paper_mode=(get_mode() == "paper"))
+    if getattr(clob, "paper_mode", True):
+        return
+    try:
+        balance = float(clob.get_balance())
+        logger.info("Startup wallet check: $%.2f USDC available", balance)
+    except Exception as exc:
+        logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
+        sys.exit("FATAL: Cannot start \u2014 wallet unreachable. Fix credentials or network and restart.")
+
+
 def _startup_data_health_check(conn):
     """Warn about deferred data actions on every startup.
 
@@ -320,6 +339,9 @@ def main():
     _startup_data_health_check(conn)
 
     conn.close()
+
+    # P7: Fail-closed wallet gate u2014 must run before first cycle.
+    _startup_wallet_check()
 
     if once:
         run_single_cycle()
