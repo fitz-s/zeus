@@ -273,7 +273,7 @@ def _startup_data_health_check(conn):
             logger.warning(
                 "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities; "
                 "mature ECMWF model_bias covers %d/%d. Missing bias data falls back "
-                "to raw ensemble member maxes, so paper can run but archive quality is incomplete.",
+                "to raw ensemble member maxes, archive quality is incomplete (raw ensemble member maxes only).",
                 forecast_city_count,
                 configured_city_count,
                 bias_city_count,
