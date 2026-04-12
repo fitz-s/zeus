@@ -1,5 +1,5 @@
 {
-  "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly — do not use downtown or approximate coordinates.",
+  "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly \u2014 do not use downtown or approximate coordinates.",
   "cities": [
     {
       "name": "NYC",
@@ -28,7 +28,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
       "timezone": "America/New_York",
-      "cluster": "US-Northeast",
+      "cluster": "NYC",
       "unit": "F",
       "historical_peak_hour": 15.8,
       "diurnal_amplitude_f": 11.0
@@ -56,7 +56,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
       "timezone": "America/Chicago",
-      "cluster": "US-GreatLakes",
+      "cluster": "Chicago",
       "unit": "F",
       "historical_peak_hour": 16.4,
       "diurnal_amplitude_f": 15.0
@@ -84,7 +84,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/wa/seatac/KSEA",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-Pacific-Northwest",
+      "cluster": "Seattle",
       "unit": "F",
       "historical_peak_hour": 13.8,
       "diurnal_amplitude_f": 12.2
@@ -108,7 +108,7 @@
       "country_code": "KR",
       "settlement_source": "https://www.wunderground.com/history/daily/kr/incheon/RKSI",
       "timezone": "Asia/Seoul",
-      "cluster": "Asia-Northeast",
+      "cluster": "Seoul",
       "unit": "C",
       "historical_peak_hour": 14.8,
       "diurnal_amplitude_c": 8.2
@@ -132,7 +132,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
       "timezone": "Asia/Shanghai",
-      "cluster": "Asia-East-China",
+      "cluster": "Shanghai",
       "unit": "C",
       "historical_peak_hour": 14.6,
       "diurnal_amplitude_c": 7.8
@@ -156,7 +156,7 @@
       "country_code": "JP",
       "settlement_source": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
       "timezone": "Asia/Tokyo",
-      "cluster": "Asia-Northeast",
+      "cluster": "Tokyo",
       "unit": "C",
       "historical_peak_hour": 14.7,
       "diurnal_amplitude_c": 7.6
@@ -184,7 +184,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
       "timezone": "America/New_York",
-      "cluster": "US-Southeast-Inland",
+      "cluster": "Atlanta",
       "unit": "F",
       "historical_peak_hour": 17.6,
       "diurnal_amplitude_f": 17.3
@@ -212,7 +212,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
       "timezone": "America/Chicago",
-      "cluster": "US-Texas-Triangle",
+      "cluster": "Austin",
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.0
@@ -240,7 +240,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
       "timezone": "America/Chicago",
-      "cluster": "US-Texas-Triangle",
+      "cluster": "Dallas",
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.6
@@ -268,7 +268,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
       "timezone": "America/Denver",
-      "cluster": "US-Rockies",
+      "cluster": "Denver",
       "unit": "F",
       "historical_peak_hour": 16.1,
       "diurnal_amplitude_f": 18.4
@@ -296,7 +296,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
       "timezone": "America/Chicago",
-      "cluster": "US-Texas-Triangle",
+      "cluster": "Houston",
       "unit": "F",
       "historical_peak_hour": 17.4,
       "diurnal_amplitude_f": 15.2
@@ -324,7 +324,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
       "timezone": "America/New_York",
-      "cluster": "US-Florida",
+      "cluster": "Miami",
       "unit": "F",
       "historical_peak_hour": 17.3,
       "diurnal_amplitude_f": 12.1
@@ -354,7 +354,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-California-Coast",
+      "cluster": "Los Angeles",
       "unit": "F",
       "historical_peak_hour": 18.1,
       "diurnal_amplitude_f": 11.1
@@ -384,7 +384,7 @@
       "country_code": "US",
       "settlement_source": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
       "timezone": "America/Los_Angeles",
-      "cluster": "US-California-Coast",
+      "cluster": "San Francisco",
       "unit": "F",
       "historical_peak_hour": 16.7,
       "diurnal_amplitude_f": 11.9
@@ -408,7 +408,7 @@
       "country_code": "FR",
       "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
       "timezone": "Europe/Paris",
-      "cluster": "Europe-Continental",
+      "cluster": "Paris",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.0
@@ -432,7 +432,7 @@
       "country_code": "GB",
       "settlement_source": "https://www.wunderground.com/history/daily/gb/london/EGLL",
       "timezone": "Europe/London",
-      "cluster": "Europe-Maritime",
+      "cluster": "London",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 7.4
@@ -459,7 +459,7 @@
       "settlement_source": "https://www.weather.gov.hk/en/cis/climat.htm",
       "settlement_source_type": "hko",
       "timezone": "Asia/Hong_Kong",
-      "cluster": "Asia-Subtropical",
+      "cluster": "Hong Kong",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.2
@@ -485,7 +485,7 @@
       "country_code": "AR",
       "settlement_source": "https://www.wunderground.com/history/daily/ar/ezeiza/SAEZ",
       "timezone": "America/Argentina/Buenos_Aires",
-      "cluster": "South-America-Pampas",
+      "cluster": "Buenos Aires",
       "unit": "C",
       "historical_peak_hour": 15.5,
       "diurnal_amplitude_c": 9.0
@@ -495,7 +495,7 @@
       "aliases": [
         "Munich",
         "munich",
-        "München"
+        "M\u00fcnchen"
       ],
       "slug_names": [
         "munich"
@@ -510,7 +510,7 @@
       "country_code": "DE",
       "settlement_source": "https://www.wunderground.com/history/daily/de/munich/EDDM",
       "timezone": "Europe/Berlin",
-      "cluster": "Europe-Continental",
+      "cluster": "Munich",
       "unit": "C",
       "historical_peak_hour": 14.8,
       "diurnal_amplitude_c": 8.5
@@ -520,7 +520,7 @@
       "aliases": [
         "Shenzhen",
         "shenzhen",
-        "深圳"
+        "\u6df1\u5733"
       ],
       "slug_names": [
         "shenzhen"
@@ -535,7 +535,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/shenzhen/ZGSZ",
       "timezone": "Asia/Shanghai",
-      "cluster": "Asia-Subtropical",
+      "cluster": "Shenzhen",
       "unit": "C",
       "historical_peak_hour": 14.3,
       "diurnal_amplitude_c": 6.8
@@ -559,7 +559,7 @@
       "country_code": "NZ",
       "settlement_source": "https://www.wunderground.com/history/daily/nz/wellington/NZWN",
       "timezone": "Pacific/Auckland",
-      "cluster": "Oceania-Maritime",
+      "cluster": "Wellington",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 5.5
@@ -583,7 +583,7 @@
       "country_code": "TR",
       "settlement_source": "https://www.wunderground.com/history/daily/tr/ankara/LTAC",
       "timezone": "Europe/Istanbul",
-      "cluster": "Turkey",
+      "cluster": "Ankara",
       "unit": "C",
       "historical_peak_hour": 15.2,
       "diurnal_amplitude_c": 11.5
@@ -608,7 +608,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/beijing/ZBAA",
       "timezone": "Asia/Shanghai",
-      "cluster": "China-North",
+      "cluster": "Beijing",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 10.5
@@ -632,7 +632,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/chengdu/ZUUU",
       "timezone": "Asia/Shanghai",
-      "cluster": "China-Central",
+      "cluster": "Chengdu",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 7.0
@@ -656,7 +656,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/chongqing/ZUCK",
       "timezone": "Asia/Shanghai",
-      "cluster": "China-Central",
+      "cluster": "Chongqing",
       "unit": "C",
       "historical_peak_hour": 15.2,
       "diurnal_amplitude_c": 6.8
@@ -680,7 +680,7 @@
       "country_code": "TR",
       "settlement_source": "https://www.wunderground.com/history/daily/tr/istanbul/LTFM",
       "timezone": "Europe/Istanbul",
-      "cluster": "Turkey",
+      "cluster": "Istanbul",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.5
@@ -704,7 +704,7 @@
       "country_code": "IN",
       "settlement_source": "https://www.wunderground.com/history/daily/in/lucknow/VILK",
       "timezone": "Asia/Kolkata",
-      "cluster": "India-North",
+      "cluster": "Lucknow",
       "unit": "C",
       "historical_peak_hour": 14.8,
       "diurnal_amplitude_c": 12.0
@@ -728,7 +728,7 @@
       "country_code": "ES",
       "settlement_source": "https://www.wunderground.com/history/daily/es/madrid/LEMD",
       "timezone": "Europe/Madrid",
-      "cluster": "Europe-Mediterranean",
+      "cluster": "Madrid",
       "unit": "C",
       "historical_peak_hour": 16.0,
       "diurnal_amplitude_c": 12.0
@@ -754,7 +754,7 @@
       "country_code": "MX",
       "settlement_source": "https://www.wunderground.com/history/daily/mx/mexico-city/MMMX",
       "timezone": "America/Mexico_City",
-      "cluster": "Latin-America-Highland",
+      "cluster": "Mexico City",
       "unit": "C",
       "historical_peak_hour": 15.5,
       "diurnal_amplitude_c": 11.0
@@ -779,7 +779,7 @@
       "country_code": "IT",
       "settlement_source": "https://www.wunderground.com/history/daily/it/milan/LIMC",
       "timezone": "Europe/Rome",
-      "cluster": "Europe-Mediterranean",
+      "cluster": "Milan",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 9.0
@@ -803,7 +803,7 @@
       "country_code": "RU",
       "settlement_source": "https://www.wunderground.com/history/daily/ru/moscow/UUEE",
       "timezone": "Europe/Moscow",
-      "cluster": "Europe-Eastern",
+      "cluster": "Moscow",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 9.5
@@ -829,7 +829,7 @@
       "country_code": "BR",
       "settlement_source": "https://www.wunderground.com/history/daily/br/sao-paulo/SBGR",
       "timezone": "America/Sao_Paulo",
-      "cluster": "South-America-Tropical",
+      "cluster": "Sao Paulo",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.5
@@ -854,7 +854,7 @@
       "country_code": "SG",
       "settlement_source": "https://www.wunderground.com/history/daily/sg/singapore/WSSS",
       "timezone": "Asia/Singapore",
-      "cluster": "Southeast-Asia-Equatorial",
+      "cluster": "Singapore",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 5.5
@@ -878,7 +878,7 @@
       "country_code": "TW",
       "settlement_source": "https://www.wunderground.com/history/daily/tw/taipei/RCTP",
       "timezone": "Asia/Taipei",
-      "cluster": "Asia-Subtropical",
+      "cluster": "Taipei",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.5
@@ -904,7 +904,7 @@
       "country_code": "IL",
       "settlement_source": "https://www.wunderground.com/history/daily/il/tel-aviv/LLBG",
       "timezone": "Asia/Jerusalem",
-      "cluster": "Middle-East-Levant",
+      "cluster": "Tel Aviv",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.5
@@ -929,7 +929,7 @@
       "country_code": "CA",
       "settlement_source": "https://www.wunderground.com/history/daily/ca/toronto/CYYZ",
       "timezone": "America/Toronto",
-      "cluster": "North-America-Great-Lakes",
+      "cluster": "Toronto",
       "unit": "C",
       "historical_peak_hour": 15.5,
       "diurnal_amplitude_c": 9.0
@@ -954,7 +954,7 @@
       "country_code": "PL",
       "settlement_source": "https://www.wunderground.com/history/daily/pl/warsaw/EPWA",
       "timezone": "Europe/Warsaw",
-      "cluster": "Europe-Eastern",
+      "cluster": "Warsaw",
       "unit": "C",
       "historical_peak_hour": 14.8,
       "diurnal_amplitude_c": 8.8
@@ -978,7 +978,7 @@
       "country_code": "CN",
       "settlement_source": "https://www.wunderground.com/history/daily/cn/wuhan/ZHHH",
       "timezone": "Asia/Shanghai",
-      "cluster": "China-Central",
+      "cluster": "Wuhan",
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.0
@@ -1002,7 +1002,7 @@
       "country_code": "NZ",
       "settlement_source": "https://www.wunderground.com/history/daily/nz/auckland/NZAA",
       "timezone": "Pacific/Auckland",
-      "cluster": "Oceania-Maritime",
+      "cluster": "Auckland",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 6.5
@@ -1027,7 +1027,7 @@
       "country_code": "MY",
       "settlement_source": "https://www.wunderground.com/history/daily/my/sepang/WMKK",
       "timezone": "Asia/Kuala_Lumpur",
-      "cluster": "Southeast-Asia-Equatorial",
+      "cluster": "Kuala Lumpur",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 5.0
@@ -1051,7 +1051,7 @@
       "country_code": "NG",
       "settlement_source": "https://www.wunderground.com/history/daily/ng/lagos/DNMM",
       "timezone": "Africa/Lagos",
-      "cluster": "Africa-West-Tropical",
+      "cluster": "Lagos",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 5.5
@@ -1076,7 +1076,7 @@
       "country_code": "SA",
       "settlement_source": "https://www.wunderground.com/history/daily/sa/jeddah/OEJN",
       "timezone": "Asia/Riyadh",
-      "cluster": "Middle-East-Arabian",
+      "cluster": "Jeddah",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.0
@@ -1100,7 +1100,7 @@
       "country_code": "ZA",
       "settlement_source": "https://www.wunderground.com/history/daily/za/cape-town/FACT",
       "timezone": "Africa/Johannesburg",
-      "cluster": "Africa-South-Maritime",
+      "cluster": "Cape Town",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 8.0
@@ -1125,7 +1125,7 @@
       "country_code": "KR",
       "settlement_source": "https://www.wunderground.com/history/daily/kr/busan/RKPK",
       "timezone": "Asia/Seoul",
-      "cluster": "Asia-Northeast",
+      "cluster": "Busan",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.5
@@ -1149,7 +1149,7 @@
       "country_code": "ID",
       "settlement_source": "https://www.wunderground.com/history/daily/id/tangerang/WIII",
       "timezone": "Asia/Jakarta",
-      "cluster": "Southeast-Asia-Equatorial",
+      "cluster": "Jakarta",
       "unit": "C",
       "historical_peak_hour": 13.5,
       "diurnal_amplitude_c": 5.0
@@ -1174,7 +1174,7 @@
       "country_code": "PA",
       "settlement_source": "https://www.wunderground.com/history/daily/pa/panama-city/MPTO",
       "timezone": "America/Panama",
-      "cluster": "Latin-America-Tropical",
+      "cluster": "Panama City",
       "unit": "C",
       "historical_peak_hour": 14.0,
       "diurnal_amplitude_c": 4.5

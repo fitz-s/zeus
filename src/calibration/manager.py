@@ -79,7 +79,7 @@ def season_from_date(date_str: str, lat: float = 90.0) -> str:
 def route_to_bucket(city: City, target_date: str) -> str:
     """Route a city + date to its calibration bucket key."""
     season = season_from_date(target_date, lat=city.lat)
-    return bucket_key(city.cluster, season)
+    return bucket_key(city.name, season)
 
 
 def maturity_level(n_pairs: int) -> int:
