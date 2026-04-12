@@ -443,41 +443,40 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
 
 
 def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int = 200) -> dict:
+    """Entry execution summary from canonical position_events."""
     try:
-        from src.state.db import _legacy_position_events_table
-        table = _legacy_position_events_table(conn) or "position_events"
         rows = conn.execute(
-            f"""
-            SELECT event_type, strategy
-            FROM {table}
-            WHERE env = ?
-              AND event_type IN ('ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED')
-            ORDER BY id DESC
+            """
+            SELECT event_type, strategy_key
+            FROM position_events
+            WHERE event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_FILLED', 'ENTRY_ORDER_REJECTED')
+            ORDER BY occurred_at DESC
             LIMIT ?
             """,
-            (env, limit),
+            (limit,),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
 
     overall = {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None}
     by_strategy: dict[str, dict] = {}
+    mapping = {
+        "POSITION_OPEN_INTENT": "attempted",
+        "ENTRY_ORDER_FILLED": "filled",
+        "ENTRY_ORDER_REJECTED": "rejected",
+    }
     for row in rows:
         event_type = str(row["event_type"])
-        strategy = str(row["strategy"] or "unclassified")
+        counter_key = mapping.get(event_type)
+        if counter_key is None:
+            continue
+        strategy = str(row["strategy_key"] or "unclassified")
         bucket = by_strategy.setdefault(
             strategy,
             {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None},
         )
-        if event_type == "ORDER_ATTEMPTED":
-            overall["attempted"] += 1
-            bucket["attempted"] += 1
-        elif event_type == "ORDER_FILLED":
-            overall["filled"] += 1
-            bucket["filled"] += 1
-        elif event_type == "ORDER_REJECTED":
-            overall["rejected"] += 1
-            bucket["rejected"] += 1
+        overall[counter_key] += 1
+        bucket[counter_key] += 1
 
     def _finalize(bucket: dict) -> None:
         denom = bucket["filled"] + bucket["rejected"]

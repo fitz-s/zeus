@@ -83,10 +83,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     Safety: if chain returns 0 positions but local has N, the API likely
     returned incomplete data. Skip voiding to prevent false PHANTOM kills.
     """
-    log_reconciled_entry_event = None
     update_trade_lifecycle = None
     if conn is not None:
-        from src.state.db import log_reconciled_entry_event, update_trade_lifecycle
+        from src.state.db import update_trade_lifecycle
 
     def _next_canonical_sequence_no(position_id: str) -> int:
         if conn is None:
@@ -116,16 +115,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if conn is None:
             return False
         try:
-            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
-        except Exception:
-            return False
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation rescue does not support hybrid position_events schema")
-        try:
             row = conn.execute(
                 "SELECT phase FROM position_current WHERE position_id = ?",
                 (position_id,),
@@ -144,16 +133,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
             return False
-        try:
-            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
-        except Exception:
-            return False
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation size-correction does not support hybrid position_events schema")
         try:
             row = conn.execute(
                 "SELECT phase FROM position_current WHERE position_id = ?",
@@ -227,88 +206,36 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
-    def _legacy_rescue_query_available() -> bool:
-        if conn is None:
-            return False
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        # Check both possible legacy table names (position_events_legacy after
-        # rename, or position_events itself when migration hasn't run).
-        for table in ("position_events_legacy", "position_events"):
-            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            columns = {row[1] for row in rows}
-            if not columns:
-                continue
-            has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(columns)
-            has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns)
-            if has_canonical and has_legacy:
-                raise RuntimeError("reconciliation rescue query does not support hybrid position_events schema")
-            if has_legacy:
-                return True
-
-        # If canonical-only position_events exists, legacy rescue is unavailable.
-        canon_rows = conn.execute("PRAGMA table_info(position_events)").fetchall()
-        if canon_rows:
-            return False
-        raise RuntimeError("reconciliation rescue query legacy schema not installed")
-
-    def _legacy_event_table() -> str:
-        """Return the legacy position_events table name, or empty string."""
-        from src.state.db import LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-        for table in ("position_events_legacy", "position_events"):
-            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            columns = {row[1] for row in rows}
-            if columns and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns):
-                return table
-        return ""
-
     def _already_logged_rescue_event(position) -> bool:
+        """Check canonical position_events for a prior rescue event."""
         if conn is None:
             return False
-        if not _legacy_rescue_query_available():
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM position_events
+                WHERE position_id = ?
+                  AND source_module LIKE '%chain_reconciliation%'
+                LIMIT 1
+                """,
+                (getattr(position, 'trade_id', ''),),
+            ).fetchone()
+            return row is not None
+        except Exception:
             return False
-        table = _legacy_event_table()
-        if not table:
-            return False
-        row = conn.execute(
-            f"""
-            SELECT 1 FROM {table}
-            WHERE runtime_trade_id = ?
-              AND event_type = 'POSITION_LIFECYCLE_UPDATED'
-              AND source = 'chain_reconciliation'
-              AND json_extract(details_json, '$.reason') = 'pending_fill_rescued'
-            LIMIT 1
-            """,
-            (getattr(position, 'trade_id', ''),),
-        ).fetchone()
-        return row is not None
 
     def _emit_rescue_event(position, *, rescued_at: str) -> None:
-        if log_reconciled_entry_event is None or _already_logged_rescue_event(position):
-            return
-        log_reconciled_entry_event(
-            conn,
-            position,
-            timestamp=rescued_at,
-            details={
-                "from_state": "pending_tracked",
-                "to_state": "entered",
-                "rescue_condition_id": getattr(position, 'condition_id', ''),
-                "historical_entry_method": getattr(position, 'entry_method', ''),
-                "historical_selected_method": getattr(position, 'selected_method', '') or getattr(position, 'entry_method', ''),
-            },
-        )
+        # Rescue events are now written as canonical lifecycle events (P9).
+        pass
 
     def _sync_reconciled_trade_lifecycle(position) -> None:
         if update_trade_lifecycle is None:
             return
         try:
-            if not _legacy_rescue_query_available():
-                return
             update_trade_lifecycle(conn, position)
         except Exception as exc:
             raise RuntimeError(
-                f"legacy reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
+                f"reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
             ) from exc
 
     chain_by_token = {cp.token_id: cp for cp in chain_positions}
