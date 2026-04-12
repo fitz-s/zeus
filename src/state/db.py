@@ -517,26 +517,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_chronicle_dedup
           ON chronicle(trade_id, event_type);
 
-        -- Durable stage-level runtime spine for position lifecycle events
-        CREATE TABLE IF NOT EXISTS position_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            runtime_trade_id TEXT NOT NULL,
-            position_state TEXT,
-            order_id TEXT,
-            decision_snapshot_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            market_id TEXT,
-            bin_label TEXT,
-            direction TEXT,
-            strategy TEXT,
-            edge_source TEXT,
-            source TEXT NOT NULL DEFAULT 'runtime',
-            details_json TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            env TEXT NOT NULL DEFAULT 'live'
-        );
+        -- position_events is canonical-only (see apply_architecture_kernel_schema)
 
         -- Derived health view for PnL and edge compression
         CREATE TABLE IF NOT EXISTS strategy_health (
@@ -972,44 +953,9 @@ def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> Non
 
 
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
-    """Ensure legacy runtime bootstrap can coexist with canonical support tables."""
-    event_columns = _table_columns(conn, "position_events")
-    legacy_present = bool(event_columns) and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-    canonical_present = bool(event_columns) and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-
-    if legacy_present and not canonical_present:
-        if not _table_exists(conn, "position_events_legacy"):
-            conn.execute("ALTER TABLE position_events RENAME TO position_events_legacy")
-        else:
-            raise RuntimeError(
-                "legacy position_events collision unresolved: both legacy and alternate legacy tables exist"
-            )
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_position_events_legacy_trade_ts ON position_events_legacy(runtime_trade_id, timestamp)"
-            )
-        except sqlite3.OperationalError:
-            pass
-
+    """Apply canonical architecture kernel schema."""
     apply_architecture_kernel_schema(conn)
 
-LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
-    "runtime_trade_id",
-    "position_state",
-    "strategy",
-    "source",
-    "details_json",
-    "timestamp",
-    "env",
-)
-
-
-def _legacy_position_events_table(conn: sqlite3.Connection) -> str:
-    for table in ("position_events_legacy", "position_events"):
-        columns = _table_columns(conn, table)
-        if columns and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns):
-            return table
-    return ""
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -1043,31 +989,6 @@ def _missing_canonical_position_tables(conn: sqlite3.Connection) -> list[str]:
     if not _table_exists(conn, "position_current"):
         missing.append("position_current")
     return missing
-
-
-def _legacy_runtime_position_event_schema_available(conn: sqlite3.Connection) -> bool:
-    legacy_table = _legacy_position_events_table(conn)
-    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
-    return (
-        bool(event_columns)
-        and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-    )
-
-
-def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
-    legacy_table = _legacy_position_events_table(conn)
-    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
-    if not event_columns:
-        # Check if canonical schema is present (canonical bootstrap without legacy)
-        canonical_columns = _table_columns(conn, "position_events")
-        if canonical_columns and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(canonical_columns):
-            raise RuntimeError(
-                "legacy runtime position_events helpers do not support canonically bootstrapped databases; "
-                "this Stage-2 bootstrap path is not runtime-ready until a later migration/cutover packet lands"
-            )
-        raise RuntimeError("legacy runtime position_events schema not installed")
-    if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
-        raise RuntimeError("legacy runtime position_events schema not installed")
 
 
 def backfill_open_legacy_paper_positions(
@@ -2356,48 +2277,11 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             import logging
             logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
 
-    if _legacy_runtime_position_event_schema_available(conn):
-        log_position_event(
-            conn,
-            "POSITION_ENTRY_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "fill_price": fill_price,
-                "submitted_price": getattr(pos, "entry_price", None),
-                "shares": getattr(pos, "shares", 0.0),
-                "chain_state": getattr(pos, "chain_state", ""),
-                "entry_method": getattr(pos, "entry_method", ""),
-                "selected_method": getattr(pos, "selected_method", ""),
-            },
-            timestamp=timestamp or None,
-            source="trade_decisions",
-        )
-    elif not _canonical_position_surface_available(conn):
-        log_position_event(
-            conn,
-            "POSITION_ENTRY_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "fill_price": fill_price,
-                "submitted_price": getattr(pos, "entry_price", None),
-                "shares": getattr(pos, "shares", 0.0),
-                "chain_state": getattr(pos, "chain_state", ""),
-                "entry_method": getattr(pos, "entry_method", ""),
-                "selected_method": getattr(pos, "selected_method", ""),
-            },
-            timestamp=timestamp or None,
-            source="trade_decisions",
-        )
+
 
 
 def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: str | None = None) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
-    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
-    if not legacy_runtime_events_available:
-        if not _canonical_position_surface_available(conn):
-            _assert_legacy_runtime_position_event_schema(conn)
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
@@ -2428,12 +2312,6 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         or getattr(pos, "order_posted_at", None)
         or datetime.now(timezone.utc).isoformat()
     )
-    if status == "filled":
-        event_type = "ORDER_FILLED"
-    elif status in {"rejected", "cancelled", "canceled"}:
-        event_type = "ORDER_REJECTED"
-    else:
-        event_type = "ORDER_ATTEMPTED"
     terminal_exec_status = status or None
     voided_at = event_timestamp if status in {"rejected", "cancelled", "canceled"} else None
     posted_at = (
@@ -2462,15 +2340,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
     )
-    if legacy_runtime_events_available:
-        log_position_event(
-            conn,
-            event_type,
-            pos,
-            details=details,
-            timestamp=event_timestamp,
-            source="execution",
-        )
+
 
 
 def log_settlement_event(
@@ -2483,10 +2353,6 @@ def log_settlement_event(
     exited_at_override: str | None = None,
 ) -> None:
     """Append a durable settlement event for learning/risk consumers."""
-    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
-    if not legacy_runtime_events_available:
-        if not _canonical_position_surface_available(conn):
-            _assert_legacy_runtime_position_event_schema(conn)
     settled_at = getattr(pos, "last_exit_at", None)
     entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
     log_outcome_fact(
@@ -2504,20 +2370,7 @@ def log_settlement_event(
         monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
         chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
     )
-    if legacy_runtime_events_available:
-        log_position_event(
-            conn,
-            "POSITION_SETTLED",
-            pos,
-            details=_canonical_position_settled_payload(
-                pos,
-                winning_bin=winning_bin,
-                won=won,
-                outcome=outcome,
-            ),
-            timestamp=settled_at,
-            source="settlement",
-        )
+
 
 
 def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
@@ -2571,21 +2424,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
             )
             VALUES ({placeholders})
         """, values)
-        log_position_event(
-            conn,
-            "POSITION_EXIT_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "exit_price": getattr(pos, "exit_price", None),
-                "pnl": getattr(pos, "pnl", None),
-                "exit_trigger": getattr(pos, "exit_trigger", ""),
-                "exit_reason": getattr(pos, "exit_reason", ""),
-                "admin_exit_reason": getattr(pos, "admin_exit_reason", ""),
-            },
-            timestamp=getattr(pos, "last_exit_at", None),
-            source="trade_decisions",
-        )
+
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
@@ -2647,23 +2486,7 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         ),
     )
 
-    log_position_event(
-        conn,
-        "POSITION_LIFECYCLE_UPDATED",
-        pos,
-        details={
-            "status": status,
-            "filled_at": filled_at,
-            "fill_price": fill_price,
-            "entry_order_id": entry_order_id,
-            "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
-            "order_status": getattr(pos, "order_status", ""),
-            "chain_state": getattr(pos, "chain_state", ""),
-            "day0_entered_at": getattr(pos, "day0_entered_at", ""),
-        },
-        timestamp=timestamp or None,
-        source="trade_decisions",
-    )
+
 
 
 def _decode_position_event_rows(rows) -> list[dict]:
@@ -2783,17 +2606,28 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
 
 
 def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
-    """Load recent durable position events for one runtime trade."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
+    """Load recent canonical position events for one position."""
     rows = conn.execute(
-        f"""
-        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-               city, target_date, market_id, bin_label, direction, strategy, edge_source,
-               source, details_json, timestamp, env
-        FROM {legacy_table}
-        WHERE runtime_trade_id = ?
-        ORDER BY id ASC
+        """
+        SELECT event_type,
+               position_id AS runtime_trade_id,
+               NULL AS position_state,
+               order_id,
+               snapshot_id AS decision_snapshot_id,
+               NULL AS city,
+               NULL AS target_date,
+               NULL AS market_id,
+               NULL AS bin_label,
+               NULL AS direction,
+               strategy_key AS strategy,
+               NULL AS edge_source,
+               source_module AS source,
+               payload_json AS details_json,
+               occurred_at AS timestamp,
+               NULL AS env
+        FROM position_events
+        WHERE position_id = ?
+        ORDER BY sequence_no ASC
         LIMIT ?
         """,
         (runtime_trade_id, limit),
@@ -2810,36 +2644,45 @@ def query_settlement_events(
     env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Load recent canonical settlement stage events from the durable event spine."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    filters = ["event_type = 'POSITION_SETTLED'"]
-    query_env = get_mode() if env is None else env
+    """Load recent canonical SETTLED events from the durable event spine."""
+    filters = ["e.event_type = 'SETTLED'"]
     params: list[object] = []
-    if query_env:
-        filters.append("env = ?")
-        params.append(query_env)
     if city is not None:
-        filters.append("city = ?")
+        filters.append("pc.city = ?")
         params.append(city)
     if target_date is not None:
-        filters.append("target_date = ?")
+        filters.append("pc.target_date = ?")
         params.append(target_date)
     if not_before is not None:
-        filters.append("timestamp >= ?")
+        filters.append("e.occurred_at >= ?")
         params.append(not_before)
+    where_clause = " AND ".join(filters)
     query = f"""
-        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-               city, target_date, market_id, bin_label, direction, strategy, edge_source,
-               source, details_json, timestamp, env
+        SELECT e.event_type,
+               e.position_id AS runtime_trade_id,
+               NULL AS position_state,
+               e.order_id,
+               e.snapshot_id AS decision_snapshot_id,
+               pc.city,
+               pc.target_date,
+               pc.market_id,
+               pc.bin_label,
+               pc.direction,
+               e.strategy_key AS strategy,
+               pc.edge_source,
+               e.source_module AS source,
+               e.payload_json AS details_json,
+               e.occurred_at AS timestamp,
+               NULL AS env
         FROM (
             SELECT *,
-                   ROW_NUMBER() OVER (PARTITION BY runtime_trade_id ORDER BY id DESC) AS rn
-            FROM {legacy_table}
-            WHERE {' AND '.join(filters)}
-        )
-        WHERE rn = 1
-        ORDER BY id DESC
+                   ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY sequence_no DESC) AS rn
+            FROM position_events
+            WHERE event_type = 'SETTLED'
+        ) e
+        LEFT JOIN position_current pc ON pc.position_id = e.position_id
+        WHERE rn = 1 AND {where_clause}
+        ORDER BY e.occurred_at DESC
         """
     if limit is not None:
         query += "\n        LIMIT ?"
@@ -3337,27 +3180,6 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
     latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
     legacy_latest_by_trade: dict[str, tuple[datetime, str]] = {}
-    legacy_table = _legacy_position_events_table(conn)
-    if legacy_table:
-        placeholders = ", ".join("?" for _ in trade_ids)
-        legacy_rows = conn.execute(
-            f"""
-            SELECT l.runtime_trade_id, l.timestamp AS latest_timestamp, l.position_state
-            FROM {legacy_table} l
-            INNER JOIN (
-                SELECT runtime_trade_id, MAX(timestamp) AS max_ts
-                FROM {legacy_table}
-                WHERE runtime_trade_id IN ({placeholders})
-                GROUP BY runtime_trade_id
-            ) agg ON l.runtime_trade_id = agg.runtime_trade_id AND l.timestamp = agg.max_ts
-            """,
-            trade_ids,
-        ).fetchall()
-        for legacy_row in legacy_rows:
-            trade_id = str(legacy_row["runtime_trade_id"] or "")
-            parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
-            if trade_id and parsed is not None:
-                legacy_latest_by_trade[trade_id] = (parsed, str(legacy_row["position_state"] or ""))
 
     current_mode = get_mode()
     positions: list[dict] = []
@@ -3655,18 +3477,7 @@ def _query_transitional_position_hints(
         return {}
     columns = _table_columns(conn, "position_events")
     placeholders = ", ".join("?" for _ in trade_ids)
-    if {"runtime_trade_id", "details_json", "timestamp"}.issubset(columns):
-        legacy_table = _legacy_position_events_table(conn) or "position_events"
-        rows = conn.execute(
-            f"""
-            SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload, env, timestamp AS occurred_at
-            FROM {legacy_table}
-            WHERE runtime_trade_id IN ({placeholders})
-            ORDER BY timestamp DESC, id DESC
-            """,
-            trade_ids,
-        ).fetchall()
-    elif {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+    if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
         rows = conn.execute(
             f"""
             SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
@@ -3711,12 +3522,7 @@ def _query_transitional_position_hints(
             status = details.get("status")
             if status not in (None, ""):
                 bucket["exit_state"] = str(status)
-        if "env" not in bucket:
-            env_value = None
-            if "env" in row.keys():
-                env_value = row["env"]
-            if env_value not in (None, ""):
-                bucket["env"] = str(env_value)
+        # env is not in canonical position_events; mode isolation is at DB level
     return hints
 
 
@@ -3815,33 +3621,26 @@ def query_execution_event_summary(
     limit: int | None = 500,
     not_before: str | None = None,
 ) -> dict:
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    query_env = get_mode() if env is None else env
-    filters = [
-        "env = ?",
-        """event_type IN (
-            'ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED',
-            'EXIT_ORDER_ATTEMPTED', 'EXIT_ORDER_FILLED',
-            'EXIT_RETRY_SCHEDULED', 'EXIT_BACKOFF_EXHAUSTED',
-            'EXIT_FILL_CHECK_FAILED', 'EXIT_FILL_CHECKED',
-            'EXIT_FILL_CONFIRMED', 'EXIT_RETRY_RELEASED'
-          )""",
-    ]
-    params: list[object] = [query_env]
+    """Execution event summary from canonical position_events."""
+    filters = []
+    params: list[object] = []
     if not_before is not None:
-        filters.append("timestamp >= ?")
+        filters.append("occurred_at >= ?")
         params.append(not_before)
+    where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
     query = f"""
-        SELECT event_type, strategy
-        FROM {legacy_table}
-        WHERE {' AND '.join(filters)}
-        ORDER BY id DESC
+        SELECT event_type, strategy_key
+        FROM position_events
+        {where_clause}
+        ORDER BY occurred_at DESC
         """
     if limit is not None:
         query += "\n        LIMIT ?"
         params.append(limit)
-    rows = conn.execute(query, params).fetchall()
+    try:
+        rows = conn.execute(query, params).fetchall()
+    except Exception:
+        rows = []
 
     def _blank() -> dict:
         return {
@@ -3862,17 +3661,13 @@ def query_execution_event_summary(
     by_strategy: dict[str, dict] = {}
 
     mapping = {
-        "ORDER_ATTEMPTED": "entry_attempted",
-        "ORDER_FILLED": "entry_filled",
-        "ORDER_REJECTED": "entry_rejected",
-        "EXIT_ORDER_ATTEMPTED": "exit_attempted",
+        "POSITION_OPEN_INTENT": "entry_attempted",
+        "ENTRY_ORDER_FILLED": "entry_filled",
+        "ENTRY_ORDER_REJECTED": "entry_rejected",
+        "EXIT_ORDER_POSTED": "exit_attempted",
         "EXIT_ORDER_FILLED": "exit_filled",
-        "EXIT_RETRY_SCHEDULED": "exit_retry_scheduled",
-        "EXIT_BACKOFF_EXHAUSTED": "exit_backoff_exhausted",
-        "EXIT_FILL_CHECK_FAILED": "exit_fill_check_failed",
-        "EXIT_FILL_CHECKED": "exit_fill_checked",
-        "EXIT_FILL_CONFIRMED": "exit_fill_confirmed",
-        "EXIT_RETRY_RELEASED": "exit_retry_released",
+        "EXIT_ORDER_VOIDED": "exit_fill_confirmed",
+        "EXIT_ORDER_REJECTED": "exit_backoff_exhausted",
     }
 
     for row in rows:
@@ -3881,7 +3676,7 @@ def query_execution_event_summary(
         if counter_key is None:
             continue
         overall[counter_key] += 1
-        strategy = str(row["strategy"] or "unclassified")
+        strategy = str(row["strategy_key"] or "unclassified")
         bucket = by_strategy.setdefault(strategy, _blank())
         bucket[counter_key] += 1
 
@@ -3890,84 +3685,6 @@ def query_execution_event_summary(
         "overall": overall,
         "by_strategy": by_strategy,
     }
-
-
-def log_position_event(
-    conn: sqlite3.Connection,
-    event_type: str,
-    pos,
-    *,
-    details: dict | None = None,
-    timestamp: str | None = None,
-    source: str = "runtime",
-    order_id: str | None = None,
-    position_state: str | None = None,
-) -> None:
-    """Append a stage-level position event without changing open-position authority."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    runtime_trade_id = getattr(pos, "trade_id", "")
-    if not runtime_trade_id:
-        return
-
-    env = getattr(pos, "env", None) or get_mode()
-    event_timestamp = (
-        timestamp
-        or getattr(pos, "last_exit_at", "")
-        or getattr(pos, "entered_at", "")
-        or getattr(pos, "order_posted_at", "")
-        or datetime.now(timezone.utc).isoformat()
-    )
-    payload = details or {}
-    event_order_id = (
-        order_id
-        or getattr(pos, "order_id", "")
-        or getattr(pos, "entry_order_id", "")
-        or getattr(pos, "last_exit_order_id", "")
-        or None
-    )
-    conn.execute(
-        f"""
-        INSERT INTO {legacy_table} (
-            event_type,
-            runtime_trade_id,
-            position_state,
-            order_id,
-            decision_snapshot_id,
-            city,
-            target_date,
-            market_id,
-            bin_label,
-            direction,
-            strategy,
-            edge_source,
-            source,
-            details_json,
-            timestamp,
-            env
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_type,
-            runtime_trade_id,
-            position_state if position_state is not None else (getattr(pos, "state", "") or None),
-            event_order_id,
-            getattr(pos, "decision_snapshot_id", "") or None,
-            getattr(pos, "city", "") or None,
-            getattr(pos, "target_date", "") or None,
-            getattr(pos, "market_id", "") or None,
-            getattr(pos, "bin_label", "") or None,
-            getattr(pos, "direction", "") or None,
-            getattr(pos, "strategy", "") or None,
-            getattr(pos, "edge_source", "") or None,
-            source,
-            json.dumps(payload, default=str),
-            event_timestamp,
-            env,
-        ),
-    )
-
 
 def log_exit_lifecycle_event(
     conn: sqlite3.Connection,
@@ -4046,15 +3763,7 @@ def log_exit_lifecycle_event(
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
         )
-    log_position_event(
-        conn,
-        event_type,
-        pos,
-        details=payload,
-        timestamp=timestamp,
-        source="exit_lifecycle",
-        order_id=order_id,
-    )
+
 
 
 def log_exit_retry_event(
@@ -4205,39 +3914,3 @@ def log_pending_exit_recovery_event(
     )
 
 
-def log_reconciled_entry_event(conn: sqlite3.Connection, pos, *, timestamp: str, details: dict | None = None) -> None:
-    """Append exactly-once stage event for chain-reconciled pending fills."""
-    payload = {
-        "status": "entered",
-        "source": "chain_reconciliation",
-        "reason": "pending_fill_rescued",
-        "entry_order_id": getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", ""),
-        "entry_method": getattr(pos, "entry_method", ""),
-        "selected_method": getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
-        "applied_validations": list(getattr(pos, "applied_validations", []) or []),
-        "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
-        "shares": getattr(pos, "shares", None),
-        "cost_basis_usd": getattr(pos, "cost_basis_usd", None),
-        "size_usd": getattr(pos, "size_usd", None),
-        "condition_id": getattr(pos, "condition_id", ""),
-        "order_status": getattr(pos, "order_status", ""),
-        "chain_state": getattr(pos, "chain_state", ""),
-    }
-    if details:
-        payload.update(details)
-    legacy_columns_present = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(
-        _table_columns(conn, "position_events")
-    )
-    if not _legacy_runtime_position_event_schema_available(conn):
-        if _canonical_position_surface_available(conn) and not legacy_columns_present:
-            return
-        _assert_legacy_runtime_position_event_schema(conn)
-    log_position_event(
-        conn,
-        "POSITION_LIFECYCLE_UPDATED",
-        pos,
-        details=payload,
-        timestamp=timestamp,
-        source="chain_reconciliation",
-        position_state="entered",
-    )
