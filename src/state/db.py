@@ -2977,7 +2977,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         SELECT position_id, phase, trade_id, city, bin_label, direction,
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
-               decision_snapshot_id, last_monitor_market_price
+               decision_snapshot_id, last_monitor_market_price,
+               token_id, no_token_id, condition_id
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -3029,6 +3030,9 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                 "edge": None,
                 "bin_label": str(row["bin_label"] or ""),
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
+                "token_id": str(row["token_id"] or ""),
+                "no_token_id": str(row["no_token_id"] or ""),
+                "condition_id": str(row["condition_id"] or ""),
                 "day0_entered_at": day0_entered_at,
                 "mark_price": mark_price,
                 "unrealized_pnl": unrealized_pnl,
@@ -3081,7 +3085,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-               chain_state, order_id, order_status, updated_at
+               chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -3129,6 +3133,9 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "chain_state": str(row["chain_state"] or "unknown"),
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
+                "token_id": str(row["token_id"] or ""),
+                "no_token_id": str(row["no_token_id"] or ""),
+                "condition_id": str(row["condition_id"] or ""),
                 "state": runtime_state,
                 "env": "live",
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),

@@ -136,6 +136,9 @@ def _canonical_projection() -> dict:
         "edge_source": "center_buy",
         "discovery_mode": "update_reaction",
         "chain_state": "unknown",
+        "token_id": None,
+        "no_token_id": None,
+        "condition_id": None,
         "order_id": None,
         "order_status": None,
         "updated_at": "2026-04-03T00:00:00Z",
@@ -1183,6 +1186,95 @@ def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
         "strategy_key": "center_buy",
         "order_status": "filled",
     }
+
+
+def test_position_current_projection_persists_token_identity():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.ledger import (
+        append_many_and_project,
+        apply_architecture_kernel_schema,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="unknown")
+    pos.token_id = "yes-token-canonical"
+    pos.no_token_id = "no-token-canonical"
+    pos.condition_id = "condition-canonical"
+
+    events, projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-token",
+        source_module="src.engine.cycle_runtime",
+    )
+    assert projection["token_id"] == "yes-token-canonical"
+    assert projection["no_token_id"] == "no-token-canonical"
+    assert projection["condition_id"] == "condition-canonical"
+
+    append_many_and_project(conn, events, projection)
+    row = conn.execute(
+        """
+        SELECT token_id, no_token_id, condition_id
+        FROM position_current
+        WHERE position_id = 'rt-pos-1'
+        """
+    ).fetchone()
+
+    assert dict(row) == {
+        "token_id": "yes-token-canonical",
+        "no_token_id": "no-token-canonical",
+        "condition_id": "condition-canonical",
+    }
+
+
+def test_kernel_schema_adds_token_identity_columns_to_existing_position_current():
+    from src.state.ledger import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            trade_id TEXT,
+            market_id TEXT,
+            city TEXT,
+            cluster TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            unit TEXT,
+            size_usd REAL,
+            shares REAL,
+            cost_basis_usd REAL,
+            entry_price REAL,
+            p_posterior REAL,
+            last_monitor_prob REAL,
+            last_monitor_edge REAL,
+            last_monitor_market_price REAL,
+            decision_snapshot_id TEXT,
+            entry_method TEXT,
+            strategy_key TEXT NOT NULL,
+            edge_source TEXT,
+            discovery_mode TEXT,
+            chain_state TEXT,
+            order_id TEXT,
+            order_status TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    apply_architecture_kernel_schema(conn)
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+
+    assert {"token_id", "no_token_id", "condition_id"}.issubset(columns)
     conn.close()
 
 

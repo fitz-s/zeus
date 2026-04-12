@@ -1587,8 +1587,63 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     assert [pos.trade_id for pos in state.positions] == ["db-t1"]
     assert state.positions[0].strategy_key == "opening_inertia"
     assert state.positions[0].state == "entered"
-    assert state.positions[0].token_id == "json-yes"
+    assert state.positions[0].token_id == ""
+    assert state.positions[0].no_token_id == ""
     assert state.bankroll == pytest.approx(99.0)
+
+
+def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, monkeypatch):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-paper.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+        ) VALUES (
+            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
+            NULL, NULL, NULL,
+            'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
+            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    path.write_text(json.dumps({
+        "positions": [{
+            "trade_id": "db-token",
+            "market_id": "m-json",
+            "city": "NYC",
+            "cluster": "US-Northeast",
+            "target_date": "2026-04-01",
+            "bin_label": "41-42°F",
+            "direction": "buy_no",
+            "unit": "F",
+            "state": "entered",
+            "strategy": "center_buy",
+            "edge_source": "center_buy",
+            "token_id": "yes-json-token",
+            "no_token_id": "no-json-token",
+            "condition_id": "condition-json",
+        }],
+        "bankroll": 99.0,
+    }))
+
+    state = load_portfolio(path)
+
+    assert [pos.trade_id for pos in state.positions] == ["db-token"]
+    assert state.positions[0].token_id == "yes-db-token"
+    assert state.positions[0].no_token_id == "no-db-token"
+    assert state.positions[0].condition_id == "condition-db"
 
 
 def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monkeypatch):

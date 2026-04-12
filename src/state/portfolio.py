@@ -893,58 +893,9 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         )
 
     bankroll = json_data.get("bankroll", 150.0)
-    compatibility_by_trade_id: dict[str, dict] = {}
-    for payload in json_data.get("positions", []):
-        trade_id = str(payload.get("trade_id") or "")
-        if trade_id:
-            compatibility_by_trade_id[trade_id] = payload
-    position_fields = {f.name for f in fields(Position)}
-    authoritative_fields = {
-        "trade_id",
-        "market_id",
-        "city",
-        "cluster",
-        "target_date",
-        "bin_label",
-        "direction",
-        "unit",
-        "size_usd",
-        "shares",
-        "cost_basis_usd",
-        "entry_price",
-        "p_posterior",
-        "last_monitor_prob",
-        "last_monitor_edge",
-        "last_monitor_market_price",
-        "decision_snapshot_id",
-        "entry_method",
-        "strategy_key",
-        "strategy",
-        "edge_source",
-        "discovery_mode",
-        "chain_state",
-        "order_id",
-        "order_status",
-        "state",
-        "env",
-        "entered_at",
-        "day0_entered_at",
-        "exit_state",
-        "admin_exit_reason",
-        "entry_fill_verified",
-    }
     positions = [
         _position_from_projection_row(
-            {
-                **row,
-                **{
-                    key: compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key)
-                    for key in position_fields
-                    if key not in authoritative_fields
-                    and row.get(key) in (None, "", [], 0, 0.0)
-                    and compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key) not in (None, "", [], 0, 0.0)
-                },
-            },
+            row,
             current_mode=current_mode,
         )
         for row in snapshot.get("positions", [])

@@ -70,6 +70,9 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
         )
 
     conn.executescript(load_architecture_kernel_sql())
+    for column in ("token_id", "no_token_id", "condition_id"):
+        if column not in table_columns(conn, "position_current"):
+            conn.execute(f"ALTER TABLE position_current ADD COLUMN {column} TEXT;")
     assert_canonical_transaction_schema(conn)
 
 

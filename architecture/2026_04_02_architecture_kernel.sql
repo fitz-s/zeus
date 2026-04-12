@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS position_current (
     edge_source TEXT,
     discovery_mode TEXT,
     chain_state TEXT,
+    token_id TEXT,
+    no_token_id TEXT,
+    condition_id TEXT,
     order_id TEXT,
     order_status TEXT,
     updated_at TEXT NOT NULL
