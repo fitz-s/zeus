@@ -952,8 +952,12 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             policy.reason,
         )
         _guard_deprecated_portfolio_json(path)
+        degraded_positions = [
+            _chain_only_quarantine_position_from_row(row)
+            for row in chain_only_quarantines
+        ]
         return PortfolioState(
-            positions=[],
+            positions=degraded_positions,
             bankroll=bankroll,
             daily_baseline_total=bankroll,
             weekly_baseline_total=bankroll,
