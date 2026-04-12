@@ -522,6 +522,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
 
         -- Append-only trade chronicle
+        -- env column: added via ALTER TABLE in init_schema lines ~854-859 — see chronicler.py:76
         CREATE TABLE IF NOT EXISTS chronicle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -809,6 +810,18 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON ensemble_snapshots(city, target_date, available_at);
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
+
+        -- Availability/outage fact log (observability — kernel §availability_fact)
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        );
 
         -- Replay engine results
         CREATE TABLE IF NOT EXISTS replay_results (
