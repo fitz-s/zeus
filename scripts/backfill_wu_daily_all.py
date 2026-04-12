@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone as _tz
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,13 +28,55 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import requests
 
 from src.state.db import get_world_connection, init_schema
-from src.contracts.settlement_semantics import SettlementSemantics
 from src.config import cities_by_name
+from src.data.ingestion_guard import IngestionGuard
+from src.types.observation_atom import ObservationAtom, IngestionRejected
+from src.calibration.manager import hemisphere_for_lat, season_from_date
+
+
+def _write_atom_to_observations(conn, atom: ObservationAtom) -> None:
+    """Single authoritative write path for observations. Uses K1 atom schema."""
+    conn.execute("""
+        INSERT OR REPLACE INTO observations (
+            city, target_date, source, high_temp, unit, station_id, fetched_at,
+            raw_value, raw_unit, target_unit, value_type,
+            fetch_utc, local_time, collection_window_start_utc, collection_window_end_utc,
+            timezone, utc_offset_minutes, dst_active,
+            is_ambiguous_local_hour, is_missing_local_hour,
+            hemisphere, season, month,
+            rebuild_run_id, data_source_version,
+            authority, provenance_metadata
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?,
+            ?, ?, ?,
+            ?, ?,
+            ?, ?
+        )
+    """, (
+        atom.city, atom.target_date.isoformat(), atom.source, atom.value, atom.target_unit,
+        atom.station_id, atom.fetch_utc.isoformat(),
+        atom.raw_value, atom.raw_unit, atom.target_unit, atom.value_type,
+        atom.fetch_utc.isoformat(), atom.local_time.isoformat(),
+        atom.collection_window_start_utc.isoformat(), atom.collection_window_end_utc.isoformat(),
+        atom.timezone, atom.utc_offset_minutes, int(atom.dst_active),
+        int(atom.is_ambiguous_local_hour), int(atom.is_missing_local_hour),
+        atom.hemisphere, atom.season, atom.month,
+        atom.rebuild_run_id, atom.data_source_version,
+        atom.authority, json.dumps(atom.provenance_metadata),
+    ))
 
 logger = logging.getLogger(__name__)
 
-WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY = os.environ.get("WU_API_KEY", "e1f10a1e78da46f5b10a1e78da96f525")
+# Default preserves existing behavior; set WU_API_KEY env var to override.
 WU_ICAO_HISTORY_URL = "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
+
+# Module-level guard instance (loads config/city_monthly_bounds.json once)
+_GUARD = IngestionGuard()
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 # Complete mapping: city → (ICAO, country_code, unit)
@@ -131,7 +174,7 @@ def _fetch_wu_icao_daily_highs(
             epoch = obs.get("valid_time_gmt")
             if temp is None or epoch is None:
                 continue
-            local_date = datetime.fromtimestamp(int(epoch), timezone.utc).astimezone(tz).date()
+            local_date = datetime.fromtimestamp(int(epoch), _tz.utc).astimezone(tz).date()
             if local_date < start_date or local_date > end_date:
                 continue
             key = local_date.isoformat()
@@ -236,20 +279,11 @@ def backfill_city(
     icao, cc, unit = info
     city_cfg = cities_by_name.get(city_name)
     timezone_name = city_cfg.timezone if city_cfg is not None else "UTC"
-    if city_cfg is not None:
-        sem = SettlementSemantics.for_city(city_cfg)
-    else:
-        sem = SettlementSemantics(
-            resolution_source=f"WU_{icao}",
-            measurement_unit=unit,
-            precision=1.0,
-            rounding_rule="round_half_to_even",
-            finalization_time="12:00:00Z",
-        )
     collected = 0
     skip_count = 0
     err_count = 0
     request_count = 0
+    rebuild_run_id = f"backfill_wu_daily_all_{datetime.now(_tz.utc).isoformat()}"
 
     end_date = date.today() - timedelta(days=2)
     start_date = end_date - timedelta(days=days_back - 1)
@@ -290,42 +324,74 @@ def backfill_city(
                 current += timedelta(days=1)
                 continue
 
+            # Settlement derivation moved to K4 rebuild_settlements.py (Revision 3 plan)
+
             existing = conn.execute(
                 "SELECT high_temp FROM observations WHERE city = ? AND target_date = ? AND source = 'wu_icao_history'",
                 (city_name, target_str),
             ).fetchone()
 
-            settlement_val = sem.assert_settlement_value(
-                high, context=f"backfill_wu_daily_all:{city_name}"
+            target_d = date.fromisoformat(target_str)
+            tz = ZoneInfo(timezone_name)
+            fetch_utc = datetime.now(_tz.utc)
+            local_time = fetch_utc.astimezone(tz)
+
+            window_start_local = datetime(target_d.year, target_d.month, target_d.day, 0, 0, tzinfo=tz)
+            window_end_local = datetime(target_d.year, target_d.month, target_d.day, 23, 59, 59, tzinfo=tz)
+            window_start_utc = window_start_local.astimezone(_tz.utc)
+            window_end_utc = window_end_local.astimezone(_tz.utc)
+
+            hemisphere = hemisphere_for_lat(city_cfg.lat) if city_cfg else "N"
+            season = season_from_date(target_str, lat=city_cfg.lat if city_cfg else 90.0)
+
+            try:
+                _GUARD.validate(
+                    city=city_name,
+                    raw_value=high,
+                    raw_unit=unit,
+                    fetch_utc=fetch_utc,
+                    target_date=target_d,
+                    peak_hour=city_cfg.historical_peak_hour if city_cfg else 15.0,
+                    local_time=local_time,
+                    hemisphere=hemisphere,
+                )
+            except IngestionRejected as e:
+                err_count += 1
+                logger.warning("Guard rejected %s/%s: %s", city_name, target_str, e)
+                current += timedelta(days=1)
+                continue
+
+            atom = ObservationAtom(
+                city=city_name,
+                target_date=target_d,
+                value_type="high",
+                value=high,
+                target_unit=unit,
+                raw_value=high,
+                raw_unit=unit,
+                source="wu_icao_history",
+                station_id=icao,
+                api_endpoint=f"https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json",
+                fetch_utc=fetch_utc,
+                local_time=local_time,
+                collection_window_start_utc=window_start_utc,
+                collection_window_end_utc=window_end_utc,
+                timezone=timezone_name,
+                utc_offset_minutes=int(local_time.utcoffset().total_seconds() // 60),
+                dst_active=bool(local_time.dst() and local_time.dst().total_seconds() > 0),
+                is_ambiguous_local_hour=bool(getattr(local_time, "fold", 0)),
+                is_missing_local_hour=False,
+                hemisphere=hemisphere,
+                season=season,
+                month=target_d.month,
+                rebuild_run_id=rebuild_run_id,
+                data_source_version="wu_icao_v1_2026",
+                authority="VERIFIED",
+                validation_pass=True,
+                provenance_metadata={},
             )
 
-            conn.execute("""
-                INSERT OR REPLACE INTO observations
-                (city, target_date, source, high_temp, unit, fetched_at)
-                VALUES (?, ?, 'wu_icao_history', ?, ?, ?)
-            """, (city_name, target_str, high, unit,
-                  datetime.now(timezone.utc).isoformat()))
-
-            conn.execute("""
-                INSERT INTO settlements
-                (city, target_date, settlement_value, settlement_source, settled_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(city, target_date) DO UPDATE SET
-                    settlement_value = excluded.settlement_value,
-                    settlement_source = excluded.settlement_source,
-                    settled_at = COALESCE(settlements.settled_at, excluded.settled_at)
-                WHERE settlements.settlement_value IS NULL
-                   OR settlements.settlement_value = ''
-                   OR settlements.settlement_source IS NULL
-                   OR settlements.settlement_source = ''
-                   OR settlements.settlement_source = 'openmeteo_archive_daily_max'
-            """, (
-                city_name,
-                target_str,
-                settlement_val,
-                f"wu_icao_{icao}",
-                datetime.combine(current, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
-            ))
+            _write_atom_to_observations(conn, atom)
 
             if existing is None:
                 collected += 1
