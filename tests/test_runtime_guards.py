@@ -259,8 +259,17 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: load_portfolio(portfolio_path))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: save_portfolio(state, portfolio_path))
+    # P4 (Tier 2.1): provide portfolio directly instead of via JSON file path.
+    # load_portfolio no longer falls back to JSON; this test isolates stale-order
+    # cleanup from portfolio loading mechanism.
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(positions=[_position(
+        trade_id="pending-1",
+        state="pending_tracked",
+        order_id="tracked",
+        order_posted_at="2026-03-30T00:00:00Z",
+        order_timeout_at="2099-01-01T00:00:00+00:00",
+    )]))
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
@@ -1472,8 +1481,12 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
 
     state = load_portfolio(path)
 
-    assert state.positions[0].strategy_key == "center_buy"
-    assert state.positions[0].strategy == "center_buy"
+    # P4 (Tier 2.1): JSON fallback deleted. DB projection is empty in this
+    # test fixture, so load_portfolio returns degraded empty portfolio.
+    # strategy_key backfilling was a JSON-path feature; canonical DB path
+    # stores strategy_key directly in position_current.
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
 
 
 def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path, monkeypatch):
@@ -1557,8 +1570,12 @@ def test_load_portfolio_falls_back_to_json_when_projection_empty(tmp_path, monke
 
     state = load_portfolio(path)
 
-    assert [pos.trade_id for pos in state.positions] == ["json-t1"]
-    assert state.positions[0].strategy_key == "center_buy"
+    # P4 (Tier 2.1): JSON fallback deleted. When DB projection is empty,
+    # load_portfolio returns empty PortfolioState with degraded flag instead
+    # of falling back to JSON data. This is the live-only axiom in action:
+    # JSON is never an authority source.
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
     assert state.bankroll == pytest.approx(111.0)
 
 
@@ -1623,9 +1640,10 @@ def test_load_portfolio_falls_back_to_json_when_legacy_events_are_newer_than_pro
 
     state = load_portfolio(path)
 
-    assert [pos.trade_id for pos in state.positions] == ["t1"]
-    assert state.positions[0].shares == pytest.approx(25.0)
-    assert state.positions[0].token_id == "yes123"
+    # P4 (Tier 2.1): JSON fallback deleted. Legacy-events-newer-than-projection
+    # now returns empty portfolio with degraded flag, not JSON data.
+    assert state.positions == []
+    assert state.portfolio_loader_degraded is True
 
 
 def test_partial_stale_policy_uses_degraded_json_fallback():

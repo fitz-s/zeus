@@ -637,6 +637,9 @@ class PortfolioState:
     recent_exits: list[dict] = field(default_factory=list)
     # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
     ignored_tokens: list[str] = field(default_factory=list)
+    # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
+    # Cycle runner must suppress new entries when this flag is set.
+    portfolio_loader_degraded: bool = False
 
     @property
     def initial_bankroll(self) -> float:
@@ -865,8 +868,15 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             else:
                 conn = get_connection(path.parent / "zeus.db")
     except Exception:
-        logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
-        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+        logger.error(
+            "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
+            exc_info=True,
+        )
+        return PortfolioState(
+            positions=[],
+            bankroll=json_data.get("bankroll", 150.0),
+            portfolio_loader_degraded=True,
+        )
 
     settlement_rows: list[dict] = []
     try:
@@ -890,12 +900,16 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
 
     policy = choose_portfolio_truth_source(snapshot.get("status"))
     if policy.source != "canonical_db":
-        logger.warning(
-            "load_portfolio falling back to JSON because canonical projection is not authoritative: %s (%s)",
+        logger.error(
+            "load_portfolio DB projection not authoritative: %s (%s); returning empty portfolio (entries suppressed)",
             snapshot.get("status"),
             policy.reason,
         )
-        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+        return PortfolioState(
+            positions=[],
+            bankroll=json_data.get("bankroll", 150.0),
+            portfolio_loader_degraded=True,
+        )
 
     bankroll = json_data.get("bankroll", 150.0)
     compatibility_by_trade_id: dict[str, dict] = {}
