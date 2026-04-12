@@ -1294,6 +1294,92 @@ def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
     assert summary["candidates"] == 0
 
 
+def test_run_cycle_surfaces_fdr_family_scan_failure_without_entries(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    class DummyClob:
+        def __init__(self):
+            pass
+
+        def get_balance(self):
+            return 100.0
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_reconcile_pending_positions",
+        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
+    )
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", lambda *args, **kwargs: (False, False))
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "find_weather_markets",
+        lambda **kwargs: [
+            {
+                "city": NYC,
+                "target_date": "2026-12-01",
+                "hours_since_open": 1.0,
+                "hours_to_resolution": 24.0,
+                "outcomes": [
+                    {
+                        "title": "39-40°F",
+                        "range_low": 39,
+                        "range_high": 40,
+                        "token_id": "yes1",
+                        "no_token_id": "no1",
+                        "market_id": "m1",
+                        "price": 0.35,
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: [
+            EdgeDecision(
+                should_trade=False,
+                decision_id="fdr-down",
+                rejection_stage="FDR_FAMILY_SCAN_UNAVAILABLE",
+                rejection_reasons=["full-family FDR scan unavailable; entry selection failed closed"],
+                fdr_fallback_fired=True,
+                fdr_family_size=0,
+            )
+        ],
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    conn = get_connection(db_path)
+    artifact_row = conn.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    artifact_payload = json.loads(artifact_row["artifact_json"])
+
+    assert summary["fdr_fallback_fired"] is True
+    assert summary["trades"] == 0
+    assert summary["no_trades"] == 1
+    assert summary["candidates"] == 1
+    assert artifact_payload["no_trade_cases"][0]["rejection_stage"] == "FDR_FAMILY_SCAN_UNAVAILABLE"
+    assert artifact_payload["no_trade_cases"][0]["rejection_reasons"] == [
+        "full-family FDR scan unavailable; entry selection failed closed"
+    ]
+
+
 def test_only_green_risk_allows_new_entries():
     assert cycle_runner._risk_allows_new_entries(RiskLevel.GREEN) is True
     assert cycle_runner._risk_allows_new_entries(RiskLevel.YELLOW) is False

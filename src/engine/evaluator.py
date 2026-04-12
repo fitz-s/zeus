@@ -906,7 +906,7 @@ def evaluate_candidate(
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
-        logger.error("Full-family hypothesis scan unavailable; using legacy FDR surface: %s", exc)
+        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc)
         _fdr_fallback = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)
@@ -914,7 +914,9 @@ def evaluate_candidate(
 
     # FDR filter
     legacy_filtered = fdr_filter(edges)
-    if full_family_hypotheses:
+    if _fdr_fallback:
+        filtered = []
+    elif full_family_hypotheses:
         selected_edge_keys = _selected_edge_keys_from_full_family(
             candidate,
             full_family_hypotheses,
@@ -942,12 +944,17 @@ def evaluate_candidate(
         logger.warning("Failed to record selection family facts: %s", exc)
 
     if not filtered:
-        stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
+        if _fdr_fallback:
+            stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
+            rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
+        else:
+            stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
+            rejection_reasons = [f"{len(edges)} edges found, {len(filtered)} passed FDR"]
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage=stage,
-            rejection_reasons=[f"{len(edges)} edges found, {len(filtered)} passed FDR"],
+            rejection_reasons=rejection_reasons,
             selected_method=selected_method,
             applied_validations=list(entry_validations),
             decision_snapshot_id=snapshot_id,
