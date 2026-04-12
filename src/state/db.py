@@ -2984,7 +2984,6 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
 
     positions: list[dict] = []
     strategy_open_counts: dict[str, int] = {}
@@ -3000,9 +2999,6 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         if phase not in OPEN_EXPOSURE_PHASES:
             continue
         trade_id = str(row["trade_id"] or row["position_id"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
-        if latest_trade_status in TERMINAL_TRADE_DECISION_STATUSES:
-            continue
         hints = transitional_hints.get(trade_id, {})
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
@@ -3099,32 +3095,13 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
-    legacy_latest_by_trade: dict[str, tuple[datetime, str]] = {}
 
     positions: list[dict] = []
-    stale_trade_ids: list[str] = []
     for row in rows:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
         hints = transitional_hints.get(trade_id, {})
-        projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
-        legacy_entry = legacy_latest_by_trade.get(trade_id)
-        if projection_updated_at is not None and legacy_entry is not None:
-            latest_legacy_ts, legacy_state = legacy_entry
-            if latest_legacy_ts > projection_updated_at:
-                # Same-phase legacy events within the dual-write tolerance
-                # window are harmless shadow events, not a stale signal.
-                current_runtime = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
-                drift_secs = (latest_legacy_ts - projection_updated_at).total_seconds()
-                if _is_semantic_advance(current_runtime, legacy_state) or drift_secs > _DUAL_WRITE_TOLERANCE_SECS:
-                    stale_trade_ids.append(trade_id)
-                    continue
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
-        terminal_runtime_state = _terminal_runtime_state_for_trade_decision_status(latest_trade_status)
-        if terminal_runtime_state:
-            runtime_state = terminal_runtime_state
         positions.append(
             {
                 "trade_id": trade_id,
@@ -3161,22 +3138,11 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "entry_fill_verified": bool(hints.get("entry_fill_verified", False)),
             }
         )
-    if not positions:
-        return {
-            "status": "stale_legacy_fallback" if stale_trade_ids else "empty",
-            "table": "position_current",
-            "positions": [],
-            "stale_trade_ids": stale_trade_ids,
-        }
-    status = "partial_stale" if stale_trade_ids else "ok"
-    result: dict = {
-        "status": status,
+    return {
+        "status": "ok" if positions else "empty",
         "table": "position_current",
         "positions": positions,
     }
-    if stale_trade_ids:
-        result["stale_trade_ids"] = stale_trade_ids
-    return result
 
 
 def upsert_control_override(
