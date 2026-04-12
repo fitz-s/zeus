@@ -19,12 +19,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def acquire_process_lock(state_dir: Path, *, mode: str = "live") -> "int | None":
-    """Acquire an exclusive process lock for the given mode.
+def acquire_process_lock(state_dir: Path) -> "int | None":
+    """Acquire an exclusive process lock for the live daemon.
 
     Args:
         state_dir: Directory where lock files are stored (e.g. zeus/state/).
-        mode: "live" or "paper". Each mode gets its own lock file.
 
     Returns:
         Open file descriptor holding the lock. Caller MUST keep this reference
@@ -34,6 +33,7 @@ def acquire_process_lock(state_dir: Path, *, mode: str = "live") -> "int | None"
     Raises:
         SystemExit: if another instance is already running.
     """
+    mode = "live"
     lock_path = state_dir / f"zeus-{mode}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)

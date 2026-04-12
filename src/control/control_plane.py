@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.config import state_path
+from src.control.gate_decision import GateDecision, ReasonCode
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
@@ -80,12 +81,31 @@ def pause_entries(reason_code: str) -> None:
     """Auto-pause entries after an unhandled exception in the entry path.
 
     Sets entries_paused and records the machine-readable reason_code in
-    _control_state, then emits an alert. Operator must explicitly resume
-    to re-enable entries.
+    _control_state, then emits an alert. Also persists to DB so the pause
+    survives a daemon restart. Operator must explicitly resume to re-enable.
     """
     _control_state["entries_paused"] = True
     _control_state["entries_pause_reason"] = reason_code
     alert_auto_pause(reason_code)
+    # Persist so a daemon restart does not silently lose the pause.
+    try:
+        conn = get_shared_connection()
+        upsert_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by=f"auto:{reason_code}",
+            issued_at=datetime.now(timezone.utc).isoformat(),
+            reason=reason_code,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.error("Failed to persist auto-pause to DB: %s", exc)
 
 
 
@@ -93,15 +113,31 @@ def get_edge_threshold_multiplier() -> float:
     return _control_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
 
 
-def strategy_gates() -> dict[str, bool]:
-    return dict(_control_state.get("strategy_gates", {}))
+def strategy_gates() -> dict[str, GateDecision]:
+    raw = _control_state.get("strategy_gates", {})
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            result[k] = GateDecision.from_dict(v)
+        else:
+            # backward compat: bare bool from DB -> GateDecision with UNSPECIFIED reason
+            result[k] = GateDecision(
+                enabled=bool(v),
+                reason_code=ReasonCode.UNSPECIFIED,
+                reason_snapshot={},
+                gated_at="",
+                gated_by="unknown",
+            )
+    return result
 
 
 def is_strategy_enabled(strategy: str) -> bool:
-    gates = _control_state.get("strategy_gates", {})
     if not strategy:
         return True
-    return gates.get(strategy, True)
+    decision = strategy_gates().get(strategy)
+    if decision is None:
+        return True
+    return decision.enabled
 
 
 
@@ -267,6 +303,16 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 return False, "missing_strategy"
             if not isinstance(enabled, bool):
                 return False, "missing_enabled_bool"
+            decision = GateDecision(
+                enabled=enabled,
+                reason_code=ReasonCode(cmd.get("reason_code", "unspecified")),
+                reason_snapshot=cmd.get("reason_snapshot", {}),
+                gated_at=issued_at,
+                gated_by=issued_by,
+            )
+            gates = dict(_control_state.get("strategy_gates", {}))
+            gates[strategy] = decision.to_dict()
+            _control_state["strategy_gates"] = gates
             result = upsert_control_override(
                 conn,
                 override_id=f"control_plane:strategy:{strategy}:gate",

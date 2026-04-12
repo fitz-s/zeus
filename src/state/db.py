@@ -535,7 +535,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             source TEXT NOT NULL DEFAULT 'runtime',
             details_json TEXT NOT NULL,
             timestamp TEXT NOT NULL,
-            env TEXT NOT NULL DEFAULT 'paper'
+            env TEXT NOT NULL DEFAULT 'live'
         );
 
         -- Derived health view for PnL and edge compression
@@ -853,11 +853,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         pass
 
     # Provenance: env column on trade-facing tables (Decision 2)
-    # Existing rows default to 'paper' — all historical data is from paper trading.
+    # Existing rows default to 'live' — Zeus is designed only for live.
     _env_tables = ["trade_decisions", "chronicle", "decision_log", "position_events"]
     for table in _env_tables:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'paper';")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
         except sqlite3.OperationalError:
             pass  # Column already exists
             
@@ -1103,7 +1103,7 @@ def backfill_open_legacy_paper_positions(
         if not trade_id:
             raise ValueError("cannot backfill canonical open position without trade_id")
 
-        env = str(getattr(position, "env", "") or "paper").strip()
+        env = str(getattr(position, "env", "") or "live").strip()
         if env != "paper":
             skipped_non_paper_trade_ids.append(trade_id)
             continue
