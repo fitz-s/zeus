@@ -1,0 +1,160 @@
+# Zeus Live Phase 1: First Boot Runbook
+
+Authority: `docs/governance/zeus_autonomous_delivery_constitution.md`
+Applies to: First live daemon boot after paper validation.
+
+---
+
+## Pre-flight checklist
+
+Before starting, verify all of the following:
+
+- [ ] `ZEUS_MODE=live` will be set in daemon environment
+- [ ] macOS Keychain entries present: `openclaw-metamask-private-key`, `openclaw-polymarket-funder-address`, `zeus_discord_webhook`
+- [ ] `state/` directory exists and is writable
+- [ ] Paper mode ran >=24h without errors
+- [ ] Full test suite shows <=25 failures (pre-live invariants pass)
+
+---
+
+## Step 1: Verify wallet balance
+
+```bash
+ZEUS_MODE=live python - <<'EOF'
+from src.data.polymarket_client import PolymarketClient
+c = PolymarketClient(paper_mode=False)
+bal = c.get_balance()
+print(f"Wallet: ${bal:.2f} USDC")
+EOF
+```
+
+**Expected**: balance prints without error. If you see `FATAL: Cannot start`, credentials are missing or the Polymarket API is unreachable.
+
+---
+
+## Step 2: Verify initial_bankroll sanity
+
+```bash
+ZEUS_MODE=live python - <<'EOF'
+from src.config import settings
+print(f"capital_base_usd: {settings.capital_base_usd}")
+print(f"kelly_multiplier: {settings['sizing']['kelly_multiplier']}")
+print(f"loss_limit_usd:   {settings['riskguard']['loss_limit_usd']}")
+EOF
+```
+
+**Sanity thresholds for Phase 1:**
+- `capital_base_usd`: matches your intended starting bankroll
+- `kelly_multiplier`: 0.10-0.25 (Phase 1 is fractional Kelly, not full)
+- `loss_limit_usd`: <=10% of capital_base_usd
+
+If any value is wrong, edit `config/settings.json` and re-check.
+
+---
+
+## Step 3: Manual single-cycle trigger
+
+```bash
+ZEUS_MODE=live python -m src.main --once 2>&1 | tee /tmp/zeus_first_boot.log
+```
+
+This runs ONE full cycle and exits. Do NOT use the daemon loop for first boot.
+
+---
+
+## Step 4: Verify each subsystem
+
+After the `--once` run, check the log for these entries:
+
+```
+# Wallet gate passed
+Startup wallet check: $NN.NN USDC available
+
+# Schema initialized
+INFO: Zeus starting in live mode (single cycle)
+
+# Discovery completed (may find 0 opportunities — that is OK)
+INFO: [...] cycle complete
+
+# Harvester ran
+INFO: harvester cycle
+
+# No unhandled exceptions
+# (no CRITICAL or FATAL lines)
+```
+
+If any subsystem logged `CRITICAL` or `FATAL`, stop and investigate before proceeding.
+
+---
+
+## Step 5: Confirm no orders placed
+
+After `--once`, verify:
+
+```bash
+# Check trade DB for any new trade_decisions rows
+ZEUS_MODE=live python - <<'EOF'
+import sqlite3, os
+from src.config import state_path
+conn = sqlite3.connect(str(state_path("zeus.db")))
+rows = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
+print(f"trade_decisions rows: {rows}")
+conn.close()
+EOF
+```
+
+For a first boot with no open markets matching current criteria, expect 0 rows. If rows exist, review them with:
+
+```bash
+ZEUS_MODE=live python -m src.analysis dashboard
+# or
+ZEUS_MODE=live python - <<'EOF'
+import sqlite3
+from src.config import state_path
+conn = sqlite3.connect(str(state_path("zeus.db")))
+for row in conn.execute("SELECT * FROM trade_decisions ORDER BY created_at DESC LIMIT 10").fetchall():
+    print(dict(zip([d[0] for d in conn.execute('PRAGMA table_info(trade_decisions)').fetchall()], row)))
+conn.close()
+EOF
+```
+
+**If any order was placed unexpectedly**: use the kill-switch immediately (see below).
+
+---
+
+## Kill-switch
+
+```bash
+# Stop the daemon immediately (if running as scheduler)
+pkill -f 'python -m src.main'
+
+# Or if running via launchd:
+launchctl unload ~/Library/LaunchAgents/com.openclaw.zeus-live.plist
+
+# Confirm stopped:
+ps aux | grep 'src.main'
+```
+
+After kill, Zeus holds all open positions as-is. No orders are sent while the daemon is stopped.
+
+---
+
+## Starting the live daemon loop
+
+Once single-cycle verified:
+
+```bash
+ZEUS_MODE=live nohup python -m src.main >> logs/zeus-live.log 2>&1 &
+echo $! > state/zeus-live.pid
+```
+
+Or via launchd (preferred for persistent operation).
+
+---
+
+## What to expect on Phase 1 boot
+
+- `insufficient_history` warnings in logs: normal. Markets with <N prior samples don't meet the FDR threshold yet.
+- `capped_by_safety_cap` in logs: this is operator-visible metadata only. It is NOT a trading decision input.
+- Discord alert `RISKGUARD HALT`: if triggered on first cycle, check the failed_rules detail in the alert.
+- 0 trades placed is a valid outcome if no edges exceed the FDR/Kelly floor.

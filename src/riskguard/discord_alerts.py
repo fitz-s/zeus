@@ -259,3 +259,97 @@ def alert_trade(direction: str, market: str, price: float, size_usd: float,
         f"Strategy: `{strategy}` | Mode: `{mode}`"
     )
     return _send_embed("trade", f"TRADE: {direction} @ {price:.2f}", body)
+
+
+# Live operation milestones and safety alerts
+
+_COOLDOWN_LIVE_MILESTONE = 0  # No cooldown u2014 milestones fire once by nature
+_COOLDOWN_WALLET_DROP = 300   # 5 minutes between wallet-drop alerts
+_COOLDOWN_CHAIN_SYNC = 600    # 10 minutes between chain-sync-failure alerts
+_COOLDOWN_HEARTBEAT = 300     # 5 minutes between missed-heartbeat alerts
+
+COLOR_LIVE_MILESTONE = 0x9B59B6  # Purple u2014 live milestone
+COLOR_WARNING_CRITICAL = 0xFF4444  # Bright red u2014 critical safety warning
+
+
+def alert_first_live_fill(
+    trade_id: str,
+    city: str,
+    direction: str,
+    price: float,
+    size_usd: float,
+) -> bool:
+    """Alert on the first live order fill. No cooldown u2014 fires once."""
+    body = (
+        f"**First live fill executed**\n"
+        f"Trade: `{trade_id}` | City: `{city}`\n"
+        f"Direction: `{direction}` | Price: `{price:.3f}` | Size: `${size_usd:.2f}`\n"
+        f"Verify position in DB before next cycle."
+    )
+    return _send_embed("trade", "FIRST LIVE FILL", body, color=COLOR_LIVE_MILESTONE)
+
+
+def alert_first_live_settlement(
+    trade_id: str,
+    city: str,
+    pnl: float,
+    won: bool,
+) -> bool:
+    """Alert on the first live settlement. No cooldown u2014 fires once."""
+    outcome = "WON" if won else "LOST"
+    sign = "+" if pnl >= 0 else ""
+    body = (
+        f"**First live settlement: {outcome}**\n"
+        f"Trade: `{trade_id}` | City: `{city}`\n"
+        f"PnL: `{sign}${pnl:.2f}`"
+    )
+    color = COLOR_LIVE_MILESTONE if won else COLOR_WARNING_CRITICAL
+    return _send_embed("trade", "FIRST LIVE SETTLEMENT", body, color=color)
+
+
+def alert_wallet_drop_over_pct(
+    wallet_before: float,
+    wallet_after: float,
+    drop_pct: float,
+) -> bool:
+    """Alert when wallet balance drops more than drop_pct%. Cooldown: 5 min."""
+    body = (
+        f"**Wallet balance dropped {drop_pct:.1f}%**\n"
+        f"Before: `${wallet_before:.2f}` u2192 After: `${wallet_after:.2f}`\n"
+        f"Investigate open positions and riskguard status."
+    )
+    return _with_cooldown(
+        "wallet_drop",
+        _COOLDOWN_WALLET_DROP,
+        lambda: _send_embed("halt", f"WALLET DROP {drop_pct:.1f}%", body, color=COLOR_WARNING_CRITICAL),
+    )
+
+
+def alert_chain_sync_failure(failure_count: int, detail: str = "") -> bool:
+    """Alert on repeated chain reconciliation failures. Cooldown: 10 min."""
+    body = (
+        f"**Chain sync failed {failure_count} consecutive time(s)**\n"
+        f"Reconciliation could not fetch authoritative on-chain positions.\n"
+    )
+    if detail:
+        body += f"Detail: {detail}\n"
+    body += "Check Polymarket API connectivity and credentials."
+    return _with_cooldown(
+        "chain_sync_failure",
+        _COOLDOWN_CHAIN_SYNC,
+        lambda: _send_embed("halt", "CHAIN SYNC FAILURE", body, color=COLOR_WARNING_CRITICAL),
+    )
+
+
+def alert_daemon_heartbeat_missed(last_seen_at: str, stale_minutes: float) -> bool:
+    """Alert when daemon heartbeat is stale (>5 min). Cooldown: 5 min."""
+    body = (
+        f"**Daemon heartbeat not updated for {stale_minutes:.1f} minutes**\n"
+        f"Last seen: `{last_seen_at}`\n"
+        f"Daemon may have silently crashed. Check process and logs."
+    )
+    return _with_cooldown(
+        "heartbeat_missed",
+        _COOLDOWN_HEARTBEAT,
+        lambda: _send_embed("halt", "HEARTBEAT MISSED", body, color=COLOR_WARNING_CRITICAL),
+    )

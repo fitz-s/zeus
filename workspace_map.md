@@ -249,7 +249,7 @@ See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of 
 | File/Dir | Purpose |
 |----------|---------|
 | `zeus-paper.db` / `zeus-live.db` | Mode-specific trade databases |
-| `zeus-shared.db` | Shared world-data database |
+| `zeus-world.db` | Shared world-data database |
 | `risk_state-*.db` | Mode-specific RiskGuard state |
 | `positions-*.json` | Mode-qualified position files |
 | `ensemble-log/` | ENS snapshots (append-only) |

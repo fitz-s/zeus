@@ -205,6 +205,24 @@ def run_single_cycle():
     logger.info("=== SINGLE CYCLE COMPLETE ===")
 
 
+def _write_heartbeat() -> None:
+    """Write a heartbeat JSON to state/ every 60s so operators can detect silent crashes."""
+    from src.config import state_path
+    path = state_path(f"daemon-heartbeat-{get_mode()}.json")
+    try:
+        import json
+        payload = {
+            "alive": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": get_mode(),
+        }
+        tmp = Path(str(path) + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)
+    except Exception as exc:
+        logger.warning("Heartbeat write failed: %s", exc)
+
+
 def _startup_wallet_check(clob=None):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
@@ -371,6 +389,8 @@ def main():
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
+    scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
+                      max_instances=1, coalesce=True)
     for time_str in discovery["ecmwf_open_data_times_utc"]:
         h, m = time_str.split(":")
         scheduler.add_job(
