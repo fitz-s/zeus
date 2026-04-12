@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+import sys
 
 from src.engine.replay import run_replay
 from src.state.db import get_connection, init_schema
+import scripts.run_replay as cli_module
 from scripts.run_replay import _format_total_pnl
 
 
@@ -465,3 +467,63 @@ def test_cli_formats_unpriced_replay_pnl_as_unavailable():
     )
 
     assert _format_total_pnl(summary) == "N/A (market price unavailable for 298/298 replayed subjects)"
+
+
+def test_cli_trade_history_audit_routes_to_backtest_lane(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "cli.db"
+    called = {}
+
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+        called.update(
+            start_date=start_date,
+            end_date=end_date,
+            mode=mode,
+            overrides=overrides,
+            allow_snapshot_only_reference=allow_snapshot_only_reference,
+        )
+        return SimpleNamespace(
+            run_id="run-1",
+            n_settlements=1,
+            n_replayed=0,
+            coverage_pct=0.0,
+            n_would_trade=0,
+            replay_win_rate=0.0,
+            replay_total_pnl=0.0,
+            limitations={
+                "pnl_available": False,
+                "pnl_unavailable_reason": "trade_history_audit_reports_actual_trade_pnl_rows_not_simulated_strategy_pnl",
+            },
+            per_city={},
+            outcomes=[],
+        )
+
+    import src.engine.replay as replay_module
+
+    monkeypatch.setattr(cli_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(replay_module, "run_replay", _run_replay)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_replay.py",
+            "--mode",
+            "trade_history_audit",
+            "--start",
+            "2026-04-03",
+            "--end",
+            "2026-04-03",
+        ],
+    )
+
+    cli_module.main()
+    output = capsys.readouterr().out
+
+    assert called == {
+        "start_date": "2026-04-03",
+        "end_date": "2026-04-03",
+        "mode": "trade_history_audit",
+        "overrides": None,
+        "allow_snapshot_only_reference": False,
+    }
+    assert "TRADE_HISTORY_AUDIT" in output
+    assert "Results stored in zeus_backtest.db" in output
