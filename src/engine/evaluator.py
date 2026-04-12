@@ -1097,11 +1097,14 @@ def evaluate_candidate(
         _shadow_flag = settings._data.get("feature_flags", {}).get("EXECUTION_PRICE_SHADOW", False)
         if _shadow_flag:
             # New path authoritative — fee-adjusted entry price
-            size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle)
+            size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
+                              safety_cap_usd=settings["live_safety_cap_usd"])
         else:
             # Shadow mode: old path authoritative, log delta for monitoring
-            size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle)
-            shadow_size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle)
+            size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle,
+                              safety_cap_usd=settings["live_safety_cap_usd"])
+            shadow_size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
+                                     safety_cap_usd=settings["live_safety_cap_usd"])
             if size > 0:
                 _ep_logger = logging.getLogger("zeus.execution_price_shadow")
                 _ep_logger.info(

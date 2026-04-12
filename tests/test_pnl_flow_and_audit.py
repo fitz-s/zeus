@@ -1559,7 +1559,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
 
-    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult):
+    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult, **kwargs):
         captured["bankroll"] = bankroll
         return 5.0
 
@@ -1708,7 +1708,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
         ),
     )
 
-    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult):
+    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult, **kwargs):
         captured["kelly_mult"] = kelly_mult
         return 5.0
 
@@ -1944,7 +1944,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
         ),
     )
 
-    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult):
+    def _capture_kelly(p_posterior, entry_price, bankroll, kelly_mult, **kwargs):
         captured["kelly_mult"] = kelly_mult
         return 10.0
 

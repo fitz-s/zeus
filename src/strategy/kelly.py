@@ -12,9 +12,13 @@ Dynamic multiplier reduces sizing when:
 - In drawdown
 """
 
+import logging
+
 import numpy as np
 
 from src.contracts.provenance_registry import require_provenance
+
+logger = logging.getLogger(__name__)
 
 
 def kelly_size(
@@ -22,11 +26,14 @@ def kelly_size(
     entry_price: float,
     bankroll: float,
     kelly_mult: float = 0.25,
+    safety_cap_usd: float | None = None,
 ) -> float:
     """Compute position size using fractional Kelly criterion. Spec §5.1.
 
     Returns: size in USD. Returns 0.0 if no positive edge.
     entry_price: cost per share in [0.01, 0.99].
+    safety_cap_usd: optional hard ceiling in USD. When provided, clips output
+        and emits a structured log record with the original pre-clip size.
     """
     if p_posterior <= entry_price:
         return 0.0
@@ -34,7 +41,15 @@ def kelly_size(
         return 0.0
 
     f_star = (p_posterior - entry_price) / (1.0 - entry_price)
-    return f_star * kelly_mult * bankroll
+    raw_proposal = f_star * kelly_mult * bankroll
+
+    if safety_cap_usd is not None and raw_proposal > safety_cap_usd:
+        logger.info(
+            "kelly_sized",
+            extra={"capped_by_safety_cap": True, "raw_proposal": raw_proposal},
+        )
+        return safety_cap_usd
+    return raw_proposal
 
 
 def dynamic_kelly_mult(

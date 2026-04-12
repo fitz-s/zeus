@@ -1,5 +1,7 @@
 {
   "capital_base_usd": 150,
+  "live_safety_cap_usd": 5.0,
+  "_live_safety_cap_usd_note": "Phase 1 maturity rail. Kelly output hard-clipped to this ceiling for canary window. Lifted only after Tier 6 canary passes.",
   "mode": "paper",
   "discovery": {
     "opening_hunt_interval_min": 30,

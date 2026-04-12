@@ -52,6 +52,7 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 | `test_fdr.py` | FDR filter correctness |
 | `test_kelly.py` | Kelly sizing |
 | `test_kelly_cascade_bounds.py` | Kelly cascade product bounds [0.001, 1.0] |
+| `test_kelly_live_safety_cap.py` | P1 relationship tests: live_safety_cap_usd clip invariant (K3→execution boundary) |
 | `test_correlation.py` | Cross-city/bin correlation |
 | `test_bootstrap_symmetry.py` | Bootstrap symmetry properties |
 | `test_alpha_target_coherence.py` | Alpha target coherence |
