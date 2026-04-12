@@ -39,7 +39,7 @@ c.close()
 print()
 
 # JSON files
-for name in ["positions-live.json", "strategy_tracker-live.json"]:
+for name in ["positions.json", "strategy_tracker.json"]:
     with open(f"state/{name}") as f:
         data = json.load(f)
     if "positions" in data:

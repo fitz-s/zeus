@@ -208,7 +208,7 @@ def run_single_cycle():
 def _write_heartbeat() -> None:
     """Write a heartbeat JSON to state/ every 60s so operators can detect silent crashes."""
     from src.config import state_path
-    path = state_path(f"daemon-heartbeat-{get_mode()}.json")
+    path = state_path("daemon-heartbeat.json")
     try:
         import json
         payload = {

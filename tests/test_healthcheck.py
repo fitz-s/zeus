@@ -174,8 +174,8 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
 
 
 def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary-paper.json"
-    risk_path = tmp_path / "risk_state-paper.db"
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
     status_path.write_text(json.dumps(_status_payload(
         portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
     )))
@@ -200,8 +200,8 @@ def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):
 
 
 def test_healthcheck_falls_back_to_launchctl_print_when_list_fails(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary-paper.json"
-    risk_path = tmp_path / "risk_state-paper.db"
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
     status_path.write_text(json.dumps(_status_payload(
         portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
     )))
@@ -234,7 +234,7 @@ def test_healthcheck_falls_back_to_launchctl_print_when_list_fails(monkeypatch, 
 
 
 def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary-live.json"
+    status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"
     status_path.write_text(json.dumps(_status_payload(
         timestamp=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
@@ -291,8 +291,8 @@ def test_healthcheck_is_not_healthy_when_riskguard_is_missing(monkeypatch, tmp_p
 
 
 def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary-paper.json"
-    risk_path = tmp_path / "risk_state-paper.db"
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
     zeus_db_path = tmp_path / "zeus.db"
     status_path.write_text(json.dumps(_status_payload(
         portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
@@ -320,8 +320,8 @@ def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path
 
 
 def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path):
-    status_path = tmp_path / "status_summary-paper.json"
-    risk_path = tmp_path / "risk_state-paper.db"
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
     status_path.write_text(
         json.dumps(
             {

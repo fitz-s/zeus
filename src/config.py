@@ -20,26 +20,12 @@ def legacy_state_path(filename: str) -> Path:
 
 
 def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
-    """Mode-qualified path for per-process state files.
+    """State path — mode prefix eliminated (live-only, Phase 2).
 
-    This is the single control point for process state isolation.
-    All per-process mutable files (positions, tracker, status, control, risk_state)
-    MUST use this function.
-
-    zeus.db does NOT use this — it holds shared world data (ENS, calibration,
-    settlements) plus env-tagged decision data.
-
-    positions.json → positions-live.json (live-only, Phase 1)
+    Mode parameter accepted for call-site compatibility but ignored.
+    All per-process state files live directly in STATE_DIR.
     """
-    import os
-
-    mode = mode or get_mode()
-    dot = filename.rfind(".")
-    if dot > 0:
-        stem, ext = filename[:dot], filename[dot:]
-    else:
-        stem, ext = filename, ""
-    return STATE_DIR / f"{stem}-{mode}{ext}"
+    return STATE_DIR / filename
 
 
 def get_mode() -> str:
