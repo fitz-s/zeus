@@ -12,9 +12,13 @@
 4. `docs/known_gaps.md` for current runtime gap context
 
 ## Current active packet
-- No active work packet
-- Branch: `data-improve`
-- Next: return to Zeus development (data improvement work)
+- **Phase**: Phase 1 Live-Only Reorientation (plan: `docs/operations/phase1live_2026-04-11_plan.md`, execution: `.omx/context/phase1live_2026-04-11_execution_plan.md`)
+- **Packet**: P1 — $5 Live Safety Cap (Tier 1.2) — FROZEN, awaiting Cassandra pre-review
+- **Team**: zeus-phase1-live (team-lead opus + cassandra opus adversary + atlas/prometheus/titan sonnet executors + hermes sonnet tester + scribe haiku writer)
+- **Branch**: `data-improve`
+- **Freeze doc**: `.omx/context/p1-safetycap_2026-04-11_freeze.md`
+- **Mainline order**: P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9a → P9b (with simplify checkpoints S1/S2/S3 every 3 packets)
+- **Next**: P1 12-step protocol runs as template packet; P2–P15 follow
 
 ## Last accepted packet
 - GOV-ROOT-AUTHORITY-GUIDE (archived)
