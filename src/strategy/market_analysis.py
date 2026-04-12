@@ -96,6 +96,16 @@ class MarketAnalysis:
         )  # centralized forecast-uncertainty seam
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
 
+    def _posterior_with_bootstrapped_bin(self, bin_idx: int, p_cal_boot: float) -> np.ndarray:
+        p_cal_boot_vector = np.array(self.p_cal, dtype=float)
+        p_cal_boot_vector[bin_idx] = p_cal_boot
+        return compute_posterior(
+            p_cal_boot_vector,
+            self.p_market,
+            self._alpha,
+            bins=self.bins,
+        )
+
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
 
@@ -235,7 +245,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot = p_raw_boot
 
-            p_post = self._alpha * p_cal_boot + (1.0 - self._alpha) * self.p_market[bin_idx]
+            p_post = self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
             bootstrap_edges[i] = p_post - self.p_market[bin_idx]
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
@@ -288,8 +298,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot = p_raw_boot
 
-            p_post_no = 1.0 - (self._alpha * p_cal_boot +
-                                (1.0 - self._alpha) * self.p_market[bin_idx])
+            p_post_no = 1.0 - self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
             p_market_no = 1.0 - self.p_market[bin_idx]
             bootstrap_edges[i] = p_post_no - p_market_no
 

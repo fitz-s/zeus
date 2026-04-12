@@ -31,6 +31,7 @@ BASE_ALPHA_BY_LEVEL = {
     3: settings["edge"]["base_alpha"]["level3"],
     4: settings["edge"]["base_alpha"]["level4"],
 }
+TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is optimal
 
 
 def vwmp(best_bid: float, best_ask: float,
@@ -196,20 +197,8 @@ def compute_posterior(
     p_market sums to vig (~0.95-1.05), not 1.0, so the blend must
     be re-normalized. CLAUDE.md types: p_posterior sums to 1.0.
     """
-    # D3: per-bin alpha scaling for tail bins
-    # Tail bins = bins where one boundary is None (open-ended: "X or below", "X or higher")
-    # Scale factor 0.5 gives Brier improvement of -0.042 over uniform α
-    TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is optimal
-
     if bins is not None and len(bins) == len(p_cal):
-        alpha_vec = np.full_like(p_cal, alpha)
-        for i, b in enumerate(bins):
-            is_tail = (hasattr(b, 'low') and b.low is None) or (hasattr(b, 'high') and b.high is None)
-            if not is_tail and hasattr(b, 'label'):
-                label = b.label.lower()
-                is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
-            if is_tail:
-                alpha_vec[i] = max(0.20, alpha * TAIL_ALPHA_SCALE)
+        alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
         raw = alpha_vec * p_cal + (1.0 - alpha_vec) * p_market
     else:
         raw = alpha * p_cal + (1.0 - alpha) * p_market
@@ -218,3 +207,14 @@ def compute_posterior(
     if total > 0:
         return raw / total
     return raw
+
+
+def alpha_for_bin(alpha: float, bin) -> float:
+    """Return the effective alpha for one bin, including tail scaling."""
+    is_tail = (hasattr(bin, 'low') and bin.low is None) or (hasattr(bin, 'high') and bin.high is None)
+    if not is_tail and hasattr(bin, 'label'):
+        label = bin.label.lower()
+        is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
+    if is_tail:
+        return max(0.20, float(alpha) * TAIL_ALPHA_SCALE)
+    return float(alpha)

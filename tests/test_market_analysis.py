@@ -91,6 +91,67 @@ class TestComputePosterior:
         result = compute_posterior(p_cal, p_market, 1.0)
         np.testing.assert_array_almost_equal(result, p_cal)
 
+    def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=34, label="33-34°F", unit="F"),
+        ]
+        result = compute_posterior(
+            np.array([1.0, 0.0]),
+            np.array([0.5, 0.5]),
+            0.8,
+            bins=bins,
+        )
+
+        np.testing.assert_array_almost_equal(result, [0.875, 0.125])
+        assert result.sum() == pytest.approx(1.0)
+
+    def test_tail_alpha_scale_applies_to_buy_yes_bootstrap_ci(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=39, high=40, label="39-40°F", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([1.0, 0.0]),
+            p_cal=np.array([1.0, 0.0]),
+            p_market=np.array([0.5, 0.5]),
+            alpha=0.8,
+            bins=bins,
+            member_maxes=np.array([30.0, 30.0, 30.0]),
+            unit="F",
+        )
+        ma._sigma = 0.0
+
+        ci_lo, ci_hi, p_value = ma._bootstrap_bin(0, 5)
+
+        assert ma._posterior_with_bootstrapped_bin(0, 1.0)[0] == pytest.approx(0.875)
+        assert ci_lo == pytest.approx(0.375)
+        assert ci_hi == pytest.approx(0.375)
+        assert p_value == 0.0
+
+    def test_tail_alpha_scale_applies_to_buy_no_bootstrap_ci(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=39, high=40, label="39-40°F", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([0.0, 1.0]),
+            p_cal=np.array([0.0, 1.0]),
+            p_market=np.array([0.5, 0.5]),
+            alpha=0.8,
+            bins=bins,
+            member_maxes=np.array([40.0, 40.0, 40.0]),
+            unit="F",
+        )
+        ma._sigma = 0.0
+
+        ci_lo, ci_hi, p_value = ma._bootstrap_bin_no(0, 5)
+
+        assert ma._posterior_with_bootstrapped_bin(0, 0.0)[0] == pytest.approx(0.25)
+        assert ci_lo == pytest.approx(0.25)
+        assert ci_hi == pytest.approx(0.25)
+        assert p_value == 0.0
+
 
 class TestMarketAnalysis:
     def _make_bins(self) -> list[Bin]:
