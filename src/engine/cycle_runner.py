@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
 
 
+def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
+    return risk_level == RiskLevel.GREEN
+
+
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
     if mode == DiscoveryMode.DAY0_CAPTURE:
         return "settlement_capture"
@@ -243,7 +247,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
-    if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:
+    if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
             portfolio_dirty = portfolio_dirty or p_dirty

@@ -1173,6 +1173,13 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     assert summary["candidates"] == 0
 
 
+def test_only_green_risk_allows_new_entries():
+    assert cycle_runner._risk_allows_new_entries(RiskLevel.GREEN) is True
+    assert cycle_runner._risk_allows_new_entries(RiskLevel.YELLOW) is False
+    assert cycle_runner._risk_allows_new_entries(RiskLevel.ORANGE) is False
+    assert cycle_runner._risk_allows_new_entries(RiskLevel.RED) is False
+
+
 def test_chain_quarantine_keeps_direction_unknown():
     portfolio = PortfolioState()
     stats = reconcile(
