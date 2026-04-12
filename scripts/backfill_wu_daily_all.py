@@ -269,8 +269,13 @@ def backfill_city(
     chunk_days: int = 31,
     sleep_seconds: float = 0.5,
     missing_only: bool = False,
+    dry_run: bool = False,
 ) -> dict:
-    """Backfill WU daily observations for one city using ICAO station data."""
+    """Backfill WU daily observations for one city using ICAO station data.
+
+    When dry_run=True, all API fetches and guard validations run as normal but
+    no rows are written to the DB. Returns fetched/passed/rejected counts.
+    """
     info = CITY_STATIONS.get(city_name)
     if not info:
         print(f"  SKIP: {city_name} not in CITY_STATIONS")
@@ -282,6 +287,7 @@ def backfill_city(
     collected = 0
     skip_count = 0
     err_count = 0
+    guard_rejected = 0
     request_count = 0
     rebuild_run_id = f"backfill_wu_daily_all_{datetime.now(_tz.utc).isoformat()}"
 
@@ -334,7 +340,27 @@ def backfill_city(
             target_d = date.fromisoformat(target_str)
             tz = ZoneInfo(timezone_name)
             fetch_utc = datetime.now(_tz.utc)
-            local_time = fetch_utc.astimezone(tz)
+
+            # Fix 3: local_time is the expected peak time on the target date in local tz,
+            # NOT the script runtime converted to local tz. This gives semantically correct
+            # provenance for historical atoms.
+            from src.signal.diurnal import _is_missing_local_hour as _is_missing
+            peak_hour_raw = city_cfg.historical_peak_hour if city_cfg else 15.0
+            _peak_h = int(peak_hour_raw)
+            _peak_m = int((peak_hour_raw - _peak_h) * 60)
+            local_time = datetime(
+                target_d.year, target_d.month, target_d.day,
+                _peak_h, _peak_m,
+                tzinfo=tz,
+            )
+
+            # Fix 2: compute is_missing_local_hour from actual local_time rather than hardcoding False
+            is_missing_local = _is_missing(local_time, tz)
+            is_ambiguous = bool(getattr(local_time, "fold", 0))
+            dst_offset = local_time.dst()
+            dst_active = bool(dst_offset and dst_offset.total_seconds() > 0)
+            utc_offset = local_time.utcoffset()
+            utc_offset_min = int(utc_offset.total_seconds() // 60) if utc_offset is not None else 0
 
             window_start_local = datetime(target_d.year, target_d.month, target_d.day, 0, 0, tzinfo=tz)
             window_end_local = datetime(target_d.year, target_d.month, target_d.day, 23, 59, 59, tzinfo=tz)
@@ -356,7 +382,7 @@ def backfill_city(
                     hemisphere=hemisphere,
                 )
             except IngestionRejected as e:
-                err_count += 1
+                guard_rejected += 1
                 logger.warning("Guard rejected %s/%s: %s", city_name, target_str, e)
                 current += timedelta(days=1)
                 continue
@@ -377,10 +403,10 @@ def backfill_city(
                 collection_window_start_utc=window_start_utc,
                 collection_window_end_utc=window_end_utc,
                 timezone=timezone_name,
-                utc_offset_minutes=int(local_time.utcoffset().total_seconds() // 60),
-                dst_active=bool(local_time.dst() and local_time.dst().total_seconds() > 0),
-                is_ambiguous_local_hour=bool(getattr(local_time, "fold", 0)),
-                is_missing_local_hour=False,
+                utc_offset_minutes=utc_offset_min,
+                dst_active=dst_active,
+                is_ambiguous_local_hour=is_ambiguous,
+                is_missing_local_hour=is_missing_local,
                 hemisphere=hemisphere,
                 season=season,
                 month=target_d.month,
@@ -391,7 +417,8 @@ def backfill_city(
                 provenance_metadata={},
             )
 
-            _write_atom_to_observations(conn, atom)
+            if not dry_run:
+                _write_atom_to_observations(conn, atom)
 
             if existing is None:
                 collected += 1
@@ -399,16 +426,19 @@ def backfill_city(
                 skip_count += 1
             current += timedelta(days=1)
 
-        conn.commit()
+        if not dry_run:
+            conn.commit()
+        chunk_label = "[DRY RUN] " if dry_run else ""
         print(
-            f"    {chunk_start} -> {chunk_end}: "
-            f"collected={collected} skip={skip_count} err={err_count}"
+            f"    {chunk_label}{chunk_start} -> {chunk_end}: "
+            f"collected={collected} skip={skip_count} err={err_count} guard_rejected={guard_rejected}"
         )
         time.sleep(sleep_seconds)
 
 
-    conn.commit()
-    return {"city": city_name, "collected": collected, "skip": skip_count, "err": err_count, "requests": request_count}
+    if not dry_run:
+        conn.commit()
+    return {"city": city_name, "collected": collected, "skip": skip_count, "err": err_count, "guard_rejected": guard_rejected, "requests": request_count}
 
 
 def main() -> int:
@@ -420,6 +450,7 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=0.5)
     parser.add_argument("--missing-only", action="store_true", help="Fetch only dates missing WU observations or valued settlements")
     parser.add_argument("--all", action="store_true", help="All configured cities")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch and validate but do not write to DB; print per-city summary")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -438,6 +469,9 @@ def main() -> int:
         ).fetchall()}
         targets = [c for c in CITY_STATIONS if c not in covered]
 
+    dry_run = args.dry_run
+    if dry_run:
+        print("[DRY RUN] No rows will be written to the DB.")
     print(f"=== WU ICAO Station History Backfill ({len(targets)} cities, {args.days} days) ===")
 
     results = []
@@ -451,18 +485,28 @@ def main() -> int:
             chunk_days=args.chunk_days,
             sleep_seconds=args.sleep,
             missing_only=args.missing_only,
+            dry_run=dry_run,
         )
         results.append(r)
-        print(f"  → collected={r['collected']} skip={r['skip']} err={r['err']}")
+        print(f"  → collected={r['collected']} skip={r['skip']} err={r['err']} guard_rejected={r['guard_rejected']}")
 
     conn.close()
 
-    print("\n=== Summary ===")
-    total = sum(r["collected"] for r in results)
-    print(f"Total collected: {total}")
-    for r in results:
-        if r["collected"] > 0:
-            print(f"  {r['city']:20s} +{r['collected']}")
+    if dry_run:
+        print("\n=== Dry Run Summary (nothing written) ===")
+        print(f"{'city':<22} {'fetched':>7} {'passed':>7} {'rejected':>9} {'would_write':>12}")
+        print("-" * 62)
+        for r in results:
+            fetched = r["collected"] + r["skip"] + r["guard_rejected"]
+            passed = r["collected"] + r["skip"]
+            print(f"  {r['city']:<20} {fetched:>7} {passed:>7} {r['guard_rejected']:>9} {r['collected']:>12}")
+    else:
+        print("\n=== Summary ===")
+        total = sum(r["collected"] for r in results)
+        print(f"Total collected: {total}")
+        for r in results:
+            if r["collected"] > 0:
+                print(f"  {r['city']:20s} +{r['collected']}")
 
     return 0
 

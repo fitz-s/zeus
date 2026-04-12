@@ -19,7 +19,8 @@ Part of K1-B packet. See .omc/plans/k1-freeze.md section 6.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+import uuid
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -88,6 +89,33 @@ class IngestionGuard:
     def _increment_rejected(cls) -> None:
         cls.rejected_count += 1
 
+    def _log_availability_failure(
+        self,
+        city: str,
+        target_date: date,
+        failure_type: str,
+        details: dict,
+    ) -> None:
+        """Best-effort INSERT into availability_fact. Swallows exceptions silently."""
+        try:
+            from src.state.db import get_world_connection, log_availability_fact
+            conn = get_world_connection()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            log_availability_fact(
+                conn,
+                availability_id=str(uuid.uuid4()),
+                scope_type="city_target",
+                scope_key=f"{city}/{target_date.isoformat()}",
+                failure_type=failure_type,
+                started_at=now_iso,
+                ended_at=now_iso,
+                impact="block",
+                details=details,
+            )
+            conn.commit()
+        except Exception:
+            pass  # Observability is best-effort; never block the guard itself
+
     # ------------------------------------------------------------------
     # Layer 1 — unit consistency
     # ------------------------------------------------------------------
@@ -110,10 +138,12 @@ class IngestionGuard:
         b) Earth-record absolute bounds on raw_value × raw_unit.
            Catches the Houston 160°F and Lagos 89°C class of bug.
         """
+        today = date.today()
         city_obj = cities_by_name.get(city)
         # Sub-check a: city.settlement_unit cross-check
         if city_obj is not None and declared_unit != city_obj.settlement_unit:
             type(self)._increment_rejected()
+            self._log_availability_failure(city, today, "UnitConsistencyViolation", {"declared_unit": declared_unit, "settlement_unit": city_obj.settlement_unit})
             raise UnitConsistencyViolation(
                 f"{city}: declared unit={declared_unit!r} but city.settlement_unit="
                 f"{city_obj.settlement_unit!r} (config/cities.json)"
@@ -122,23 +152,27 @@ class IngestionGuard:
         if raw_unit == "C":
             if raw_value > 56.7:
                 type(self)._increment_rejected()
+                self._log_availability_failure(city, today, "UnitConsistencyViolation", {"raw_value": raw_value, "raw_unit": raw_unit, "check": "earth_record_high_C"})
                 raise UnitConsistencyViolation(
                     f"{city}: {raw_value}\u00b0C exceeds Earth record 56.7\u00b0C — "
                     f"likely mislabelled \u00b0F value"
                 )
             if raw_value < -89.2:
                 type(self)._increment_rejected()
+                self._log_availability_failure(city, today, "UnitConsistencyViolation", {"raw_value": raw_value, "raw_unit": raw_unit, "check": "earth_record_low_C"})
                 raise UnitConsistencyViolation(
                     f"{city}: {raw_value}\u00b0C below Earth record -89.2\u00b0C"
                 )
         elif raw_unit == "F":
             if raw_value > 134.0:
                 type(self)._increment_rejected()
+                self._log_availability_failure(city, today, "UnitConsistencyViolation", {"raw_value": raw_value, "raw_unit": raw_unit, "check": "earth_record_high_F"})
                 raise UnitConsistencyViolation(
                     f"{city}: {raw_value}\u00b0F exceeds Earth record 134\u00b0F"
                 )
             if raw_value < -128.6:
                 type(self)._increment_rejected()
+                self._log_availability_failure(city, today, "UnitConsistencyViolation", {"raw_value": raw_value, "raw_unit": raw_unit, "check": "earth_record_low_F"})
                 raise UnitConsistencyViolation(
                     f"{city}: {raw_value}\u00b0F below Earth record -128.6\u00b0F"
                 )
@@ -172,6 +206,7 @@ class IngestionGuard:
         upper = p99 + 2 * sigma
         if not (lower <= value_f <= upper):
             type(self)._increment_rejected()
+            self._log_availability_failure(city, date.today(), "PhysicalBoundsViolation", {"value_f": value_f, "lower": lower, "upper": upper, "month": month, "path": "tigge"})
             raise PhysicalBoundsViolation(
                 f"{city} month={month}: {value_f}\u00b0F outside "
                 f"[{lower:.1f}, {upper:.1f}]\u00b0F "
@@ -193,6 +228,7 @@ class IngestionGuard:
             lower, upper = -60.0, 105.0
         if not (lower <= value_f <= upper):
             type(self)._increment_rejected()
+            self._log_availability_failure(city, date.today(), "PhysicalBoundsViolation", {"value_f": value_f, "lower": lower, "upper": upper, "month": month, "path": "lat_band"})
             raise PhysicalBoundsViolation(
                 f"{city} month={month}: {value_f}\u00b0F outside lat-band "
                 f"[{lower}, {upper}]\u00b0F (|lat|={abs_lat:.1f}\u00b0, fallback path)"
@@ -235,6 +271,7 @@ class IngestionGuard:
         lower, upper = envelope[month]
         if not (lower <= value_f <= upper):
             type(self)._increment_rejected()
+            self._log_availability_failure(city, date.today(), "SeasonalPlausibilityViolation", {"value_f": value_f, "lower": lower, "upper": upper, "month": month, "hemisphere": hemisphere})
             raise SeasonalPlausibilityViolation(
                 f"{city} (hemisphere={hemisphere!r}) month={month}: "
                 f"{value_f}\u00b0F outside seasonal envelope [{lower}, {upper}]\u00b0F"
@@ -265,12 +302,14 @@ class IngestionGuard:
         if fetch_date_local == target_date:
             if fetch_local.hour < peak_hour:
                 type(self)._increment_rejected()
+                self._log_availability_failure(city, target_date, "CollectionTimingViolation", {"fetch_local_hour": fetch_local.hour, "peak_hour": peak_hour, "target_date": target_date.isoformat()})
                 raise CollectionTimingViolation(
                     f"{city}: fetched at local hour {fetch_local.hour:02d}:00 on "
                     f"{target_date}, but peak_hour={peak_hour} — daily max not yet observed"
                 )
         elif fetch_date_local < target_date:
             type(self)._increment_rejected()
+            self._log_availability_failure(city, target_date, "CollectionTimingViolation", {"fetch_date_local": fetch_date_local.isoformat(), "target_date": target_date.isoformat()})
             raise CollectionTimingViolation(
                 f"{city}: fetched on {fetch_date_local} but target_date is "
                 f"{target_date} (fetch is in the past relative to target)"
@@ -294,6 +333,8 @@ class IngestionGuard:
         from src.signal.diurnal import _is_missing_local_hour  # avoid circular at module load
         if _is_missing_local_hour(local_time, tz):
             type(self)._increment_rejected()
+            _td = local_time.date() if hasattr(local_time, 'date') else date.today()
+            self._log_availability_failure(city, _td, "DstBoundaryViolation", {"local_time": local_time.isoformat() if hasattr(local_time, 'isoformat') else str(local_time), "timezone": city_obj.timezone})
             raise DstBoundaryViolation(
                 f"{city}: local_time {local_time} falls in a spring-forward DST gap "
                 f"(hour does not exist on the wall clock for {city_obj.timezone})"

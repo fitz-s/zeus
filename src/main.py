@@ -87,16 +87,21 @@ def _wu_daily_dispatch():
     """
     try:
         from src.data.wu_scheduler import WuDailyScheduler, dispatch_wu_daily_collection
-        from datetime import timezone
-        scheduler = WuDailyScheduler()
-        cities_to_collect = dispatch_wu_daily_collection(scheduler)
-        if not cities_to_collect:
-            return
+        from datetime import date as _date
+        from src.config import cities_by_name as _cities_by_name
         from src.data.wu_daily_collector import collect_daily_highs
-        result = collect_daily_highs(city_names=cities_to_collect)
+        scheduler = WuDailyScheduler()
+        city_names = dispatch_wu_daily_collection(scheduler)
+        if not city_names:
+            return
+        cities = [_cities_by_name[name] for name in city_names if name in _cities_by_name]
+        if not cities:
+            logger.warning("WU daily dispatch: no known cities in dispatch list %s", city_names)
+            return
+        result = collect_daily_highs(target_date=_date.today(), cities=cities)
         logger.info(
             "WU daily dispatch: cities=%s collected=%d, skipped=%d, errors=%d",
-            cities_to_collect,
+            [c.name for c in cities],
             result.get("collected", 0),
             result.get("skipped", 0),
             result.get("errors", 0),
