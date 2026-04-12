@@ -27,41 +27,33 @@ from src.types import Bin
 
 def typed_bins_for_city_date(conn, city_name: str, target_date: str, unit: str) -> list[Bin]:
     """Return replay-bin order used by `ReplayContext` for a city/date."""
-    queries = [
-        (
-            """
-            SELECT DISTINCT range_label
+    rows = conn.execute(
+        """
+        SELECT DISTINCT range_label FROM (
+            SELECT range_label
             FROM calibration_pairs
             WHERE city = ? AND target_date = ?
-            ORDER BY range_label
-            """,
-            (city_name, target_date),
-        ),
-        (
-            """
-            SELECT DISTINCT range_label
+            UNION
+            SELECT range_label
             FROM market_events
             WHERE city = ?
               AND target_date = ?
               AND range_label IS NOT NULL
               AND range_label != ''
-            ORDER BY range_label
-            """,
-            (city_name, target_date),
-        ),
-    ]
-    for query, params in queries:
-        bins: list[Bin] = []
-        for row in conn.execute(query, params).fetchall():
-            label = row["range_label"]
-            try:
-                low, high = _parse_temp_range(label)
-                bins.append(Bin(low=low, high=high, label=label, unit=unit))
-            except Exception:
-                continue
-        if bins:
-            return bins
-    return []
+        )
+        ORDER BY range_label
+        """,
+        (city_name, target_date, city_name, target_date),
+    ).fetchall()
+    bins: list[Bin] = []
+    for row in rows:
+        label = row["range_label"]
+        try:
+            low, high = _parse_temp_range(label)
+            bins.append(Bin(low=low, high=high, label=label, unit=unit))
+        except Exception:
+            continue
+    return bins
 
 
 def p_raw_from_member_values(member_values: list[float] | np.ndarray, bins: list[Bin], city: City) -> list[float]:
