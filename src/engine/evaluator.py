@@ -103,7 +103,9 @@ class EdgeDecision:
     spread: float = 0.0
     n_edges_found: int = 0
     n_edges_after_fdr: int = 0
-    
+    fdr_fallback_fired: bool = False
+    fdr_family_size: int = 0
+
     # Heavy Bound Domain Objects (Phase 2 encapsulation)
     edge_context: Optional[EdgeContext] = None
     settlement_semantics_json: Optional[str] = None
@@ -900,11 +902,14 @@ def evaluate_candidate(
         forecast_context["day0"] = day0_forecast_context
     n_bootstrap = edge_n_bootstrap()
     edges = analysis.find_edges(n_bootstrap=n_bootstrap)
+    _fdr_fallback = False
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
-        logger.warning("Full-family hypothesis scan unavailable; using legacy FDR surface: %s", exc)
+        logger.error("Full-family hypothesis scan unavailable; using legacy FDR surface: %s", exc)
+        _fdr_fallback = True
         full_family_hypotheses = []
+    _fdr_family_size = len(full_family_hypotheses)
     entry_validations.append("bootstrap_ci")
 
     # FDR filter
@@ -954,6 +959,8 @@ def evaluate_candidate(
             spread=float(getattr(ensemble_spread, "value", ens.spread_float())),
             n_edges_found=len(edges),
             n_edges_after_fdr=0,
+            fdr_fallback_fired=_fdr_fallback,
+            fdr_family_size=_fdr_family_size,
         )]
 
     bankroll_val = getattr(portfolio, "effective_bankroll", getattr(portfolio, "bankroll", 0.0)) if entry_bankroll is None else entry_bankroll
@@ -1210,6 +1217,9 @@ def evaluate_candidate(
         projected_city_exposure_usd[city.name] += size
         projected_cluster_exposure_usd[city.cluster] += size
 
+    if _fdr_fallback or _fdr_family_size:
+        from dataclasses import replace
+        decisions = [replace(d, fdr_fallback_fired=_fdr_fallback, fdr_family_size=_fdr_family_size) for d in decisions]
     return decisions
 
 

@@ -1,7 +1,7 @@
 """Benjamini-Hochberg FDR filter for edge selection.
 
-Spec §4.4: Controls false discovery rate across 220 simultaneous hypotheses
-(10 cities × 11 bins × 2 directions per cycle).
+Spec §4.4: Controls false discovery rate. Applied per-market (not cross-city).
+Typical family size: ~22 hypotheses per market (11 bins × 2 directions).
 
 p-values are computed via np.mean(bootstrap_edges <= 0) in MarketAnalysis,
 NEVER via approximation formula.
