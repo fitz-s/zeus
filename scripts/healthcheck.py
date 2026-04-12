@@ -183,6 +183,7 @@ def check() -> dict:
             result["exposure"] = status.get("portfolio", {}).get("total_exposure_usd", 0)
             cycle = status.get("cycle", {}) or {}
             result["entries_blocked_reason"] = cycle.get("entries_blocked_reason")
+            result["force_exit_review_scope"] = cycle.get("force_exit_review_scope")
             result["cycle_failed"] = bool(cycle.get("failed", False))
             result["failure_reason"] = cycle.get("failure_reason")
             execution = status.get("execution", {}) or {}

@@ -319,6 +319,39 @@ def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path
     assert healthcheck.exit_code_for(result) == 1
 
 
+def test_healthcheck_projects_force_exit_review_scope(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={
+            "force_exit_review": True,
+            "force_exit_review_scope": "entry_block_only",
+            "entries_blocked_reason": "force_exit_review_daily_loss_red",
+        },
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["force_exit_review_scope"] == "entry_block_only"
+    assert result["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
+    assert result["healthy"] is True
+
+
 def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"

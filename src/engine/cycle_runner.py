@@ -215,7 +215,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     force_exit = get_force_exit_review()
     if force_exit:
         summary["force_exit_review"] = True
-        logger.warning("B5: force_exit_review active — daily loss RED. Blocking new entries.")
+        summary["force_exit_review_scope"] = "entry_block_only"
+        logger.warning("B5: force_exit_review active — daily loss RED. Scope: entry-block only.")
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
