@@ -40,7 +40,7 @@ workspace_map.md (YOU ARE HERE)
 |------|---------|
 | `AGENTS.md` | Root operating brief — read first, always |
 | `workspace_map.md` | This file — master topology node |
-| `src/main.py` | Daemon entry point (paper/live mode) |
+| `src/main.py` | Live-only daemon entry point |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Git exclusions |
 | `.importlinter` | Zone boundary enforcement (import rules) |
@@ -99,7 +99,7 @@ See `src/AGENTS.md` for the zone map and navigation guide. Each package has its 
 
 | File | Purpose |
 |------|---------|
-| `src/config.py` | Runtime configuration — settings loader, state paths, mode qualification |
+| `src/config.py` | Runtime configuration — settings loader and live-only state paths |
 
 ---
 
@@ -140,7 +140,7 @@ See `tests/AGENTS.md` for the complete test catalog with invariant mappings.
 
 | File | Tests |
 |------|-------|
-| `test_executor.py` | Order execution (paper + live) |
+| `test_executor.py` | Order execution and live exit-order contracts |
 | `test_riskguard.py` | Risk level behavior changes |
 | `test_entry_exit_symmetry.py` | Entry/exit statistical burden fairness |
 | `test_exit_authority.py` | Exit decision authority |
@@ -252,10 +252,10 @@ See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of 
 | `zeus-world.db` | Shared world-data database: settlements, forecasts, observations, calibration, market data |
 | `zeus_backtest.db` | Derived diagnostic backtest output; non-promotion, never runtime authority |
 | `zeus-paper.db` / `zeus-live.db` | Legacy/obsolete mode-specific trade databases; do not use as current authority |
-| `risk_state-*.db` | Mode-specific RiskGuard state |
-| `positions-*.json` | Mode-qualified position files |
+| `risk_state.db` | Live RiskGuard state |
+| `positions.json` | Derived live position cache; DB remains authority |
 | `ensemble-log/` | ENS snapshots (append-only) |
-| `status_summary-*.json` | Cycle health snapshots (derived, for Venus) |
+| `status_summary.json` | Cycle health snapshot (derived, for Venus/OpenClaw) |
 
 ---
 

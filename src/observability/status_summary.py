@@ -1,7 +1,7 @@
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
-Written to the mode-qualified truth file for Venus/OpenClaw to read.
+Written to a derived live status file for Venus/OpenClaw to read.
 """
 
 import json
