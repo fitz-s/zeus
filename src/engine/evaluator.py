@@ -1054,8 +1054,8 @@ def evaluate_candidate(
             else 0.0
         )
         
-        # Phase 3: RiskGraph Regime Throttling
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+        # Phase 3: RiskGraph Regime Throttling (K3: cluster == city.name)
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5
@@ -1144,14 +1144,9 @@ def evaluate_candidate(
             size_usd=size,
             bankroll=sizing_bankroll,
             city=city.name,
-            cluster=city.cluster,
             current_city_exposure=(
                 city_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
                 + (projected_city_exposure_usd[city.name] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
-            ),
-            current_cluster_exposure=(
-                cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
-                + (projected_cluster_exposure_usd[city.cluster] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
             ),
             current_portfolio_heat=current_heat,
             limits=limits,
@@ -1215,7 +1210,7 @@ def evaluate_candidate(
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size
-        projected_cluster_exposure_usd[city.cluster] += size
+        projected_cluster_exposure_usd[city.name] += size
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace
