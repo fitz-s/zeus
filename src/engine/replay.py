@@ -247,7 +247,8 @@ class ReplayContext:
 
         row = self.conn.execute(
             f"""
-            SELECT td.trade_id, td.timestamp AS decision_time, td.forecast_snapshot_id AS snapshot_id
+            SELECT td.trade_id, td.timestamp AS decision_time,
+                   td.forecast_snapshot_id AS snapshot_id, td.market_hours_open
             FROM trade_decisions td
             JOIN {self._sp}ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
             WHERE es.city = ? AND es.target_date = ?
@@ -263,6 +264,7 @@ class ReplayContext:
                 "trade_id": row["trade_id"],
                 "decision_time": row["decision_time"],
                 "snapshot_id": row["snapshot_id"],
+                "market_hours_open": row["market_hours_open"],
                 "source": "trade_decisions",
             }
             self._decision_ref_cache[key] = result
@@ -296,6 +298,7 @@ class ReplayContext:
                             "p_cal_vector": list(trade_case.get("p_cal_vector") or []),
                             "p_market_vector": list(trade_case.get("p_market_vector") or []),
                             "alpha": float(trade_case.get("alpha", 0.0) or 0.0),
+                            "market_hours_open": trade_case.get("market_hours_open"),
                             "agreement": trade_case.get("agreement", ""),
                             "should_trade": True,
                         }
@@ -1055,12 +1058,17 @@ def _replay_one_settlement(
     elif decision_ref.get("alpha", 0.0):
         alpha = float(decision_ref["alpha"])
     else:
+        hours_since_open = decision_ref.get("market_hours_open")
+        try:
+            hours_since_open = float(hours_since_open)
+        except (TypeError, ValueError):
+            hours_since_open = 48.0
         alpha = compute_alpha(
             calibration_level=cal_level,
             ensemble_spread=TemperatureDelta(float(snapshot["spread"] or 3.0), city.settlement_unit),
             model_agreement=decision_ref.get("agreement", "AGREE") or "AGREE",
             lead_days=lead_days,
-            hours_since_open=48.0,
+            hours_since_open=hours_since_open,
             city_name=city.name,
             season=season,
         ).value
