@@ -3227,7 +3227,29 @@ def record_token_suppression(
     if not normalized_source:
         raise ValueError("token suppression requires source_module")
     now = created_at or datetime.now(timezone.utc).isoformat()
-    evidence_json = json.dumps(evidence or {}, sort_keys=True)
+    evidence_payload = dict(evidence or {})
+    if normalized_reason == "chain_only_quarantined":
+        existing = conn.execute(
+            """
+            SELECT suppression_reason, created_at, evidence_json
+            FROM token_suppression
+            WHERE token_id = ?
+            """,
+            (normalized_token,),
+        ).fetchone()
+        if existing is not None and str(existing["suppression_reason"] or "") == "chain_only_quarantined":
+            try:
+                existing_evidence = json.loads(str(existing["evidence_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                existing_evidence = {}
+            first_seen_at = str(
+                existing_evidence.get("first_seen_at")
+                or existing["created_at"]
+                or ""
+            )
+            if first_seen_at:
+                evidence_payload["first_seen_at"] = first_seen_at
+    evidence_json = json.dumps(evidence_payload, sort_keys=True)
     conn.execute(
         """
         INSERT INTO token_suppression (

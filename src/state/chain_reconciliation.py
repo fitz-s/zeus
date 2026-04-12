@@ -270,6 +270,35 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             or getattr(position, "exit_state", "") in PENDING_EXIT_STATES
         )
 
+    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
+        if conn is None:
+            return
+        from src.state.db import record_token_suppression
+
+        try:
+            result = record_token_suppression(
+                conn,
+                token_id=token_id,
+                condition_id=chain.condition_id,
+                suppression_reason="chain_only_quarantined",
+                source_module="src.state.chain_reconciliation",
+                evidence={
+                    "size": chain.size,
+                    "avg_price": chain.avg_price,
+                    "cost": chain.cost or (chain.size * chain.avg_price),
+                    "condition_id": chain.condition_id,
+                    "first_seen_at": now,
+                },
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"chain-only quarantine fact write failed for {token_id}: {exc}"
+            ) from exc
+        if result.get("status") != "written":
+            raise RuntimeError(
+                f"chain-only quarantine fact write failed for {token_id}: {result}"
+            )
+
     # Count non-pending local positions for incomplete-response guard
     active_local = sum(
         1 for p in portfolio.positions
@@ -457,37 +486,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 condition_id=chain.condition_id,
                 quarantined_at=now,
             )
-            if conn is not None:
-                try:
-                    from src.state.db import record_token_suppression
-
-                    result = record_token_suppression(
-                        conn,
-                        token_id=tid,
-                        condition_id=chain.condition_id,
-                        suppression_reason="chain_only_quarantined",
-                        source_module="src.state.chain_reconciliation",
-                        evidence={
-                            "size": chain.size,
-                            "avg_price": chain.avg_price,
-                            "cost": chain.cost or (chain.size * chain.avg_price),
-                            "condition_id": chain.condition_id,
-                            "first_seen_at": now,
-                        },
-                    )
-                    if result.get("status") != "written":
-                        stats["quarantine_fact_write_skipped"] = (
-                            stats.get("quarantine_fact_write_skipped", 0) + 1
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to persist chain-only quarantine fact for %s: %s",
-                        tid,
-                        exc,
-                    )
-                    stats["quarantine_fact_write_failed"] = (
-                        stats.get("quarantine_fact_write_failed", 0) + 1
-                    )
+            _persist_chain_only_quarantine_fact(tid, chain)
             portfolio.positions.append(quarantine_pos)
             stats["quarantined"] += 1
 

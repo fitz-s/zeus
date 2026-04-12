@@ -1188,27 +1188,22 @@ def test_chain_quarantine_keeps_direction_unknown():
     assert pos.strategy == ""
 
 
-def test_chain_quarantine_explicitly_warns_exclusion_without_db_calls(caplog):
+def test_chain_quarantine_fails_closed_when_fact_write_fails(caplog):
     class GuardConn:
         def execute(self, *_args, **_kwargs):
-            raise AssertionError("chain-only quarantine exclusion should not touch DB state")
+            raise RuntimeError("db write unavailable")
 
     portfolio = PortfolioState()
     with caplog.at_level("WARNING"):
-        stats = reconcile(
-            portfolio,
-            [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
-            conn=GuardConn(),
-        )
+        with pytest.raises(RuntimeError, match="chain-only quarantine fact write failed"):
+            reconcile(
+                portfolio,
+                [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
+                conn=GuardConn(),
+            )
 
-    assert stats["quarantined"] == 1
-    assert len(portfolio.positions) == 1
-    pos = portfolio.positions[0]
-    assert pos.trade_id.startswith("quarantine_")
-    assert pos.direction == "unknown"
-    assert pos.chain_state == "quarantined"
+    assert portfolio.positions == []
     assert "EXCLUDED FROM CANONICAL MIGRATION" in caplog.text
-    assert "pending future governance design" in caplog.text
 
 
 def test_chain_only_quarantine_persists_reconciliation_fact_without_strategy_default(tmp_path):
@@ -1287,6 +1282,46 @@ def test_load_portfolio_rehydrates_chain_only_quarantine_fact(tmp_path):
     assert pos.strategy == ""
     assert pos.chain_state == "quarantined"
     assert pos.quarantined_at == "2026-04-04T00:00:00Z"
+
+
+def test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "condition_id": "cond-1",
+            }),
+        ),
+    )
+    conn.execute("DROP TABLE position_current")
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    state = load_portfolio(path)
+
+    assert state.portfolio_loader_degraded is True
+    assert len(state.positions) == 1
+    assert state.positions[0].token_id == "yes-chain-only"
+    assert state.positions[0].chain_state == "quarantined"
 
 
 def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_token(tmp_path):
@@ -1371,6 +1406,54 @@ def test_load_portfolio_uses_chain_quarantine_evidence_first_seen_at(tmp_path):
     state = load_portfolio(path)
 
     assert state.positions[0].quarantined_at == "2026-04-04T00:00:00Z"
+
+
+def test_chain_only_quarantine_upsert_preserves_original_first_seen_at(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "first_seen_at": "2026-04-01T00:00:00Z",
+            }),
+        ),
+    )
+    portfolio = PortfolioState()
+
+    reconcile(
+        portfolio,
+        [ChainPosition(token_id="yes-chain-only", size=12.0, avg_price=0.42, cost=5.04, condition_id="cond-1")],
+        conn=conn,
+    )
+    row = conn.execute(
+        "SELECT evidence_json FROM token_suppression WHERE token_id = 'yes-chain-only'"
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    evidence = json.loads(row["evidence_json"])
+    state = load_portfolio(path)
+
+    assert evidence["first_seen_at"] == "2026-04-01T00:00:00Z"
+    assert state.positions[0].quarantined_at == "2026-04-01T00:00:00Z"
 
 
 def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
