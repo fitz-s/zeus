@@ -139,7 +139,7 @@ class Position:
     unit: str = "F"  # Blueprint v2: carried, never inferred
 
     # Provenance: which environment created this position (set once, never changed)
-    env: str = "paper"  # "paper" | "live" | "backtest"
+    env: str = "live"  # live-only (Phase 1 axiom)
 
     # Probability (always in held-side space — flipped exactly once at creation)
     size_usd: float = 0.0

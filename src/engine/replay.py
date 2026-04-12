@@ -149,7 +149,7 @@ class ReplayContext:
         # Detect whether shared DB is attached (production) or monolithic (tests)
         try:
             self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
-            self._sp = "shared."  # shared DB attached
+            self._sp = "world."  # world DB attached
         except Exception:
             self._sp = ""  # monolithic DB (tests)
 

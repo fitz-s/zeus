@@ -109,7 +109,7 @@ def run_backfill(positions_path: Path = POSITIONS_PATH) -> dict:
 
     try:
         conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
-        _sp = "shared."
+        _sp = "world."
     except Exception:
         _sp = ""
 
