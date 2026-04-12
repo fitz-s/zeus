@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 import sys
 
-from src.engine.replay import run_replay
+from src.engine.replay import _market_price_linkage_limitations, run_replay
 from src.state.db import get_connection, init_schema
 import scripts.run_replay as cli_module
-from scripts.run_replay import _format_total_pnl
+from scripts.run_replay import _format_total_pnl, _pnl_available
 
 
 def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch):
@@ -467,6 +467,107 @@ def test_cli_formats_unpriced_replay_pnl_as_unavailable():
     )
 
     assert _format_total_pnl(summary) == "N/A (market price unavailable for 298/298 replayed subjects)"
+
+
+def test_replay_market_price_linkage_limitations_distinguish_full_partial_none():
+    full = _market_price_linkage_limitations(
+        n_replayed=2,
+        market_price_linked_subjects=2,
+        market_price_unavailable_subjects=0,
+    )
+    assert full["market_price_linkage_state"] == "full"
+    assert full["pnl_available"] is True
+    assert full["pnl_subject_scope"] == "all_replayed_subjects"
+    assert full["pnl_unavailable_reason"] == ""
+
+    partial = _market_price_linkage_limitations(
+        n_replayed=3,
+        market_price_linked_subjects=1,
+        market_price_unavailable_subjects=2,
+    )
+    assert partial["market_price_linkage_state"] == "partial"
+    assert partial["pnl_available"] is False
+    assert partial["pnl_subject_scope"] == "partial_market_price_linkage"
+    assert partial["pnl_unavailable_reason"] == "partial_market_price_linkage"
+
+    none = _market_price_linkage_limitations(
+        n_replayed=3,
+        market_price_linked_subjects=0,
+        market_price_unavailable_subjects=3,
+    )
+    assert none["market_price_linkage_state"] == "none"
+    assert none["pnl_available"] is False
+    assert none["pnl_subject_scope"] == "no_market_price_linkage"
+    assert none["pnl_unavailable_reason"] == "market_price_unavailable"
+
+
+def test_cli_formats_partial_market_linkage_pnl_as_unavailable():
+    summary = SimpleNamespace(
+        replay_total_pnl=12.5,
+        n_replayed=4,
+        limitations={
+            "pnl_available": False,
+            "pnl_requires_market_price_linkage": True,
+            "pnl_unavailable_reason": "partial_market_price_linkage",
+            "market_price_linked_subjects": 1,
+            "market_price_unavailable_subjects": 3,
+        },
+    )
+
+    assert _pnl_available(summary) is False
+    assert _format_total_pnl(summary) == "N/A (market price linked for 1/4 replayed subjects; partial linkage)"
+
+
+def test_cli_prints_partial_market_linkage_as_na(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "cli.db"
+
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+        return SimpleNamespace(
+            run_id="run-1",
+            n_settlements=2,
+            n_replayed=2,
+            coverage_pct=100.0,
+            n_would_trade=1,
+            replay_win_rate=0.0,
+            replay_total_pnl=9.0,
+            limitations={
+                "pnl_available": False,
+                "pnl_requires_market_price_linkage": True,
+                "pnl_unavailable_reason": "partial_market_price_linkage",
+                "market_price_linked_subjects": 1,
+                "market_price_unavailable_subjects": 1,
+            },
+            per_city={
+                "Paris": {"n_dates": 2, "n_trades": 1, "total_pnl": 9.0, "win_rate": 0.0},
+            },
+            outcomes=[],
+        )
+
+    import src.engine.replay as replay_module
+
+    monkeypatch.setattr(cli_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(replay_module, "run_replay", _run_replay)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_replay.py",
+            "--mode",
+            "audit",
+            "--start",
+            "2026-04-03",
+            "--end",
+            "2026-04-04",
+        ],
+    )
+
+    cli_module.main()
+    output = capsys.readouterr().out
+
+    assert "Total PnL:    N/A (market price linked for 1/2 replayed subjects; partial linkage)" in output
+    assert "Paris" in output
+    assert "N/A" in output
+    assert "until all replay subjects have decision-time market price linkage" in output
 
 
 def test_cli_trade_history_audit_routes_to_backtest_lane(tmp_path, monkeypatch, capsys):

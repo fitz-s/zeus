@@ -46,7 +46,8 @@ def _pnl_available(summary) -> bool:
     if summary.limitations.get("pnl_available") is False:
         return False
     if summary.limitations.get("pnl_requires_market_price_linkage"):
-        return int(summary.limitations.get("market_price_linked_subjects") or 0) > 0
+        linked = int(summary.limitations.get("market_price_linked_subjects") or 0)
+        return summary.n_replayed > 0 and linked == summary.n_replayed
     return True
 
 
@@ -58,6 +59,10 @@ def _format_total_pnl(summary) -> str:
         unavailable = int(summary.limitations.get("market_price_unavailable_subjects") or 0)
         total = summary.n_replayed
         return f"N/A (market price unavailable for {unavailable}/{total} replayed subjects)"
+    if reason == "partial_market_price_linkage":
+        linked = int(summary.limitations.get("market_price_linked_subjects") or 0)
+        total = summary.n_replayed
+        return f"N/A (market price linked for {linked}/{total} replayed subjects; partial linkage)"
     return f"N/A ({reason})"
 
 
@@ -243,7 +248,10 @@ def main():
             print(f"{city_name:15} {stats['n_dates']:>6} {stats['n_trades']:>7} "
                   f"{pnl:>10} {stats['win_rate']:>5.1%}")
         if not _pnl_available(summary):
-            print("* PnL is unavailable until replay subjects have decision-time market price linkage.")
+            if summary.limitations.get("pnl_unavailable_reason") == "partial_market_price_linkage":
+                print("* PnL is unavailable until all replay subjects have decision-time market price linkage.")
+            else:
+                print("* PnL is unavailable until replay subjects have decision-time market price linkage.")
 
     print()
     if args.mode in {"wu_settlement_sweep", "trade_history_audit"}:

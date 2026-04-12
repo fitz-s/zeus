@@ -106,6 +106,38 @@ class ReplaySummary:
     limitations: dict = field(default_factory=dict)
 
 
+def _market_price_linkage_limitations(
+    *,
+    n_replayed: int,
+    market_price_linked_subjects: int,
+    market_price_unavailable_subjects: int,
+) -> dict:
+    full_linkage = n_replayed > 0 and market_price_linked_subjects == n_replayed
+    partial_linkage = 0 < market_price_linked_subjects < n_replayed
+    if full_linkage:
+        state = "full"
+        pnl_scope = "all_replayed_subjects"
+        unavailable_reason = ""
+    elif partial_linkage:
+        state = "partial"
+        pnl_scope = "partial_market_price_linkage"
+        unavailable_reason = "partial_market_price_linkage"
+    else:
+        state = "none"
+        pnl_scope = "no_market_price_linkage"
+        unavailable_reason = "market_price_unavailable"
+    return {
+        "market_price_linkage": full_linkage,
+        "market_price_linkage_state": state,
+        "market_price_linked_subjects": market_price_linked_subjects,
+        "market_price_unavailable_subjects": market_price_unavailable_subjects,
+        "pnl_requires_market_price_linkage": True,
+        "pnl_available": full_linkage,
+        "pnl_subject_scope": pnl_scope,
+        "pnl_unavailable_reason": unavailable_reason,
+    }
+
+
 @dataclass(frozen=True)
 class TradeSubjectCandidate:
     position_id: str
@@ -1890,13 +1922,11 @@ def run_replay(
         "uniform_prior": "diagnostic_edge_ranking_only_when_market_vector_missing",
         "flat_sizing": False,
         "no_bootstrap_fdr": False,
-        "market_price_linkage": priced_subjects == summary.n_replayed if summary.n_replayed else False,
-        "market_price_linked_subjects": priced_subjects,
-        "market_price_unavailable_subjects": unpriced_subjects,
-        "pnl_requires_market_price_linkage": True,
-        "pnl_available": priced_subjects > 0,
-        "pnl_subject_scope": "priced_subjects_only",
-        "pnl_unavailable_reason": "market_price_unavailable" if priced_subjects == 0 else "",
+        **_market_price_linkage_limitations(
+            n_replayed=summary.n_replayed,
+            market_price_linked_subjects=priced_subjects,
+            market_price_unavailable_subjects=unpriced_subjects,
+        ),
         "forecast_rows_fallback": allow_snapshot_only_reference,
         "promotion_authority": False,
     }
