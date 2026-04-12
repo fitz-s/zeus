@@ -61,7 +61,7 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 
 | File | What it tests |
 |------|--------------|
-| `test_executor.py` | Order execution (paper + live) |
+| `test_executor.py` | Order execution and live exit-order contracts |
 | `test_execution_price.py` | Typed execution price semantics |
 | `test_riskguard.py` | Risk level behavior changes (INV-05) |
 | `test_entry_exit_symmetry.py` | Entry/exit use same statistical burden |

@@ -22,8 +22,8 @@ Every package subdirectory has its own `AGENTS.md` with zone-specific rules, dom
 | File | Purpose |
 |------|---------|
 | `__init__.py` | Package marker |
-| `config.py` | Runtime configuration — settings loader, state paths, mode qualification |
-| `main.py` | Daemon entry point (paper/live mode) |
+| `config.py` | Runtime configuration — settings loader and live-only state paths |
+| `main.py` | Live-only daemon entry point |
 
 ## Import rules
 
