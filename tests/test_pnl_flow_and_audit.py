@@ -539,6 +539,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: "auto_exception")
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: "auto_pause:ValueError")
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
     monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": GateDecision(enabled=False, reason_code=ReasonCode.UNSPECIFIED, reason_snapshot={}, gated_at="", gated_by="unknown")})
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
@@ -557,6 +559,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
     assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
     assert status["control"]["entries_paused"] is True
+    assert status["control"]["entries_pause_source"] == "auto_exception"
+    assert status["control"]["entries_pause_reason"] == "auto_pause:ValueError"
     assert status["control"]["edge_threshold_multiplier"] == 2.0
     assert status["control"]["strategy_gates"]["opening_inertia"]["enabled"] is False
     assert status["control"]["recommended_controls"] == ["tighten_risk"]
@@ -948,6 +952,9 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
     monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
@@ -957,6 +964,94 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
     refreshed = json.loads(status_path.read_text())
 
     assert refreshed["cycle"]["entries_blocked_reason"] == "risk_level=ORANGE"
+
+
+def test_inv_write_status_drops_stale_pause_cycle_when_refreshing_after_resume(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00Z",
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
+                "risk": {"level": "GREEN"},
+                "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
+                "cycle": {
+                    "entries_paused": True,
+                    "entries_pause_reason": "auto_pause:ValueError",
+                    "entries_blocked_reason": "entries_paused",
+                    "failed": False,
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+
+    status_summary_module.write_status()
+    refreshed = json.loads(status_path.read_text())
+
+    assert "entries_paused" not in refreshed["cycle"]
+    assert "entries_pause_reason" not in refreshed["cycle"]
+    assert "entries_blocked_reason" not in refreshed["cycle"]
+    assert refreshed["control"]["entries_paused"] is False
+    assert refreshed["control"]["entries_pause_source"] is None
+    assert refreshed["control"]["entries_pause_reason"] is None
+
+
+def test_inv_write_status_overrides_stale_blocker_when_refreshing_during_pause(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00Z",
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
+                "risk": {"level": "GREEN"},
+                "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
+                "cycle": {
+                    "entries_blocked_reason": "risk_level=ORANGE",
+                    "failed": False,
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: "manual_command")
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+
+    status_summary_module.write_status()
+    refreshed = json.loads(status_path.read_text())
+
+    assert refreshed["cycle"]["entries_paused"] is True
+    assert refreshed["cycle"]["entries_blocked_reason"] == "entries_paused"
+    assert "entries_pause_reason" not in refreshed["cycle"]
+    assert refreshed["control"]["entries_pause_source"] == "manual_command"
 
 
 def test_inv_status_surfaces_db_substrate_degradation(monkeypatch, tmp_path):
@@ -1087,16 +1182,87 @@ def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path)
 
     assert processed == ["pause_entries"]
     assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
 
     control_plane_module.clear_control_state()
 
     assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
     row = get_connection(db_path).execute(
-        "SELECT value, issued_by, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+        "SELECT value, issued_by, reason, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
     ).fetchone()
     assert row["value"] == "true"
     assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "control_plane:pause_entries"
     assert row["precedence"] == 100
+
+
+def test_inv_pause_entries_source_is_manual_for_custom_issuer(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_world_connection", lambda: get_connection(db_path))
+    control_plane_module.clear_control_state()
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {"command": "pause_entries", "issued_by": "ui", "note": "operator requested pause"}
+                ],
+                "acks": [],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["pause_entries"]
+    assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
+    row = get_connection(db_path).execute(
+        "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+    ).fetchone()
+    assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "operator requested pause"
+
+
+def test_inv_pause_entries_source_ignores_manual_note_that_looks_auto(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_world_connection", lambda: get_connection(db_path))
+    control_plane_module.clear_control_state()
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {"command": "pause_entries", "issued_by": "ui", "note": "auto_pause:manual-note"}
+                ],
+                "acks": [],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["pause_entries"]
+    assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
+    row = get_connection(db_path).execute(
+        "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+    ).fetchone()
+    assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "auto_pause:manual-note"
 
 
 def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatch, tmp_path):

@@ -181,6 +181,8 @@ def check() -> dict:
                 result["risk_details"] = risk_details
             result["positions"] = status.get("portfolio", {}).get("open_positions", 0)
             result["exposure"] = status.get("portfolio", {}).get("total_exposure_usd", 0)
+            result["entries_pause_source"] = control.get("entries_pause_source")
+            result["entries_pause_reason"] = control.get("entries_pause_reason")
             cycle = status.get("cycle", {}) or {}
             result["entries_blocked_reason"] = cycle.get("entries_blocked_reason")
             result["force_exit_review_scope"] = cycle.get("force_exit_review_scope")

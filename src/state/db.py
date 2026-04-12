@@ -3439,6 +3439,8 @@ def query_control_override_state(
         return {
             "status": "skipped_no_connection",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
@@ -3446,12 +3448,14 @@ def query_control_override_state(
         return {
             "status": "missing_table",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
     rows = conn.execute(
         """
-        SELECT override_id, target_type, target_key, action_type, value, precedence, issued_at
+        SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
         FROM control_overrides
         WHERE target_type IN ('global', 'strategy')
           AND issued_at <= ?
@@ -3461,6 +3465,8 @@ def query_control_override_state(
         (current_time, current_time),
     ).fetchall()
     entries_paused = False
+    entries_pause_source = None
+    entries_pause_reason = None
     edge_threshold_multiplier = 1.0
     strategy_gates: dict[str, bool] = {}
     seen_strategy_gate: set[str] = set()
@@ -3473,6 +3479,14 @@ def query_control_override_state(
         value = str(row["value"] or "")
         if target_type == "global" and target_key == "entries" and action_type == "gate" and not global_gate_seen:
             entries_paused = _parse_boolish_text(value)
+            if entries_paused:
+                reason = str(row["reason"] or "")
+                issued_by = str(row["issued_by"] or "")
+                if issued_by.startswith("auto:auto_pause:"):
+                    entries_pause_source = "auto_exception"
+                    entries_pause_reason = issued_by.removeprefix("auto:")
+                else:
+                    entries_pause_source = "manual_command"
             global_gate_seen = True
             continue
         if target_type == "global" and target_key == "entries" and action_type == "threshold_multiplier" and not global_threshold_seen:
@@ -3488,6 +3502,8 @@ def query_control_override_state(
     return {
         "status": "ok",
         "entries_paused": entries_paused,
+        "entries_pause_source": entries_pause_source,
+        "entries_pause_reason": entries_pause_reason,
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }

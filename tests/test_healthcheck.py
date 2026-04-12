@@ -413,6 +413,48 @@ def test_healthcheck_projects_quarantine_expired_cycle_field(monkeypatch, tmp_pa
     assert result["healthy"] is True
 
 
+def test_healthcheck_projects_current_auto_pause_reason_from_control(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={
+            "entries_paused": True,
+            "entries_pause_reason": "auto_pause:StaleCycleReason",
+        },
+        control={"entries_paused": True, "entries_pause_source": "auto_exception", "entries_pause_reason": "auto_pause:ValueError", **{
+            "strategy_gates": {},
+            "recommended_but_not_gated": [],
+            "gated_but_not_recommended": [],
+            "recommended_controls_not_applied": [],
+            "recommended_auto_commands": [],
+            "review_required_commands": [],
+            "recommended_commands": [],
+        }},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entries_pause_source"] == "auto_exception"
+    assert result["entries_pause_reason"] == "auto_pause:ValueError"
+    assert result["control_state"]["entries_paused"] is True
+    assert result["healthy"] is True
+
+
 def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"
