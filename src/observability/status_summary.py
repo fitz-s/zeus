@@ -220,7 +220,10 @@ def write_status(cycle_summary: dict = None) -> None:
             "day0_positions": int(position_view.get("day0_positions", 0)),
         },
         "strategy": strategy_summary,
-        "execution": {},
+        "execution": {
+            "fdr_family_size": int((cycle_summary or {}).get("fdr_family_size", 0)),
+            "fdr_fallback_fired": bool((cycle_summary or {}).get("fdr_fallback_fired", False)),
+        },
         "learning": {},
         "no_trade": {},
         "cycle": cycle_summary or {},
