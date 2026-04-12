@@ -29,7 +29,7 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
     zeus.db does NOT use this — it holds shared world data (ENS, calibration,
     settlements) plus env-tagged decision data.
 
-    positions.json → positions-paper.json / positions-live.json
+    positions.json → positions-live.json (live-only, Phase 1)
     """
     import os
 
@@ -43,16 +43,7 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
 
 
 def get_mode() -> str:
-    """Canonical mode resolution — the ONLY way to determine paper vs live.
-
-    Priority: ZEUS_MODE env var → settings.json mode field.
-    Every call site that needs to know the current mode MUST use this function.
-    Do NOT read settings.mode directly for mode checks.
-    """
-    import os
-
-    # Phase 2: Zeus is live-only. Hard-coded to 'live'.
-    # Original: return os.environ.get("ZEUS_MODE", settings.mode)
+    """Mode accessor. Zeus is live-only — always returns 'live'."""
     return "live"
 
 

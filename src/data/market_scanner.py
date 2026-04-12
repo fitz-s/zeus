@@ -50,10 +50,10 @@ def find_weather_markets(
 
 
 def get_current_yes_price(market_id: str) -> Optional[float]:
-    """Fetch the current YES-side price for an active market in paper mode.
+    """Fetch the current YES-side price for an active market via Gamma event data.
 
-    Paper mode uses Gamma event data, not live CLOB VWMP, as the observable
-    market price source during monitor cycles.
+    Used during monitor cycles as the observable market price source when live
+    CLOB VWMP is not available (e.g. non-CLOB positions).
     """
     events = _get_active_events()
     if not events:

@@ -29,7 +29,7 @@ def _zeus_conn():
     from src.config import settings
     from src.state.db import get_trade_connection_with_world, init_schema
 
-    conn = get_trade_connection_with_world(settings.mode)
+    conn = get_trade_connection_with_world()
     init_schema(conn)
     return conn
 

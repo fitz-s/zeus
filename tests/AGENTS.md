@@ -71,6 +71,7 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 | `test_pnl_flow_and_audit.py` | P&L data flow chain invariants |
 | `test_tracker_integrity.py` | Strategy tracker integrity |
 | `test_strategy_tracker_regime.py` | Strategy tracker regime transitions |
+| `test_polymarket_error_matrix.py` | CLOB 429/5xx/timeout error handling: executor rejects gracefully, lifecycle retries not closes |
 
 ### Data/ETL tests
 

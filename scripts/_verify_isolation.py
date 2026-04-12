@@ -15,7 +15,7 @@ c.close()
 print()
 
 # Live DB
-c = sqlite3.connect("state/zeus-live.db")
+c = sqlite3.connect("state/zeus_trades.db")
 c.row_factory = sqlite3.Row
 for tbl in ["position_current", "position_events", "position_events_legacy", "trade_decisions"]:
     try:
