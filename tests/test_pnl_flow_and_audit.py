@@ -63,6 +63,10 @@ NYC = City(
 MISSING = object()
 
 
+def _stub_full_family_scan(monkeypatch) -> None:
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+
+
 def _position(**kwargs) -> Position:
     defaults = dict(
         trade_id="t1",
@@ -1707,6 +1711,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
 
@@ -1845,6 +1850,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -1965,6 +1971,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -2081,6 +2088,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -2205,6 +2213,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "is_reentry_blocked", lambda *args, **kwargs: True)
@@ -2344,6 +2353,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2471,6 +2481,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2586,6 +2597,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
