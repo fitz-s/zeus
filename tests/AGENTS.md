@@ -101,6 +101,7 @@ Tests defend kernel law and delivery guarantees. Zeus has 68 test files and exte
 
 | File | What it tests |
 |------|--------------|
+| `test_automation_analysis.py` | Automation analysis report readiness semantics |
 | `test_bayesian_sigma_evaluation.py` | Bayesian sigma evaluation |
 | `test_lead_sigma_evaluation.py` | Lead-time sigma evaluation |
 | `test_sigma_floor_evaluation.py` | Sigma floor evaluation |
