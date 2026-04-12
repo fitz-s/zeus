@@ -61,6 +61,17 @@ NYC = City(
 )
 
 
+class _CycleSettingsStub:
+    def __init__(self, *, capital_base_usd: float = 150.0, smoke_test_portfolio_cap_usd=None):
+        self.capital_base_usd = capital_base_usd
+        self._smoke_test_portfolio_cap_usd = smoke_test_portfolio_cap_usd
+
+    def __getitem__(self, key: str):
+        if key == "smoke_test_portfolio_cap_usd":
+            return self._smoke_test_portfolio_cap_usd
+        raise KeyError(key)
+
+
 def _position(**kwargs) -> Position:
     defaults = dict(
         trade_id="t1",
@@ -106,7 +117,6 @@ def _edge() -> BinEdge:
 
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
-    portfolio_path = tmp_path / "positions.json"
     conn = get_connection(db_path)
     init_schema(conn)
     conn.execute(
@@ -117,7 +127,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     )
     conn.commit()
     conn.close()
-    save_portfolio(PortfolioState(positions=[_position(size_usd=8.0, shares=20.0, cost_basis_usd=8.0)]), portfolio_path)
+    portfolio = PortfolioState(positions=[_position(size_usd=8.0, shares=20.0, cost_basis_usd=8.0)])
 
     class DummyClob:
         def __init__(self):
@@ -140,9 +150,9 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: load_portfolio(portfolio_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: save_portfolio(state, portfolio_path))
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
@@ -157,8 +167,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-    loaded = load_portfolio(portfolio_path)
-    pos = loaded.positions[0]
+    pos = portfolio.positions[0]
 
     assert summary["chain_sync"]["synced"] == 1
     assert summary["chain_sync"]["updated"] == 1
@@ -387,6 +396,7 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
         def get_open_orders(self):
             return []
 
+    monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub(capital_base_usd=150.0, smoke_test_portfolio_cap_usd=None))
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -896,6 +906,7 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
         def get_balance(self):
             return 100.0
 
+    monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub(capital_base_usd=150.0, smoke_test_portfolio_cap_usd=None))
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
