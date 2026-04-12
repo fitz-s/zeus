@@ -1,8 +1,6 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Handles both paper and live modes.
-Paper mode: simulates fills at VWMP.
-Live mode: places limit orders via Polymarket CLOB API.
+Live mode only: places limit orders via Polymarket CLOB API.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -126,7 +124,7 @@ def create_execution_intent(
 
 def execute_intent(
     intent: ExecutionIntent,
-    edge_vwmp: float,  # Phase 2: remove when _paper_fill callers are cleaned up
+    edge_vwmp: float,  # Phase 2: remove this parameter (dead after _paper_fill deletion)
     label: str,
 ) -> OrderResult:
     """Execute the instantiated live domain intent."""

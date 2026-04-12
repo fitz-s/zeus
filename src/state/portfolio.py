@@ -648,11 +648,6 @@ class PortfolioState:
 
 
 
-class PortfolioModeError(RuntimeError):
-    """Paper data in live state, or vice versa. Daemon refuses to boot."""
-    pass
-
-
 class DeprecatedStateFileError(RuntimeError):
     """Raised when a deprecated unsuffixed truth file is accessed."""
     pass
@@ -723,14 +718,6 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             len(skipped_terminal),
             ", ".join(skipped_terminal[:10]) + ("..." if len(skipped_terminal) > 10 else ""),
         )
-
-    for pos in positions:
-        if pos.env and pos.env != current_mode:
-            raise PortfolioModeError(
-                f"{current_mode} portfolio contains {pos.env} position "
-                f"{pos.trade_id} — refusing to load. Resolve manually: "
-                f"settle or void all {pos.env} positions before switching modes."
-            )
 
     bankroll = data.get("bankroll", 150.0)
     return PortfolioState(
@@ -855,18 +842,13 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         mode_override = current_mode
 
     try:
-        if mode_override is not None:
-            sibling_mode_db = path.parent / f"zeus-{mode_override}.db"
-            if sibling_mode_db.exists():
-                conn = get_connection(sibling_mode_db)
-            else:
-                conn = get_trade_connection_with_world(mode_override)
+        trade_db = path.parent / "zeus_trades.db"
+        if trade_db.exists():
+            conn = get_connection(trade_db)
+        elif mode_override is not None:
+            conn = get_trade_connection_with_world()
         else:
-            sibling_mode_db = path.parent / f"zeus-{current_mode}.db"
-            if sibling_mode_db.exists():
-                conn = get_connection(sibling_mode_db)
-            else:
-                conn = get_connection(path.parent / "zeus.db")
+            conn = get_connection(path.parent / "zeus.db")
     except Exception:
         logger.error(
             "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
@@ -882,12 +864,11 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     try:
         snapshot = query_portfolio_loader_view(conn)
         if snapshot.get("status") in ("ok", "partial_stale"):
-            query_env = mode_override or current_mode
             try:
                 settlement_rows = query_authoritative_settlement_rows(
                     conn,
                     limit=None,
-                    env=query_env,
+                    env="live",
                 )
             except Exception:
                 logger.warning(

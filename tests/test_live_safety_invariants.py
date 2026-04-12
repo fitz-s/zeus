@@ -1533,7 +1533,7 @@ def test_position_carries_env():
 @pytest.mark.skip(reason="P4: contamination guard was in _load_portfolio_from_json_data (now deleted); needs relocation to canonical load path")
 def test_contamination_guard_blocks_wrong_env():
     """Loading a live position into paper portfolio (or vice versa) must fail."""
-    from src.state.portfolio import PortfolioModeError, load_portfolio, save_portfolio
+    from src.state.portfolio import load_portfolio, save_portfolio
     import tempfile
     from pathlib import Path
 
@@ -1548,7 +1548,7 @@ def test_contamination_guard_blocks_wrong_env():
 
         # Loading in paper mode (settings.mode == "paper") should raise
         # because the position has env="live"
-        with pytest.raises(PortfolioModeError, match="live position"):
+        with pytest.raises(RuntimeError, match="live position"):  # PortfolioModeError deleted (Phase 1)
             load_portfolio(tmp)
     finally:
         tmp.unlink(missing_ok=True)

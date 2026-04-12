@@ -1,7 +1,7 @@
 """Process-level lock to prevent double-daemon launches. P12 finding #3.
 
-Uses fcntl.flock() with separate lock files per mode (paper/live) so both
-can coexist, but two live daemons (or two paper daemons) cannot.
+Uses fcntl.flock() with a mode-qualified lock file so two live daemons cannot
+run concurrently.
 
 Stale lock detection: if the PID in the lock file is dead, reclaim the lock.
 The caller must keep the returned fd alive (store it) to hold the lock.

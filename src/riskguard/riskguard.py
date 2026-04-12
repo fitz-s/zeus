@@ -383,7 +383,7 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     (canonical position_events, legacy position_events_legacy, legacy
     decision_log artifacts) and the same underlying trade may appear in
     more than one source or in multiple batches of the same source. Prior
-    to dedup, opening_inertia would show 19 settlements on paper on
+    to dedup, opening_inertia would show 19 settlements on
     2026-04-11 while the canonical truth was 6 unique positions, because
     two decision_log settlement batches (19:43 and 20:43) each recorded
     the same 6 positions. The two bugs are now fixed at the writer layer

@@ -235,7 +235,7 @@ def test_healthcheck_falls_back_to_launchctl_print_when_list_fails(monkeypatch, 
 
 def test_healthcheck_is_not_healthy_when_daemon_is_dead(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary-live.json"
-    risk_path = tmp_path / "risk_state-live.db"
+    risk_path = tmp_path / "risk_state.db"
     status_path.write_text(json.dumps(_status_payload(
         timestamp=(datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
         portfolio={"open_positions": 0, "total_exposure_usd": 0.0},

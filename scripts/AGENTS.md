@@ -19,3 +19,9 @@ Scripts here are enforcement, audit, runtime support, or operator tools.
 - let scripts become hidden authority centers
 - write directly to canonical truth except explicitly approved migration/support tooling
 - block CI on external files that are outside repo control unless policy says so
+
+## Operator tools
+
+| Script | Purpose |
+|--------|---------|
+| `check_daemon_heartbeat.py` | Check staleness of `state/daemon-heartbeat-{mode}.json`; exit 1 if >5 min stale or missing |

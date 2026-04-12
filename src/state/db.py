@@ -24,15 +24,12 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
 ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
-RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
+RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
 
-def _zeus_trade_db_path(mode: str | None = None) -> Path:
-    """Physical path for mode-specific trade database.
-    Paper and live trade data live in different files.
-    Cross-mode reads are unconstructable — different files."""
-    mode = mode or get_mode()
-    return STATE_DIR / f"zeus-{mode}.db"
+def _zeus_trade_db_path() -> Path:
+    """Physical path for the trade database."""
+    return STATE_DIR / "zeus_trades.db"
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -45,9 +42,9 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def get_trade_connection(mode: str | None = None) -> sqlite3.Connection:
-    """Mode-isolated trade DB. Paper gets zeus-paper.db, live gets zeus-live.db."""
-    return _connect(_zeus_trade_db_path(mode))
+def get_trade_connection() -> sqlite3.Connection:
+    """Trade DB connection (zeus_trades.db)."""
+    return _connect(_zeus_trade_db_path())
 
 
 def get_world_connection() -> sqlite3.Connection:
@@ -55,9 +52,9 @@ def get_world_connection() -> sqlite3.Connection:
     return _connect(ZEUS_WORLD_DB_PATH)
 
 
-def get_trade_connection_with_world(mode: str | None = None) -> sqlite3.Connection:
+def get_trade_connection_with_world() -> sqlite3.Connection:
     """Trade connection with shared DB ATTACHed for cross-DB joins."""
-    conn = get_trade_connection(mode)
+    conn = get_trade_connection()
     conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     return conn
 
@@ -2137,7 +2134,7 @@ def log_outcome_fact(
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", None) or get_mode()
+    env = "live"
     status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
@@ -2300,7 +2297,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         from datetime import datetime
-        env = getattr(pos, "env", None) or get_mode()
+        env = "live"
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
@@ -3105,7 +3102,6 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
     latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
     legacy_latest_by_trade: dict[str, tuple[datetime, str]] = {}
 
-    current_mode = get_mode()
     positions: list[dict] = []
     stale_trade_ids: list[str] = []
     for row in rows:
@@ -3113,9 +3109,6 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
         phase = str(row["phase"] or "")
         latest_trade_status = latest_trade_statuses.get(trade_id, "")
         hints = transitional_hints.get(trade_id, {})
-        position_env = str(hints.get("env") or current_mode)
-        if position_env != current_mode:
-            continue
         projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
         legacy_entry = legacy_latest_by_trade.get(trade_id)
         if projection_updated_at is not None and legacy_entry is not None:
@@ -3160,7 +3153,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
-                "env": position_env,
+                "env": "live",
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": str(hints.get("exit_state") or ""),

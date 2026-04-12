@@ -5,7 +5,7 @@ Historical note: this module used to maintain a persistent JSON file
 record_settlement callbacks fired from the runtime. That design violated
 K1 (derived surfaces must not have write authority): the tracker was a
 second, out-of-band ledger that drifted from position_events across
-paper-bankroll resets, producing phantom PnL totals (e.g. opening_inertia
+bankroll resets, producing phantom PnL totals (e.g. opening_inertia
 showed +$210.68 while position_events said -$13.03). It also fed the
 `strategy_edge_compression_alerts` signal that in turn drove RiskGuard's
 strategy_signal_level — so "not authority" was a lie in practice.
