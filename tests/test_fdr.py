@@ -424,6 +424,18 @@ class TestSelectionFamilySubstrate:
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
+        monkeypatch.setattr(
+            evaluator_module,
+            "resolve_strategy_policy",
+            lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
+                strategy_key=strategy_key,
+                gated=False,
+                allocation_multiplier=1.0,
+                threshold_multiplier=1.0,
+                exit_only=False,
+                sources=[],
+            ),
+        )
 
         candidate = evaluator_module.MarketCandidate(
             city=cities_by_name["Dallas"],
@@ -552,6 +564,18 @@ class TestSelectionFamilySubstrate:
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
         monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("family scan down")))
         monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+        monkeypatch.setattr(
+            evaluator_module,
+            "resolve_strategy_policy",
+            lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
+                strategy_key=strategy_key,
+                gated=False,
+                allocation_multiplier=1.0,
+                threshold_multiplier=1.0,
+                exit_only=False,
+                sources=[],
+            ),
+        )
 
         candidate = evaluator_module.MarketCandidate(
             city=cities_by_name["Dallas"],
