@@ -1021,6 +1021,26 @@ def test_manual_portfolio_state_does_not_write_real_exit_audit(monkeypatch):
 
 def test_load_portfolio_enables_audit_logging(tmp_path):
     from src.state.portfolio import load_portfolio
+    from src.state.db import get_connection, init_schema
+
+    # P4: load_portfolio now requires a healthy canonical DB to enable audit logging.
+    # Set up zeus.db (fallback path) with one active position.
+    db = get_connection(tmp_path / "zeus.db")
+    init_schema(db)
+    db.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+         direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+         entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+         order_id, order_status, updated_at)
+        VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-04-01','39-40\u00b0F',
+                'buy_yes','F',8.0,20.0,8.0,0.4,0.6,'ens_member_counting','center_buy',
+                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z')
+        """
+    )
+    db.commit()
+    db.close()
 
     state = load_portfolio(tmp_path / "missing.json")
     assert state.audit_logging_enabled is True

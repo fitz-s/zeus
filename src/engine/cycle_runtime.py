@@ -841,7 +841,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         lead_hours=float(lead_hours_to_target(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     )
                 except Exception as exc:
-                    logger.warning("telemetry write failed: %s", exc)
+                    deps.logger.warning("telemetry write failed: %s", exc)
             for d in decisions:
                 if False:
                     _ = d.calibration
