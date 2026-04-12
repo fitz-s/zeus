@@ -197,6 +197,32 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             unit TEXT NOT NULL,
             station_id TEXT,
             fetched_at TEXT,
+            -- K1 additions: raw value/unit contract
+            raw_value REAL,
+            raw_unit TEXT CHECK (raw_unit IN ('F', 'C', 'K')),
+            target_unit TEXT CHECK (target_unit IN ('F', 'C')),
+            value_type TEXT CHECK (value_type IN ('high', 'low', 'mean')),
+            -- K1 additions: temporal provenance
+            fetch_utc TEXT,
+            local_time TEXT,
+            collection_window_start_utc TEXT,
+            collection_window_end_utc TEXT,
+            -- K1 additions: DST context
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER CHECK (dst_active IN (0, 1)),
+            is_ambiguous_local_hour INTEGER CHECK (is_ambiguous_local_hour IN (0, 1)),
+            is_missing_local_hour INTEGER CHECK (is_missing_local_hour IN (0, 1)),
+            -- K1 additions: geographic/seasonal
+            hemisphere TEXT CHECK (hemisphere IN ('N', 'S')),
+            season TEXT CHECK (season IN ('DJF', 'MAM', 'JJA', 'SON')),
+            month INTEGER CHECK (month BETWEEN 1 AND 12),
+            -- K1 additions: run provenance
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            -- K1 additions: authority + extensibility
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
         );
 
