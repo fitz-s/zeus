@@ -1,6 +1,6 @@
 """Vig normalization contract — D5 resolution.
 
-D5 gap: p_market includes vig (~0.95–1.05). compute_posterior() blends
+D5 gap: p_market includes vig (~0.90–1.10). compute_posterior() blends
 α × p_cal + (1-α) × p_market then normalizes. This smears vig bias across all
 bins because the blend happens before vig removal. The normalization step partially
 corrects it but the blend coefficients were already contaminated.
@@ -26,7 +26,7 @@ class VigTreatment:
     and that the cleaning step is explicit and auditable.
 
     Attributes:
-        raw_market_prices: Original p_market array summing to ~vig (0.95–1.05).
+        raw_market_prices: Original p_market array summing to plausible vig (~0.90–1.10).
         vig_factor: The vig total (sum of raw_market_prices). Used to derive
             clean_prices = raw_market_prices / vig_factor.
         clean_prices: Normalized market probabilities summing to 1.0, suitable
@@ -41,6 +41,14 @@ class VigTreatment:
     applied_before_blend: bool
 
     def __post_init__(self) -> None:
+        if not np.all(np.isfinite(self.raw_market_prices)):
+            raise ValueError("VigTreatment.raw_market_prices must be finite")
+        if np.any(self.raw_market_prices < 0.0):
+            raise ValueError("VigTreatment.raw_market_prices must be non-negative")
+        if not np.all(np.isfinite(self.clean_prices)):
+            raise ValueError("VigTreatment.clean_prices must be finite")
+        if np.any(self.clean_prices < 0.0):
+            raise ValueError("VigTreatment.clean_prices must be non-negative")
         if self.vig_factor <= 0.0:
             raise ValueError(
                 f"VigTreatment.vig_factor must be > 0, got {self.vig_factor}"
@@ -73,6 +81,10 @@ class VigTreatment:
         This is the canonical way to construct a VigTreatment — it ensures
         vig removal happens at construction time (before any blend call).
         """
+        if not np.all(np.isfinite(raw_market_prices)):
+            raise ValueError("raw_market_prices must be finite")
+        if np.any(raw_market_prices < 0.0):
+            raise ValueError("raw_market_prices must be non-negative")
         vig_factor = float(np.sum(raw_market_prices))
         if vig_factor <= 0.0:
             raise ValueError(

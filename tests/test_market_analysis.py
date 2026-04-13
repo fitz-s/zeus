@@ -91,6 +91,30 @@ class TestComputePosterior:
         result = compute_posterior(p_cal, p_market, 1.0)
         np.testing.assert_array_almost_equal(result, p_cal)
 
+    def test_vig_removed_before_blend(self):
+        p_cal = np.array([0.60, 0.30, 0.10])
+        p_market = np.array([0.54, 0.36, 0.18])
+
+        result = compute_posterior(p_cal, p_market, 0.4)
+        expected = 0.4 * p_cal + 0.6 * (p_market / p_market.sum())
+        legacy_post_blend = (0.4 * p_cal + 0.6 * p_market)
+        legacy_post_blend = legacy_post_blend / legacy_post_blend.sum()
+
+        np.testing.assert_allclose(result, expected)
+        assert not np.allclose(result, legacy_post_blend)
+
+    def test_sparse_monitor_market_vector_is_not_de_vigged(self):
+        p_cal = np.array([0.30, 0.40, 0.30])
+        p_market = np.array([0.00, 0.95, 0.00])
+
+        result = compute_posterior(p_cal, p_market, 0.5)
+        raw = 0.5 * p_cal + 0.5 * p_market
+        expected = raw / raw.sum()
+        incorrectly_devigged = 0.5 * p_cal + 0.5 * np.array([0.0, 1.0, 0.0])
+
+        np.testing.assert_allclose(result, expected)
+        assert not np.allclose(result, incorrectly_devigged)
+
     def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
         bins = [
             Bin(low=None, high=32, label="32°F or below", unit="F"),
@@ -105,6 +129,21 @@ class TestComputePosterior:
 
         np.testing.assert_array_almost_equal(result, [0.875, 0.125])
         assert result.sum() == pytest.approx(1.0)
+
+    def test_tail_alpha_uses_de_vigged_market_before_blend(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=34, label="33-34°F", unit="F"),
+        ]
+        p_cal = np.array([1.0, 0.0])
+        p_market = np.array([0.648, 0.432])
+        result = compute_posterior(p_cal, p_market, 0.8, bins=bins)
+
+        alpha_vec = np.array([0.4, 0.8])
+        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * (p_market / p_market.sum())
+        expected = raw / raw.sum()
+
+        np.testing.assert_allclose(result, expected)
 
     def test_tail_alpha_scale_applies_to_buy_yes_bootstrap_ci(self):
         bins = [
@@ -221,3 +260,24 @@ class TestMarketAnalysis:
             alpha=0.5, bins=bins, member_maxes=member_maxes,
         )
         assert ma.vig == pytest.approx(1.0, abs=0.01)
+
+    def test_market_analysis_keeps_raw_vig_but_posterior_uses_clean_market(self):
+        bins = self._make_bins()[1:4]
+        p_cal = np.array([0.60, 0.30, 0.10])
+        p_market = np.array([0.54, 0.36, 0.18])
+        member_maxes = np.ones(51) * 40.0
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=p_market,
+            alpha=0.4,
+            bins=bins,
+            member_maxes=member_maxes,
+        )
+
+        assert ma.vig == pytest.approx(1.08)
+        np.testing.assert_allclose(
+            ma.p_posterior,
+            0.4 * p_cal + 0.6 * (p_market / p_market.sum()),
+        )

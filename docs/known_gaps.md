@@ -336,10 +336,11 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Cross-reference:** Several specific manifestations of this asymmetry are tracked in the "Exit/Entry Epistemic Asymmetry" section above (MC count mismatch [FIXED], CI-aware exit [FIXED], hours_since_open [FIXED], divergence threshold [FIXED]). This gap tracks the *structural* asymmetry: entry and exit should share a symmetric `DecisionEvidence` contract with comparable statistical burden.
 **Proposed antibody:** Entry and exit share the same `DecisionEvidence` contract type with symmetric statistical burden. Exit reversal requires bootstrap-grade evidence, not just 2 consecutive point-estimate checks.
 
-### [OPEN] D5 — Vig smearing distorts edge signal (MEDIUM)
+### [MITIGATED] D5 — Complete market-family vig is removed before posterior blend (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — probability blending
 **Problem:** `p_market` includes vig (~0.95–1.05 total probability across bins). Blending model probability with vig-contaminated market probability, then normalizing, smears the vig bias into the posterior. The posterior systematically inherits a vig-driven bias that is not a real probability signal.
-**Proposed antibody:** Vig normalization before blend, under a declared `VigTreatment` contract that makes the vig handling explicit.
+**Antibody deployed:** `compute_posterior()` now constructs `VigTreatment.from_raw(p_market)` and blends against `clean_prices` before final posterior normalization when `p_market` looks like a complete market-family vector: plausible vig sum and at least two positive components. `MarketAnalysis.p_market` remains the raw tradable market vector for edge/entry-price semantics; only posterior fusion uses the de-vigged probability vector.
+**Residual:** Sparse monitor vectors and complete-family vectors outside the plausible vig window stay in raw observed-price space until monitor refresh can provide complete market-family vectors with explicit provenance. This does not address execution-side spread, fees, slippage, or historical replay metric drift from prior post-blend normalization.
 
 ### [OPEN] D6 — EV hold calculation ignores funding/correlation cost (MEDIUM)
 **Location:** `src/strategy/kelly.py` — hold value calculation

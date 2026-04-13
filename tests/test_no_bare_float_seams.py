@@ -3,11 +3,14 @@ import ast
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
+from src.contracts.vig_treatment import VigTreatment
 from src.strategy.kelly import kelly_size
+from src.strategy.market_fusion import compute_posterior
 
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
@@ -56,6 +59,33 @@ class TestExecutionPriceConstruction:
             currency="probability_units",
         )
         assert ep.price_type == "implied_probability"
+
+
+class TestVigTreatmentSeam:
+    def test_compute_posterior_rejects_zero_market_vector(self):
+        with pytest.raises(ValueError, match="cannot compute vig"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([0.0, 0.0]),
+                0.5,
+            )
+
+    def test_compute_posterior_rejects_negative_market_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([-0.1, 1.1]),
+                0.5,
+            )
+
+    def test_vig_treatment_constructor_rejects_negative_raw_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            VigTreatment(
+                raw_market_prices=np.array([-0.1, 1.1]),
+                vig_factor=1.0,
+                clean_prices=np.array([-0.1, 1.1]),
+                applied_before_blend=True,
+            )
 
 
 # ---------------------------------------------------------------------------
