@@ -8,14 +8,10 @@ Every package subdirectory has its own `AGENTS.md` with zone-specific rules, dom
 
 ## Zone map
 
-| Zone | Packages | Purpose |
-|------|----------|---------|
-| K0 (Kernel) | `contracts/`, `state/` | Truth, lifecycle, semantic boundaries |
-| K1 (Protective) | `riskguard/`, `control/` | Risk enforcement, control plane |
-| K2 (Execution) | `execution/`, `supervisor_api/` | Order execution, Venus contracts |
-| K3 (Math/Data) | `engine/`, `signal/`, `calibration/`, `strategy/`, `data/` | Signals, calibration, trading decisions, data |
-| K4 (Extension) | `observability/`, `analysis/` | Monitoring, reporting (derived, never canonical) |
-| Cross-cutting | `types/` | Unit-safe types (Temperature, market types) |
+The canonical file-level zone map lives in `architecture/zones.yaml`.
+Use this file only as a navigation summary. If it disagrees with `architecture/zones.yaml`, the YAML wins.
+
+`src/state/` should be treated as a mixed navigation cluster when reading docs. Consult `architecture/zones.yaml` for file-level ownership before editing any file there.
 
 ## Standalone files
 
