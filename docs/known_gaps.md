@@ -208,12 +208,13 @@ cycle_runner._execute_monitoring_phase()
 **Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 
-### [STALE-UNVERIFIED] Exit authority still runs with incomplete monitor context on some day0 positions
+### [FIXED] Day0 stale probability no longer blocks exit authority (2026-04-13)
 **Location:** `src/engine/cycle_runner.py`, `src/engine/monitor_refresh.py`, `src/execution/exit_triggers.py`
 **Problem:** Current cycle logs show `INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh)` for several day0 positions. The cycle continues, but exit authority is evaluating with partially missing freshness context.
 **Live evidence (2026-04-06):** 4 positions (`dab0ddb6-e7f`, `e6f0d01d-2a3`, `19a7116d-36c`, `511c16a6-27d`) repeatedly triggered this warning in the 14:30 and 15:00 cycles.
-**Live evidence (2026-04-09):** 3 positions (`52280711-260`, `b33ff595-3cb`, `c25e2bfe-769`) still triggering `INCOMPLETE_EXIT_CONTEXT` in day0_capture cycle. Still not confirmed fixed.
-**Proposed antibody:** Make `fresh_prob_is_fresh` a required field for exit evaluation; if it is missing, mark the position as `exit_context_incomplete` and skip exit authority until the next full monitor refresh.
+**Live evidence (2026-04-09):** 3 positions (`52280711-260`, `b33ff595-3cb`, `c25e2bfe-769`) still triggered `INCOMPLETE_EXIT_CONTEXT` in day0_capture cycle.
+**Antibody deployed:** `ExitContext.missing_authority_fields()` now waives stale `fresh_prob_is_fresh` only for `day0_active=True`; `evaluate_exit()` keeps audit markers (`day0_stale_prob_authority_waived`, `stale_prob_substitution`) instead of pretending stale probability is fresh. Non-day0 stale probability still fails closed. Covered by `tests/test_day0_exit_gate.py` and `tests/test_live_safety_invariants.py`.
+**Residual:** If fresh live logs still show this exact missing field for day0 positions, the likely defect is upstream state classification not reaching `day0_window`, not the freshness waiver itself.
 
 ### [OPEN] strategy_tracker can report profit that is not reconstructible from durable DB truth
 **Location:** `src/state/strategy_tracker.py`, `zeus/state/strategy_tracker-paper.json`, `zeus/state/positions-paper.json`, `zeus/state/zeus.db`

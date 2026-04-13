@@ -1292,6 +1292,7 @@ def test_exit_authority_fails_closed_on_stale_monitor_inputs():
     assert decision.should_exit is False
     assert "fresh_prob_is_fresh" in decision.reason
     assert "current_market_price_is_fresh" in decision.reason
+    assert decision.reason.count("fresh_prob_is_fresh") == 1
 
 
 def test_buy_yes_edge_exit_requires_best_bid():

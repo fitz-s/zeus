@@ -98,7 +98,6 @@ class ExitContext:
         elif not self.fresh_prob_is_fresh and not self.day0_active:
             # Day0 positions waive fresh_prob_is_fresh requirement
             missing.append("fresh_prob_is_fresh")
-            missing.append("fresh_prob_is_fresh")
         if not self._is_finite(self.current_market_price):
             missing.append("current_market_price")
         elif not self.current_market_price_is_fresh:
