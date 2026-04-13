@@ -284,7 +284,7 @@
   },
   "bias_correction_enabled": false,
   "feature_flags": {
-    "EXECUTION_PRICE_SHADOW": false,
+    "EXECUTION_PRICE_SHADOW": true,
     "CANONICAL_EXIT_PATH": false
   }
 }

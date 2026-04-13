@@ -145,19 +145,15 @@ class TestNoBareFloatAtKellyBoundary:
             "This documents the D3 systematic Kelly oversizing."
         )
 
-    def test_kelly_size_still_accepts_bare_float(self):
-        """Document current state: kelly_size accepts bare float entry_price (pre-seam wiring).
-
-        This test PASSES now (bare float accepted) and should be UPDATED to assert
-        ExecutionPriceContractError once evaluator.py is rewritten with the D3 seam.
-        """
+    def test_kelly_size_remains_numeric_kernel(self):
+        """Kelly stays numeric; evaluator owns the ExecutionPrice boundary."""
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,  # bare float — currently accepted
+            entry_price=0.40,
             bankroll=1000.0,
             kelly_mult=0.25,
         )
-        assert size > 0.0, "kelly_size with bare float entry_price should still work (pre-seam)"
+        assert size > 0.0, "kelly_size remains a numeric kernel behind the evaluator seam"
 
 
 # ---------------------------------------------------------------------------

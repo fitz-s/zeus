@@ -317,11 +317,12 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Impact:** Strategy B's primary edge source is systematically attenuated by a calibration-serving parameter.
 **Proposed antibody:** `TailTreatment` contract that declares whether it serves calibration OR profit. Cannot serve both without explicit tradeoff documentation.
 
-### [OPEN] D3 — Entry price uses implied probability, not VWMP+fee (SEVERE)
+### [OPEN] D3 — Entry price must remain typed through execution economics
 **Location:** `src/strategy/market_analysis.py` — `BinEdge.entry_price`
 **Problem:** `BinEdge.entry_price = p_market[i]` (implied probability from mid-price), but actual execution price = ask + taker fee (5%) + slippage. Kelly sizing uses the implied probability as the cost basis, systematically oversizing positions because the real cost is higher.
 **Impact:** Every Kelly-sized position is larger than it should be. The magnitude depends on spread width and fee structure.
-**Proposed antibody:** `ExecutionPrice(vwmp_or_ask, fee_deducted=True/False, currency)` wrapper at the Kelly boundary. Kelly must receive fee-adjusted cost, not implied probability.
+**Mitigation deployed (2026-04-13):** `evaluator.py` wraps entry price as `ExecutionPrice`, queries token-specific CLOB fee rate when available, and computes `polymarket_fee(p) = fee_rate × p × (1-p)` before Kelly. The default settings now make the fee-adjusted path authoritative (`EXECUTION_PRICE_SHADOW=true`) instead of leaving the old bare-price path in control.
+**Remaining antibody:** Remove or harden the rollback seam, carry typed execution cost beyond evaluator, and connect market-specific tick size, neg-risk, and realized fill/slippage reconciliation.
 
 ### [OPEN] D4 — Entry-exit epistemic asymmetry (CRITICAL)
 **Location:** `src/engine/evaluator.py` (entry), `src/execution/exit_triggers.py` (exit)
