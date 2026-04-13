@@ -46,6 +46,16 @@ SEMANTIC_RULES = {
 TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py", "day0_residual.py"}
 P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
 
+# K2_struct: forbid bare FROM calibration_pairs outside the allowlist.
+# Only src/calibration/store.py and files under migrations/ may query this table directly.
+# scripts/ is explicitly carved out: operator-run scripts are reviewed at PR time.
+# Named gap: scripts/ not enforced by this rule (see K2_struct ADR note).
+CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+    "store.py",              # src/calibration/store.py — canonical query layer
+    "blocked_oos.py",       # src/calibration/blocked_oos.py — K2_struct approved, has authority_filter
+    "effective_sample_size.py",  # src/calibration/effective_sample_size.py — K2_struct approved
+})
+
 
 class SemanticAnalyzer(ast.NodeVisitor):
     def __init__(self, filepath: Path):
@@ -179,6 +189,37 @@ def _check_regional_cluster_literals(py_file: Path, content: str) -> list[str]:
     return violations
 
 
+def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
+    """K2_struct: forbid direct FROM calibration_pairs outside the allowlist.
+
+    Allowlist: src/calibration/store.py, migrations/.
+    scripts/ is carved out (operator-run, reviewed at PR time).
+    """
+    # Skip allowlisted files by name
+    if py_file.name in CALIBRATION_PAIRS_SELECT_ALLOWLIST:
+        return []
+    # Skip migrations/ directory
+    if "migrations" in py_file.parts:
+        return []
+    # Skip scripts/ directory (named gap)
+    if "scripts" in py_file.parts:
+        return []
+
+    violations = []
+    pattern = re.compile(r'FROM\s+calibration_pairs', re.IGNORECASE)
+    for lineno, line in enumerate(content.splitlines(), 1):
+        # Strip Python inline comments (#) and SQL inline comments (--)
+        stripped = line.split("#")[0].split("--")[0]
+        if pattern.search(stripped):
+            violations.append(
+                f"{py_file}:{lineno}:\n"
+                "  [ERROR] K2_struct: direct FROM calibration_pairs query outside allowlist.\n"
+                "  Use src/calibration/store.py query functions instead.\n"
+                f"  Line: {line.rstrip()}\n"
+            )
+    return violations
+
+
 def run_linter(src_path: Path) -> int:
     """Run the linter over all Python files in the source tree."""
     total_violations = 0
@@ -208,6 +249,12 @@ def run_linter(src_path: Path) -> int:
         # K3: check for forbidden regional cluster literals
         cluster_violations = _check_regional_cluster_literals(py_file, content)
         for violation in cluster_violations:
+            print(violation)
+            total_violations += 1
+
+        # K2_struct: check for bare FROM calibration_pairs outside allowlist
+        cp_violations = _check_calibration_pairs_select(py_file, content)
+        for violation in cp_violations:
             print(violation)
             total_violations += 1
 
