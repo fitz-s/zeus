@@ -37,6 +37,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import season_from_date
 from src.config import cities_by_name
+from src.data.rebuild_validators import (
+    validate_ensemble_snapshot_for_calibration,
+    ImpossibleTemperatureError,
+    EnsembleIntegrityError,
+)
 from src.state.db import get_world_connection, init_schema
 
 
@@ -202,27 +207,22 @@ def rebuild_calibration(
             per_city[city_name]["skipped"] += 1
             continue
 
-        # Parse ensemble members
+        # Parse ensemble members to raw float list, then validate (M9/M10/M11 fix)
         try:
             members_data = json.loads(snap["members_json"])
             if isinstance(members_data, dict):
-                # Format: {"members": [[hourly temps], ...]} or similar
                 if "members" in members_data:
-                    # Each member is a list of hourly temps - take daily max
-                    member_maxes = np.array([
-                        float(np.max(m)) for m in members_data["members"]
-                    ])
+                    raw_floats = [float(np.max(m)) for m in members_data["members"]]
                 elif "member_maxes" in members_data:
-                    member_maxes = np.array(members_data["member_maxes"], dtype=float)
+                    raw_floats = [float(v) for v in members_data["member_maxes"]]
                 else:
-                    # Assume flat list of max values
-                    member_maxes = np.array(list(members_data.values()), dtype=float)
+                    raw_floats = [float(v) for v in members_data.values()]
             elif isinstance(members_data, list):
                 arr = np.array(members_data, dtype=float)
                 if arr.ndim == 2:
-                    member_maxes = arr.max(axis=1)
+                    raw_floats = list(arr.max(axis=1))
                 else:
-                    member_maxes = arr
+                    raw_floats = list(arr)
             else:
                 rows_skipped += 1
                 per_city[city_name]["skipped"] += 1
@@ -232,10 +232,24 @@ def rebuild_calibration(
             per_city[city_name]["skipped"] += 1
             continue
 
-        if len(member_maxes) == 0:
+        if len(raw_floats) == 0:
             rows_skipped += 1
             per_city[city_name]["skipped"] += 1
             continue
+
+        # K1_struct: validate + convert ensemble values (M9 Kelvin, M10 NaN, M11 count)
+        members_as_dicts = [{"value_native_unit": v} for v in raw_floats]
+        try:
+            converted_floats = validate_ensemble_snapshot_for_calibration(
+                members_as_dicts, city, conn, target_date=target_date
+            )
+        except (ImpossibleTemperatureError, EnsembleIntegrityError, ValueError) as e:
+            print(f"  SKIP {city_name}/{target_date}: ensemble validator rejected: {e}")
+            rows_skipped += 1
+            per_city[city_name]["skipped"] += 1
+            continue
+
+        member_maxes = np.array(converted_floats, dtype=float)
 
         # Get bins for this city
         bins = _get_bins_for_city(conn, city_name)
@@ -251,7 +265,7 @@ def rebuild_calibration(
             ]
             for i in range(-4, 5):
                 v = center + i * step
-                bins.append({"range_label": f"{v}u00b0{city.settlement_unit}",
+                bins.append({"range_label": f"{v}°{city.settlement_unit}",
                               "range_low": float(v), "range_high": float(v)})
             bins.append(
                 {"range_label": f"{center + 5*step} or above",

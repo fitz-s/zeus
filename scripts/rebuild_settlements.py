@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.rebuild_validators import validate_observation_for_settlement
 from src.state.db import get_world_connection, init_schema
 
 
@@ -101,10 +102,20 @@ def rebuild_settlements(
             per_city[city_name]["skipped"] += 1
             continue
 
+        # C3 fix: validate unit consistency + Kelvin detection BEFORE stamping VERIFIED
+        try:
+            obs_dict = dict(obs)
+            validated_value = validate_observation_for_settlement(obs_dict, city, conn)
+        except Exception as e:
+            print(f"  SKIP {city_name}/{target_date}: validator rejected: {e}")
+            rows_skipped += 1
+            per_city[city_name]["skipped"] += 1
+            continue
+
         try:
             sem = SettlementSemantics.for_city(city)
             settlement_value = sem.assert_settlement_value(
-                float(high_temp), context="rebuild_settlements"
+                validated_value, context="rebuild_settlements"
             )
         except Exception as e:
             print(f"  SKIP {city_name}/{target_date}: SettlementSemantics error: {e}")
