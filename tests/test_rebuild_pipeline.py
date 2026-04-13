@@ -336,7 +336,7 @@ def test_refit_writes_authority_verified(tmp_path):
     ).fetchall()
     conn2.close()
 
-    assert len(rows) >= 1, "Expected at least one platt_model row after refit"
+    assert len(rows) == 1, "Expected exactly 1 active platt_model row after refit  # Deterministic fixture count; see K4.5.1 commit 3"
     assert all(r["authority"] == "VERIFIED" for r in rows), (
         f"All platt_models must have authority='VERIFIED' after refit. "
         f"Got: {[r['authority'] for r in rows]}"
