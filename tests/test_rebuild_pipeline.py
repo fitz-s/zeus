@@ -509,3 +509,160 @@ def test_rebuild_calibration_db_error_is_not_swallowed(tmp_path):
         "M6 fix: DB errors must be logged via logging.warning, not silently swallowed"
     )
     assert call_count[0] >= 1, "Injected error should have fired"
+
+
+# ---------------------------------------------------------------------------
+# K3_struct E2E: synthetic-bin path uses real degree symbol (C2 regression guard)
+# ---------------------------------------------------------------------------
+
+def test_rebuild_calibration_synthetic_bins_use_real_degree_symbol(tmp_path):
+    """K3_struct: synthetic bins use real \u00b0 (degree symbol), not the string u00b0.
+
+    Forces synthetic-bin path by NOT seeding market_events for NYC.
+    Asserts \u00b0 present and 'u00b0' absent in resulting range_labels.
+    """
+    conn, db_path = _make_tmp_db(tmp_path)
+
+    target = "2025-07-01"
+    members = [85.0 + j * 0.1 for j in range(51)]
+    # Seed snapshot and settlement but NO market_events -> triggers synthetic-bin fallback
+    conn.execute(
+        "INSERT OR IGNORE INTO ensemble_snapshots "
+        "(city, target_date, issue_time, valid_time, available_at, "
+        " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
+        "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED')",
+        (
+            target,
+            f"{target}T00:00:00Z",
+            f"{target}T12:00:00Z",
+            f"{target}T06:00:00Z",
+            f"{target}T07:00:00Z",
+            json.dumps(members),
+        ),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO settlements "
+        "(city, target_date, settlement_value, settlement_source, settled_at, authority) "
+        "VALUES ('NYC', ?, 85.0, 'wu_icao_rebuild', '2025-07-01T12:00:00Z', 'VERIFIED')",
+        (target,),
+    )
+    conn.commit()
+    conn.close()
+
+    from scripts.rebuild_calibration import rebuild_calibration
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.row_factory = sqlite3.Row
+    rebuild_calibration(conn2, dry_run=False, city_filter="NYC")
+    conn2.commit()
+
+    labels = [
+        row[0]
+        for row in conn2.execute(
+            "SELECT range_label FROM calibration_pairs WHERE city='NYC'"
+        ).fetchall()
+    ]
+    conn2.close()
+
+    assert len(labels) > 0, "Expected at least some calibration_pairs from synthetic bins"
+    # At least one synthetic bin label should have a real degree symbol
+    labels_with_degree = [l for l in labels if "\u00b0" in l]
+    labels_with_escaped = [l for l in labels if "u00b0" in l]
+    assert len(labels_with_degree) > 0, (
+        f"C2 fix: expected real \u00b0 in range_labels. Got labels: {labels}"
+    )
+    assert len(labels_with_escaped) == 0, (
+        f"C2 regression: found literal 'u00b0' in range_labels: {labels_with_escaped}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# K3_struct E2E: unit-mismatch observation is rejected, no VERIFIED row written
+# ---------------------------------------------------------------------------
+
+def test_rebuild_settlements_rejects_unknown_unit(tmp_path):
+    """K3_struct: obs with unknown unit='X' for F-settlement city is rejected by validator.
+
+    Seeds NYC (settlement_unit=F) with one VERIFIED obs that has unit='X' (unknown).
+    Asserts: zero settlements written, rows_skipped==1.
+
+    Note: C-unit obs for F-city is CONVERTED (not rejected) per K1_struct spec
+    ('convert, don't reject' for F<->C mismatches). Unknown units (not F/C/K)
+    are always rejected.
+    """
+    conn, db_path = _make_tmp_db(tmp_path)
+
+    # NYC expects F; inject unknown-unit obs to trigger UnknownUnitError
+    conn.execute(
+        "INSERT INTO observations "
+        "(city, target_date, source, high_temp, low_temp, unit, authority) "
+        "VALUES ('NYC', '2025-07-01', 'wu_icao', 85.0, 70.0, 'X', 'VERIFIED')"
+    )
+    conn.commit()
+    conn.close()
+
+    from scripts.rebuild_settlements import rebuild_settlements
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.row_factory = sqlite3.Row
+    summary = rebuild_settlements(conn2, dry_run=False, city_filter="NYC")
+    conn2.commit()
+
+    settlements = conn2.execute(
+        "SELECT COUNT(*) FROM settlements WHERE city='NYC'"
+    ).fetchone()[0]
+    conn2.close()
+
+    assert settlements == 0, (
+        f"Unknown-unit obs must not produce a VERIFIED settlement. Got {settlements} rows."
+    )
+    assert summary["rows_skipped"] == 1, (
+        f"Expected rows_skipped=1 for unknown-unit obs, got {summary['rows_skipped']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# K3_struct E2E: multi-city fixture with one wrong-unit city
+# ---------------------------------------------------------------------------
+
+def test_rebuild_multi_city_one_unknown_unit_one_valid(tmp_path):
+    """K3_struct: multi-city run where one obs has unknown unit, rest are valid.
+
+    NYC (F): 2 VERIFIED F-unit obs -> 2 settlements written.
+    NYC (F): 1 VERIFIED X-unit obs -> rejected (unknown unit), rows_skipped += 1.
+    Total: 2 settlements, 1 skipped.
+
+    Note: C-unit obs for F-city is CONVERTED (not rejected) per K1_struct spec.
+    """
+    conn, db_path = _make_tmp_db(tmp_path)
+
+    # 2 good F-unit observations
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO observations "
+            "(city, target_date, source, high_temp, low_temp, unit, authority) "
+            "VALUES ('NYC', ?, 'wu_icao', 85.0, 70.0, 'F', 'VERIFIED')",
+            (f"2025-07-{i+1:02d}",),
+        )
+    # 1 unknown-unit (X) observation
+    conn.execute(
+        "INSERT INTO observations "
+        "(city, target_date, source, high_temp, low_temp, unit, authority) "
+        "VALUES ('NYC', '2025-07-10', 'wu_icao', 85.0, 70.0, 'X', 'VERIFIED')"
+    )
+    conn.commit()
+    conn.close()
+
+    from scripts.rebuild_settlements import rebuild_settlements
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.row_factory = sqlite3.Row
+    summary = rebuild_settlements(conn2, dry_run=False, city_filter="NYC")
+    conn2.commit()
+
+    settlements = conn2.execute(
+        "SELECT COUNT(*) FROM settlements WHERE city='NYC'"
+    ).fetchone()[0]
+    conn2.close()
+
+    assert settlements == 2, f"Expected 2 valid settlements, got {settlements}"
+    assert summary["rows_skipped"] == 1, (
+        f"Expected 1 skipped (unknown unit), got {summary['rows_skipped']}"
+    )
