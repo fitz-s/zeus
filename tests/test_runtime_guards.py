@@ -3197,6 +3197,45 @@ def test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode():
     assert ctx.best_bid == pytest.approx(0.46)
 
 
+def test_build_exit_context_preserves_missing_best_bid_for_exit_audit():
+    edge_ctx = type(
+        "EdgeContext",
+        (),
+        {
+            "p_posterior": 0.41,
+            "p_market": np.array([0.46]),
+            "divergence_score": 0.0,
+            "market_velocity_1h": 0.0,
+        },
+    )()
+    pos = Position(
+        trade_id="live-buy-yes-missing-bid",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        last_monitor_prob=0.41,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.46,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=None,
+    )
+
+    ctx = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=4.0,
+        ExitContext=ExitContext,
+    )
+
+    assert ctx.best_bid is None
+    assert ctx.current_market_price == pytest.approx(0.46)
+
+
 def test_monitoring_skips_sell_pending_when_chain_already_missing():
     pos = Position(
         trade_id="retry-missing-chain",

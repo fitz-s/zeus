@@ -40,7 +40,7 @@ def _make_day0_exit_context(
     fresh_prob: float,
     fresh_prob_is_fresh: bool,
     current_market_price: float,
-    best_bid: float,
+    best_bid: float | None,
     hours_to_settlement: float = 3.0,
 ) -> ExitContext:
     return ExitContext(
@@ -198,3 +198,22 @@ class TestDay0ExitGateStaleProbability:
         assert decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT"), (
             f"Non-day0 stale prob must return INCOMPLETE, got: {decision.reason}"
         )
+
+    def test_day0_missing_best_bid_uses_degraded_market_price_proxy(self):
+        pos = _make_position(p_posterior=0.001, entry_price=0.02)
+        ctx = _make_day0_exit_context(
+            fresh_prob=0.001,
+            fresh_prob_is_fresh=False,
+            current_market_price=0.03,
+            best_bid=None,
+        )
+
+        decision = pos.evaluate_exit(ctx)
+
+        assert not decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT"), (
+            f"day0 missing best_bid should use degraded proxy, got: {decision.reason}"
+        )
+        assert "day0_stale_prob_authority_waived" in decision.applied_validations
+        assert "best_bid_unavailable" in decision.applied_validations
+        assert "best_bid_proxy_from_current_market_price" in decision.applied_validations
+        assert "best_bid_proxy_tick_discount" in decision.applied_validations
