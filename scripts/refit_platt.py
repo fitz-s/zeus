@@ -99,12 +99,12 @@ def refit_all():
             bootstrap_json = json.dumps(cal.bootstrap_params)
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            # K4: write new model with authority='VERIFIED'
+            # K4/C1 fix: write new model with authority='VERIFIED' explicitly in column list
             conn.execute("""
                 INSERT OR REPLACE INTO platt_models
                 (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-                 n_samples, brier_insample, fitted_at, is_active, input_space)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                 n_samples, brier_insample, fitted_at, is_active, input_space, authority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'VERIFIED')
             """, (bucket_key, cal.A, cal.B, cal.C, bootstrap_json,
                   len(pairs), brier_insample, now_iso, cal.input_space))
 

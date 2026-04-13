@@ -299,7 +299,7 @@ def rebuild_calibration(
 
             if not dry_run:
                 try:
-                    conn.execute(
+                    cursor = conn.execute(
                         """
                         INSERT OR IGNORE INTO calibration_pairs
                         (city, target_date, range_label, p_raw, outcome, lead_days,
@@ -315,11 +315,26 @@ def rebuild_calibration(
                             f"{group_id}|bin={i}",
                         ),
                     )
-                except Exception:
-                    pass
-
-            rows_written += 1
-            per_city[city_name]["written"] += 1
+                    # H4 fix: only count rows that were actually inserted
+                    if cursor.rowcount == 1:
+                        rows_written += 1
+                        per_city[city_name]["written"] += 1
+                    else:
+                        rows_skipped += 1
+                        per_city[city_name]["skipped"] += 1
+                except Exception as e:
+                    # M6 fix: log DB errors instead of silently swallowing them
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "calibration_pairs INSERT failed for %s/%s bin=%d: %s",
+                        city_name, target_date, i, e,
+                    )
+                    rows_skipped += 1
+                    per_city[city_name]["skipped"] += 1
+            else:
+                # dry_run: count would-be writes unconditionally
+                rows_written += 1
+                per_city[city_name]["written"] += 1
 
     if not dry_run:
         conn.commit()
