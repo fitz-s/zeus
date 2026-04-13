@@ -240,11 +240,12 @@ cycle_runner._execute_monitoring_phase()
 **Antibody deployed:** `evaluate_candidate()` rejects settlement-sensitive entry modes (`day0_capture`, `update_reaction`) before Kelly when the confidence band is missing, non-finite, has `ci_lower <= 0`, or has `ci_upper <= ci_lower`. The rejection is recorded as `EDGE_INSUFFICIENT` with `confidence_band_guard`; `opening_hunt` is unchanged in this narrow packet.
 **Residual:** This does not rebuild historical reconstructed decisions or add provenance for deterministic/high-quality zero-width CI. Supporting such a case safely would need a larger provenance/schema packet.
 
-### [OPEN] Some positions never develop a usable monitor-to-exit chain before settlement
+### [MITIGATED] Missing monitor-to-exit chain escalates before settlement (2026-04-13)
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`
 **Problem:** A subset of positions reach settlement with only lifecycle + settlement events and no intermediate monitor/reversal chain, so `EDGE_REVERSAL` never has a chance to fire.
 **Impact:** The system cannot protect itself from fast-moving divergence if the monitor phase does not create an actual executable exit path.
-**Proposed antibody:** Require at least one post-entry monitor scan before settlement-sensitive positions are allowed to age out; if monitoring does not occur, flag the position as `monitor_chain_missing` and escalate.
+**Antibody deployed:** `execute_monitoring_phase()` now records `monitor_chain_missing` when a settlement-sensitive position cannot form a usable monitor-to-exit chain because refresh failed or exit authority returned `INCOMPLETE_EXIT_CONTEXT`. Refresh failures now produce a `MonitorResult` instead of disappearing from the cycle artifact, and `status_summary` projects `cycle_monitor_chain_missing:<count>` as infrastructure RED.
+**Residual:** This is operator-visible cycle escalation, not durable lifetime proof. DB projection/schema support for monitor counts or a durable monitor evidence spine remains a separate package.
 
 ### [FIXED] Buy-yes exit uses degraded proxy when best_bid is missing (2026-04-13)
 **Location:** `src/state/portfolio.py`

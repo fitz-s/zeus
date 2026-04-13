@@ -696,6 +696,52 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
     }
 
 
+def test_status_summary_projects_monitor_chain_missing_as_infrastructure_red(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_position_current_status_view",
+        lambda conn: {
+            "status": "ok",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        },
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_strategy_health_snapshot",
+        lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+    )
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test", "monitor_chain_missing": 2})
+    status = json.loads(status_path.read_text())
+
+    assert status["risk"]["infrastructure_level"] == "RED"
+    assert "cycle_monitor_chain_missing:2" in status["risk"]["infrastructure_issues"]
+
+
 def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     db_path = tmp_path / "zeus.db"

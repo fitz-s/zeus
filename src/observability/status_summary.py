@@ -324,6 +324,9 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("learning_summary_unavailable")
     if status.get("no_trade", {}).get("error"):
         consistency_issues.append("no_trade_summary_unavailable")
+    monitor_chain_missing = int((cycle_summary or {}).get("monitor_chain_missing", 0) or 0)
+    if monitor_chain_missing > 0:
+        consistency_issues.append(f"cycle_monitor_chain_missing:{monitor_chain_missing}")
     if position_view.get("status") != "ok":
         consistency_issues.append(f"position_current_{position_view.get('status')}")
     strategy_health_status = str(strategy_health.get("status") or "")
@@ -354,6 +357,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "execution_summary_unavailable",
             "learning_summary_unavailable",
             "no_trade_summary_unavailable",
+            "cycle_monitor_chain_missing",
             "position_current_missing_table",
             "position_current_query_error",
         )
