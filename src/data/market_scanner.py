@@ -186,6 +186,15 @@ def _parse_event(
     city = _match_city(title, event.get("slug", ""))
     if city is None:
         return None
+    sanity_rejection = _market_city_sanity_rejection(event, city)
+    if sanity_rejection is not None:
+        logger.warning(
+            "Rejecting Gamma market city mismatch: city=%s reason=%s event=%s",
+            city.name,
+            sanity_rejection,
+            event.get("id") or event.get("slug"),
+        )
+        return None
 
     # Parse target date from slug or end date
     target_date = _parse_target_date(event)
@@ -252,6 +261,69 @@ def _match_city(title: str, slug: str) -> Optional[City]:
         if re.search(pattern, haystack):
             return city
 
+    return None
+
+
+def _city_match_tokens(city: City) -> set[str]:
+    tokens = {
+        city.name,
+        city.wu_station,
+        city.airport_name,
+        city.settlement_source,
+        *city.aliases,
+        *city.slug_names,
+    }
+    return {str(token).strip().lower() for token in tokens if str(token).strip()}
+
+
+def _token_in_text(token: str, text: str) -> bool:
+    if not token:
+        return False
+    normalized = token.lower()
+    if "/" in normalized or "." in normalized:
+        return normalized in text
+    if "-" in normalized:
+        return normalized in text or normalized.replace("-", " ") in text
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None:
+    """Reject Gamma events that explicitly identify a different configured city."""
+    from src.config import cities
+
+    text_fields = [
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("description", ""),
+        event.get("resolutionSource", ""),
+        event.get("resolution_source", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        text_fields.extend([
+            market.get("question", ""),
+            market.get("slug", ""),
+            market.get("description", ""),
+            market.get("resolutionSource", ""),
+            market.get("resolution_source", ""),
+            market.get("groupItemTitle", ""),
+            market.get("group_item_title", ""),
+        ])
+    combined = " ".join(str(field) for field in text_fields if field).lower()
+    if not combined:
+        return None
+
+    matched_tokens = _city_match_tokens(matched_city)
+    for city in cities:
+        if city.name == matched_city.name:
+            continue
+        for token in sorted(_city_match_tokens(city), key=len, reverse=True):
+            if token in matched_tokens:
+                continue
+            if _token_in_text(token, combined):
+                return f"matched {matched_city.name} but text references {city.name} via {token!r}"
     return None
 
 

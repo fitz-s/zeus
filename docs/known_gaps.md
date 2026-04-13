@@ -284,11 +284,12 @@ cycle_runner._execute_monitoring_phase()
 **Impact:** Harvester cycles can fail noisily and skip settlement/pair creation work, leaving the runtime path partially broken even when the daemon and RiskGuard are alive.
 **Proposed antibody:** Add an explicit runtime-DB shape gate before Stage-2 harvester work starts, and route canonically bootstrapped databases through the migrated helper path only. Add a regression test that the legacy helper is rejected with a structured preflight error instead of spamming runtime logs.
 
-### [OPEN] Los Angeles Gamma markets can be mislabeled / sourced from Milan
+### [FIXED] Los Angeles Gamma discovery rejects explicit Milan conflicts (2026-04-13)
 **Location:** Gamma API market discovery / `market_scanner` LA path
 **Problem:** Current audit evidence shows the Los Angeles market title / data source can resolve to Milan temperature data instead of LA weather truth.
 **Impact:** LA bin construction can be anchored to the wrong city, which contaminates signal, entry sizing, and any downstream settlement comparison.
-**Proposed antibody:** Add an explicit city-to-market sanity check in discovery so LA cannot bind to non-LA titles or station metadata; fail closed and record the anomaly when title/location mismatch is detected.
+**Antibody deployed:** `market_scanner._parse_event()` now rejects Gamma events when event or market text/station metadata explicitly references a different configured city than the matched event city. LA events with Milan/Milano/LIMC/Milan Malpensa evidence fail closed before outcomes are returned; valid LA/KLAX metadata still parses.
+**Residual:** This only catches explicit text/station conflicts on the `find_weather_markets()` discovery path. Existing monitor helpers (`get_current_yes_price`, `get_sibling_outcomes`) and harvester closed-event polling still need their own source-attestation package if they must defend against the same class of malformed Gamma payload. If Gamma omits metadata or supplies self-consistent but false LA metadata, external source attestation is still required.
 
 ### [OPEN] ACP router fallback chain is recovering after failure, not stabilizing before dispatch
 **Source:** `evolution/router-audit/2026-04-08-router-audit.md`
