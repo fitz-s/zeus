@@ -577,6 +577,113 @@ def test_compute_alpha_requires_explicit_kwarg():
         )
 
 
+# ---------------------------------------------------------------------------
+# Test C1a: save_platt_model writes authority='VERIFIED' by default
+# ---------------------------------------------------------------------------
+
+def test_save_platt_model_writes_verified(tmp_path):
+    """C1a fix: save_platt_model round-trip asserts authority='VERIFIED' in DB row."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    db_path = tmp_path / "test_platt_authority.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(conn)
+    # init_schema now includes authority column; shim for pre-migration safety
+    info = conn.execute("PRAGMA table_info(platt_models)").fetchall()
+    if "authority" not in {row[1] for row in info}:
+        conn.execute(
+            "ALTER TABLE platt_models ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+    conn.commit()
+
+    from src.calibration.store import save_platt_model
+    save_platt_model(
+        conn,
+        bucket_key="NYC_JJA",
+        A=-1.2,
+        B=0.5,
+        C=0.0,
+        bootstrap_params=[(-1.0, 0.4, 0.0), (-1.3, 0.6, 0.0)],
+        n_samples=100,
+        brier_insample=0.18,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT authority FROM platt_models WHERE bucket_key = 'NYC_JJA'"
+    ).fetchone()
+    conn.close()
+    assert row is not None, "save_platt_model did not write a row"
+    assert row["authority"] == "VERIFIED", (
+        f"save_platt_model must write authority='VERIFIED', got '{row['authority']}'"
+    )
+
+
+def test_load_platt_model_skips_unverified(tmp_path):
+    """C1a fix: load_platt_model returns VERIFIED row and ignores UNVERIFIED row."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    db_path = tmp_path / "test_platt_load.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(conn)
+    info = conn.execute("PRAGMA table_info(platt_models)").fetchall()
+    if "authority" not in {row[1] for row in info}:
+        conn.execute(
+            "ALTER TABLE platt_models ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+    conn.commit()
+
+    import json as _json
+    now = "2025-07-01T12:00:00+00:00"
+    bootstrap = _json.dumps([[-1.0, 0.4, 0.0]])
+
+    # Insert UNVERIFIED row for bucket_key 'NYC_DJF'
+    conn.execute(
+        "INSERT INTO platt_models "
+        "(bucket_key, param_A, param_B, param_C, bootstrap_params_json, "
+        " n_samples, fitted_at, is_active, input_space, authority) "
+        "VALUES ('NYC_DJF', -1.0, 0.4, 0.0, ?, 50, ?, 1, 'raw_probability', 'UNVERIFIED')",
+        (bootstrap, now),
+    )
+    # Insert VERIFIED row for bucket_key 'NYC_JJA'
+    conn.execute(
+        "INSERT INTO platt_models "
+        "(bucket_key, param_A, param_B, param_C, bootstrap_params_json, "
+        " n_samples, fitted_at, is_active, input_space, authority) "
+        "VALUES ('NYC_JJA', -1.2, 0.5, 0.0, ?, 80, ?, 1, 'raw_probability', 'VERIFIED')",
+        (bootstrap, now),
+    )
+    conn.commit()
+
+    from src.calibration.store import load_platt_model
+
+    # UNVERIFIED bucket must return None
+    unverified_result = load_platt_model(conn, "NYC_DJF")
+    assert unverified_result is None, (
+        f"load_platt_model must return None for UNVERIFIED row, got {unverified_result}"
+    )
+
+    # VERIFIED bucket must return the model
+    verified_result = load_platt_model(conn, "NYC_JJA")
+    conn.close()
+    assert verified_result is not None, (
+        "load_platt_model must return model for VERIFIED row"
+    )
+    assert verified_result["A"] == pytest.approx(-1.2)
+
+
+# ---------------------------------------------------------------------------
+# Original test below
+# ---------------------------------------------------------------------------
+
 def test_store_returns_empty_on_missing_authority_column():
     """Pre-migration shim: DB without authority column returns empty list (M7 fix)."""
     conn = sqlite3.connect(":memory:")
