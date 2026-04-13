@@ -2,6 +2,12 @@
 
 Provides CRUD operations for calibration_pairs and platt_models tables.
 All writes include proper timestamps. All reads enforce available_at constraint.
+
+K4: get_pairs_for_bucket now defaults to authority_filter='VERIFIED' so all
+callers get only provenance-verified pairs by default. Pass
+authority_filter='any' to bypass (diagnostic / rebuild use only).
+If the authority column is missing (pre-migration DB), the filter is skipped
+so existing callers are not broken.
 """
 
 import json
@@ -25,20 +31,20 @@ def infer_bin_width_from_label(range_label: str) -> float | None:
     label = (range_label or "").strip()
 
     # Shoulder low/high
-    if re.search(r"°[FfCc]\s+or\s+(below|lower)$", label):
+    if re.search(r"\u00b0[FfCc]\s+or\s+(below|lower)$", label):
         return None
-    if re.search(r"°[FfCc]\s+or\s+(higher|above|more)$", label):
+    if re.search(r"\u00b0[FfCc]\s+or\s+(higher|above|more)$", label):
         return None
 
-    # Interior range like 39-40°F
-    m = re.search(r"(-?\d+\.?\d*)\s*[-–]\s*(-?\d+\.?\d*)\s*°?[FfCc]?", label)
+    # Interior range like 39-40\u00b0F
+    m = re.search(r"(-?\d+\.?\d*)\s*[-\u2013]\s*(-?\d+\.?\d*)\s*\u00b0?[FfCc]?", label)
     if m:
         low = float(m.group(1))
         high = float(m.group(2))
         return max(1.0, high - low + 1.0)
 
-    # Point bin like 10°C
-    m = re.search(r"(-?\d+\.?\d*)\s*°[Cc]$", label)
+    # Point bin like 10\u00b0C
+    m = re.search(r"(-?\d+\.?\d*)\s*\u00b0[Cc]$", label)
     if m:
         return 1.0
 
@@ -62,8 +68,8 @@ def add_calibration_pair(
 ) -> None:
     """Insert a calibration pair (one per bin per settled market).
 
-    Spec §8.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
-    settlement_value is stored for audit only — defensive round to integer per contract.
+    Spec \u00a78.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
+    settlement_value is stored for audit only \u2014 defensive round to integer per contract.
     """
     if settlement_value is not None:
         settlement_value = round(float(settlement_value))
@@ -80,21 +86,47 @@ def add_calibration_pair(
           decision_group_id, int(bool(bias_corrected))))
 
 
+def _has_authority_column(conn: sqlite3.Connection) -> bool:
+    """Check whether calibration_pairs has the authority column.
+
+    Used to gracefully handle pre-migration DBs in tests and production
+    until migrate_add_authority_column.py has been run.
+    """
+    rows = conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()
+    return any(row[1] == "authority" for row in rows)
+
+
 def get_pairs_for_bucket(
     conn: sqlite3.Connection,
     cluster: str,
     season: str,
+    authority_filter: str = 'VERIFIED',
 ) -> list[dict]:
-    """Get all calibration pairs for a bucket (cluster × season).
+    """Get calibration pairs for a bucket (cluster \u00d7 season).
 
-    Returns list of dicts with keys: p_raw, lead_days, outcome.
+    K4: authority_filter defaults to 'VERIFIED' so all callers get only
+    provenance-verified pairs by default. Pass authority_filter='any' to
+    bypass the filter (diagnostic / rebuild use only).
+
+    If the authority column is absent (pre-migration DB), the filter is
+    silently skipped so existing callers are not broken by the schema gap.
+
+    Returns list of dicts with keys: p_raw, lead_days, outcome, range_label.
     """
-    rows = conn.execute("""
-        SELECT p_raw, lead_days, outcome, range_label
-        FROM calibration_pairs
-        WHERE cluster = ? AND season = ?
-        ORDER BY target_date
-    """, (cluster, season)).fetchall()
+    if authority_filter == 'any' or not _has_authority_column(conn):
+        rows = conn.execute("""
+            SELECT p_raw, lead_days, outcome, range_label
+            FROM calibration_pairs
+            WHERE cluster = ? AND season = ?
+            ORDER BY target_date
+        """, (cluster, season)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT p_raw, lead_days, outcome, range_label
+            FROM calibration_pairs
+            WHERE cluster = ? AND season = ? AND authority = ?
+            ORDER BY target_date
+        """, (cluster, season, authority_filter)).fetchall()
 
     result = []
     for row in rows:
