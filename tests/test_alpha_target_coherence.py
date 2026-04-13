@@ -35,19 +35,14 @@ class TestAlphaDecisionConstruction:
         )
         assert ad.optimization_target == "ev"
 
-    def test_invalid_target_not_runtime_enforced(self):
-        """Literal["brier_score","ev","risk_cap"] is a static type hint only.
-
-        Runtime enforcement lives in assert_target_compatible(), not construction.
-        """
-        # Construction does not raise — Literal is a static annotation
-        ad = AlphaDecision(
-            value=0.65,
-            optimization_target="profit",  # type: ignore[arg-type]
-            evidence_basis="some basis",
-            ci_bound=0.10,
-        )
-        assert ad.optimization_target == "profit"
+    def test_invalid_target_raises(self):
+        with pytest.raises(ValueError, match="optimization_target"):
+            AlphaDecision(
+                value=0.65,
+                optimization_target="profit",  # type: ignore[arg-type]
+                evidence_basis="some basis",
+                ci_bound=0.10,
+            )
 
     def test_value_out_of_range_raises(self):
         with pytest.raises(ValueError):
@@ -148,6 +143,25 @@ class TestBrierAlphaIntoEvSizingRaises:
             ci_bound=0.05,
         )
         ad.assert_target_compatible("ev")  # Must not raise
+
+    def test_value_for_consumer_checks_target_then_returns_value(self):
+        ad = AlphaDecision(
+            value=0.30,
+            optimization_target="risk_cap",
+            evidence_basis="Conservative cap",
+            ci_bound=0.05,
+        )
+        assert ad.value_for_consumer("ev") == pytest.approx(0.30)
+
+    def test_invalid_consumer_target_raises(self):
+        ad = AlphaDecision(
+            value=0.30,
+            optimization_target="risk_cap",
+            evidence_basis="Conservative cap",
+            ci_bound=0.05,
+        )
+        with pytest.raises(ValueError, match="consumer_target"):
+            ad.value_for_consumer("profit")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

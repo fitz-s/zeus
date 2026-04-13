@@ -1,9 +1,9 @@
-"""Alpha blending decision contract — D1 resolution.
+"""Alpha blending decision contract — D1 mitigation.
 
-D1 gap: compute_alpha() produces an α value validated against Brier score, but
-downstream (Kelly sizing) uses it as if it were an EV-optimized edge weight.
-Brier-optimized α converges Zeus toward market, making edge → 0 when the market
-is already calibrated.
+D1 gap: alpha values can be optimized for calibration accuracy, risk capping,
+or EV, but downstream consumers may silently treat them as interchangeable.
+Brier-optimized α in particular converges Zeus toward market, making edge → 0
+when the market is already calibrated.
 
 Resolution: α outputs are wrapped in AlphaDecision. Downstream consumers must
 declare their optimization_target. A Brier-optimized alpha fed into an EV-seeking
@@ -43,6 +43,12 @@ class AlphaDecision:
     ci_bound: float
 
     def __post_init__(self) -> None:
+        if self.optimization_target not in {"brier_score", "ev", "risk_cap"}:
+            raise ValueError(
+                "AlphaDecision.optimization_target must be one of "
+                "{'brier_score', 'ev', 'risk_cap'}, got "
+                f"{self.optimization_target!r}"
+            )
         if not 0.0 <= self.value <= 1.0:
             raise ValueError(
                 f"AlphaDecision.value must be in [0, 1], got {self.value}"
@@ -61,6 +67,11 @@ class AlphaDecision:
         A Brier-optimized alpha fed into an EV-seeking consumer is the canonical
         D1 violation: it silently drives edge → 0.
         """
+        if consumer_target not in {"brier_score", "ev", "risk_cap"}:
+            raise ValueError(
+                "consumer_target must be one of {'brier_score', 'ev', 'risk_cap'}, "
+                f"got {consumer_target!r}"
+            )
         if self.optimization_target == "brier_score" and consumer_target == "ev":
             raise AlphaTargetMismatchError(
                 f"AlphaDecision was optimized for '{self.optimization_target}' "
@@ -68,6 +79,11 @@ class AlphaDecision:
                 "Brier-optimized alpha in EV-seeking sizing drives edge → 0. "
                 "Re-derive alpha against EV objective or wrap with explicit override."
             )
+
+    def value_for_consumer(self, consumer_target: Literal["brier_score", "ev", "risk_cap"]) -> float:
+        """Return alpha value only after target compatibility is declared."""
+        self.assert_target_compatible(consumer_target)
+        return self.value
 
 
 class AlphaTargetMismatchError(Exception):

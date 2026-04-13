@@ -52,6 +52,7 @@ from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_
 from src.strategy.selection_family import apply_familywise_fdr, make_family_id
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
+from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
@@ -955,13 +956,29 @@ def evaluate_candidate(
         )]
 
     # Compute alpha
-    alpha = compute_alpha(
-        calibration_level=cal_level,
-        ensemble_spread=ensemble_spread,
-        model_agreement=agreement,
-        lead_days=lead_days_for_calibration,
-        hours_since_open=candidate.hours_since_open,
-    ).value
+    try:
+        alpha = compute_alpha(
+            calibration_level=cal_level,
+            ensemble_spread=ensemble_spread,
+            model_agreement=agreement,
+            lead_days=lead_days_for_calibration,
+            hours_since_open=candidate.hours_since_open,
+        ).value_for_consumer("ev")
+    except AlphaTargetMismatchError as exc:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[f"ALPHA_TARGET_MISMATCH:{exc}"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "alpha_target_contract"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            p_market=p_market,
+            agreement=agreement,
+        )]
     if not is_day0_mode:
         entry_validations.append("model_agreement")
     entry_validations.append("alpha_posterior")

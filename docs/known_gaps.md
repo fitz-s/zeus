@@ -311,11 +311,12 @@ cycle_runner._execute_monitoring_phase()
 
 Six design gaps identified at the signal→strategy→execution boundary. The signal layer's high hit rate does not compose into profit because each cross-layer handoff loses the semantic that makes the upstream number meaningful. These are architecture-level gaps requiring typed contracts at module boundaries (INV-12 territory).
 
-### [OPEN] D1 — Alpha blending optimization target misalignment (CRITICAL)
+### [MITIGATED] D1 — Alpha consumers declare EV compatibility (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — `compute_alpha()`
 **Problem:** α adjustments (spread, lead time, freshness, model agreement) are validated against Brier score. But profit requires EV > cost. Brier-optimization converges Zeus toward market consensus, which drives edge → 0. The optimization target (accuracy) conflicts with the business objective (profit).
 **Impact:** Systematic edge compression. Alpha tuning that improves calibration accuracy simultaneously destroys the trading edge.
-**Proposed antibody:** α outputs become a typed `AlphaDecision(value, optimization_target, evidence_basis, ci_bound)` so downstream consumers know whether the number was optimized for accuracy or EV. INV-12 enforcement.
+**Antibody deployed:** `compute_alpha()` returns `AlphaDecision(optimization_target='risk_cap')`; active entry and monitor consumers call `value_for_consumer('ev')` before using α. Invalid alpha targets now fail construction, and a Brier-target alpha fails closed before Kelly sizing instead of silently flowing into EV decisions.
+**Residual:** α is still a conservative risk-cap blend, not an EV-optimized sweep. Closing D1 fully requires deriving and validating an EV-target alpha policy, not just preventing target mismatch.
 
 ### [OPEN] D2 — TAIL_ALPHA_SCALE breaks buy_no primary edge source (CRITICAL)
 **Location:** `src/strategy/market_fusion.py` — tail alpha scaling

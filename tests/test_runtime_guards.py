@@ -2922,6 +2922,112 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     assert "confidence_band_guard" in decisions[0].applied_validations
 
 
+def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
+    from src.contracts.alpha_decision import AlphaDecision
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or below",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.20,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.35,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.45,
+            },
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=3000):
+            return np.array([0.25, 0.50, 0.25])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-alpha-target")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(
+        evaluator_module,
+        "compute_alpha",
+        lambda *args, **kwargs: AlphaDecision(
+            value=0.65,
+            optimization_target="brier_score",
+            evidence_basis="test brier alpha",
+            ci_bound=0.1,
+        ),
+    )
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("alpha mismatch must not reach sizing")))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        entry_bankroll=150.0,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].rejection_reasons[0].startswith("ALPHA_TARGET_MISMATCH")
+    assert "alpha_target_contract" in decisions[0].applied_validations
+
+
 def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     calls: dict[str, object] = {}
 

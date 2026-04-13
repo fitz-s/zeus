@@ -11,6 +11,7 @@ Covers:
 import pytest
 import numpy as np
 
+from src.contracts.alpha_decision import AlphaDecision
 from src.contracts.execution_price import (
     ExecutionPrice,
     ExecutionPriceContractError,
@@ -358,7 +359,16 @@ class TestEvaluatorWiring:
         monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-execution-price")
         monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
         monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
-        monkeypatch.setattr(evaluator_module, "compute_alpha", lambda *args, **kwargs: types.SimpleNamespace(value=0.5))
+        monkeypatch.setattr(
+            evaluator_module,
+            "compute_alpha",
+            lambda *args, **kwargs: AlphaDecision(
+                value=0.5,
+                optimization_target="risk_cap",
+                evidence_basis="execution-price test",
+                ci_bound=0.05,
+            ),
+        )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
         monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
