@@ -12,14 +12,8 @@ from src.state.db import get_connection, init_schema
 
 
 def _ensure_auth_column(conn) -> None:
-    """Add authority column to calibration_pairs if missing (K4.5 fixture catch-up)."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()}
-    if "authority" not in cols:
-        conn.execute(
-            "ALTER TABLE calibration_pairs ADD COLUMN "
-            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
-        )
-        conn.commit()
+    """No-op: init_schema now creates authority column. Retained for call-site compatibility."""
+    pass
 
 
 ROOT = Path(__file__).resolve().parents[1]

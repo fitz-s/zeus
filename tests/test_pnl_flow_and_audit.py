@@ -51,13 +51,7 @@ from src.types import Bin, BinEdge
 
 
 def _ensure_auth_verified(conn) -> None:
-    """Add authority column if missing and mark all calibration_pairs rows VERIFIED."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()}
-    if "authority" not in cols:
-        conn.execute(
-            "ALTER TABLE calibration_pairs ADD COLUMN "
-            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
-        )
+    """Mark all calibration_pairs rows VERIFIED (init_schema now creates the column)."""
     conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
     conn.commit()
 

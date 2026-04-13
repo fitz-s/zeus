@@ -183,6 +183,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL,
             settlement_source TEXT,
             settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             UNIQUE(city, target_date)
         );
 
@@ -276,6 +277,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL DEFAULT 'v1',
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -293,7 +295,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
             decision_group_id TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1))
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Independent forecast-event units derived from calibration_pairs.
@@ -330,7 +333,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             brier_insample REAL,
             fitted_at TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability'
+            input_space TEXT NOT NULL DEFAULT 'raw_probability',
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Trade decisions with full audit trail
