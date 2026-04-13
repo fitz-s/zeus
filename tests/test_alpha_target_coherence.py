@@ -294,6 +294,14 @@ class TestTailTreatmentDeclaresTarget:
                 validated_against="",
             )
 
+    def test_invalid_serves_raises(self):
+        with pytest.raises(ValueError, match="serves"):
+            TailTreatment(
+                scale_factor=0.5,
+                serves="both",  # type: ignore[arg-type]
+                validated_against="some sweep",
+            )
+
     def test_profit_with_brier_validation_warns(self):
         """TailTreatment(serves='profit') with Brier-reference emits warning."""
         import warnings
@@ -322,12 +330,11 @@ class TestTailTreatmentDeclaresTarget:
         assert len(w) == 0
 
     def test_tail_alpha_scale_matches_tail_treatment_default(self):
-        """TAIL_ALPHA_SCALE in market_fusion.py is 0.5 — matches TailTreatment scale."""
-        source = (ZEUS_ROOT / "src" / "strategy" / "market_fusion.py").read_text()
-        assert "TAIL_ALPHA_SCALE" in source, "TAIL_ALPHA_SCALE not found in market_fusion.py"
-        tt = TailTreatment(
-            scale_factor=0.5,
-            serves="calibration_accuracy",
-            validated_against="D3 sweep 2026-03-31",
-        )
-        assert tt.scale_factor == pytest.approx(0.5)
+        """Default tail alpha treatment declares calibration target explicitly."""
+        from src.strategy.market_fusion import DEFAULT_TAIL_TREATMENT, TAIL_ALPHA_SCALE, alpha_for_bin
+        from src.types import Bin
+
+        assert isinstance(DEFAULT_TAIL_TREATMENT, TailTreatment)
+        assert DEFAULT_TAIL_TREATMENT.serves == "calibration_accuracy"
+        assert DEFAULT_TAIL_TREATMENT.scale_factor == pytest.approx(TAIL_ALPHA_SCALE)
+        assert alpha_for_bin(0.8, Bin(low=None, high=32, label="32°F or below", unit="F")) == pytest.approx(0.4)

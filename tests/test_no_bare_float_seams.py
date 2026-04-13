@@ -115,6 +115,14 @@ class TestHoldValueSeam:
         assert "HoldValue.compute" in exit_src
 
 
+class TestTailTreatmentSeam:
+    def test_market_fusion_routes_tail_scale_through_tail_treatment(self):
+        source = (ZEUS_ROOT / "src" / "strategy" / "market_fusion.py").read_text()
+
+        assert "DEFAULT_TAIL_TREATMENT" in source
+        assert "float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor" in source
+
+
 # ---------------------------------------------------------------------------
 # assert_kelly_safe — INV-12 contract
 # ---------------------------------------------------------------------------

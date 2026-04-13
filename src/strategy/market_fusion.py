@@ -9,6 +9,7 @@ import numpy as np
 
 from src.config import settings
 from src.contracts.alpha_decision import AlphaDecision
+from src.contracts.tail_treatment import TailTreatment
 from src.contracts.vig_treatment import VigTreatment
 from src.types.temperature import TemperatureDelta
 
@@ -32,7 +33,15 @@ BASE_ALPHA_BY_LEVEL = {
     3: settings["edge"]["base_alpha"]["level3"],
     4: settings["edge"]["base_alpha"]["level4"],
 }
-TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is optimal
+TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is Brier-optimal
+DEFAULT_TAIL_TREATMENT = TailTreatment(
+    scale_factor=TAIL_ALPHA_SCALE,
+    serves="calibration_accuracy",
+    validated_against=(
+        "D3 sweep 2026-03-31 tail bins, Brier improvement -0.042; "
+        "not validated against buy_no P&L"
+    ),
+)
 COMPLETE_MARKET_VIG_MIN = 0.90
 COMPLETE_MARKET_VIG_MAX = 1.10
 
@@ -234,5 +243,5 @@ def alpha_for_bin(alpha: float, bin) -> float:
         label = bin.label.lower()
         is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
     if is_tail:
-        return max(0.20, float(alpha) * TAIL_ALPHA_SCALE)
+        return max(0.20, float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor)
     return float(alpha)

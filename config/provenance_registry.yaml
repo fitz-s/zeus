@@ -325,11 +325,12 @@ constants:
     cascade_bound: null
 
   - constant_name: market_fusion.TAIL_ALPHA_SCALE
-    file_location: "src/strategy/market_fusion.py::compute_posterior TAIL_ALPHA_SCALE=0.5"
+    file_location: "src/strategy/market_fusion.py::alpha_for_bin DEFAULT_TAIL_TREATMENT.scale_factor"
     declared_target: brier_score
     data_basis: >
       D3 sweep (2026-03-31): sweep [0.5, 0.6, ..., 1.0] on tail bins,
       TAIL_ALPHA_SCALE=0.5 gives Brier improvement of −0.042 over uniform α.
+      Runtime exposes this as TailTreatment(serves="calibration_accuracy").
       CAUTION (D2): validated against Brier, not buy_no P&L. This constant
       halves the edge that buy_no depends on (market tail overpricing).
       Must be re-validated against buy_no P&L before treating as profit-safe.

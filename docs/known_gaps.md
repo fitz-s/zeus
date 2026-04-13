@@ -318,11 +318,12 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Antibody deployed:** `compute_alpha()` returns `AlphaDecision(optimization_target='risk_cap')`; active entry and monitor consumers call `value_for_consumer('ev')` before using α. Invalid alpha targets now fail construction, and a Brier-target alpha fails closed before Kelly sizing instead of silently flowing into EV decisions.
 **Residual:** α is still a conservative risk-cap blend, not an EV-optimized sweep. Closing D1 fully requires deriving and validating an EV-target alpha policy, not just preventing target mismatch.
 
-### [OPEN] D2 — TAIL_ALPHA_SCALE breaks buy_no primary edge source (CRITICAL)
+### [MITIGATED] D2 — Tail alpha scale is explicit calibration treatment (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — tail alpha scaling
 **Problem:** `TAIL_ALPHA_SCALE=0.5` scales α toward market on tail bins, directly halving the edge that buy_no depends on (retail lottery-effect overpricing of shoulder bins). The scaling serves calibration accuracy (Brier) but destroys the structural edge that Strategy B (Shoulder Bin Sell) exploits.
 **Impact:** Strategy B's primary edge source is systematically attenuated by a calibration-serving parameter.
-**Proposed antibody:** `TailTreatment` contract that declares whether it serves calibration OR profit. Cannot serve both without explicit tradeoff documentation.
+**Antibody deployed:** `alpha_for_bin()` now routes tail scaling through `DEFAULT_TAIL_TREATMENT = TailTreatment(scale_factor=TAIL_ALPHA_SCALE, serves='calibration_accuracy', ...)` instead of applying a naked constant. Provenance also states this is calibration-serving, not buy_no P&L validated.
+**Residual:** Behavior is unchanged and still may attenuate buy_no structural edge. Closing D2 requires a profit-validated tail policy, likely direction/objective-aware, with buy_no P&L evidence.
 
 ### [OPEN] D3 — Entry price must remain typed through execution economics
 **Location:** `src/strategy/market_analysis.py` — `BinEdge.entry_price`
