@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -3154,8 +3155,103 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     conn.close()
 
     assert result["pairs_created"] == 2
+    assert result["stage2_status"] == "ready"
     assert row is not None
     assert row["n_samples"] >= 15
+
+
+def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "canonical_bootstrap.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            }
+        ],
+    }
+
+    hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: hconn)
+    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: hconn)
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(
+            bankroll=150.0,
+            positions=[
+                _position(
+                    trade_id="stage2-skip-settles",
+                    city="NYC",
+                    target_date="2026-04-01",
+                    bin_label="39-40°F",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    monkeypatch.setattr(
+        harvester_module,
+        "_snapshot_contexts_for_market",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("preflight should skip Stage-2")),
+    )
+    settled_calls = []
+
+    def _settle_positions(*args, **kwargs):
+        settled_calls.append(args[2:5])
+        kwargs["settlement_records"].append(SettlementRecord(
+            trade_id="stage2-skip-settles",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.61,
+            outcome=1,
+            pnl=1.0,
+            decision_snapshot_id="snap-missing",
+            strategy="center_buy",
+            edge_source="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        ))
+        return 1
+
+    monkeypatch.setattr(harvester_module, "_settle_positions", _settle_positions)
+    monkeypatch.setattr(
+        harvester_module,
+        "store_settlement_records",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("decision_log writer must be skipped")),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = harvester_module.run_harvester()
+
+    assert result["settlements_found"] == 1
+    assert result["pairs_created"] == 0
+    assert result["positions_settled"] == 1
+    assert result["legacy_settlement_records_skipped"] == 1
+    assert result["stage2_status"] == "skipped_db_shape_preflight"
+    assert "decision_log" in result["stage2_missing_trade_tables"]
+    assert "chronicle" in result["stage2_missing_trade_tables"]
+    assert "ensemble_snapshots" in result["stage2_missing_shared_tables"]
+    assert settled_calls == [("NYC", "2026-04-01", "39-40°F")]
+    assert not any("Harvester error" in record.getMessage() for record in caplog.records)
 
 
 def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_settlement_exists(monkeypatch, tmp_path):
