@@ -22,29 +22,43 @@ _MATRIX_PATH = Path(__file__).parent.parent.parent / "config" / "city_correlatio
 
 @lru_cache(maxsize=1)
 def _load_matrix() -> dict:
-    """Load data-driven Pearson matrix + validate keys against city config."""
+    """Load data-driven Pearson matrix + validate keys against city config.
+
+    On validation failure (unknown city keys), logs a warning and returns
+    an empty matrix — the haversine fallback path in get_correlation
+    handles the missing data gracefully. This prevents stale matrix files
+    from crashing the entire risk engine.
+    """
     if not _MATRIX_PATH.exists():
         return {}
     with open(_MATRIX_PATH) as f:
         raw = json.load(f).get("matrix", {})
-    # Schema validation: every key must be a known city
+    # Schema validation: every key must be a known city.
+    # Fail SAFE: log warning + return {} so haversine fallback handles all queries.
     known = set(cities_by_name.keys())
-    unknown_keys = [k for k in raw.keys() if k not in known]
-    if unknown_keys:
-        raise ValueError(
-            f"city_correlation_matrix.json contains unknown city keys: {unknown_keys}. "
-            f"Every matrix key must be a member of cities_by_name. "
-            f"Regenerate via scripts/build_correlation_matrix.py or fix manually."
+    unknown_outer = [k for k in raw.keys() if k not in known]
+    if unknown_outer:
+        logger.warning(
+            f"city_correlation_matrix.json contains unknown outer keys: {unknown_outer}. "
+            f"Treating matrix as absent; all queries will use haversine fallback. "
+            f"Regenerate via scripts/build_correlation_matrix.py to fix."
         )
-    # Also validate: every inner key (correlated-with) must be a known city
+        return {}
+    # Also validate inner keys (correlated-with cities)
+    unknown_inner_total = []
     for outer, inner in raw.items():
         if not isinstance(inner, dict):
             continue
         unknown_inner = [k for k in inner.keys() if k not in known]
         if unknown_inner:
-            raise ValueError(
-                f"city_correlation_matrix.json[{outer}] contains unknown keys: {unknown_inner}"
-            )
+            unknown_inner_total.extend([f"{outer}/{k}" for k in unknown_inner])
+    if unknown_inner_total:
+        logger.warning(
+            f"city_correlation_matrix.json contains unknown inner keys: "
+            f"{unknown_inner_total[:10]}... "
+            f"Treating matrix as absent; all queries will use haversine fallback."
+        )
+        return {}
     return raw
 
 

@@ -279,7 +279,7 @@ def backfill_city(
     info = CITY_STATIONS.get(city_name)
     if not info:
         print(f"  SKIP: {city_name} not in CITY_STATIONS")
-        return {"city": city_name, "collected": 0, "skip": 0, "err": 0}
+        return {"city": city_name, "collected": 0, "skip": 0, "err": 0, "guard_rejected": 0}
 
     icao, cc, unit = info
     city_cfg = cities_by_name.get(city_name)

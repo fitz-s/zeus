@@ -113,6 +113,7 @@ class IngestionGuard:
                 details=details,
             )
             conn.commit()
+            conn.close()  # K3.7: prevent fd leak on high-rejection backfills
         except Exception:
             pass  # Observability is best-effort; never block the guard itself
 

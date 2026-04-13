@@ -126,8 +126,13 @@ def test_negative_pearson_clamped_to_zero():
     assert 0.0 <= r2 <= 1.0, f"get_correlation returned {r2}, must be in [0, 1]"
 
 
-def test_load_matrix_rejects_unknown_city_keys(tmp_path, monkeypatch):
-    """_load_matrix raises if the matrix JSON contains a non-city key."""
+def test_load_matrix_returns_empty_on_unknown_city_keys(tmp_path, monkeypatch, caplog):
+    """_load_matrix returns {} + logs warning if matrix contains unknown city keys.
+
+    Previously raised ValueError (K3.6), which crashed the risk engine on stale
+    matrix files. K3.7 changes this to a warn+fallback-to-haversine pattern.
+    """
+    import logging
     from src.strategy import correlation
     # Write a corrupted matrix with a regional cluster key
     bad_matrix = tmp_path / "bad_matrix.json"
@@ -141,7 +146,10 @@ def test_load_matrix_rejects_unknown_city_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(correlation, "_MATRIX_PATH", bad_matrix)
     correlation._load_matrix.cache_clear()
     try:
-        with pytest.raises(ValueError, match="unknown city keys"):
-            correlation._load_matrix()
+        with caplog.at_level(logging.WARNING, logger="src.strategy.correlation"):
+            result = correlation._load_matrix()
+        assert result == {}, f"expected empty dict, got {result}"
+        assert any("unknown" in rec.message for rec in caplog.records), \
+            "expected WARNING about unknown keys"
     finally:
         correlation._load_matrix.cache_clear()
