@@ -1,7 +1,8 @@
 """Family-wise hypothesis selection helpers.
 
-This module is an additive substrate. It does not change the active evaluator
-selection path until a later explicit cutover packet wires it in.
+The active evaluator uses this module after the full-family scan. Family scope
+is determined by `family_id`: currently one candidate/market/snapshot family
+across strategy keys, not one whole-cycle family across all markets.
 """
 
 from __future__ import annotations

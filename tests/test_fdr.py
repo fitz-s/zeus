@@ -121,6 +121,19 @@ class TestSelectionFamilySubstrate:
         assert out[2]["q_value"] <= 0.10
         assert out[3]["q_value"] is None
 
+    def test_candidate_snapshot_families_are_independent_not_cycle_wide(self):
+        rows = [
+            {"family_id": "nyc|2026-04-01|snap-1", "hypothesis_id": "nyc-1", "p_value": 0.049, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-1", "p_value": 0.200, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-2", "p_value": 0.200, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-3", "p_value": 0.200, "tested": True},
+        ]
+
+        out = apply_familywise_fdr(rows, q=0.10)
+
+        assert out[0]["selected_post_fdr"] == 1
+        assert [row["selected_post_fdr"] for row in out[1:]] == [0, 0, 0]
+
     def test_selection_family_facts_record_all_tested_hypotheses(self, tmp_path):
         conn = get_connection(tmp_path / "selection_facts.db")
         init_schema(conn)
