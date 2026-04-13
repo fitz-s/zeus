@@ -276,6 +276,7 @@ class TestDecisionGroupAccounting:
             settlement_value=40.0,
             bias_corrected=True,
         )
+        _ensure_auth_verified(conn)
 
         group = build_decision_group_for_key(
             conn,

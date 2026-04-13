@@ -112,14 +112,22 @@ def build_decision_group_for_key(
     target_date: str,
     forecast_available_at: str,
     lead_days: float | None = None,
+    authority_filter: str = "VERIFIED",
 ) -> CalibrationDecisionGroup | None:
-    """Build one decision group for a freshly written calibration sample."""
+    """Build one decision group for a freshly written calibration sample.
+
+    K4.5.1 fix: filters by authority='VERIFIED' by default (matches sibling
+    build_decision_groups). Pass authority_filter='any' for diagnostics.
+    """
     lead_filter = "" if lead_days is None else "AND lead_days = ?"
+    auth_filter = "" if authority_filter == "any" else "AND authority = ?"
     params: tuple = (
         (city, target_date, forecast_available_at)
         if lead_days is None
         else (city, target_date, forecast_available_at, lead_days)
     )
+    if authority_filter != "any":
+        params = params + (authority_filter,)
     row = conn.execute(
         f"""
         SELECT
@@ -139,6 +147,7 @@ def build_decision_group_for_key(
           AND target_date = ?
           AND forecast_available_at = ?
           {lead_filter}
+          {auth_filter}
         GROUP BY city, target_date, forecast_available_at, lead_days
         """,
         params,
