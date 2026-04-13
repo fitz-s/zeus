@@ -1295,7 +1295,7 @@ def test_exit_authority_fails_closed_on_stale_monitor_inputs():
     assert decision.reason.count("fresh_prob_is_fresh") == 1
 
 
-def test_buy_yes_edge_exit_requires_best_bid():
+def test_buy_yes_edge_exit_uses_degraded_best_bid_proxy():
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -1312,7 +1312,87 @@ def test_buy_yes_edge_exit_requires_best_bid():
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+    assert not decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert "best_bid_unavailable" in decision.applied_validations
+    assert "best_bid_proxy_from_current_market_price" in decision.applied_validations
+    assert "best_bid_proxy_tick_discount" in decision.applied_validations
+
+
+def test_degraded_best_bid_proxy_applies_tick_discount_and_clamp():
+    from src.state.portfolio import _buy_yes_degraded_best_bid_proxy
+
+    assert _buy_yes_degraded_best_bid_proxy(0.55) == pytest.approx(0.54)
+    assert _buy_yes_degraded_best_bid_proxy(0.005) == pytest.approx(0.01)
+    assert _buy_yes_degraded_best_bid_proxy(1.20) == pytest.approx(0.99)
+
+
+def test_degraded_best_bid_proxy_discount_can_veto_edge_exit(monkeypatch):
+    """The 1c discount is the safety property, not just formatting."""
+    monkeypatch.setattr("src.state.portfolio.buy_yes_edge_threshold", lambda entry_ci_width: 0.0)
+    with_real_bid = _make_position(
+        direction="buy_yes",
+        size_usd=5.0,
+        entry_price=0.40,
+        entry_ci_width=0.02,
+        neg_edge_count=1,
+    )
+    real_bid_decision = with_real_bid.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.545,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=0.55,
+            hours_to_settlement=4.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    with_proxy = _make_position(
+        direction="buy_yes",
+        size_usd=5.0,
+        entry_price=0.40,
+        entry_ci_width=0.02,
+        neg_edge_count=1,
+    )
+    proxy_decision = with_proxy.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.545,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.55,
+            current_market_price_is_fresh=True,
+            best_bid=None,
+            hours_to_settlement=4.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    assert real_bid_decision.should_exit is True
+    assert proxy_decision.should_exit is False
+    assert "best_bid_proxy_tick_discount" in proxy_decision.applied_validations
+
+
+def test_buy_yes_exit_still_hard_fails_without_market_price_source():
+    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.30,
+            fresh_prob_is_fresh=True,
+            current_market_price=None,
+            current_market_price_is_fresh=False,
+            best_bid=None,
+            hours_to_settlement=4.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert "current_market_price" in decision.reason
 
 
 def test_day0_buy_yes_uses_single_confirmation_observation_reversal():

@@ -245,11 +245,12 @@ cycle_runner._execute_monitoring_phase()
 **Impact:** The system cannot protect itself from fast-moving divergence if the monitor phase does not create an actual executable exit path.
 **Proposed antibody:** Require at least one post-entry monitor scan before settlement-sensitive positions are allowed to age out; if monitoring does not occur, flag the position as `monitor_chain_missing` and escalate.
 
-### [OPEN] Exit evaluation hard-fails when best_bid / exit context is missing
-**Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
+### [FIXED] Buy-yes exit uses degraded proxy when best_bid is missing (2026-04-13)
+**Location:** `src/state/portfolio.py`
 **Problem:** `best_bid is None` currently yields `INCOMPLETE_EXIT_CONTEXT` rather than a conservative fallback.
 **Impact:** Thin books or incomplete market snapshots can suppress exits entirely, even when the live edge has clearly reversed.
-**Proposed antibody:** Add a degraded fallback exit path (mid / last-trade / conservative proxy) and only hard-fail when all market evidence sources are unavailable.
+**Antibody deployed:** `Position.evaluate_exit()` keeps `ExitContext.best_bid=None` for audit truth, but buy-yes exit evaluation now uses a degraded EV-gate proxy from fresh `current_market_price - 0.01` when `best_bid` is unavailable. It records `best_bid_unavailable`, `best_bid_proxy_from_current_market_price`, and `best_bid_proxy_tick_discount`; if current market price is missing or stale, exit authority still fails closed.
+**Residual:** The proxy is not chain-proven sell-side liquidity. Use the audit markers to separate degraded exits from exits based on a real best bid.
 
 ### [PARTIALLY FIXED] EDGE_REVERSAL — hard divergence kill-switch at 0.30 added (2026-04-06, math audit)
 **Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`

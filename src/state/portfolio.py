@@ -117,6 +117,11 @@ ADMIN_EXITS = frozenset({
 })
 
 
+def _buy_yes_degraded_best_bid_proxy(current_market_price: float) -> float:
+    """Conservative buy-yes sell proxy when fresh market price exists but bid is absent."""
+    return max(0.01, min(0.99, float(current_market_price) - 0.01))
+
+
 @dataclass
 class Position:
     """A held trading position — stateful entity that owns its exit logic.
@@ -323,12 +328,21 @@ class Position:
                     applied=applied,
                 )
             else:
+                best_bid = exit_context.best_bid
+                day0_applied = applied
+                if best_bid is None:
+                    best_bid = _buy_yes_degraded_best_bid_proxy(float(exit_context.current_market_price))
+                    day0_applied = [
+                        *applied,
+                        "best_bid_proxy_from_current_market_price",
+                        "best_bid_proxy_tick_discount",
+                    ]
                 day0_decision = self._buy_yes_exit(
                     forward_edge,
                     current_p_posterior=float(exit_context.fresh_prob),
-                    best_bid=exit_context.best_bid,
+                    best_bid=best_bid,
                     day0_active=True,
-                    applied=applied,
+                    applied=day0_applied,
                 )
             if day0_decision.should_exit:
                 return day0_decision
@@ -438,12 +452,21 @@ class Position:
                 applied=applied,
             )
         else:
+            best_bid = exit_context.best_bid
+            buy_yes_applied = applied
+            if best_bid is None:
+                best_bid = _buy_yes_degraded_best_bid_proxy(float(exit_context.current_market_price))
+                buy_yes_applied = [
+                    *applied,
+                    "best_bid_proxy_from_current_market_price",
+                    "best_bid_proxy_tick_discount",
+                ]
             return self._buy_yes_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=exit_context.best_bid,
+                best_bid=best_bid,
                 day0_active=bool(exit_context.day0_active),
-                applied=applied,
+                applied=buy_yes_applied,
             )
 
     def _buy_yes_exit(
