@@ -1867,6 +1867,77 @@ def test_strategy_classification_preserves_day0_and_update_semantics():
     assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
 
 
+def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():
+    center_edge = _edge()
+    center_edge.ci_lower = 0.0
+    center_edge.ci_upper = 0.0
+    shoulder_no = BinEdge(
+        bin=Bin(low=None, high=38, label="38°F or below", unit="F"),
+        direction="buy_no",
+        edge=0.11,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.72,
+        p_market=0.58,
+        p_posterior=0.69,
+        entry_price=0.58,
+        p_value=0.02,
+        vwmp=0.58,
+    )
+    update = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+    day0 = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=2.0,
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+    opening = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    assert evaluator_module._entry_ci_rejection_reason(update, center_edge).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(update, center_edge) == "center_buy"
+    assert evaluator_module._entry_ci_rejection_reason(update, shoulder_no).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(update, shoulder_no) == "shoulder_sell"
+    buy_no_center = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_no",
+        edge=0.11,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.72,
+        p_market=0.58,
+        p_posterior=0.69,
+        entry_price=0.58,
+        p_value=0.02,
+        vwmp=0.58,
+    )
+    assert evaluator_module._strategy_key_for(update, buy_no_center) == "opening_inertia"
+    assert evaluator_module._entry_ci_rejection_reason(day0, center_edge).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(day0, center_edge) == "settlement_capture"
+    assert evaluator_module._entry_ci_rejection_reason(opening, center_edge) is None
+
+
 def test_materialize_position_preserves_evaluator_strategy_key():
     decision = evaluator_module.EdgeDecision(
         should_trade=True,
@@ -2723,6 +2794,132 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     assert [d.should_trade for d in decisions] == [True, False]
     assert heats[0] == pytest.approx(0.0)
     assert heats[1] == pytest.approx(0.4)
+
+
+def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or below",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.20,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.35,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.45,
+            },
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=3000):
+            return np.array([0.25, 0.50, 0.25])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+    degenerate_edge = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_yes",
+        edge=0.12,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.60,
+        p_market=0.35,
+        p_posterior=0.47,
+        entry_price=0.35,
+        p_value=0.02,
+        vwmp=0.35,
+    )
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            degenerate_edge.forward_edge = degenerate_edge.p_posterior - degenerate_edge.p_market
+            return [degenerate_edge]
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-degenerate-ci")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degenerate CI must not reach sizing")))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        entry_bankroll=150.0,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "EDGE_INSUFFICIENT"
+    assert decisions[0].rejection_reasons[0].startswith("DEGENERATE_CONFIDENCE_BAND")
+    assert decisions[0].strategy_key == "center_buy"
+    assert "confidence_band_guard" in decisions[0].applied_validations
 
 
 def test_day0_observation_path_reaches_day0_signal(monkeypatch):

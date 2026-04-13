@@ -1374,6 +1374,36 @@ def test_degraded_best_bid_proxy_discount_can_veto_edge_exit(monkeypatch):
     assert "best_bid_proxy_tick_discount" in proxy_decision.applied_validations
 
 
+def test_settlement_sensitive_entries_reject_missing_confidence_band():
+    from src.engine.discovery_mode import DiscoveryMode
+    from src.engine.evaluator import MarketCandidate, _entry_ci_rejection_reason
+    from src.types import Bin, BinEdge
+
+    candidate = MarketCandidate(
+        city=type("City", (), {"name": "NYC"})(),
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=3.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+    edge = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_yes",
+        edge=0.10,
+        ci_lower=float("nan"),
+        ci_upper=0.10,
+        p_model=0.60,
+        p_market=0.40,
+        p_posterior=0.55,
+        entry_price=0.40,
+        p_value=0.01,
+        vwmp=0.40,
+    )
+
+    assert _entry_ci_rejection_reason(candidate, edge) == "MISSING_CONFIDENCE_BAND"
+
+
 def test_buy_yes_exit_still_hard_fails_without_market_price_source():
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 

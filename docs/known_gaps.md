@@ -233,11 +233,12 @@ cycle_runner._execute_monitoring_phase()
 **Impact:** Zero new trades for 3 days. Polymarket has 47 active April 11 markets with prices, but system cannot enter due to RED block.
 **Proposed antibody:** Add a canonical projection preflight in `load_portfolio()` that explicitly checks position chain state — if > N positions have `chain_state=unknown`, mark projection as `degraded` instead of `ok`, and require explicit handling rather than silent fallback.
 
-### [OPEN] Entry sizing is too permissive on reconstructed day0 windows with weak CI
-**Location:** `src/engine/evaluator.py`, `src/engine/monitor_refresh.py`, `src/state/portfolio.py`
+### [FIXED] Settlement-sensitive entries fail closed on degenerate CI (2026-04-13)
+**Location:** `src/engine/evaluator.py`
 **Problem:** Day0 / `update_reaction` entries can still be sized aggressively even when `ci_lower == ci_upper == 0`, `fill_quality = 0`, and the decision is reconstructed rather than directly observed.
 **Impact:** The system can allocate oversized capital to weakly-supported extreme bins, producing large settlement losses before any runtime reversal has a chance to intervene.
-**Proposed antibody:** Add a hard size cap or rejection gate for reconstructed day0 entries with missing / degenerate CI, and require a nonzero confidence band before allowing full-size execution.
+**Antibody deployed:** `evaluate_candidate()` rejects settlement-sensitive entry modes (`day0_capture`, `update_reaction`) before Kelly when the confidence band is missing, non-finite, has `ci_lower <= 0`, or has `ci_upper <= ci_lower`. The rejection is recorded as `EDGE_INSUFFICIENT` with `confidence_band_guard`; `opening_hunt` is unchanged in this narrow packet.
+**Residual:** This does not rebuild historical reconstructed decisions or add provenance for deterministic/high-quality zero-width CI. Supporting such a case safely would need a larger provenance/schema packet.
 
 ### [OPEN] Some positions never develop a usable monitor-to-exit chain before settlement
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`
