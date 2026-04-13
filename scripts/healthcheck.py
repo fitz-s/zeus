@@ -175,8 +175,16 @@ def check() -> dict:
                 result["action_required"] = False
                 result["auto_action_available"] = False
             result["last_cycle"] = status.get("timestamp", "unknown")
-            result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
-            risk_details = status.get("risk", {}).get("details", {}) or {}
+            risk = status.get("risk", {}) if isinstance(status.get("risk", {}), dict) else {}
+            result["risk_level"] = risk.get("level", "UNKNOWN")
+            result["infrastructure_level"] = risk.get("infrastructure_level")
+            infrastructure_issues = risk.get("infrastructure_issues", [])
+            result["infrastructure_issues"] = (
+                list(infrastructure_issues)
+                if isinstance(infrastructure_issues, list)
+                else []
+            )
+            risk_details = risk.get("details", {}) or {}
             if isinstance(risk_details, dict):
                 result["risk_details"] = risk_details
             result["positions"] = status.get("portfolio", {}).get("open_positions", 0)
@@ -290,6 +298,7 @@ def check() -> dict:
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
         and not bool(result.get("cycle_failed"))
+        and result.get("infrastructure_level") != "RED"
     )
     return result
 
