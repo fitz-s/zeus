@@ -9,7 +9,7 @@
 ```
 workspace_map.md (YOU ARE HERE)
   ├── AGENTS.md              ← operating rules, invariants, zones
-  ├── src/AGENTS.md          ← source root: zone map + navigation
+  ├── src/AGENTS.md          ← source root: navigation summary; canonical zone map in architecture/zones.yaml
   │   └── src/*/AGENTS.md    ← zone-specific rules + file registry per package
   ├── tests/AGENTS.md        ← test catalog with invariant mappings
   │   └── tests/contracts/AGENTS.md  ← spec-owned validation manifests
@@ -30,6 +30,8 @@ workspace_map.md (YOU ARE HERE)
 
 **Navigation rule**: Read this file for orientation. Then read the `AGENTS.md` in the directory you're editing. That file has the complete file registry and domain rules for its zone.
 
+The canonical file-level zone map lives in `architecture/zones.yaml`. Treat this workspace map as a navigation aid only, and treat `src/state` as a mixed navigation cluster rather than a blanket package label.
+
 **Maintenance rule**: When you add, rename, or delete a file, update the `AGENTS.md` in that directory AND this file if it changes directory-level structure. See root `AGENTS.md` §7 "Mesh topology maintenance."
 
 ---
@@ -49,14 +51,14 @@ workspace_map.md (YOU ARE HERE)
 
 ## `src/` — Source Code (14 packages, organized by zone)
 
-See `src/AGENTS.md` for the zone map and navigation guide. Each package has its own `AGENTS.md` with zone rules, domain context, and a complete file registry. Read the package `AGENTS.md` before editing any file in that package.
+See `src/AGENTS.md` for the navigation guide. The canonical file-level zone map lives in `architecture/zones.yaml`. Each package has its own `AGENTS.md` with local rules, domain context, and a complete file registry. Read the package `AGENTS.md` before editing any file in that package.
 
-### Zone K0 — Kernel (truth, lifecycle, contracts)
+### Zone K0 summary — Kernel/truth surfaces (navigation only; see `architecture/zones.yaml` for file-level ownership)
 
 | Package | Files | Purpose | Key entry point |
 |---------|-------|---------|-----------------|
 | `src/contracts/` | 17 | Typed semantic boundaries — settlement semantics, execution prices, edge context, provenance registry, reality contracts | `settlement_semantics.py`, `edge_context.py` |
-| `src/state/` | 10 | Truth surface — DB, portfolio, lifecycle FSM, chronicler, chain reconciliation, strategy tracker; also defines derived backtest DB bootstrap | `db.py`, `lifecycle_manager.py` |
+| `src/state/` | 10 | Mixed truth/runtime state surfaces; consult `architecture/zones.yaml` for the file-level split | `db.py`, `lifecycle_manager.py` |
 
 ### Zone K1 — Protective (risk, control)
 

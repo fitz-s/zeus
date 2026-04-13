@@ -4,6 +4,7 @@ Zeus is a position-managed weather-probability trading runtime on Polymarket.
 It converts ECMWF 51-member ensemble forecasts into calibrated probabilities, selects statistically significant edges via FDR control, sizes positions with fractional Kelly, and manages a full lifecycle from entry to settlement.
 
 Your job is to change only what the active work packet allows while protecting kernel law, truth contracts, and zone boundaries.
+The machine-checkable invariant set lives in `architecture/invariants.yaml`, and the machine-checkable zone map lives in `architecture/zones.yaml`. If this file ever disagrees with those YAMLs, the YAMLs win.
 
 ## 1. How Zeus Works (domain model)
 
@@ -114,11 +115,11 @@ Three reconciliation rules:
 
 ### Lifecycle states
 
-9 states: `pending_entry → active → day0_window → pending_exit → economically_closed → settled`. Terminal: `voided`, `quarantined`, `admin_closed`. Transitions are enforced by `LEGAL_LIFECYCLE_FOLDS` — illegal transitions raise errors. The lifecycle manager is the ONLY state authority (INV-01).
+9 states: `pending_entry → active → day0_window → pending_exit → economically_closed → settled`. Terminal: `voided`, `quarantined`, `admin_closed`. Transitions are enforced by `LEGAL_LIFECYCLE_FOLDS` — illegal transitions raise errors. The lifecycle manager is the ONLY state authority. See `architecture/invariants.yaml`.
 
-### Risk levels change behavior (INV-05)
+### Risk levels change behavior
 
-GREEN = normal. YELLOW = no new entries. ORANGE = no entries, exit at favorable prices. RED = cancel all, exit all immediately. Advisory-only risk is explicitly forbidden — if a risk level doesn't change behavior, it violates INV-05.
+GREEN = normal. YELLOW = no new entries. ORANGE = no entries, exit at favorable prices. RED = cancel all, exit all immediately. Advisory-only risk is explicitly forbidden — risk outputs must change behavior.
 
 ### External boundaries
 
@@ -131,44 +132,25 @@ For full domain model with worked examples: `docs/reference/zeus_domain_model.md
 
 ## 2. Zone system
 
-Zeus uses 5 zones (K0-K4). You can only import downward. You can only write in your assigned zone.
+The canonical zone map lives in `architecture/zones.yaml`.
+Use this file as a navigation aid only. It may summarize packages, but it must not redefine ownership or compete with the YAML.
 
-| Zone | What | Key directories | Planning lock? |
-|------|------|-----------------|----------------|
-| K0 | Kernel: lifecycle, state schema, canonical truth | `src/state/`, `src/contracts/` | Always |
-| K1 | Protective: risk enforcement, control plane | `src/riskguard/`, `src/control/` | Always |
-| K2 | Execution: supervisor, CLOB interaction | `src/supervisor_api/`, `src/execution/` | Packet required |
-| K3 | Math/Data: signals, calibration, strategy, analysis | `src/signal/`, `src/calibration/`, `src/strategy/`, `src/engine/` | Only if touching lifecycle/governance semantics |
-| K4 | Extension: monitoring, reporting, observability | `src/observability/`, `src/analysis/` | No |
-
-Import rule: K4 may import K3, K3 may import K2, etc. Never upward.
-
-Zone definitions with full import rules: `architecture/zones.yaml`
+In particular, treat `src/state` as a mixed navigation cluster when reading docs. File-level ownership there is determined by `architecture/zones.yaml`, not by any blanket package label in this guide.
 
 ## 3. Invariants (break one = rejected change)
 
-| ID | Rule | WHY |
-|----|------|-----|
-| INV-01 | Lifecycle is the only state authority | Prevents parallel truth surfaces from diverging |
-| INV-02 | strategy_key is the sole governance key | Attribution must trace to exactly one strategy, never defaulted |
-| INV-03 | DB is the canonical truth surface | JSON/CSV exports are derived, never promoted back to truth |
-| INV-04 | Point-in-time learning only | No future data leakage into training or evaluation |
-| INV-05 | Risk levels must change behavior | Advisory-only risk is theater — every level enforces real constraints |
-| INV-06 | Settlement semantics are typed contracts | Rounding/precision drift is a fatal error, not a minor bug |
-| INV-07 | No zone boundary violations | K3 math code cannot redefine K0 lifecycle semantics |
-| INV-08 | Lifecycle grammar is bounded and frozen | No ad-hoc state strings — only `LifecyclePhase` enum values |
-| INV-09 | Attribution must be exact, never defaulted | If attribution doesn't exist, the system must fail, not guess |
-| INV-10 | Packet discipline for non-trivial changes | Prevents "while here" drift and scope creep |
+The canonical invariant definitions live in `architecture/invariants.yaml`.
+Use this file as a reminder only; do not treat any prose summary here as a competing source of truth or a place to rename IDs.
 
 Full invariant definitions: `architecture/invariants.yaml`
 
 ## 4. Forbidden moves
 
-- Promote JSON/CSV exports back to canonical truth (violates INV-03)
-- Let math code (K3) write or redefine lifecycle/control semantics (K0/K1) (violates INV-07)
-- Invent governance keys beyond `strategy_key` (violates INV-02)
-- Add strategy fallback defaults when exact attribution exists or should exist (violates INV-09)
-- Assign lifecycle phase strings ad hoc outside `LifecyclePhase` enum (violates INV-08)
+- Promote JSON/CSV exports back to canonical truth
+- Let math code (K3) write or redefine lifecycle/control semantics (K0/K1)
+- Invent governance keys beyond `strategy_key`
+- Add strategy fallback defaults when exact attribution exists or should exist
+- Assign lifecycle phase strings ad hoc outside `LifecyclePhase` enum
 - Suppress type errors with `as any`, `@ts-ignore`, or equivalent
 - Commit without explicit request
 - Rewrite broad authority files in one unbounded patch

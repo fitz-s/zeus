@@ -175,17 +175,14 @@ Those consumers may read derived surfaces, but may not upgrade themselves into a
 
 ## 8. Zone law
 
-Zeus is partitioned into five zones with decreasing sensitivity:
+The canonical file-level zone map lives in `architecture/zones.yaml`. This section is a human reminder only and must not be used as a competing ownership table.
 
-| Zone | Meaning | Key dirs | Edit rules |
-|------|---------|----------|------------|
-| `K0` | Kernel truth / lifecycle / contracts | `src/state/`, `src/contracts/` | Planning lock always. Strongest review burden. No broad edits. |
-| `K1` | Protective behavior / control | `src/riskguard/`, `src/control/` | Planning lock always. May consume K0. May influence K2/K3 behavior. May NOT redefine K0 semantics. |
-| `K2` | Execution / supervisor contracts | `src/execution/`, `src/supervisor_api/` | Packet required. May consume K0/K1. May NOT invent new truth surfaces or backdoor-mutate canonical truth. |
-| `K3` | Math / data / strategy / engine | `src/signal/`, `src/calibration/`, `src/strategy/`, `src/engine/`, `src/data/` | Planning lock only if touching lifecycle/governance semantics. May consume K0 contracts/types. May NOT write canonical lifecycle truth or become a governance source. |
-| `K4` | Observability / extension | `src/observability/`, `src/analysis/` | No planning lock. No canonical writes. No policy writes. No import into K0/K1/K2 without promotion packet. |
+Practical reading guidance:
+- treat `src/state` as a mixed navigation cluster when reading docs
+- consult `architecture/zones.yaml` for the file-level split before editing any state-adjacent file
+- use package `AGENTS.md` files as local navigation, not authority
 
-Import rule: downward only. Lower-numbered zones may not import upward.
+Import rule: follow the canonical directionality encoded in `architecture/zones.yaml`.
 
 Zone boundary enforcement:
 - K3 math code may not redefine K0/K1 lifecycle or governance semantics (INV-07 / FM-01)

@@ -1,10 +1,10 @@
-# src/state AGENTS — Zone K0 (Kernel)
+# src/state AGENTS — state / runtime boundary guide
 
 ## WHY this zone matters
 
-State is the **truth and transition zone** — where lifecycle events are recorded, positions are projected, and the DB serves as canonical authority. This is the most drift-prone zone in the repo because every other module wants to write state "just this once."
+State is the **truth and transition zone** — where lifecycle events are recorded, positions are projected, and the DB serves as canonical authority. This directory also carries runtime read-model and reconciliation helpers, so do not infer a blanket package zone from this file. File-level ownership is defined in `architecture/zones.yaml`.
 
-The lifecycle manager is the **sole state authority** (INV-01). No other module may transition lifecycle states. The DB is canonical truth (INV-03) — JSON/CSV exports are derived, never promoted back.
+The lifecycle manager is the **sole state authority**. No other module may transition lifecycle states. The DB is canonical truth — JSON/CSV exports are derived, never promoted back.
 
 ## Key files
 
@@ -13,7 +13,7 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 | `db.py` | SQLite connection, schema, canonical queries | CRITICAL — truth surface |
 | `portfolio.py` | Position model + portfolio state | CRITICAL — runtime position truth |
 | `portfolio_loader_policy.py` | Explicit DB-vs-fallback portfolio load policy | HIGH — truth source routing |
-| `lifecycle_manager.py` | 9-state lifecycle FSM + `LEGAL_LIFECYCLE_FOLDS` | CRITICAL — INV-01 enforcer |
+| `lifecycle_manager.py` | 9-state lifecycle FSM + `LEGAL_LIFECYCLE_FOLDS` | CRITICAL — lifecycle authority enforcer |
 | `chain_reconciliation.py` | Chain > Chronicler > Portfolio (3 rules) | HIGH — truth reconciliation |
 | `chronicler.py` | Append-only event log | HIGH — event spine |
 | `ledger.py` | Event ledger — position_events + position_current projection | HIGH — event persistence |
@@ -33,18 +33,18 @@ The lifecycle manager is the **sole state authority** (INV-01). No other module 
 
 ## Domain rules
 
-- `strategy_key` is the sole governance key (INV-02) — no fallback buckets
-- Event append + projection update must be in one SQLite transaction (INV-08)
-- Point-in-time truth beats hindsight truth (INV-06) — snapshots preserve decision-time state
-- Missing data is first-class truth (INV-09)
+- `strategy_key` is the sole governance key — no fallback buckets. See `architecture/invariants.yaml`.
+- Event append + projection update must be in one SQLite transaction. See `architecture/invariants.yaml`.
+- Point-in-time truth beats hindsight truth — snapshots preserve decision-time state. See `architecture/invariants.yaml`.
+- Missing data is first-class truth. See `architecture/invariants.yaml`.
 
 ## Common mistakes
 
-- Promoting JSON exports (`positions.json`, `status_summary.json`) back to authority → INV-03 violation
+- Promoting JSON exports (`positions.json`, `status_summary.json`) back to authority → canonical truth violation
 - Creating new shadow persistence surfaces (another JSON file "just for debugging") → truth divergence
-- Defaulting unknown strategy to a governance bucket → INV-09 violation
+- Defaulting unknown strategy to a governance bucket → exact-attribution violation
 - Schema or truth-path changes without packet + rollback → architectural drift
-- Bypassing `LEGAL_LIFECYCLE_FOLDS` with direct state assignment → INV-08 violation
+- Bypassing `LEGAL_LIFECYCLE_FOLDS` with direct state assignment → lifecycle authority violation
 
 ## Forbidden
 
