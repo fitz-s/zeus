@@ -4044,6 +4044,183 @@ def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monke
     assert artifact.exit_cases[0].trade_id == "filled-1"
 
 
+def _monitor_chain_deps(now: datetime):
+    return types.SimpleNamespace(
+        MonitorResult=cycle_runner.MonitorResult,
+        logger=logging.getLogger("test_monitor_chain_missing"),
+        cities_by_name={"NYC": NYC},
+        _utcnow=lambda: now,
+        has_acknowledged_quarantine_clear=lambda token_id: False,
+    )
+
+
+def test_monitor_refresh_failure_near_settlement_is_operator_visible(monkeypatch):
+    pos = _position(trade_id="monitor-chain-missing", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh exploded")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_positions"] == ["monitor-chain-missing"]
+    assert summary["monitor_chain_missing_reasons"][0]["reason"] == "refresh_failed:RuntimeError"
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason == "MONITOR_CHAIN_MISSING:refresh_failed:RuntimeError"
+
+
+def test_monitor_refresh_failure_far_from_settlement_is_not_chain_missing(monkeypatch):
+    pos = _position(trade_id="monitor-far", state="holding", target_date="2026-04-10")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh exploded")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert "monitor_chain_missing" not in summary
+    assert artifact.monitor_results == []
+
+
+def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeypatch):
+    pos = _position(trade_id="monitor-incomplete", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            p_market=np.array([]),
+            p_posterior=0.41,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.0,
+        ),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_incomplete_exit_context"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith(
+        "incomplete_exit_context:INCOMPLETE_EXIT_CONTEXT"
+    )
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+
+
+def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
+    pos = _position(trade_id="monitor-execution-failed", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    def _refresh_position(conn, clob, pos):
+        pos.last_monitor_market_price = 0.46
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = 0.46
+        pos.last_monitor_prob = 0.41
+        pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.46]),
+            p_posterior=0.41,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-0.05,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(True, "EDGE_REVERSAL", trigger="EDGE_REVERSAL"),
+    )
+    monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("execution failed")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert "monitor_chain_missing" not in summary
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason == "EDGE_REVERSAL"
+
+
+def test_time_context_failure_near_active_position_escalates_monitor_chain(monkeypatch):
+    pos = _position(trade_id="monitor-time-context", state="holding", target_date="not-a-date")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("refresh should not run")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith("time_context_failed")
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason.startswith("MONITOR_CHAIN_MISSING:time_context_failed")
+
+
 def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
