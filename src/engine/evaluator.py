@@ -320,6 +320,24 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     return "opening_inertia"
 
 
+def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
+    if candidate.discovery_mode not in {
+        DiscoveryMode.DAY0_CAPTURE.value,
+        DiscoveryMode.UPDATE_REACTION.value,
+    }:
+        return None
+    try:
+        ci_lower = float(edge.ci_lower)
+        ci_upper = float(edge.ci_upper)
+    except (TypeError, ValueError):
+        return "MISSING_CONFIDENCE_BAND"
+    if not np.isfinite(ci_lower) or not np.isfinite(ci_upper):
+        return "MISSING_CONFIDENCE_BAND"
+    if ci_lower <= 0.0 or ci_upper <= ci_lower:
+        return f"DEGENERATE_CONFIDENCE_BAND(ci_lower={ci_lower:.4f},ci_upper={ci_upper:.4f})"
+    return None
+
+
 def _selection_hypothesis_id(
     *,
     family_id: str,
@@ -1067,6 +1085,21 @@ def evaluate_candidate(
         decision_validations = list(entry_validations)
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
+        ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
+        if ci_rejection_reason is not None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="EDGE_INSUFFICIENT",
+                rejection_reasons=[ci_rejection_reason],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "confidence_band_guard"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
         policy_now = decision_time or datetime.now(timezone.utc)
         policy = (
             resolve_strategy_policy(conn, strategy_key, policy_now)
