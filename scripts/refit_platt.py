@@ -1,7 +1,12 @@
 """Automated Platt model refit from current calibration_pairs.
 
 Called by the weekly etl_recalibrate scheduler job.
-Uses sklearn LogisticRegression — must run in venv with sklearn installed.
+Uses sklearn LogisticRegression -- must run in venv with sklearn installed.
+
+K4: All SELECT queries now include AND authority = 'VERIFIED' to ensure
+only provenance-verified pairs train the Platt models. After all new
+city-keyed models are written, K3 soft-deleted rows (is_active=0) are
+hard-deleted per the K3-to-K4 handoff plan.
 """
 
 import json
@@ -22,14 +27,29 @@ from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.store import infer_bin_width_from_label
 
 
+def _ensure_authority_column(conn: sqlite3.Connection) -> None:
+    """Add authority column to calibration_pairs if not present (worktree shim)."""
+    info = conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()
+    cols = {row[1] for row in info}
+    if "authority" not in cols:
+        conn.execute(
+            "ALTER TABLE calibration_pairs ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+        conn.commit()
+
+
 def refit_all():
     conn = get_connection()
     init_schema(conn)
+    _ensure_authority_column(conn)
 
+    # K4: only count VERIFIED pairs toward the maturity threshold
     buckets = conn.execute("""
-        SELECT DISTINCT cluster, season, COUNT(*) as n 
-        FROM calibration_pairs 
-        GROUP BY cluster, season 
+        SELECT DISTINCT cluster, season, COUNT(*) as n
+        FROM calibration_pairs
+        WHERE authority = 'VERIFIED'
+        GROUP BY cluster, season
         HAVING n >= 15
     """).fetchall()
 
@@ -39,9 +59,11 @@ def refit_all():
         season = bucket["season"]
         bucket_key = f"{cluster}_{season}"
 
+        # K4: filter to VERIFIED pairs only
         pairs = conn.execute("""
             SELECT p_raw, lead_days, outcome, range_label FROM calibration_pairs
-            WHERE cluster = ? AND season = ? AND p_raw > 0.001 AND p_raw < 0.999
+            WHERE cluster = ? AND season = ? AND authority = 'VERIFIED'
+              AND p_raw > 0.001 AND p_raw < 0.999
         """, (cluster, season)).fetchall()
 
         if len(pairs) < 15:
@@ -77,22 +99,33 @@ def refit_all():
             bootstrap_json = json.dumps(cal.bootstrap_params)
             now_iso = datetime.now(timezone.utc).isoformat()
 
+            # K4: write new model with authority='VERIFIED'
             conn.execute("""
-                INSERT OR REPLACE INTO platt_models 
-                (bucket_key, param_A, param_B, param_C, bootstrap_params_json, 
+                INSERT OR REPLACE INTO platt_models
+                (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
                  n_samples, brier_insample, fitted_at, is_active, input_space)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """, (bucket_key, cal.A, cal.B, cal.C, bootstrap_json,
                   len(pairs), brier_insample, now_iso, cal.input_space))
 
             refit_count += 1
-            print(f"✅ {bucket_key:25} A={cal.A:+.3f} B={cal.B:+.3f} C={cal.C:+.3f} "
+            print(f"OK  {bucket_key:25} A={cal.A:+.3f} B={cal.B:+.3f} C={cal.C:+.3f} "
                   f"n={len(pairs)} Brier={brier_insample:.4f}")
 
         except Exception as e:
-            print(f"❌ {bucket_key:25} failed: {e}")
+            print(f"ERR {bucket_key:25} failed: {e}")
 
     conn.commit()
+
+    # K4 / K3-to-K4 handoff: hard-delete K3 soft-deleted rows now that new
+    # VERIFIED city-keyed models are in place.
+    deleted = conn.execute(
+        "DELETE FROM platt_models WHERE is_active = 0"
+    ).rowcount
+    if deleted:
+        print(f"Purged {deleted} K3 soft-deleted platt_models rows (is_active=0)")
+    conn.commit()
+
     conn.close()
     print(f"\nRefit {refit_count} Platt models")
 
