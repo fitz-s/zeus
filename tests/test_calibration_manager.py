@@ -42,6 +42,18 @@ from src.config import City
 from src.state.db import get_connection, init_schema
 
 
+def _ensure_auth_verified(conn) -> None:
+    """Add authority column if missing and mark all calibration_pairs rows VERIFIED."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()}
+    if "authority" not in cols:
+        conn.execute(
+            "ALTER TABLE calibration_pairs ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+    conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
+    conn.commit()
+
+
 NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
     timezone="America/New_York", cluster="NYC",
@@ -149,6 +161,7 @@ class TestStoreRoundTrip:
                 forecast_available_at="2026-01-01T00:00:00Z",
             )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         pairs = get_pairs_for_bucket(conn, "US-Northeast", "DJF")
         assert len(pairs) == 20
@@ -182,6 +195,7 @@ class TestDecisionGroupAccounting:
                     settlement_value=41.0,
                 )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         groups = build_decision_groups(conn)
         health = summarize_bucket_health(groups)
@@ -233,6 +247,7 @@ class TestDecisionGroupAccounting:
             forecast_available_at="2025-12-30T00:00:00Z",
             settlement_value=40.0,
         )
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
 
         assert write_decision_groups(conn, groups, recorded_at="t1") == 1
@@ -300,6 +315,7 @@ class TestDecisionGroupAccounting:
                     settlement_value=41.0,
                 )
 
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
         written = write_decision_groups(conn, groups, recorded_at="t1")
         mixed = conn.execute(
@@ -340,6 +356,7 @@ class TestDecisionGroupAccounting:
                     forecast_available_at=f"2025-12-{group_idx + 20:02d}T00:00:00Z",
                     settlement_value=41.0,
                 )
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
         shadow = summarize_maturity_shadow(groups)
         conn.close()
@@ -404,6 +421,7 @@ class TestBlockedOOSCalibration:
                 winning_idx=winning_idx,
             )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         report = evaluate_blocked_oos_calibration(
             conn,
@@ -444,6 +462,7 @@ class TestBlockedOOSCalibration:
             winning_idx=4,
         )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         report = evaluate_blocked_oos_calibration(
             conn,

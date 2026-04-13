@@ -50,6 +50,18 @@ from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
 
 
+def _ensure_auth_verified(conn) -> None:
+    """Add authority column if missing and mark all calibration_pairs rows VERIFIED."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()}
+    if "authority" not in cols:
+        conn.execute(
+            "ALTER TABLE calibration_pairs ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+    conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
+    conn.commit()
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,
@@ -2836,7 +2848,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     init_schema(conn)
 
     season = season_from_date("2026-04-01")
-    for i in range(13):
+    for i in range(15):
         add_calibration_pair(
             conn,
             city="NYC",
@@ -2881,6 +2893,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         settled_at="2026-04-01T23:00:00Z",
     )])
     conn.commit()
+    _ensure_auth_verified(conn)
     conn.close()
 
     event = {

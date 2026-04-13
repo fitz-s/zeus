@@ -11,6 +11,17 @@ import pytest
 from src.state.db import get_connection, init_schema
 
 
+def _ensure_auth_column(conn) -> None:
+    """Add authority column to calibration_pairs if missing (K4.5 fixture catch-up)."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()}
+    if "authority" not in cols:
+        conn.execute(
+            "ALTER TABLE calibration_pairs ADD COLUMN "
+            "authority TEXT NOT NULL DEFAULT 'UNVERIFIED'"
+        )
+        conn.commit()
+
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKTREE_VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 EXPECTED_SUBPROCESS_PYTHON = (
@@ -143,6 +154,7 @@ def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monk
 
     conn = get_connection(shared_db)
     init_schema(conn)
+    _ensure_auth_column(conn)
     conn.execute(
         "INSERT INTO settlements (city, target_date, winning_bin) VALUES (?, ?, ?)",
         ("NYC", "2026-01-02", "39-40°F"),
@@ -204,6 +216,7 @@ def test_etl_tigge_calibration_uses_settlement_value_when_winning_bin_missing(tm
 
     conn = get_connection(shared_db)
     init_schema(conn)
+    _ensure_auth_column(conn)
     conn.execute(
         "INSERT INTO settlements (city, target_date, settlement_value) VALUES (?, ?, ?)",
         ("NYC", "2026-01-02", 40.0),
