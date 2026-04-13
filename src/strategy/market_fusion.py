@@ -11,6 +11,16 @@ from src.config import settings
 from src.contracts.alpha_decision import AlphaDecision
 from src.types.temperature import TemperatureDelta
 
+
+class AuthorityViolation(ValueError):
+    """Raised when the computation chain receives UNVERIFIED calibration data.
+
+    K4 hard gate: market_fusion refuses to compute alpha on data whose
+    provenance has not been verified. This is not a soft warning -- it is
+    a hard raise that prevents UNVERIFIED data from entering the edge
+    computation chain.
+    """
+
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
 # This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
 # HARDCODED(setting_key="edge.spread_tight_f", note_key="edge._spread_tight_f_note",
@@ -60,6 +70,7 @@ def compute_alpha(
     hours_since_open: float,
     city_name: str = "",
     season: str = "",
+    authority_verified: bool = True,
 ) -> AlphaDecision:
     """Compute α for model-market blending. Spec §4.5.
 
@@ -79,6 +90,16 @@ def compute_alpha(
     ensemble_spread must be a TemperatureDelta. This is a hard rule:
     spread thresholds are unit-aware and must not silently fall back to bare floats.
     """
+    # K4 authority hard gate: refuse UNVERIFIED calibration data.
+    # The evaluator already gates via get_pairs_for_bucket(authority_filter='VERIFIED');
+    # this is a second line of defense at the market_fusion boundary.
+    if not authority_verified:
+        raise AuthorityViolation(
+            f"market_fusion refused UNVERIFIED calibration for "
+            f"{city_name!r}/{season!r} "
+            f"(calibration_level={calibration_level})"
+        )
+
     if not isinstance(ensemble_spread, TemperatureDelta):
         raise TypeError(
             "compute_alpha requires ensemble_spread to be TemperatureDelta. "
