@@ -175,21 +175,24 @@ def save_platt_model(
     n_samples: int,
     brier_insample: Optional[float] = None,
     input_space: str = "raw_probability",
+    authority: str = "VERIFIED",
 ) -> None:
     """Save a fitted Platt model.
 
     Uses INSERT OR REPLACE to handle refits on the UNIQUE(bucket_key) constraint.
+    authority defaults to 'VERIFIED': this function writes a freshly fitted,
+    trusted model. Pass authority='UNVERIFIED' only for diagnostic/test data.
     """
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("""
         INSERT OR REPLACE INTO platt_models
         (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, brier_insample, fitted_at, is_active, input_space)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+         n_samples, brier_insample, fitted_at, is_active, input_space, authority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     """, (
         bucket_key, A, B, C,
         json.dumps(bootstrap_params),
-        n_samples, brier_insample, now, input_space
+        n_samples, brier_insample, now, input_space, authority
     ))
 
 
@@ -197,12 +200,12 @@ def load_platt_model(
     conn: sqlite3.Connection,
     bucket_key: str,
 ) -> Optional[dict]:
-    """Load a fitted Platt model. Returns None if not found or inactive."""
+    """Load a fitted Platt model. Returns None if not found, inactive, or not VERIFIED."""
     row = conn.execute("""
         SELECT param_A, param_B, param_C, bootstrap_params_json,
                n_samples, brier_insample, fitted_at, input_space
         FROM platt_models
-        WHERE bucket_key = ? AND is_active = 1
+        WHERE bucket_key = ? AND is_active = 1 AND authority = 'VERIFIED'
     """, (bucket_key,)).fetchone()
 
     if row is None:
