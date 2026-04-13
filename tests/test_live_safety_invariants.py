@@ -1372,6 +1372,9 @@ def test_degraded_best_bid_proxy_discount_can_veto_edge_exit(monkeypatch):
     assert real_bid_decision.should_exit is True
     assert proxy_decision.should_exit is False
     assert "best_bid_proxy_tick_discount" in proxy_decision.applied_validations
+    assert "hold_value_contract" in proxy_decision.applied_validations
+    assert "hold_cost_fee_declared_zero" in proxy_decision.applied_validations
+    assert "hold_cost_time_declared_zero" in proxy_decision.applied_validations
 
 
 def test_settlement_sensitive_entries_reject_missing_confidence_band():
@@ -1402,6 +1405,35 @@ def test_settlement_sensitive_entries_reject_missing_confidence_band():
     )
 
     assert _entry_ci_rejection_reason(candidate, edge) == "MISSING_CONFIDENCE_BAND"
+
+
+def test_buy_no_edge_exit_declares_hold_value_costs():
+    pos = _make_position(
+        direction="buy_no",
+        size_usd=5.0,
+        entry_price=0.60,
+        entry_ci_width=0.02,
+        neg_edge_count=1,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.50,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.70,
+            current_market_price_is_fresh=True,
+            best_bid=0.69,
+            hours_to_settlement=48.0,
+            position_state="holding",
+            day0_active=False,
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "BUY_NO_EDGE_EXIT"
+    assert "hold_value_contract" in decision.applied_validations
+    assert "hold_cost_fee_declared_zero" in decision.applied_validations
+    assert "hold_cost_time_declared_zero" in decision.applied_validations
 
 
 def test_buy_yes_exit_still_hard_fails_without_market_price_source():

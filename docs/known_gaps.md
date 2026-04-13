@@ -342,7 +342,8 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Antibody deployed:** `compute_posterior()` now constructs `VigTreatment.from_raw(p_market)` and blends against `clean_prices` before final posterior normalization when `p_market` looks like a complete market-family vector: plausible vig sum and at least two positive components. `MarketAnalysis.p_market` remains the raw tradable market vector for edge/entry-price semantics; only posterior fusion uses the de-vigged probability vector.
 **Residual:** Sparse monitor vectors and complete-family vectors outside the plausible vig window stay in raw observed-price space until monitor refresh can provide complete market-family vectors with explicit provenance. This does not address execution-side spread, fees, slippage, or historical replay metric drift from prior post-blend normalization.
 
-### [OPEN] D6 — EV hold calculation ignores funding/correlation cost (MEDIUM)
-**Location:** `src/strategy/kelly.py` — hold value calculation
+### [MITIGATED] D6 — Exit EV gate declares zero-cost HoldValue seam (2026-04-13)
+**Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
 **Problem:** `net_hold = shares × p_posterior` assumes free carry. Ignores opportunity cost of locked capital and correlation crowding across simultaneous positions. When holding multiple positions, capital is not fungible, but the sizing treats it as if each position is independent.
-**Proposed antibody:** `HoldValue` contract declaring included costs; minimum = fee + time-cost-to-settlement. Correlation-adjusted portfolio heat already partially addresses this through the Kelly cascade drawdown factor, but the hold value itself remains naïve.
+**Antibody deployed:** Active and legacy exit EV gates now route hold EV through `HoldValue.compute(...)`, explicitly declaring `fee` and `time` costs as zero and recording hold-value audit markers on active `Position.evaluate_exit()` paths. This makes free-carry arithmetic explicit and auditable without inventing unverified funding/correlation parameters.
+**Residual:** Real nonzero funding, redemption/fee, and correlation-crowding costs are still not priced. Closing D6 fully requires a cost policy, portfolio context at exit authority, and replay/live validation.

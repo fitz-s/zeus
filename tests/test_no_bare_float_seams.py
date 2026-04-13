@@ -8,6 +8,7 @@ import pytest
 
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
+from src.contracts.hold_value import HoldValue, HoldValueCostDeclarationError
 from src.contracts.vig_treatment import VigTreatment
 from src.strategy.kelly import kelly_size
 from src.strategy.market_fusion import compute_posterior
@@ -15,6 +16,7 @@ from src.strategy.market_fusion import compute_posterior
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
 EXIT_TRIGGERS_PY = ZEUS_ROOT / "src" / "execution" / "exit_triggers.py"
+PORTFOLIO_PY = ZEUS_ROOT / "src" / "state" / "portfolio.py"
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,31 @@ class TestVigTreatmentSeam:
                 clean_prices=np.array([-0.1, 1.1]),
                 applied_before_blend=True,
             )
+
+
+class TestHoldValueSeam:
+    def test_hold_value_requires_fee_and_time_declarations(self):
+        with pytest.raises(HoldValueCostDeclarationError):
+            HoldValue(
+                gross_value=10.0,
+                fee_cost=0.0,
+                time_cost=0.0,
+                net_value=10.0,
+                costs_declared=[],
+            )
+
+    def test_hold_value_compute_declares_zero_costs_explicitly(self):
+        hold = HoldValue.compute(gross_value=10.0, fee_cost=0.0, time_cost=0.0)
+
+        assert hold.net_value == pytest.approx(10.0)
+        assert hold.costs_declared == ["fee", "time"]
+
+    def test_exit_ev_gate_uses_hold_value_contract(self):
+        portfolio_src = PORTFOLIO_PY.read_text()
+        exit_src = EXIT_TRIGGERS_PY.read_text()
+
+        assert "HoldValue.compute" in portfolio_src
+        assert "HoldValue.compute" in exit_src
 
 
 # ---------------------------------------------------------------------------

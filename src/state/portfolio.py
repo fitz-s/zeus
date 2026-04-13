@@ -21,6 +21,7 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
+from src.contracts.hold_value import HoldValue
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
@@ -120,6 +121,22 @@ ADMIN_EXITS = frozenset({
 def _buy_yes_degraded_best_bid_proxy(current_market_price: float) -> float:
     """Conservative buy-yes sell proxy when fresh market price exists but bid is absent."""
     return max(0.01, min(0.99, float(current_market_price) - 0.01))
+
+
+def _declared_zero_cost_hold_value(shares: float, current_p_posterior: float) -> HoldValue:
+    return HoldValue.compute(
+        gross_value=float(shares) * float(current_p_posterior),
+        fee_cost=0.0,
+        time_cost=0.0,
+    )
+
+
+def _append_hold_value_audit(applied: list[str]) -> None:
+    applied.extend([
+        "hold_value_contract",
+        "hold_cost_fee_declared_zero",
+        "hold_cost_time_declared_zero",
+    ])
 
 
 @dataclass
@@ -495,7 +512,9 @@ class Position:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
-            if shares * best_bid <= shares * current_p_posterior:
+            hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
+            _append_hold_value_audit(applied)
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -535,7 +554,9 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            if shares * best_bid <= shares * current_p_posterior:
+            hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
+            _append_hold_value_audit(applied)
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -573,7 +594,9 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
+                _append_hold_value_audit(applied)
+                if shares * current_market_price <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -619,7 +642,9 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
+                _append_hold_value_audit(applied)
+                if shares * current_market_price <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
