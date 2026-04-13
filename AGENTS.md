@@ -76,7 +76,7 @@ Mandatory backtest hygiene before changing mathematical/statistical logic:
 P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal
 P_cal + P_market → α-weighted fusion → P_posterior
 P_posterior - P_market → Edge (with double-bootstrap CI)
-Edges → BH FDR filter (220 hypotheses) → Selected edges
+Edges → BH FDR over active tested candidate family → Selected edges
 Selected → Fractional Kelly (dynamic mult) → Position size
 ```
 
@@ -100,7 +100,7 @@ Raw ensemble probabilities are systematically biased — overconfident at long l
 
 ### Why FDR filtering exists
 
-Each cycle evaluates ~220 simultaneous hypotheses (cities × bins × directions). At α=0.10 without FDR control, random chance produces ~22 spurious "edges." Benjamini-Hochberg controls the false discovery rate across all hypotheses, not just per-test significance.
+Each live cycle can encounter a macro pool on the order of cities × bins × directions, but the active control unit is the tested candidate/market/snapshot family, not one whole-cycle batch. Benjamini-Hochberg is applied over every hypothesis in that active tested family, including hypotheses that fail the positive-edge prefilter. Zeus does not currently claim whole-cycle BH control.
 
 ### The truth hierarchy
 

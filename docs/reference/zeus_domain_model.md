@@ -9,11 +9,11 @@ Zeus converts weather ensemble forecasts into calibrated trading probabilities o
 P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal
 P_cal + P_market → α-weighted fusion → P_posterior
 P_posterior - P_market → Edge (with double-bootstrap CI)
-Edges → BH FDR filter (220 hypotheses) → Selected edges
+Edges → BH FDR over active tested candidate family → Selected edges
 Selected → Fractional Kelly (dynamic mult) → Position size
 ```
 
-**Worked example**: Chicago, 3 days out. 51 ensemble members predict daily max temperatures. For each member, add ASOS sensor noise (σ ≈ 0.2–0.5°F), round to integer (WU display), repeat 10,000× → P_raw per bin. Platt calibrates: `P_cal = sigmoid(A·logit(P_raw) + B·3 + C)`. Fuse with market price via α-weighted blend → `P_posterior`. Edge = `P_posterior - P_market`. Bootstrap CI on that edge (3 uncertainty sources). If BH-significant across all 220 hypotheses → Kelly sizes it.
+**Worked example**: Chicago, 3 days out. 51 ensemble members predict daily max temperatures. For each member, add ASOS sensor noise (σ ≈ 0.2–0.5°F), round to integer (WU display), repeat 10,000× → P_raw per bin. Platt calibrates: `P_cal = sigmoid(A·logit(P_raw) + B·3 + C)`. Fuse with market price via α-weighted blend → `P_posterior`. Edge = `P_posterior - P_market`. Bootstrap CI on that edge (3 uncertainty sources). If BH-significant within the active tested family for that market snapshot → Kelly sizes it.
 
 ## 2. Why settlement is integer
 
@@ -105,9 +105,9 @@ P-values come from bootstrap empirical distribution: `p = mean(bootstrap_edges �
 
 ## 6. FDR filtering
 
-Each cycle evaluates ~220 simultaneous hypotheses (10 cities × 11 bins × 2 directions). At α=0.10 without FDR control, random chance produces ~22 spurious "edges."
+Each cycle may observe a macro pool on the order of cities × bins × directions. The active live implementation controls the candidate/market/snapshot tested family, not the whole cycle as one hypothesis batch.
 
-Benjamini-Hochberg controls the **false discovery rate** across all hypotheses: sort by p-value ascending, find largest k where `p_value[k] ≤ α × k / m`. Only edges 1..k survive.
+Benjamini-Hochberg controls the **false discovery rate** within each active tested family: sort by p-value ascending, find largest k where `p_value[k] ≤ α × k / m`. Only edges 1..k survive. Whole-cycle BH would require a separate cycle-level aggregation package and is not current runtime truth.
 
 P-values come from bootstrap: `p = mean(bootstrap_edges ≤ 0)`. Never from approximation formulas.
 

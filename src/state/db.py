@@ -423,7 +423,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
             ON probability_trace_fact(decision_snapshot_id);
 
-        -- Selection-family substrate for later family-wise FDR cutover.
+        -- Selection-family facts for active candidate-family FDR accounting.
         CREATE TABLE IF NOT EXISTS selection_family_fact (
             family_id TEXT PRIMARY KEY,
             cycle_mode TEXT NOT NULL,
