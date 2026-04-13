@@ -109,6 +109,21 @@ class PolymarketClient:
 
         return best_bid, best_ask, bid_size, ask_size
 
+    def get_fee_rate(self, token_id: str) -> float:
+        """Fetch the token-specific Polymarket taker fee rate."""
+        resp = httpx.get(f"{CLOB_BASE}/fee-rate", params={"token_id": token_id}, timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+        schedule = data.get("feeSchedule") if isinstance(data, dict) else None
+        if not isinstance(schedule, dict):
+            schedule = data if isinstance(data, dict) else {}
+        if schedule.get("feesEnabled") is False:
+            return 0.0
+        for key in ("feeRate", "fee_rate", "takerFeeRate", "taker_fee_rate"):
+            if key in schedule and schedule[key] is not None:
+                return float(schedule[key])
+        raise RuntimeError(f"Fee-rate response missing feeSchedule.feeRate for {token_id}")
+
     def place_limit_order(
         self,
         token_id: str,

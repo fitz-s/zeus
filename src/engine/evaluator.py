@@ -19,7 +19,7 @@ import numpy as np
 from src.calibration.manager import get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.config import City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
+from src.config import CONFIG_DIR, City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -60,6 +60,10 @@ from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
+
+
+class FeeRateUnavailableError(RuntimeError):
+    """Raised when token-specific execution fee cannot be established."""
 
 
 @dataclass
@@ -145,6 +149,85 @@ def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -
     if entry_price <= CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:
         return f"CENTER_BUY_ULTRA_LOW_PRICE({entry_price:.4f}<={CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:.2f})"
     return None
+
+
+def _size_at_execution_price_boundary(
+    *,
+    p_posterior: float,
+    entry_price: float,
+    fee_rate: float,
+    sizing_bankroll: float,
+    kelly_multiplier: float,
+    safety_cap_usd: float | None,
+    feature_flags: dict | None,
+) -> float:
+    """Size a trade at the evaluator→Kelly boundary using typed entry cost."""
+    raw_entry_price = float(entry_price)
+    ep = ExecutionPrice(
+        value=raw_entry_price,
+        price_type="implied_probability",
+        fee_deducted=False,
+        currency="probability_units",
+    )
+    ep_fee_adjusted = ep.with_taker_fee(fee_rate)
+    ep_fee_adjusted.assert_kelly_safe()
+
+    fee_adjusted_size = kelly_size(
+        p_posterior,
+        ep_fee_adjusted.value,
+        sizing_bankroll,
+        kelly_multiplier,
+        safety_cap_usd=safety_cap_usd,
+    )
+
+    use_fee_adjusted = (feature_flags or {}).get("EXECUTION_PRICE_SHADOW", True)
+    if use_fee_adjusted:
+        return fee_adjusted_size
+
+    raw_size = kelly_size(
+        p_posterior,
+        raw_entry_price,
+        sizing_bankroll,
+        kelly_multiplier,
+        safety_cap_usd=safety_cap_usd,
+    )
+    if raw_size > 0:
+        _ep_logger = logging.getLogger("zeus.execution_price_shadow")
+        _ep_logger.info(
+            "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
+            raw_size,
+            fee_adjusted_size,
+            raw_size - fee_adjusted_size,
+            raw_entry_price,
+            ep_fee_adjusted.value,
+        )
+    return raw_size
+
+
+def _default_weather_fee_rate() -> float:
+    try:
+        from src.contracts.reality_contract import load_contracts_from_yaml
+
+        contracts = load_contracts_from_yaml(CONFIG_DIR / "reality_contracts" / "economic.yaml")
+        fee_contract = next(
+            (contract for contract in contracts if contract.contract_id == "FEE_RATE_WEATHER"),
+            None,
+        )
+        if fee_contract is not None:
+            return float(fee_contract.current_value)
+    except Exception as exc:
+        logger.warning("FEE_RATE_WEATHER contract unavailable; falling back to 0.05: %s", exc)
+    return 0.05
+
+
+def _fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
+    getter = getattr(clob, "get_fee_rate", None)
+    if callable(getter):
+        try:
+            return float(getter(token_id))
+        except Exception as exc:
+            raise FeeRateUnavailableError(f"fee-rate lookup failed for {token_id}: {exc}") from exc
+    return _default_weather_fee_rate()
 
 
 def _to_jsonable(value):
@@ -1098,34 +1181,33 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
         
-        # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost
-        ep = ExecutionPrice(
-            value=edge.entry_price,
-            price_type="implied_probability",
-            fee_deducted=False,
-            currency="probability_units",
+        # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
+        try:
+            fee_rate = _fee_rate_for_token(clob, check_token)
+        except FeeRateUnavailableError as exc:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="EXECUTION_PRICE_UNAVAILABLE",
+                rejection_reasons=[str(exc)],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=list(decision_validations),
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
+        size = _size_at_execution_price_boundary(
+            p_posterior=edge.p_posterior,
+            entry_price=edge.entry_price,
+            fee_rate=fee_rate,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=km * risk_throttle,
+            safety_cap_usd=settings["live_safety_cap_usd"],
+            feature_flags=settings._data.get("feature_flags", {}),
         )
-        ep_fee_adjusted = ep.with_taker_fee()
-        ep_fee_adjusted.assert_kelly_safe()
-
-        _shadow_flag = settings._data.get("feature_flags", {}).get("EXECUTION_PRICE_SHADOW", False)
-        if _shadow_flag:
-            # New path authoritative — fee-adjusted entry price
-            size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
-                              safety_cap_usd=settings["live_safety_cap_usd"])
-        else:
-            # Shadow mode: old path authoritative, log delta for monitoring
-            size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle,
-                              safety_cap_usd=settings["live_safety_cap_usd"])
-            shadow_size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
-                                     safety_cap_usd=settings["live_safety_cap_usd"])
-            if size > 0:
-                _ep_logger = logging.getLogger("zeus.execution_price_shadow")
-                _ep_logger.info(
-                    "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
-                    size, shadow_size, size - shadow_size,
-                    edge.entry_price, ep_fee_adjusted.value,
-                )
         if policy.allocation_multiplier != 1.0:
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")
