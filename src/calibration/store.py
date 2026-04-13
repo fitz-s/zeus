@@ -113,13 +113,20 @@ def get_pairs_for_bucket(
 
     Returns list of dicts with keys: p_raw, lead_days, outcome, range_label.
     """
-    if authority_filter == 'any' or not _has_authority_column(conn):
+    if authority_filter == 'any':
         rows = conn.execute("""
             SELECT p_raw, lead_days, outcome, range_label
             FROM calibration_pairs
             WHERE cluster = ? AND season = ?
             ORDER BY target_date
         """, (cluster, season)).fetchall()
+    elif not _has_authority_column(conn):
+        # M7 fix: pre-migration DB without authority column.
+        # If caller requests UNVERIFIED, return empty list to prevent false-positive
+        # blocks (returning all rows would look like contamination to the evaluator).
+        # If caller requests VERIFIED (default), also return empty -- no verified data
+        # can exist on a pre-migration DB.
+        return []
     else:
         rows = conn.execute("""
             SELECT p_raw, lead_days, outcome, range_label
@@ -136,12 +143,26 @@ def get_pairs_for_bucket(
     return result
 
 
-def get_pairs_count(conn: sqlite3.Connection, cluster: str, season: str) -> int:
-    """Count calibration pairs in a bucket."""
+def get_pairs_count(
+    conn: sqlite3.Connection,
+    cluster: str,
+    season: str,
+    authority_filter: str = "VERIFIED",
+) -> int:
+    """Count calibration pairs in a bucket.
+
+    K4.5 H5 fix: filters by authority='VERIFIED' by default.
+    Pass authority_filter='any' to count all rows (diagnostics only).
+    """
+    if authority_filter == "any" or not _has_authority_column(conn):
+        return conn.execute("""
+            SELECT COUNT(*) FROM calibration_pairs
+            WHERE cluster = ? AND season = ?
+        """, (cluster, season)).fetchone()[0]
     return conn.execute("""
         SELECT COUNT(*) FROM calibration_pairs
-        WHERE cluster = ? AND season = ?
-    """, (cluster, season)).fetchone()[0]
+        WHERE cluster = ? AND season = ? AND authority = ?
+    """, (cluster, season, authority_filter)).fetchone()[0]
 
 
 def save_platt_model(

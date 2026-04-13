@@ -503,3 +503,110 @@ def test_evaluator_gate_label_present_in_evaluator_code():
     assert "insufficient_verified_calibration" in content, (
         "evaluator.py must reference insufficient_verified_calibration reason"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: K2_struct perimeter authority filter tests (commit 4)
+# ---------------------------------------------------------------------------
+
+def test_blocked_oos_filters_unverified():
+    """_fetch_rows (blocked_oos) returns only VERIFIED rows and excludes UNVERIFIED."""
+    conn = _make_db()
+    # Seed one VERIFIED, one UNVERIFIED row on different dates to keep them distinct.
+    for authority, date in (("VERIFIED", "2025-07-01"), ("UNVERIFIED", "2025-07-02")):
+        conn.execute(
+            """
+            INSERT INTO calibration_pairs
+            (city, target_date, range_label, p_raw, outcome, lead_days,
+             season, cluster, forecast_available_at, bias_corrected, authority)
+            VALUES ('NYC', ?, '85-86F', 0.3, 0, 3.0, 'JJA', 'NYC',
+                    '2025-06-28T12:00:00', 0, ?)
+            """,
+            (date, authority),
+        )
+    conn.commit()
+
+    from src.calibration.blocked_oos import _fetch_rows
+    verified_rows = _fetch_rows(conn, start="2025-07-01", end="2025-07-31", authority_filter="VERIFIED")
+    unverified_rows = _fetch_rows(conn, start="2025-07-01", end="2025-07-31", authority_filter="UNVERIFIED")
+    assert len(verified_rows) == 1, f"Expected 1 VERIFIED row, got {len(verified_rows)}"
+    assert len(unverified_rows) == 1, f"Expected 1 UNVERIFIED row, got {len(unverified_rows)}"
+
+
+def test_get_pairs_count_filters_unverified():
+    """get_pairs_count returns only VERIFIED rows by default."""
+    conn = _make_db()
+    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=5)
+    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=3)
+
+    from src.calibration.store import get_pairs_count
+    verified_count = get_pairs_count(conn, cluster="NYC", season="JJA")
+    assert verified_count == 5
+    all_count = get_pairs_count(conn, cluster="NYC", season="JJA", authority_filter="any")
+    assert all_count == 8
+
+
+def test_build_decision_groups_filters_unverified():
+    """build_decision_groups returns only VERIFIED rows by default."""
+    conn = _make_db()
+    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=4)
+    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=6)
+
+    from src.calibration.effective_sample_size import build_decision_groups
+    groups = build_decision_groups(conn, authority_filter="VERIFIED")
+    # Should only include VERIFIED rows
+    cities = {g.city for g in groups}
+    assert len(groups) <= 4, f"Expected at most 4 groups (VERIFIED), got {len(groups)}"
+    all_groups = build_decision_groups(conn, authority_filter="any")
+    assert len(all_groups) >= len(groups)
+
+
+def test_compute_alpha_requires_explicit_kwarg():
+    """compute_alpha raises TypeError when authority_verified is omitted (keyword-only, no default)."""
+    from src.strategy.market_fusion import compute_alpha
+    from src.types.temperature import TemperatureDelta
+    import pytest
+
+    with pytest.raises(TypeError, match="authority_verified"):
+        compute_alpha(
+            calibration_level=2,
+            ensemble_spread=TemperatureDelta(3.0, "F"),
+            model_agreement="AGREE",
+            lead_days=3.0,
+            hours_since_open=24.0,
+        )
+
+
+def test_store_returns_empty_on_missing_authority_column():
+    """Pre-migration shim: DB without authority column returns empty list (M7 fix)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # Create calibration_pairs WITHOUT authority column (pre-migration schema)
+    conn.execute("""
+        CREATE TABLE calibration_pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            p_raw REAL,
+            outcome INTEGER,
+            lead_days REAL,
+            season TEXT,
+            cluster TEXT,
+            forecast_available_at TEXT,
+            bias_corrected INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute(
+        "INSERT INTO calibration_pairs "
+        "(city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at) "
+        "VALUES ('NYC', '2025-07-01', '85-86F', 0.3, 0, 3.0, 'JJA', 'NYC', '2025-06-28T12:00:00')"
+    )
+    conn.commit()
+
+    from src.calibration.store import get_pairs_for_bucket
+    # Both VERIFIED and UNVERIFIED requests should return empty on pre-migration DB
+    result_verified = get_pairs_for_bucket(conn, cluster="NYC", season="JJA", authority_filter="VERIFIED")
+    result_unverified = get_pairs_for_bucket(conn, cluster="NYC", season="JJA", authority_filter="UNVERIFIED")
+    assert result_verified == [], f"Pre-migration VERIFIED request must return empty, got {result_verified}"
+    assert result_unverified == [], f"Pre-migration UNVERIFIED request must return empty, got {result_unverified}"

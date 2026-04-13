@@ -38,10 +38,24 @@ def _group_id(city: str, target_date: str, forecast_available_at: str, lead_days
     return f"{city}|{target_date}|{forecast_available_at}|lead={_lead_key(lead_days)}"
 
 
-def build_decision_groups(conn: sqlite3.Connection) -> list[CalibrationDecisionGroup]:
-    """Build one independent calibration sample per city/date/forecast time."""
+def build_decision_groups(
+    conn: sqlite3.Connection,
+    authority_filter: str = "VERIFIED",
+) -> list[CalibrationDecisionGroup]:
+    """Build one independent calibration sample per city/date/forecast time.
+
+    K4.5 H5 fix: filters by authority='VERIFIED' by default.
+    Pass authority_filter='any' to include all rows (diagnostics only).
+    """
+    if authority_filter == "any":
+        where_clause = ""
+        params: tuple = ()
+    else:
+        where_clause = "WHERE authority = ?"
+        params = (authority_filter,)
+
     rows = conn.execute(
-        """
+        f"""
         SELECT
             city,
             target_date,
@@ -55,9 +69,11 @@ def build_decision_groups(conn: sqlite3.Connection) -> list[CalibrationDecisionG
             COUNT(*) AS n_pair_rows,
             SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS n_positive_rows
         FROM calibration_pairs
+        {where_clause}
         GROUP BY city, target_date, forecast_available_at, lead_days
         ORDER BY city, target_date, forecast_available_at, lead_days
-        """
+        """,
+        params,
     ).fetchall()
 
     groups: list[CalibrationDecisionGroup] = []

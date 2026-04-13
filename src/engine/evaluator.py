@@ -887,6 +887,7 @@ def evaluate_candidate(
         model_agreement=agreement,
         lead_days=lead_days_for_calibration,
         hours_since_open=candidate.hours_since_open,
+        authority_verified=True,
     ).value
     if not is_day0_mode:
         entry_validations.append("model_agreement")

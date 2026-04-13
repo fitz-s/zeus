@@ -70,7 +70,8 @@ def compute_alpha(
     hours_since_open: float,
     city_name: str = "",
     season: str = "",
-    authority_verified: bool = True,
+    *,
+    authority_verified: bool,
 ) -> AlphaDecision:
     """Compute α for model-market blending. Spec §4.5.
 
