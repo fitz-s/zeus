@@ -18,7 +18,7 @@
 - **Branch**: `data-improve`
 - **Freeze doc (archived reference)**: `.omx/context/p1-safetycap_2026-04-11_freeze.md` (367 lines, A1–A4 history)
 - **Mainline order**: ~~P1~~ → ~~P2~~ → P3 → P4 → P5 → P6 → P7 → P8 → P9a → P9b (with simplify checkpoints S1/S2/S3 every 3 packets)
-- **Next**: Continue replay/calibration hardening from `.omx/context/zeus_deferred_audit_backlog_20260412T174038Z.md`. Do not reopen P2 as pending; the auto-pause hook and operator-visible pause source are already implemented and tested on `data-improve`.
+- **Next**: Remaining repair backlog is tracked in `docs/operations/task_2026-04-13_remaining_repair_backlog.md`. Continue DB/rebuild-dependent items only in the dedicated rebuild tree; promote larger strategy/design packets one at a time through the small-package critic/review/verifier loop.
 - **Retrospective items** (to capture at Step 12 P1 report): (1) Cassandra NOTE 8 — permanent execution plan §3 Step 6 protocol change requiring `git stash → pytest → unstash` baseline diff on any failures; (2) Hermes silence pattern investigation for P2 onboarding; (3) Cassandra NOTE 10 aspirational pytest antibody for "mock signature divergence" bug category; (4) 4 Lead error catalog with per-catch lessons; (5) Scribe bindings: NOTE Q3 (`capped_by_safety_cap` log field is operator-visible only, not decision input) and NOTE 4 (forbid `paper_*` counterparts to `live_*` config keys in P12 runbook)
 
 ## Last accepted packet

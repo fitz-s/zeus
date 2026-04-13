@@ -8,6 +8,7 @@ Live control surface — current state pointer, active work packets. This is whe
 |------|---------|
 | `current_state.md` | Single live control-entry pointer — current branch, active packet, what to read |
 | `phase1live_2026-04-11_plan.md` | **Active** — Phase 1 Live-Only Reorientation master plan (the WHAT). Companion to `.omx/context/phase1live_2026-04-11_execution_plan.md` (the HOW). Restored from rogue-agent `PLAN.md` at root; see packet P0. |
+| `task_2026-04-13_remaining_repair_backlog.md` | Active backlog of remaining repair items after non-DB small-package loop; separates DB/rebuild dependencies from larger strategy/design packets. |
 
 ## Packet lifecycle
 
