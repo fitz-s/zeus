@@ -183,6 +183,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL,
             settlement_source TEXT,
             settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             UNIQUE(city, target_date)
         );
 
@@ -197,6 +198,32 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             unit TEXT NOT NULL,
             station_id TEXT,
             fetched_at TEXT,
+            -- K1 additions: raw value/unit contract
+            raw_value REAL,
+            raw_unit TEXT CHECK (raw_unit IN ('F', 'C', 'K')),
+            target_unit TEXT CHECK (target_unit IN ('F', 'C')),
+            value_type TEXT CHECK (value_type IN ('high', 'low', 'mean')),
+            -- K1 additions: temporal provenance
+            fetch_utc TEXT,
+            local_time TEXT,
+            collection_window_start_utc TEXT,
+            collection_window_end_utc TEXT,
+            -- K1 additions: DST context
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER CHECK (dst_active IN (0, 1)),
+            is_ambiguous_local_hour INTEGER CHECK (is_ambiguous_local_hour IN (0, 1)),
+            is_missing_local_hour INTEGER CHECK (is_missing_local_hour IN (0, 1)),
+            -- K1 additions: geographic/seasonal
+            hemisphere TEXT CHECK (hemisphere IN ('N', 'S')),
+            season TEXT CHECK (season IN ('DJF', 'MAM', 'JJA', 'SON')),
+            month INTEGER CHECK (month BETWEEN 1 AND 12),
+            -- K1 additions: run provenance
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            -- K1 additions: authority + extensibility
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
         );
 
@@ -250,6 +277,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL DEFAULT 'v1',
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -267,7 +295,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
             decision_group_id TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1))
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Independent forecast-event units derived from calibration_pairs.
@@ -304,7 +333,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             brier_insample REAL,
             fitted_at TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability'
+            input_space TEXT NOT NULL DEFAULT 'raw_probability',
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Trade decisions with full audit trail
@@ -522,6 +552,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
 
         -- Append-only trade chronicle
+        -- env column: added via ALTER TABLE in init_schema lines ~854-859 — see chronicler.py:76
         CREATE TABLE IF NOT EXISTS chronicle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -809,6 +840,18 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON ensemble_snapshots(city, target_date, available_at);
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
+
+        -- Availability/outage fact log (observability — kernel §availability_fact)
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        );
 
         -- Replay engine results
         CREATE TABLE IF NOT EXISTS replay_results (

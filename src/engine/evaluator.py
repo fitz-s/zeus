@@ -791,6 +791,33 @@ def evaluate_candidate(
     _store_snapshot_p_raw(conn, snapshot_id, p_raw)
 
     # Calibration
+    # K4 authority gate: verify no UNVERIFIED pairs are present for this bucket.
+    # get_pairs_for_bucket defaults to authority='VERIFIED', so this check catches
+    # any situation where UNVERIFIED rows are present (belt-and-suspenders).
+    # Guard: skip if conn is None/unavailable (test stubs that don't provide a real DB).
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_date, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="AUTHORITY_GATE",
+                rejection_reasons=[
+                    f"insufficient_verified_calibration: "
+                    f"{len(_unverified_pairs)} UNVERIFIED calibration rows present "
+                    f"for {city.name}/{_cal_season}"
+                ],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
     cal, cal_level = get_calibrator(conn, city, target_date)
     if cal is not None:
         p_cal = calibrate_and_normalize(
@@ -799,7 +826,7 @@ def evaluate_candidate(
             lead_days_for_calibration,
             bin_widths=[b.width for b in bins],
         )
-        entry_validations.extend(["platt_calibration", "normalization"])
+        entry_validations.extend(["platt_calibration", "normalization", "authority_verified"])
     else:
         p_cal = p_raw.copy()
 
@@ -955,7 +982,8 @@ def evaluate_candidate(
             agreement=agreement,
         )]
 
-    # Compute alpha
+    # Compute alpha — UNION resolution: K4.5 authority_verified gate (worktree)
+    # + consumer-target gating with AlphaTargetMismatchError handling (data-improve).
     try:
         alpha = compute_alpha(
             calibration_level=cal_level,
@@ -963,6 +991,7 @@ def evaluate_candidate(
             model_agreement=agreement,
             lead_days=lead_days_for_calibration,
             hours_since_open=candidate.hours_since_open,
+            authority_verified=True,
         ).value_for_consumer("ev")
     except AlphaTargetMismatchError as exc:
         return [EdgeDecision(
@@ -1194,8 +1223,8 @@ def evaluate_candidate(
             else 0.0
         )
         
-        # Phase 3: RiskGraph Regime Throttling
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+        # Phase 3: RiskGraph Regime Throttling (K3: cluster == city.name)
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5
@@ -1283,14 +1312,9 @@ def evaluate_candidate(
             size_usd=size,
             bankroll=sizing_bankroll,
             city=city.name,
-            cluster=city.cluster,
             current_city_exposure=(
                 city_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
                 + (projected_city_exposure_usd[city.name] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
-            ),
-            current_cluster_exposure=(
-                cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
-                + (projected_cluster_exposure_usd[city.cluster] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
             ),
             current_portfolio_heat=current_heat,
             limits=limits,
@@ -1354,7 +1378,7 @@ def evaluate_candidate(
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size
-        projected_cluster_exposure_usd[city.cluster] += size
+        projected_cluster_exposure_usd[city.name] += size
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace

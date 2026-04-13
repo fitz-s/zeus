@@ -61,17 +61,23 @@ def _stable_run_id(*, train_start: str, train_end: str, test_start: str, test_en
     return "calibration_oos:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _fetch_rows(conn: sqlite3.Connection, *, start: str, end: str) -> list[CalibrationEvalRow]:
+def _fetch_rows(
+    conn: sqlite3.Connection,
+    *,
+    start: str,
+    end: str,
+    authority_filter: str = "VERIFIED",
+) -> list[CalibrationEvalRow]:
     rows = conn.execute(
         """
         SELECT
             id, city, target_date, range_label, p_raw, outcome, lead_days,
             season, cluster, forecast_available_at
         FROM calibration_pairs
-        WHERE target_date >= ? AND target_date <= ?
+        WHERE target_date >= ? AND target_date <= ? AND authority = ?
         ORDER BY cluster, season, target_date, city, id
         """,
-        (start, end),
+        (start, end, authority_filter),
     ).fetchall()
     return [
         CalibrationEvalRow(

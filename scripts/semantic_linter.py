@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
 """
 Semantic Provenance Linter for Zeus.
-AST-based static analyzer to enforce that AI implementation logic 
-never reads a semantically heavy value (like a derived probability) 
+AST-based static analyzer to enforce that AI implementation logic
+never reads a semantically heavy value (like a derived probability)
 without ALSO reading its provenance context (like the entry method).
+
+Also enforces K3 cluster collapse: no regional cluster literal strings in src/.
 """
 
 import ast
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
+
+# K3: forbid regional cluster literal strings in src/
+# These strings should not appear in any Python source after the cluster->city collapse.
+FORBIDDEN_REGIONAL_CLUSTERS: frozenset[str] = frozenset({
+    "US-Northeast", "US-Southeast", "US-GreatLakes", "US-Texas-Triangle",
+    "US-Mountain", "US-Pacific", "US-West", "US-Florida", "US-Southeast-Inland",
+    "US-California-Coast", "US-Pacific-Northwest", "US-Rockies",
+    "Asia-Northeast", "Asia-Subtropical", "Asia-East-China", "Asia-Maritime",
+    "China-Central", "China-North",
+    "Europe-Maritime", "Europe-Continental", "Europe-Atlantic", "Europe-Eastern",
+    "Europe-Mediterranean",
+    "Oceania-Temperate", "Oceania-Maritime",
+    "Southeast-Asia-Equatorial", "Latin-America-Temperate", "Latin-America-Tropical",
+    "Latin-America-Highland", "South-America-Pampas", "South-America-Tropical",
+    "Middle-East", "Middle-East-Levant", "Middle-East-Arabian",
+    "Africa-Tropical", "Africa-Temperate", "Africa-West-Tropical", "Africa-South-Maritime",
+    "North-America-Great-Lakes", "India-North", "Turkey",
+})
 
 SEMANTIC_RULES = {
     ("p_posterior", "p_held_side", "last_monitor_prob"): {
@@ -24,6 +45,16 @@ SEMANTIC_RULES = {
 
 TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py", "day0_residual.py"}
 P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
+
+# K2_struct: forbid bare FROM calibration_pairs outside the allowlist.
+# Only src/calibration/store.py and files under migrations/ may query this table directly.
+# scripts/ is explicitly carved out: operator-run scripts are reviewed at PR time.
+# Named gap: scripts/ not enforced by this rule (see K2_struct ADR note).
+CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+    "store.py",              # src/calibration/store.py — canonical query layer
+    "blocked_oos.py",       # src/calibration/blocked_oos.py — K2_struct approved, has authority_filter
+    "effective_sample_size.py",  # src/calibration/effective_sample_size.py — K2_struct approved
+})
 
 
 class SemanticAnalyzer(ast.NodeVisitor):
@@ -141,31 +172,92 @@ class SemanticAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _check_regional_cluster_literals(py_file: Path, content: str) -> list[str]:
+    """K3: Scan for forbidden regional cluster literal strings outside comments."""
+    violations = []
+    for lineno, line in enumerate(content.splitlines(), 1):
+        # Strip inline comment portion
+        stripped = line.split("#")[0]
+        for cluster in FORBIDDEN_REGIONAL_CLUSTERS:
+            if cluster in stripped:
+                violations.append(
+                    f"{py_file}:{lineno}:\n"
+                    f"  [ERROR] K3 cluster collapse: regional cluster literal {cluster!r} "
+                    "found in src/. After K3 all clusters equal city names.\n"
+                    f"  Line: {line.rstrip()}\n"
+                )
+    return violations
+
+
+def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
+    """K2_struct: forbid direct FROM calibration_pairs outside the allowlist.
+
+    Allowlist: src/calibration/store.py, migrations/.
+    scripts/ is carved out (operator-run, reviewed at PR time).
+    """
+    # Skip allowlisted files by name
+    if py_file.name in CALIBRATION_PAIRS_SELECT_ALLOWLIST:
+        return []
+    # Skip migrations/ directory
+    if "migrations" in py_file.parts:
+        return []
+    # Skip scripts/ directory (named gap)
+    if "scripts" in py_file.parts:
+        return []
+
+    violations = []
+    pattern = re.compile(r'FROM\s+calibration_pairs', re.IGNORECASE)
+    for lineno, line in enumerate(content.splitlines(), 1):
+        # Strip Python inline comments (#) and SQL inline comments (--)
+        stripped = line.split("#")[0].split("--")[0]
+        if pattern.search(stripped):
+            violations.append(
+                f"{py_file}:{lineno}:\n"
+                "  [ERROR] K2_struct: direct FROM calibration_pairs query outside allowlist.\n"
+                "  Use src/calibration/store.py query functions instead.\n"
+                f"  Line: {line.rstrip()}\n"
+            )
+    return violations
+
+
 def run_linter(src_path: Path) -> int:
     """Run the linter over all Python files in the source tree."""
     total_violations = 0
     checked_files = 0
-    
+
     python_files = list(src_path.rglob("*.py"))
-    
+
     for py_file in python_files:
         if py_file.name.startswith("test_"):
             continue  # Skip tests unless we decide invariant specs need linters too
-            
+
         try:
-            tree = ast.parse(py_file.read_text())
+            content = py_file.read_text()
+            tree = ast.parse(content)
         except SyntaxError as e:
             print(f"Error parsing {py_file}: {e}")
             continue
-            
+
         analyzer = SemanticAnalyzer(py_file)
         analyzer.visit(tree)
-        
+
         if analyzer.violations:
             for violation in analyzer.violations:
                 print(violation)
                 total_violations += 1
-                
+
+        # K3: check for forbidden regional cluster literals
+        cluster_violations = _check_regional_cluster_literals(py_file, content)
+        for violation in cluster_violations:
+            print(violation)
+            total_violations += 1
+
+        # K2_struct: check for bare FROM calibration_pairs outside allowlist
+        cp_violations = _check_calibration_pairs_select(py_file, content)
+        for violation in cp_violations:
+            print(violation)
+            total_violations += 1
+
         checked_files += 1
 
     if total_violations > 0:

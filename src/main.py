@@ -68,7 +68,7 @@ def _harvester_cycle():
 
 
 def _wu_daily_collection():
-    """Daily WU observation collection. Must run daily — data is ephemeral (~36h)."""
+    """Daily WU observation collection (all cities). Must run daily — data is ephemeral (~36h)."""
     try:
         from src.data.wu_daily_collector import collect_daily_highs
         result = collect_daily_highs()
@@ -76,6 +76,38 @@ def _wu_daily_collection():
                     result["collected"], result["skipped"], result["errors"])
     except Exception as e:
         logger.error("WU daily collection failed: %s", e, exc_info=True)
+
+
+def _wu_daily_dispatch():
+    """Hourly dispatch: check every city's WuDailyScheduler and trigger collection.
+
+    K2: replaces fixed UTC 12:00 cron. Each city fires at local
+    peak_hour+4h (DST-aware). On any given hour some subset of cities
+    will be in-window; only those are collected.
+    """
+    try:
+        from src.data.wu_scheduler import WuDailyScheduler, dispatch_wu_daily_collection
+        from datetime import date as _date
+        from src.config import cities_by_name as _cities_by_name
+        from src.data.wu_daily_collector import collect_daily_highs
+        scheduler = WuDailyScheduler()
+        city_names = dispatch_wu_daily_collection(scheduler)
+        if not city_names:
+            return
+        cities = [_cities_by_name[name] for name in city_names if name in _cities_by_name]
+        if not cities:
+            logger.warning("WU daily dispatch: no known cities in dispatch list %s", city_names)
+            return
+        result = collect_daily_highs(target_date=_date.today(), cities=cities)
+        logger.info(
+            "WU daily dispatch: cities=%s collected=%d, skipped=%d, errors=%d",
+            [c.name for c in cities],
+            result.get("collected", 0),
+            result.get("skipped", 0),
+            result.get("errors", 0),
+        )
+    except Exception as e:
+        logger.error("WU daily dispatch failed: %s", e, exc_info=True)
 
 
 def _ecmwf_open_data_cycle():
@@ -401,11 +433,13 @@ def main():
             hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
         )
 
-    # Daily WU observation collection — data is ephemeral, MUST run daily
+    # K2: per-city physical-clock WU daily collection (hourly dispatch)
+    # Each city fires at local peak_hour+4h (DST-aware via WuDailyScheduler).
+    # Hourly tick checks which cities are in their window; only those are collected.
     scheduler.add_job(
-        _wu_daily_collection, "cron",
-        hour=12, minute=0, id="wu_daily",
-        max_instances=1, coalesce=True,
+        _wu_daily_dispatch, "cron",
+        minute=0, id="wu_daily",
+        max_instances=1, coalesce=True, misfire_grace_time=1800,
     )
 
     # Daily recalibration: ETL refresh + TIGGE direct cal + Platt refit

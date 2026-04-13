@@ -28,6 +28,8 @@ def test_load_cities_preserves_zero_unit_specific_diurnal_amplitude(tmp_path):
                         "unit": "F",
                         "cluster": "US-Test",
                         "wu_station": "KTEST",
+                        "country_code": "US",
+                        "historical_peak_hour": 15.0,
                         "diurnal_amplitude_f": 0.0,
                         "diurnal_amplitude_c": 9.0,
                     }

@@ -43,7 +43,8 @@ def _load_json(path: Path) -> dict:
 
 
 _DEFAULT_CITY_DATA = _load_json(CONFIG_DIR / "cities.json")["cities"]
-ALL_CLUSTERS = tuple(dict.fromkeys(city["cluster"] for city in _DEFAULT_CITY_DATA))
+# K3: cluster identity collapsed to city name — ALL_CLUSTERS is now the set of city names
+ALL_CLUSTERS = tuple(sorted(city["name"] for city in _DEFAULT_CITY_DATA))
 CALIBRATION_SEASONS = ("DJF", "MAM", "JJA", "SON")
 
 
@@ -67,7 +68,10 @@ class City:
     wu_pws: Optional[str] = None
     meteostat_station: Optional[str] = None
     airport_name: str = ""
+    country_code: str = ""          # ISO-2 code, e.g. "US", "GB", "JP"
     settlement_source: str = ""
+    settlement_source_type: str = "wu_icao"  # "wu_icao" default; "hko" for Hong Kong
+    historical_peak_hour: float = 14.0       # local hour of average daily max (fallback for diurnal DB when empty)
     diurnal_amplitude: float = 12.0
     noaa_office: Optional[str] = None
     noaa_gridX: Optional[int] = None
@@ -170,7 +174,10 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 wu_pws=c.get("wu_pws"),
                 meteostat_station=c.get("meteostat_station"),
                 airport_name=c.get("airport_name", ""),
+                country_code=c["country_code"],
                 settlement_source=c.get("settlement_source", ""),
+                settlement_source_type=c.get("settlement_source_type", "wu_icao"),
+                historical_peak_hour=float(c["historical_peak_hour"]),
                 diurnal_amplitude=amp,
                 noaa_office=noaa_office,
                 noaa_gridX=noaa_gx,
@@ -257,36 +264,15 @@ def ensemble_unimodal_range_epsilon() -> float:
 
 def sizing_defaults() -> dict[str, float]:
     sizing = settings["sizing"]
+    # K3: max_region_pct removed u2014 no regional tier after cluster collapse
     return {
         "max_single_position_pct": float(sizing["max_single_position_pct"]),
         "max_portfolio_heat_pct": float(sizing["max_portfolio_heat_pct"]),
         "max_correlated_pct": float(sizing["max_correlated_pct"]),
         "max_city_pct": float(sizing["max_city_pct"]),
-        "max_region_pct": float(sizing["max_region_pct"]),
         "min_order_usd": float(sizing["min_order_usd"]),
     }
 
 
 def correlation_default_cross_cluster() -> float:
     return float(settings["correlation"]["default_cross_cluster"])
-
-
-def correlation_matrix() -> dict[str, dict[str, float]]:
-    matrix = {
-        cluster: {other: float(value) for other, value in mapping.items()}
-        for cluster, mapping in settings["correlation"]["matrix"].items()
-    }
-    missing = set(ALL_CLUSTERS) - set(matrix)
-    unknown = set(matrix) - set(ALL_CLUSTERS)
-    if missing or unknown:
-        raise KeyError(
-            "correlation.matrix must match canonical cluster taxonomy. "
-            f"missing={sorted(missing)}, unknown={sorted(unknown)}"
-        )
-    for cluster, mapping in matrix.items():
-        bad_targets = set(mapping) - set(ALL_CLUSTERS)
-        if bad_targets:
-            raise KeyError(
-                f"correlation.matrix[{cluster!r}] has unknown cluster targets: {sorted(bad_targets)}"
-            )
-    return matrix

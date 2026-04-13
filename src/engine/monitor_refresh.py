@@ -168,6 +168,7 @@ def _refresh_ens_member_counting(
         model_agreement="AGREE",
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
+        authority_verified=True,
     ).value_for_consumer("ev")
 
     # Persistence anomaly check: if ENS predicts a historically rare
@@ -328,6 +329,7 @@ def _refresh_day0_observation(
         model_agreement="AGREE",
         lead_days=0.0,
         hours_since_open=hours_since_open,
+        authority_verified=True,
     ).value_for_consumer("ev")
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market

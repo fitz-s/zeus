@@ -51,12 +51,18 @@ from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
 
 
+def _ensure_auth_verified(conn) -> None:
+    """Mark all calibration_pairs rows VERIFIED (init_schema now creates the column)."""
+    conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
+    conn.commit()
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,
     lon=-73.8726,
     timezone="America/New_York",
-    cluster="US-Northeast",
+    cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
 )
@@ -73,7 +79,7 @@ def _position(**kwargs) -> Position:
         trade_id="t1",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -1779,7 +1785,6 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -1930,7 +1935,6 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2044,7 +2048,6 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2168,7 +2171,6 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2290,7 +2292,6 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2416,7 +2417,6 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
         decision_time=now,
@@ -2544,7 +2544,6 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
         decision_time=now,
@@ -2866,7 +2865,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
         trade_id="rt-settle-auth",
         market_id="m6",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3068,7 +3067,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     init_schema(conn)
 
     season = season_from_date("2026-04-01")
-    for i in range(13):
+    for i in range(15):
         add_calibration_pair(
             conn,
             city="NYC",
@@ -3113,6 +3112,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         settled_at="2026-04-01T23:00:00Z",
     )])
     conn.commit()
+    _ensure_auth_verified(conn)
     conn.close()
 
     event = {

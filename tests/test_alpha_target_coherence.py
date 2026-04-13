@@ -179,6 +179,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         assert isinstance(result, AlphaDecision), (
             f"compute_alpha returned {type(result).__name__}, expected AlphaDecision."
@@ -197,6 +198,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         assert result.optimization_target == "risk_cap", (
             f"Expected risk_cap, got {result.optimization_target}. "
@@ -211,6 +213,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         # risk_cap → ev is allowed (conservative, not misleading)
         result.assert_target_compatible("ev")  # Must not raise
@@ -239,6 +242,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement=model_agreement,
             lead_days=lead_days,
             hours_since_open=48.0,
+            authority_verified=True,
         )
         assert isinstance(result, AlphaDecision)
         assert 0.20 <= result.value <= 0.85, (

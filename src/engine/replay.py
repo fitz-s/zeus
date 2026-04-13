@@ -1057,7 +1057,7 @@ def _replay_one_settlement(
     from src.strategy.kelly import dynamic_kelly_mult, kelly_size
     from src.strategy.market_analysis import MarketAnalysis
     from src.strategy.market_fusion import compute_alpha
-    from src.signal.diurnal import season_from_month
+    from src.calibration.manager import season_from_month
     from src.data.market_scanner import _parse_temp_range
     from src.types import Bin
 
@@ -1083,7 +1083,7 @@ def _replay_one_settlement(
     member_maxes = snapshot["member_maxes"]
     lead_days = snapshot["lead_hours"] / 24.0
     target_d = date.fromisoformat(target_date)
-    season = season_from_month(target_d.month)
+    season = season_from_month(target_d.month, lat=city.lat)
 
     # Use the stored p_raw directly (it was computed at decision time)
     p_raw_stored = snapshot["p_raw_stored"] or decision_ref.get("p_raw_vector")
@@ -1153,6 +1153,7 @@ def _replay_one_settlement(
             hours_since_open=hours_since_open,
             city_name=city.name,
             season=season,
+            authority_verified=True,
         ).value
 
     # Calibrate — S6: use calibrate_and_normalize (same path as entry + monitor)

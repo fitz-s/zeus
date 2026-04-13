@@ -41,39 +41,39 @@ class TestVWMP:
 
 class TestComputeAlpha:
     def test_level_1_base(self):
-        a = compute_alpha(1, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0).value
+        a = compute_alpha(1, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0, authority_verified=True).value
         assert a == pytest.approx(0.65, abs=0.01)
 
     def test_level_4_base(self):
-        a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0).value
+        a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0, authority_verified=True).value
         assert a == pytest.approx(0.25, abs=0.01)
 
     def test_conflict_reduces_alpha(self):
         spread = TemperatureDelta(3.0, "F")
-        a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0).value
-        a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0).value
+        a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0, authority_verified=True).value
+        a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0, authority_verified=True).value
         assert a_conflict < a_agree
 
     def test_fresh_market_increases_alpha(self):
         """hours_since_open < 6 → +0.15 total (0.10 + 0.05)."""
         spread = TemperatureDelta(3.0, "F")
-        a_old = compute_alpha(2, spread, "AGREE", 3, 48.0).value
-        a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0).value
+        a_old = compute_alpha(2, spread, "AGREE", 3, 48.0, authority_verified=True).value
+        a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0, authority_verified=True).value
         assert a_fresh > a_old
 
     def test_clamped_floor(self):
         """Alpha should never go below 0.20."""
-        a = compute_alpha(4, TemperatureDelta(8.0, "F"), "CONFLICT", 7, 48.0).value
+        a = compute_alpha(4, TemperatureDelta(8.0, "F"), "CONFLICT", 7, 48.0, authority_verified=True).value
         assert a >= 0.20
 
     def test_clamped_ceiling(self):
         """Alpha should never exceed 0.85."""
-        a = compute_alpha(1, TemperatureDelta(1.0, "F"), "AGREE", 1, 2.0).value
+        a = compute_alpha(1, TemperatureDelta(1.0, "F"), "AGREE", 1, 2.0, authority_verified=True).value
         assert a <= 0.85
 
     def test_rejects_float_spread(self):
         with pytest.raises(TypeError):
-            compute_alpha(1, 3.0, "AGREE", 3, 24.0)
+            compute_alpha(1, 3.0, "AGREE", 3, 24.0, authority_verified=True)
 
 
 class TestComputePosterior:
