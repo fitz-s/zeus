@@ -296,7 +296,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL,
             decision_group_id TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            bin_source TEXT NOT NULL DEFAULT 'legacy'
         );
 
         -- Independent forecast-event units derived from calibration_pairs.
@@ -975,6 +976,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     for ddl in [
         "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
         "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
+        # 2026-04-14 refactor: bin_source discriminator separates canonical-grid
+        # training pairs from legacy market-derived pairs so the destructive
+        # DELETE path in rebuild_calibration_pairs_canonical.py can target
+        # WHERE bin_source='canonical_v1' without LIKE blast radius.
+        "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
     ]:
         try:
             conn.execute(ddl)

@@ -85,6 +85,75 @@ def member_maxes_for_target_date(
     return members_hourly[:, tz_hours].max(axis=1)
 
 
+def p_raw_vector_from_maxes(
+    member_maxes: np.ndarray,
+    city: City,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    *,
+    n_mc: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Monte Carlo P_raw vector from per-member daily maxes.
+
+    Spec §2.1: Simulates the full settlement chain:
+    atmosphere -> NWP member -> sensor noise -> METAR rounding -> WU integer display.
+
+    Extracted from ``EnsembleSignal.p_raw_vector`` so offline calibration
+    rebuilds (which load ``member_maxes`` from ``ensemble_snapshots.members_json``
+    without hourly context) and live inference (which slices maxes from hourly
+    data) share **exactly the same MC + noise + rounding code path**. Training
+    and inference MUST use this function — naive member counting (iterating
+    members and testing bin membership directly without Monte Carlo) is
+    forbidden because it produces a distribution shape that diverges from the
+    live P_raw space, and Platt learned on that shape would not generalize.
+
+    Args:
+        member_maxes: per-member daily max temperatures, shape (n_members,),
+            already in ``city.settlement_unit``.
+        city: city config — used for instrument sigma lookup.
+        settlement_semantics: per-market rounding rules.
+        bins: bin partition to compute probabilities over. Must be a complete
+            partition (cover the real line including shoulders) for the result
+            to sum to 1.0; the caller is responsible for grid completeness.
+        n_mc: Monte Carlo iterations. Defaults to ``ensemble_n_mc()`` (10,000).
+        rng: numpy Generator. Callers should seed externally for reproducible
+            tests; defaults to ``np.random.default_rng()``.
+
+    Returns:
+        np.ndarray shape (n_bins,). If the grid is complete the vector sums to
+        1.0; if not, it is normalized so whatever mass landed sums to 1.0.
+    """
+    if n_mc is None:
+        n_mc = ensemble_n_mc()
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_bins = len(bins)
+    n_members = len(member_maxes)
+    p = np.zeros(n_bins)
+    sig = sigma_instrument(city.settlement_unit)
+
+    for _ in range(n_mc):
+        noised = member_maxes + rng.normal(0, sig.value, n_members)
+        measured = settlement_semantics.round_values(noised)
+
+        for i, b in enumerate(bins):
+            if b.is_open_low:
+                p[i] += np.sum(measured <= b.high)
+            elif b.is_open_high:
+                p[i] += np.sum(measured >= b.low)
+            else:
+                p[i] += np.sum((measured >= b.low) & (measured <= b.high))
+
+    p = p / (float(n_members) * n_mc)
+
+    total = p.sum()
+    if total > 0:
+        p = p / total
+    return p
+
+
 class EnsembleSignal:
     """51 ensemble members → probability vector over all bins.
 
@@ -231,43 +300,21 @@ class EnsembleSignal:
         Spec §2.1: Monte Carlo with ε ~ N(0, σ_instrument²) per member.
         Simulates full settlement chain according to SettlementSemantics rules.
 
+        Delegates to ``p_raw_vector_from_maxes`` (module-level) so offline
+        calibration rebuilds that do not have hourly context share the exact
+        same code path. The seed=None default preserves legacy behavior;
+        tests that require determinism should patch ``np.random.default_rng``
+        or pass ``rng`` through the module-level function directly.
+
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
-        if n_mc is None:
-            n_mc = ensemble_n_mc()
-
-        n_bins = len(bins)
-        n_members = len(self.member_maxes)
-        p = np.zeros(n_bins)
-
-        rng = np.random.default_rng(seed=None)  # Tests should seed externally
-        # Use city-appropriate instrument noise (°C independently calibrated)
-        sig = sigma_instrument(self.city.settlement_unit)
-
-        for _ in range(n_mc):
-            # Add instrument noise to each member's daily max
-            noised = self.member_maxes + rng.normal(0, sig.value, n_members)
-            measured = self._simulate_settlement(noised)
-
-            for i, b in enumerate(bins):
-                if b.is_open_low:
-                    # Shoulder low: "X or below"
-                    p[i] += np.sum(measured <= b.high)
-                elif b.is_open_high:
-                    # Shoulder high: "X or higher"
-                    p[i] += np.sum(measured >= b.low)
-                else:
-                    p[i] += np.sum(
-                        (measured >= b.low) & (measured <= b.high)
-                    )
-
-        p = p / (float(n_members) * n_mc)
-
-        # Normalize to sum=1.0. If total=0 (impossible but defensive), return as-is.
-        total = p.sum()
-        if total > 0:
-            p = p / total
-        return p
+        return p_raw_vector_from_maxes(
+            self.member_maxes,
+            self.city,
+            self.settlement_semantics,
+            bins,
+            n_mc=n_mc,
+        )
 
     def spread(self) -> TemperatureDelta:
         """Ensemble spread (σ of member daily maxes) as typed TemperatureDelta."""
