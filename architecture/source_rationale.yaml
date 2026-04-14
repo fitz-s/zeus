@@ -127,6 +127,7 @@ files:
   src/contracts/expiring_assumption.py: {zone: K0_frozen_kernel, authority_role: assumption_contract, why: "Makes external assumptions time-bounded and reviewable."}
   src/contracts/hold_value.py: {zone: K0_frozen_kernel, authority_role: hold_value_contract, why: "Makes hold-cost assumptions explicit for exit EV reasoning."}
   src/contracts/provenance_registry.py: {zone: K0_frozen_kernel, authority_role: provenance_law, why: "Enforces registration of safety-critical constants and cascades."}
+  src/contracts/calibration_bins.py: {zone: K0_frozen_kernel, authority_role: calibration_bin_partition_contract, why: "Canonical per-unit bin grids (F=2F pairs + shoulders, C=1C points + shoulders) that decouple Platt training from market_events; complete real-line partitions so sum(P_raw) stays 1.0 in training.", downstream: ["scripts/rebuild_calibration_pairs_canonical.py"]}
   src/contracts/reality_contract.py: {zone: K0_frozen_kernel, authority_role: external_reality_contract, why: "Models external assumption contracts for drift detection."}
   src/contracts/reality_contracts_loader.py: {zone: K0_frozen_kernel, authority_role: contract_loader, why: "Loads YAML reality contracts into typed contract objects."}
   src/contracts/reality_verifier.py: {zone: K0_frozen_kernel, authority_role: reality_drift_detector, why: "Verifies reality contracts against current evidence."}

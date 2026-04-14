@@ -15,6 +15,7 @@ categories:
     - tests/test_backtest_outcome_comparison.py
     - tests/test_backtest_settlement_value_outcome.py
     - tests/test_backtest_trade_subject_identity.py
+    - tests/test_calibration_bins_canonical.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
     - tests/test_cross_module_invariants.py

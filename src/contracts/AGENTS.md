@@ -11,6 +11,7 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `settlement_semantics.py` | Integer rounding contract for all DB writes | CRITICAL — INV-06 enforcement |
+| `calibration_bins.py` | Canonical bin grid partitions (F=2°F pairs, C=1°C points, plus shoulders) — decouples Platt training from `market_events` | HIGH — training/inference alignment law |
 | `execution_price.py` | Typed price wrappers (native side, held side) | HIGH — prevents price semantic confusion |
 | `edge_context.py` | Edge provenance (source, confidence, costs) | HIGH — INV-12 enforcement |
 | `epistemic_context.py` | Cross-layer uncertainty context | HIGH |

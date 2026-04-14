@@ -363,6 +363,7 @@ scripts:
   parse_change_log.py: {class: utility}
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
   rebuild_calibration.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
   rebuild_settlements.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
