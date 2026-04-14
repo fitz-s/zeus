@@ -1,0 +1,105 @@
+# K2 hole-scanner legitimate-gap whitelist.
+#
+# This file declares (city, data_source, target_date) combinations that are
+# *not* expected to produce a row in Zeus's data tables, so the hole scanner
+# in src/data/hole_scanner.py does not keep re-attempting them. Every entry
+# here must be sourced from a durable upstream constraint (API publication
+# window, model retro availability, city-onboard calendar), not from
+# transient failures — transient failures belong in the `FAILED` state with a
+# `retry_after` embargo, not here.
+#
+# Scanner behavior on match:
+#   - the (city × source × target_date) row is pinned as
+#     status='LEGITIMATE_GAP' in the `data_coverage` table
+#   - `reason` is set to the matching exception's `reason_code`
+#   - scanner does not retry it on any subsequent tick
+#
+# Scanner also calls the `online_verifiers` listed below to cross-check the
+# static whitelist against the live upstream (e.g., re-query the HKO API's
+# completeness flags for the current month) so that newly incomplete days
+# in a real source get auto-pinned without requiring a manual edit here.
+
+# ---------------------------------------------------------------------------
+# Model retro availability windows — hard upstream constraints
+# ---------------------------------------------------------------------------
+# Each Previous Runs NWP model exposes a different historical window. Rows
+# with target_date < this date legitimately cannot be fetched.
+model_retro_starts:
+  # target_date < these values → LEGITIMATE_GAP for that source
+  openmeteo_previous_runs: "2024-01-18"  # Open-Meteo best_match
+  gfs_previous_runs: "2024-01-18"        # NOAA GFS retro via Open-Meteo
+  ecmwf_previous_runs: "2024-01-18"      # ECMWF IFS retro via Open-Meteo
+  icon_previous_runs: "2024-01-18"       # DWD ICON retro via Open-Meteo
+  ukmo_previous_runs: "2024-08-04"       # UKMO retro window is narrower (confirmed empirically)
+
+# ---------------------------------------------------------------------------
+# Upstream publication lag — current-period data not yet released
+# ---------------------------------------------------------------------------
+# Each data source has a typical lag between "target_date" and
+# "when it becomes available upstream". Scanner treats entries within
+# today - lag_days as NOT YET a hole (can't fault upstream for not having
+# tomorrow's data).
+publication_lag_days:
+  wu_icao_history: 2            # WU ICAO history usually 24-48h delayed
+  hko_daily_api: 2              # HKO publishes 1 day after end-of-day HKT
+  openmeteo_archive_hourly: 3   # Open-Meteo Archive API ~2-3d behind real time
+  openmeteo_solar: 0            # sunrise/sunset is deterministic / future-computable
+  openmeteo_previous_runs: 1    # forecasts for today+1 are stable ~1d after issue
+  gfs_previous_runs: 1
+  ecmwf_previous_runs: 1
+  icon_previous_runs: 1
+  ukmo_previous_runs: 1
+
+# ---------------------------------------------------------------------------
+# HKO monthly publication boundary — current+prior month may be incomplete
+# ---------------------------------------------------------------------------
+# HKO Open Data API publishes month-by-month. Within the current month, most
+# days carry the "C" complete flag, but the last 1-3 days and the current day
+# usually come back "#" (incomplete). At month roll-over the new month may
+# take 1-2 days before the first "C" appears. The hole scanner re-verifies
+# these by hitting HKO and pinning any "#"/"***" days it sees — it does not
+# trust a static list here.
+hko_publication:
+  online_verify: true          # scanner queries HKO API for current month flags
+  verify_window_days: 7        # only verify last 7 days (most churn)
+  static_known_gaps: []        # explicit dates that are known to stay "#"
+
+# ---------------------------------------------------------------------------
+# City onboarding — target_dates before onboarded_at are legitimate gaps
+# ---------------------------------------------------------------------------
+# Scanner reads cities.json for each city's `onboarded_at` field (if present)
+# and pins every (city × source × target_date < onboarded_at) row as
+# LEGITIMATE_GAP with reason=CITY_NOT_YET_ONBOARDED. If a city has no
+# onboarded_at, the global backfill floor (below) is used instead.
+onboarding:
+  global_floor: "2024-01-01"   # Zeus's hard start date for all historical data
+  read_cities_json: true       # scanner honors per-city onboarded_at if present
+
+# ---------------------------------------------------------------------------
+# Online verifiers — runtime cross-checks against live upstream
+# ---------------------------------------------------------------------------
+# Scanner runs these on each scan pass to catch upstream state changes (e.g.
+# HKO flipping a "#" to "C" after it recomputes, UKMO extending its retro
+# window). Each verifier returns a list of (city, source, target_date) →
+# reason to flip to LEGITIMATE_GAP or clear back to MISSING.
+online_verifiers:
+  - name: hko_completeness_flags
+    enabled: true
+    description: "Re-query HKO API for current month and pin '#'/'***' days."
+    lookback_days: 30
+  - name: openmeteo_model_availability
+    enabled: false              # placeholder — implement after UKMO window shifts
+    description: "Check Previous Runs API for earliest available forecast_basis_date per model."
+
+# ---------------------------------------------------------------------------
+# Fill policy — scanner decision thresholds
+# ---------------------------------------------------------------------------
+# How aggressively the scanner auto-fills holes without operator approval.
+#   hole_age_days ≤ auto_fill_ceiling → scanner calls the live append helper
+#   hole_age_days > auto_alert_floor  → scanner emits critical log + alert
+#   between the two → scanner fills but also logs a warning
+fill_policy:
+  auto_fill_ceiling_days: 7     # recent holes are filled without operator review
+  auto_alert_floor_days: 30     # older holes always trigger an alert
+  max_holes_per_city_per_scan: 90  # cap fetches per city per tick so a big
+                                   # gap does not burn Open-Meteo quota in one scan
