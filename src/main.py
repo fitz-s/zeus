@@ -78,36 +78,141 @@ def _wu_daily_collection():
         logger.error("WU daily collection failed: %s", e, exc_info=True)
 
 
-def _wu_daily_dispatch():
-    """Hourly dispatch: check every city's WuDailyScheduler and trigger collection.
+def _k2_daily_obs_tick():
+    """K2 daily-observations tick — replaces legacy wu_daily_collector.
 
-    K2: replaces fixed UTC 12:00 cron. Each city fires at local
-    peak_hour+4h (DST-aware). On any given hour some subset of cities
-    will be in-window; only those are collected.
+    Fires every hour. Inside:
+    - WU cities whose local peak+4h window is active get their last
+      completed local day fetched via the WU ICAO historical endpoint
+    - HKO current+prior month refreshed once per day (gated to UTC 02:00)
+    - All writes flow through ObservationAtom + IngestionGuard (no Layer 3)
+    - data_coverage is updated in the same transaction as the physical row
     """
     try:
-        from src.data.wu_scheduler import WuDailyScheduler, dispatch_wu_daily_collection
-        from datetime import date as _date
-        from src.config import cities_by_name as _cities_by_name
-        from src.data.wu_daily_collector import collect_daily_highs
-        scheduler = WuDailyScheduler()
-        city_names = dispatch_wu_daily_collection(scheduler)
-        if not city_names:
-            return
-        cities = [_cities_by_name[name] for name in city_names if name in _cities_by_name]
-        if not cities:
-            logger.warning("WU daily dispatch: no known cities in dispatch list %s", city_names)
-            return
-        result = collect_daily_highs(target_date=_date.today(), cities=cities)
-        logger.info(
-            "WU daily dispatch: cities=%s collected=%d, skipped=%d, errors=%d",
-            [c.name for c in cities],
-            result.get("collected", 0),
-            result.get("skipped", 0),
-            result.get("errors", 0),
-        )
+        from src.data.daily_obs_append import daily_tick
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
+        try:
+            result = daily_tick(conn)
+        finally:
+            conn.close()
+        logger.info("K2 daily_obs_tick: %s", result)
     except Exception as e:
-        logger.error("WU daily dispatch failed: %s", e, exc_info=True)
+        logger.error("K2 daily_obs_tick failed: %s", e, exc_info=True)
+
+
+def _k2_hourly_instants_tick():
+    """K2 hourly Open-Meteo archive tick for observation_instants.
+
+    Sweeps all 46 cities with a per-city dynamic end_date (each city's
+    most recently completed local day). 3-day rolling window allows
+    Open-Meteo archive ~2-3 day delay + catches promotions.
+    """
+    try:
+        from src.data.hourly_instants_append import hourly_tick
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
+        try:
+            result = hourly_tick(conn)
+        finally:
+            conn.close()
+        logger.info("K2 hourly_instants_tick: %s", result)
+    except Exception as e:
+        logger.error("K2 hourly_instants_tick failed: %s", e, exc_info=True)
+
+
+def _k2_solar_daily_tick():
+    """K2 daily sunrise/sunset refresh — once per day (UTC 00:30).
+
+    Fetches [today, today+14] per city. Deterministic astronomical data
+    so no backoff / retry semantics are needed beyond network errors.
+    """
+    try:
+        from src.data.solar_append import daily_tick
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
+        try:
+            result = daily_tick(conn)
+        finally:
+            conn.close()
+        logger.info("K2 solar_daily_tick: %s", result)
+    except Exception as e:
+        logger.error("K2 solar_daily_tick failed: %s", e, exc_info=True)
+
+
+def _k2_forecasts_daily_tick():
+    """K2 daily NWP forecasts refresh — once per day (UTC 07:30).
+
+    Fires after ECMWF 00Z and GFS 06Z runs are populated in the
+    Previous Runs API (empirically ~UTC 07:00). Fetches [today-3,
+    today+7] × 5 models × 7 leads per city.
+    """
+    try:
+        from src.data.forecasts_append import daily_tick
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
+        try:
+            result = daily_tick(conn)
+        finally:
+            conn.close()
+        logger.info("K2 forecasts_daily_tick: %s", result)
+    except Exception as e:
+        logger.error("K2 forecasts_daily_tick failed: %s", e, exc_info=True)
+
+
+def _k2_hole_scanner_tick():
+    """K2 hole scanner daily patrol — runs hole_scanner.scan_all().
+
+    Finds physical-table rows not yet in data_coverage (self-seed from
+    critic S2#2) and writes MISSING rows for expected-but-absent ones.
+    The appenders pick up the new MISSING rows on their next tick via
+    find_pending_fills. Logs a compact summary per data_table.
+    """
+    try:
+        from src.data.hole_scanner import HoleScanner
+        from src.state.db import get_world_connection
+
+        conn = get_world_connection()
+        try:
+            scanner = HoleScanner(conn)
+            results = scanner.scan_all()
+            for r in results:
+                logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("K2 hole_scanner_tick failed: %s", e, exc_info=True)
+
+
+def _k2_startup_catch_up():
+    """K2 boot-time hole filler — runs once at daemon start.
+
+    For each of the 4 data tables, calls the module's catch_up_missing()
+    which queries data_coverage for MISSING/retry-ready FAILED rows in
+    the last 30 days and fills them. This handles daemon downtime gaps
+    without human intervention.
+    """
+    try:
+        from src.data.daily_obs_append import catch_up_missing as catch_up_obs
+        from src.data.hourly_instants_append import catch_up_missing as catch_up_hourly
+        from src.data.solar_append import catch_up_missing as catch_up_solar
+        from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
+        from src.state.db import get_world_connection
+
+        conn = get_world_connection()
+        try:
+            logger.info("K2 startup catch-up: observations")
+            logger.info("  %s", catch_up_obs(conn, days_back=30))
+            logger.info("K2 startup catch-up: observation_instants")
+            logger.info("  %s", catch_up_hourly(conn, days_back=30))
+            logger.info("K2 startup catch-up: solar_daily")
+            logger.info("  %s", catch_up_solar(conn, days_back=30))
+            logger.info("K2 startup catch-up: forecasts")
+            logger.info("  %s", catch_up_forecasts(conn, days_back=30))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("K2 startup catch-up failed: %s", e, exc_info=True)
 
 
 def _ecmwf_open_data_cycle():
@@ -433,13 +538,40 @@ def main():
             hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
         )
 
-    # K2: per-city physical-clock WU daily collection (hourly dispatch)
-    # Each city fires at local peak_hour+4h (DST-aware via WuDailyScheduler).
-    # Hourly tick checks which cities are in their window; only those are collected.
+    # K2 live-ingestion packet (task #59) — 4 appenders that replace the
+    # legacy wu_daily_collector. Each writes to its own physical table AND
+    # to the shared `data_coverage` ledger in the same transaction, so the
+    # hole scanner always has a truthful view of what's been fetched.
+    #
+    # Job cadence rationale:
+    #   daily_obs_tick          hourly — WuDailyScheduler fires per city at
+    #                           local peak+4h, HKO refresh gated to UTC 02:00
+    #   hourly_instants_tick    hourly — 3-day rolling window per city with
+    #                           per-city dynamic end_date (most-recently
+    #                           completed local day)
+    #   solar_daily_tick        daily UTC 00:30 — deterministic astronomical
+    #                           data, [today, today+14] per city
+    #   forecasts_daily_tick    daily UTC 07:30 — after ECMWF 00Z + GFS 06Z
+    #                           runs populate in Previous Runs API
     scheduler.add_job(
-        _wu_daily_dispatch, "cron",
-        minute=0, id="wu_daily",
+        _k2_daily_obs_tick, "cron",
+        minute=0, id="k2_daily_obs",
         max_instances=1, coalesce=True, misfire_grace_time=1800,
+    )
+    scheduler.add_job(
+        _k2_hourly_instants_tick, "cron",
+        minute=7, id="k2_hourly_instants",   # :07 to stagger from daily_obs :00
+        max_instances=1, coalesce=True, misfire_grace_time=1800,
+    )
+    scheduler.add_job(
+        _k2_solar_daily_tick, "cron",
+        hour=0, minute=30, id="k2_solar_daily",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _k2_forecasts_daily_tick, "cron",
+        hour=7, minute=30, id="k2_forecasts_daily",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
 
     # Daily recalibration: ETL refresh + TIGGE direct cal + Platt refit
@@ -454,6 +586,33 @@ def main():
         _automation_analysis_cycle, "cron",
         hour=9, minute=0, id="automation_analysis",
         max_instances=1, coalesce=True,
+    )
+
+    # K2 boot-time catch-up: register as the FIRST scheduled job with
+    # next_run_time=now so the scheduler starts immediately and the
+    # catch-up runs on the scheduler thread rather than blocking boot.
+    # Rationale (critic S2#3): running catch-up inline before
+    # scheduler.start() blocks the heartbeat writer, which lets the
+    # OpenClaw process supervisor mark the daemon stale and kill it
+    # mid-catch-up, creating a livelock: restart → re-run 30 min of
+    # catch-up → get killed → restart. Registering as a normal job with
+    # max_instances=1 avoids the stall.
+    from datetime import datetime as _datetime_now
+    scheduler.add_job(
+        _k2_startup_catch_up, "date",
+        run_date=_datetime_now.now(),  # fire once, immediately
+        id="k2_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+    )
+
+    # K2 hole scanner: scheduled pass once per day (UTC 04:00) so the
+    # coverage ledger stays healthy even for cities onboarded after
+    # daemon boot. Previously the scanner only ran via the post-fillback
+    # shell script; K2 now has a permanent patrol schedule (critic S3).
+    scheduler.add_job(
+        _k2_hole_scanner_tick, "cron",
+        hour=4, minute=0, id="k2_hole_scanner",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
 
     jobs = [j.id for j in scheduler.get_jobs()]
