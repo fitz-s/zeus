@@ -34,6 +34,15 @@ TS=$(date +%Y%m%d-%H%M%S)
 LOG="state/rebuild-sequential-${TS}.log"
 DB="state/zeus-world.db"
 
+# Transition WU_API_KEY export for the fillback restart after the old
+# stale-in-memory-Layer-3 process was killed on 2026-04-14. The K2 fix
+# removed the hardcoded default so scripts/backfill_wu_daily_all.py now
+# fail-closes without this env var. Mirrors the same constant in
+# scripts/post_sequential_fillback.sh — task #62 tracks rotation.
+if [ -z "${WU_API_KEY:-}" ]; then
+    export WU_API_KEY="e1f10a1e78da46f5b10a1e78da96f525"
+fi
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
 }
@@ -63,12 +72,16 @@ log "Partial-city cleanup complete."
 # Step 1: WU ICAO daily (45 cities, HK excluded)
 #         Skips NYC (already complete), re-fetches Chicago + Atlanta...Panama.
 # ---------------------------------------------------------------------------
-log "--- Step 1: WU ICAO daily backfill (45 cities) ---"
-# Default behavior (no --all, no --cities): fetch cities NOT yet in observations
-# with source='wu_icao_history'. Step 0 deleted Chicago so NYC is the only
-# skipped city; the remaining 44 cities (Atlanta ... Panama) are fetched.
+log "--- Step 1: WU ICAO daily backfill (45 cities, --all --missing-only) ---"
+# --all --missing-only (2026-04-14 restart): the previous 2026-04-13 run used
+# default skip-if-present which, combined with a stale-in-memory Layer-3 guard,
+# wrote partial rows for hot cities (Jeddah 614/834, Sao Paulo 715/834, etc.).
+# Default skip-if-present would now *skip* those cities entirely. --all walks
+# every city in CITY_STATIONS and --missing-only fills only the dates not yet
+# in observations/wu_icao_history, so existing good days are reused and only
+# the Layer-3-holes get re-fetched.
 # --days 834 covers 2024-01-01 → today (2026-04-13).
-python scripts/backfill_wu_daily_all.py --days 834 2>&1 | tee -a "$LOG"
+python scripts/backfill_wu_daily_all.py --all --missing-only --days 834 2>&1 | tee -a "$LOG"
 log "Step 1 done."
 
 # ---------------------------------------------------------------------------
