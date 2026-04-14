@@ -1738,7 +1738,52 @@ def _change_kind(path: str, tracked: set[str]) -> str:
     return "modified"
 
 
-def run_map_maintenance(changed_files: list[str]) -> StrictResult:
+def _git_status_changes() -> dict[str, str]:
+    proc = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entries = [entry for entry in proc.stdout.split("\0") if entry]
+    changes: dict[str, str] = {}
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        status = entry[:2]
+        path = entry[3:]
+        if not path:
+            index += 1
+            continue
+
+        if "R" in status or "C" in status:
+            old_path = entries[index + 1] if index + 1 < len(entries) else ""
+            if old_path:
+                changes[old_path] = "deleted"
+            changes[path] = "added"
+            index += 2
+            continue
+
+        if status == "??" or "A" in status:
+            kind = "added"
+        elif "D" in status:
+            kind = "deleted"
+        else:
+            kind = "modified"
+        changes[path] = kind
+        index += 1
+    return changes
+
+
+def _map_maintenance_changes(changed_files: list[str]) -> dict[str, str]:
+    if not changed_files:
+        return _git_status_changes()
+    tracked = set(_git_ls_files())
+    return {path: _change_kind(path, tracked) for path in changed_files}
+
+
+def run_map_maintenance(changed_files: list[str] | None = None, mode: str = "advisory") -> StrictResult:
     if not MAP_MAINTENANCE_PATH.exists():
         return StrictResult(
             ok=False,
@@ -1752,7 +1797,32 @@ def run_map_maintenance(changed_files: list[str]) -> StrictResult:
         )
     manifest = load_map_maintenance()
     issues: list[TopologyIssue] = []
-    tracked = set(_git_ls_files())
+    mode_spec = (manifest.get("modes") or {}).get(mode)
+    if not mode_spec:
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "map_maintenance_invalid_mode",
+                    "architecture/map_maintenance.yaml",
+                    f"unknown mode {mode!r}",
+                )
+            ],
+        )
+    issue_fn = _issue if mode_spec.get("blocking") else _warning
+    try:
+        changes = _map_maintenance_changes(changed_files or [])
+    except subprocess.CalledProcessError as exc:
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "map_maintenance_git_status_failed",
+                    "<git-status>",
+                    f"could not read git status: {exc}",
+                )
+            ],
+        )
 
     for rule in manifest.get("rules") or []:
         if not rule.get("path_globs"):
@@ -1760,9 +1830,8 @@ def run_map_maintenance(changed_files: list[str]) -> StrictResult:
         if not rule.get("required_companions"):
             issues.append(_issue("map_maintenance_missing_companion", str(rule.get("id", "<unknown>")), "rule missing required_companions"))
 
-    changed_set = set(changed_files)
-    for path in changed_files:
-        kind = _change_kind(path, tracked)
+    changed_set = set(changes)
+    for path, kind in changes.items():
         for rule in manifest.get("rules") or []:
             if kind not in (rule.get("on_change") or []):
                 continue
@@ -1771,16 +1840,14 @@ def run_map_maintenance(changed_files: list[str]) -> StrictResult:
             for companion in rule.get("required_companions") or []:
                 if companion not in changed_set:
                     issues.append(
-                        _issue(
+                        issue_fn(
                             "map_maintenance_companion_missing",
                             path,
                             f"{kind} file requires companion update {companion} ({rule.get('id')})",
                         )
                     )
-    return StrictResult(ok=not issues, issues=issues)
-
-
-
+    blocking = [issue for issue in issues if issue.severity == "error"]
+    return StrictResult(ok=not blocking, issues=issues)
 
 
 def _source_rationale_for(files: list[str]) -> list[dict[str, Any]]:
@@ -1998,9 +2065,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-modes", action="store_true", help="Check discovery/runtime mode manifest and root visibility")
     parser.add_argument("--reference-replacement", action="store_true", help="Check reference replacement matrix")
     parser.add_argument("--map-maintenance", action="store_true", help="Check companion registry updates for added/deleted files")
+    parser.add_argument(
+        "--map-maintenance-mode",
+        choices=["advisory", "precommit", "closeout"],
+        default="advisory",
+        help="Map-maintenance severity mode",
+    )
     parser.add_argument("--navigation", action="store_true", help="Run default navigation health and task digest")
     parser.add_argument("--planning-lock", action="store_true", help="Check whether changed files require planning evidence")
-    parser.add_argument("--changed-files", nargs="*", default=[], help="Files to check for --planning-lock")
+    parser.add_argument(
+        "--changed-files",
+        nargs="*",
+        default=[],
+        help="Files for --planning-lock; optional map-maintenance override (omitted there reads git status)",
+    )
     parser.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path for --planning-lock")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     parser.add_argument("--task", default="", help="Task string for --navigation")
@@ -2065,7 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_strict(result, as_json=args.json)
         return 0 if result.ok else 1
     if args.map_maintenance:
-        result = run_map_maintenance(args.changed_files)
+        result = run_map_maintenance(args.changed_files, mode=args.map_maintenance_mode)
         _print_strict(result, as_json=args.json)
         return 0 if result.ok else 1
     if args.navigation:

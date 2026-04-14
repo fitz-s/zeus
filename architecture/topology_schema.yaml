@@ -114,6 +114,8 @@ strict_issue_codes:
   - reference_replacement_delete_unsafe
   - reference_replacement_replacement_missing
   - map_maintenance_manifest_missing
+  - map_maintenance_invalid_mode
+  - map_maintenance_git_status_failed
   - map_maintenance_missing_path_glob
   - map_maintenance_missing_companion
   - map_maintenance_companion_missing

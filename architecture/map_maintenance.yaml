@@ -6,6 +6,23 @@ metadata:
     Declare which companion map/registry files must move with added or deleted
     files in active surfaces. This gate is intentionally narrow: it enforces
     registry ownership, not broad prose rewrites.
+  operating_model: >
+    During active refactors this is an advisory map-delta reporter. At
+    precommit/closeout it becomes a blocking ownership check.
+  git_tracking: >
+    If the caller omits changed_files, topology_doctor reads git status and
+    derives added/deleted/modified/renamed paths itself.
+
+modes:
+  advisory:
+    blocking: false
+    use: "During active implementation; report pending map delta only."
+  precommit:
+    blocking: true
+    use: "Before committing a verified slice."
+  closeout:
+    blocking: true
+    use: "At packet closeout; unresolved map delta must be handled or explicitly deferred."
 
 rules:
   - id: src_file_registry

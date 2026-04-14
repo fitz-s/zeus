@@ -177,7 +177,8 @@ When adding, renaming, or deleting a file:
 
 Unregistered files are invisible to future agents.
 
-Machine check: `python scripts/topology_doctor.py --map-maintenance --changed-files <files...>`.
+During active refactors, subagents report map delta; the owner resolves it at
+slice/packet closeout. Machine check: `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`; omit `--changed-files` to use git status, pass files only to narrow a mixed workspace.
 
 ## Context Budget
 

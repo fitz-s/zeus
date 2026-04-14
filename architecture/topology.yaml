@@ -287,12 +287,30 @@ state_surfaces:
     zone: state
     authority_role: scratch_artifact
     forbidden_misread: Test lock artifact only.
-  - path: "state/rebuild-20260413-184018.log"
+  - path: "state/rebuild-sequential-20260414-121120.log"
     status: scratch
     scope: runtime
     zone: state
     authority_role: scratch_artifact
-    forbidden_misread: Rebuild log artifact; not proof of successful rebuild.
+    forbidden_misread: Active sequential backfill tee log (2026-04-14 restart after stale-Layer3-process kill); not proof of successful rebuild.
+  - path: "state/rebuild-nohup-20260414-121120.out"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Active sequential backfill nohup stdout (2026-04-14 restart); not proof of successful rebuild.
+  - path: "state/fillback-sequential-20260414-121129.log"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Active fillback waiter tee log (2026-04-14 restart); populated only after sequential PID exits.
+  - path: "state/fillback-nohup-20260414-121129.out"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Active fillback waiter nohup stdout (2026-04-14 restart).
   - path: "state/zeus-world.db-shm"
     status: scratch
     scope: runtime

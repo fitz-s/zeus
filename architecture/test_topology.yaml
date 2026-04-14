@@ -28,6 +28,7 @@ categories:
     - tests/test_fdr.py
     - tests/test_gate_decision.py
     - tests/test_ingestion_guard.py
+    - tests/test_k2_live_ingestion_relationships.py
     - tests/test_instrument_invariants.py
     - tests/test_kelly_cascade_bounds.py
     - tests/test_kelly_live_safety_cap.py

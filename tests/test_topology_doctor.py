@@ -213,7 +213,7 @@ def test_map_maintenance_requires_test_topology_for_new_test_file(monkeypatch):
         return original_exists(self)
 
     monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
-    result = topology_doctor.run_map_maintenance(["tests/test_new_behavior.py"])
+    result = topology_doctor.run_map_maintenance(["tests/test_new_behavior.py"], mode="precommit")
 
     assert not result.ok
     assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
@@ -231,7 +231,8 @@ def test_map_maintenance_allows_new_test_file_when_companion_present(monkeypatch
 
     monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
     result = topology_doctor.run_map_maintenance(
-        ["tests/test_new_behavior.py", "architecture/test_topology.yaml"]
+        ["tests/test_new_behavior.py", "architecture/test_topology.yaml"],
+        mode="precommit",
     )
 
     assert result.ok
@@ -244,6 +245,67 @@ def test_map_maintenance_does_not_require_registry_for_plain_modification(monkey
 
     assert result.ok
     assert result.issues == []
+
+
+def test_map_maintenance_advisory_reports_without_blocking(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["architecture/test_topology.yaml"])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "tests/test_new_behavior.py":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(["tests/test_new_behavior.py"])
+
+    assert result.ok
+    assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
+    assert all(issue.severity == "warning" for issue in result.issues)
+
+
+def test_git_status_parser_maps_rename_to_delete_and_add(monkeypatch):
+    def fake_run(*args, **kwargs):
+        assert "-z" in args[0]
+        return type(
+            "CompletedProcess",
+            (),
+            {"stdout": "R  src/new_name.py\0src/old_name.py\0?? scripts/new_tool.py\0 M AGENTS.md\0"},
+        )()
+
+    monkeypatch.setattr(topology_doctor.subprocess, "run", fake_run)
+    changes = topology_doctor._git_status_changes()
+
+    assert changes["src/old_name.py"] == "deleted"
+    assert changes["src/new_name.py"] == "added"
+    assert changes["scripts/new_tool.py"] == "added"
+    assert changes["AGENTS.md"] == "modified"
+
+
+def test_map_maintenance_uses_git_status_when_changed_files_omitted(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_status_changes",
+        lambda: {"scripts/new_tool.py": "added"},
+    )
+    result = topology_doctor.run_map_maintenance(mode="precommit")
+
+    assert not result.ok
+    assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
+    assert any("architecture/script_manifest.yaml" in issue.message for issue in result.issues)
+
+
+def test_map_maintenance_git_status_advisory_does_not_block(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_status_changes",
+        lambda: {"src/contracts/new_contract.py": "added"},
+    )
+    result = topology_doctor.run_map_maintenance()
+
+    assert result.ok
+    assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
+    assert all(issue.severity == "warning" for issue in result.issues)
 
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(

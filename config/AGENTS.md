@@ -15,6 +15,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `reality_contracts/protocol.yaml` | External assumption contract: Polymarket protocol rules |
 | `reality_contracts/economic.yaml` | External assumption contract: economic/market assumptions |
 | `reality_contracts/data.yaml` | External assumption contract: data source availability and behavior |
+| `data_availability_exceptions.yaml` | K2 hole_scanner whitelist: per-model retro-start dates, publication lag, onboarding floor, fill policy |
 
 ## Rules
 
