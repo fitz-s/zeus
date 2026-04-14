@@ -9,6 +9,7 @@ Live control surface — current state pointer, active work packets. This is whe
 | `current_state.md` | Single live control-entry pointer — current branch, active packet, what to read |
 | `task_2026-04-13_topology_compiler_program.md` | Active topology compiler program packet tracker |
 | `task_2026-04-13_remaining_repair_backlog.md` | Active backlog of remaining repair items after non-DB small-package loop; separates DB/rebuild dependencies from larger strategy/design packets |
+| `task_2026-04-14_session_backlog.md` | End-of-session backlog snapshot from the calibration-refactor session (df13308/45745ba/854cf5d/ed13310); groups open tasks by unblocking condition |
 | `data_rebuild_plan.md` | Active upstream data-rebuild plan; do not execute from topology packets |
 | `phase1live_2026-04-11_plan.md` | Phase 1 Live-Only Reorientation master plan; supporting runtime notes are not repo authority |
 
