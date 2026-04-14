@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import (
     get_backtest_connection,
     get_trade_connection_with_world,
@@ -577,7 +578,7 @@ def derive_outcome_from_settlement_value(
     if bin.unit != unit:
         raise ValueError(f"settlement unit mismatch: bin={bin.unit} settlement={unit}")
 
-    value = round(float(settlement_value))
+    value = round_wmo_half_up_value(float(settlement_value))
     if bin.low is None and bin.high is not None:
         return value <= bin.high
     if bin.high is None and bin.low is not None:
@@ -1200,7 +1201,7 @@ def _replay_one_settlement(
     settlement_value = settlement.get("settlement_value")
     # Defensive: round to integer per settlement precision contract
     if settlement_value is not None:
-        settlement_value = round(float(settlement_value))
+        settlement_value = round_wmo_half_up_value(float(settlement_value))
 
     decisions = []
     best_edge = 0.0

@@ -1,28 +1,42 @@
 File: scripts/AGENTS.md
 Disposition: NEW
-Authority basis: architecture/zones.yaml; architecture/negative_constraints.yaml; docs/authority/zeus_current_delivery.md; current repo scripts.
-Supersedes / harmonizes: informal script scope.
-Why this file exists now: enforcement and audit scripts can quietly overreach or encode stale assumptions.
-Current-phase or long-lived: Long-lived.
+Authority basis: architecture/script_manifest.yaml; architecture/zones.yaml; docs/authority/zeus_current_delivery.md.
+Why this file exists now: scripts can overreach DB truth or persist one-off probes unless their lifecycle is explicit.
 
 # scripts AGENTS
 
-Scripts here are enforcement, audit, runtime support, or operator tools.
+Scripts are enforcement, audit, runtime support, ETL, repair, or operator tools.
+The machine registry is `architecture/script_manifest.yaml`.
 
-## Do
-- keep script purpose narrow
-- distinguish blocking gates from advisory checks
-- make external-workspace assumptions explicit
-- fail loudly on stale authority where appropriate
+## Machine Registry
 
-## Do not
-- let scripts become hidden authority centers
-- write directly to canonical truth except explicitly approved migration/support tooling
-- block CI on external files that are outside repo control unless policy says so
+Use `architecture/script_manifest.yaml` for:
 
-## Operator tools
+- script lifecycle: `long_lived`, `packet_ephemeral`, `promotion_candidate`, `deprecated_fail_closed`
+- authority scope
+- read/write targets
+- dry-run/apply metadata
+- target DB and danger classification
+- reuse/disposal policy
+
+Use `python scripts/topology_doctor.py --scripts --json` to check that top-level
+scripts are registered and safe for their declared class.
+
+## Core Rules
+
+- Check the manifest before adding a top-level script; reuse or extend existing
+  long-lived tools when possible.
+- One-off scripts need `task_YYYY-MM-DD_<purpose>.py` naming plus `delete_by`.
+- Repair/ETL writers must declare write targets and dry-run/apply behavior.
+- Diagnostics and reports must not write canonical DB truth.
+- Scripts are not hidden authority centers.
+
+## Local Registry
+
+Only list durable entry points here; use the manifest for the full catalog.
 
 | Script | Purpose |
 |--------|---------|
-| `check_daemon_heartbeat.py` | Check staleness of `state/daemon-heartbeat-{mode}.json`; exit 1 if >5 min stale or missing |
-| `backfill_tigge_snapshot_p_raw.py` | Materialize replay-compatible `ensemble_snapshots.p_raw_json` from existing TIGGE `members_json` and typed bin labels |
+| `topology_doctor.py` | Compiled topology/digest/health checks |
+| `check_daemon_heartbeat.py` | Daemon heartbeat staleness check |
+| `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |

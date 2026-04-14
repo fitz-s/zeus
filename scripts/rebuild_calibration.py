@@ -42,6 +42,7 @@ from src.data.rebuild_validators import (
     ImpossibleTemperatureError,
     EnsembleIntegrityError,
 )
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection, init_schema
 
 
@@ -257,7 +258,7 @@ def rebuild_calibration(
             # No market_events bins: generate synthetic bins around settlement value
             # This is a fallback; production bins should come from market_events.
             # TODO Round 5: require bins from market_events; fail if absent.
-            center = round(float(settlement_value))
+            center = round_wmo_half_up_value(float(settlement_value))
             step = 1 if city.settlement_unit == "C" else 2
             bins = [
                 {"range_label": f"{center - 5*step} or below",

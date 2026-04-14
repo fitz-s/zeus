@@ -36,8 +36,9 @@ back as runtime authority.
 
 ## Configuration
 
-- `config/settings.json` — all runtime parameters (single source of truth)
+- `config/settings.json` — tunable runtime parameters
 - `config/cities.json` — 16 cities with coordinates, stations, peak hours, units
+- `config/reality_contracts/*.yaml` — scoped external assumption contracts
 
 ## Dependencies
 

@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import state_path
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.market_scanner import _parse_temp_range
 
 
@@ -70,7 +71,7 @@ def _winning_price(conn, exit_row: dict) -> float | None:
     bin_label = exit_row.get("bin_label", "")
     if settlement_value is not None:
         # Defensive: round to integer per settlement precision contract
-        settlement_value = round(float(settlement_value))
+        settlement_value = round_wmo_half_up_value(float(settlement_value))
         low, high = _parse_temp_range(bin_label)
         if low is None and high is not None:
             hit = settlement_value <= high

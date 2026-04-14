@@ -1,0 +1,520 @@
+schema_version: 1
+metadata:
+  created: "2026-04-13"
+  owner_packet: "Packet 2 topology compiler MVP"
+  authority_note: >
+    This graph indexes existing authority. It does not override
+    architecture/zones.yaml, architecture/invariants.yaml, or root AGENTS.md.
+
+coverage_roots:
+  - path: "."
+    status: active
+    scope: global
+    zone: root
+    authority_role: registry
+    forbidden_misread: Root artifacts are not authority unless classified here.
+  - path: "src"
+    status: active
+    scope: scoped
+    zone: source
+    authority_role: executable_law
+    forbidden_misread: Package labels are navigation only; file-level zones win.
+  - path: "tests"
+    status: active
+    scope: scoped
+    zone: tests
+    authority_role: registry
+    forbidden_misread: Skipped or stale tests are not proof of active law.
+  - path: "scripts"
+    status: active
+    scope: scoped
+    zone: scripts
+    authority_role: runtime_support
+    forbidden_misread: Scripts are not hidden authority centers.
+  - path: "docs"
+    status: active
+    scope: scoped
+    zone: docs
+    authority_role: reference_only
+    forbidden_misread: Docs cannot create executable law without enforcement.
+  - path: "config"
+    status: active
+    scope: scoped
+    zone: config
+    authority_role: schema_law
+    forbidden_misread: Reality contracts must stay tied to verification.
+  - path: ".github/workflows"
+    status: active
+    scope: scoped
+    zone: ci
+    authority_role: runtime_support
+    forbidden_misread: Advisory CI lanes are not blocking proof.
+  - path: "architecture"
+    status: active
+    scope: global
+    zone: architecture
+    authority_role: schema_law
+    forbidden_misread: Topology graph must not redefine canonical manifests.
+  - path: "state"
+    status: conditional
+    scope: runtime
+    zone: state
+    authority_role: canonical_truth
+    forbidden_misread: DB/file role must be classified before use as truth.
+  - path: ".omx"
+    status: scratch
+    scope: runtime
+    zone: runtime_state
+    authority_role: scratch_artifact
+    forbidden_misread: OMX state is session/runtime context, not repo authority.
+  - path: ".claude/worktrees"
+    status: shadow
+    scope: shadow
+    zone: shadow
+    authority_role: shadow_worktree
+    forbidden_misread: Shadow worktrees are not active repo topology.
+  - path: "zeus_data_improvement_foundation_plus"
+    status: generated
+    scope: historical
+    zone: generated
+    authority_role: derived_diagnostic
+    forbidden_misread: Generated packages cannot be promoted without a packet.
+
+root_governed_files:
+  - path: "AGENTS.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: registry
+    forbidden_misread: Root operating law must be read before narrower scopes.
+  - path: "workspace_map.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: registry
+    forbidden_misread: Navigation aid, not a replacement for zones.yaml.
+  - path: "requirements.txt"
+    status: active
+    scope: global
+    zone: root
+    authority_role: runtime_support
+    forbidden_misread: Dependency list is not architecture authority.
+  - path: ".importlinter"
+    status: active
+    scope: global
+    zone: root
+    authority_role: schema_law
+    forbidden_misread: Import rules enforce only configured boundaries.
+  - path: ".gitignore"
+    status: active
+    scope: global
+    zone: root
+    authority_role: runtime_support
+    forbidden_misread: Ignore rules do not classify authority.
+  - path: "zeus_data_inventory.xlsx"
+    status: conditional
+    scope: historical
+    zone: root
+    authority_role: reference_only
+    forbidden_misread: Spreadsheet inventory is not canonical DB truth.
+  - path: "zeus-world.db"
+    status: scratch
+    scope: runtime
+    zone: root
+    authority_role: scratch_artifact
+    forbidden_misread: Root-level DB artifact is not canonical; canonical world DB path is state/zeus-world.db.
+
+state_surfaces:
+  - path: "state/LIVE_LOCK"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Process/lock marker, not DB truth.
+  - path: "state/zeus_trades.db"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: canonical_truth
+    forbidden_misread: Live trade DB truth; do not mutate from diagnostics.
+  - path: "state/zeus-world.db"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: canonical_truth
+    forbidden_misread: World-data DB, not trade lifecycle authority.
+  - path: "state/zeus_backtest.db"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: diagnostic_non_promotion only.
+  - path: "state/risk_state.db"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: RiskGuard state, not trade-event truth.
+  - path: "state/assumptions.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: schema_law
+    forbidden_misread: Assumption manifest must match executable contracts.
+  - path: "state/control_plane.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Control state artifact; authority flows through src/control/control_plane.py.
+  - path: "state/daemon-heartbeat.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Health heartbeat, not trade truth.
+  - path: "state/positions.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Derived position cache; DB projection remains authority.
+  - path: "state/reality_contract_state.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Reality-contract state cache, not source law.
+  - path: "state/status_summary.json"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Derived operator/Venus health snapshot.
+  - path: "state/baseline_results.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Historical diagnostic output only.
+  - path: "state/cache_investigation.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Investigation output only.
+  - path: "state/ecmwf_bias_investigation.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Diagnostic report only.
+  - path: "state/tigge_priority.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Historical planning artifact.
+  - path: "state/venus_antibody_queue.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Agent queue artifact, not runtime truth.
+  - path: "state/venus_sensing_report.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Venus report artifact, not authority.
+  - path: "state/wu_settlement_audit.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: derived_diagnostic
+    forbidden_misread: Audit report artifact, not settlement truth.
+  - path: "state/cancel-signal-state.json"
+    status: deprecated
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Cancellation signal artifact only.
+  - path: "state/risk_state-live.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Legacy mode-specific risk DB, not current RiskGuard state.
+  - path: "state/risk_state-paper.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Paper risk DB artifact; Zeus is live-only.
+  - path: "state/status_summary-paper.json"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Paper status artifact; Zeus is live-only.
+  - path: "state/trade_data-paper.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Paper trade artifact; not current trade truth.
+  - path: "state/zeus-paper.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Paper-mode DB artifact; not current authority.
+  - path: "state/zeus-shared.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Legacy shared DB artifact.
+  - path: "state/zeus.db"
+    status: deprecated
+    scope: historical
+    zone: state
+    authority_role: legacy_artifact
+    forbidden_misread: Legacy DB artifact; current trade/world DBs are split.
+  - path: "state/zeus-test.lock"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Test lock artifact only.
+  - path: "state/rebuild-20260413-184018.log"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Rebuild log artifact; not proof of successful rebuild.
+  - path: "state/zeus-world.db-shm"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: SQLite sidecar for state/zeus-world.db, not standalone truth.
+  - path: "state/zeus-world.db-wal"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: SQLite WAL sidecar for state/zeus-world.db, not standalone truth.
+  - path: "state/zeus-world.db.pre-rebuild-20260413-184018"
+    status: scratch
+    scope: runtime
+    zone: state
+    authority_role: scratch_artifact
+    forbidden_misread: Pre-rebuild backup artifact; do not promote without dedicated rebuild packet.
+
+required_active_pointers:
+  - path: "docs/operations/current_state.md"
+    rationale: Single live control-entry pointer required by root AGENTS.
+
+registry_directories:
+  - path: "architecture"
+  - path: "architecture/self_check"
+  - path: "scripts"
+  - path: "tests"
+  - path: "docs/authority"
+  - path: "docs/reference"
+  - path: "docs/operations"
+  - path: "docs/runbooks"
+  - path: "config"
+  - path: "config/reality_contracts"
+  - path: ".github/workflows"
+
+docs_mode_excluded_roots:
+  - path: "docs/data improve large pack"
+    status: external_active_package
+    rationale: >
+      Active data-improvement package currently read by other agents. Packet 3
+      must not move, rename, edit, archive, or normalize this package.
+
+reference_fact_specs:
+  - path: "docs/reference/zeus_math_spec.md"
+    status: active
+    authority_role: reference_only
+    fact_role: mathematical_specification
+    rationale: >
+      Newly written high-confidence math specification. It is not top-level
+      authority, but its factual content should be reflected in executable
+      contracts, authority manifests, tests, and packet plans.
+
+digest_profiles:
+  - id: "change settlement rounding"
+    match:
+      - "settlement rounding"
+      - "wmo"
+      - "rounding"
+    required_law:
+      - "WMO asymmetric half-up: floor(x + 0.5)"
+      - "SettlementSemantics is the canonical rounding law."
+      - "round_half_to_even and Python/NumPy banker rounding are forbidden for settlement values."
+    allowed_files:
+      - "src/contracts/settlement_semantics.py"
+      - "tests/test_instrument_invariants.py"
+      - "state/assumptions.json"
+      - "config/reality_contracts/data.yaml"
+    forbidden_files:
+      - "state/*.db"
+      - "docs/archives/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_instrument_invariants.py"
+      - "python scripts/validate_assumptions.py"
+      - "python scripts/semantic_linter.py"
+      - "rg settlement banker-rounding patterns in active src/scripts"
+    downstream:
+      - "src/signal/ensemble_signal.py"
+      - "src/signal/day0_signal.py"
+      - "src/strategy/market_analysis.py"
+      - "src/engine/replay.py"
+      - "src/execution/harvester.py"
+      - "src/calibration/store.py"
+    stop_conditions:
+      - "Any DB rewrite or rebuild request belongs to a separate data-rebuild packet."
+      - "Any broad cleanup belongs to a separate cleanup packet."
+  - id: "edit replay fidelity"
+    match:
+      - "replay fidelity"
+      - "backtest"
+      - "audit replay"
+    required_law:
+      - "Backtest output is diagnostic_non_promotion."
+      - "Replay economics require point-in-time forecast references and market-price linkage."
+      - "WU settlement_value is weather truth; stored winning_bin is evidence only."
+    allowed_files:
+      - "src/engine/replay.py"
+      - "scripts/audit_replay_fidelity.py"
+      - "tests/test_replay_time_provenance.py"
+      - "tests/test_backtest_settlement_value_outcome.py"
+    forbidden_files:
+      - "state/zeus_trades.db"
+      - "state/zeus-world.db"
+      - ".claude/worktrees/**"
+    gates:
+      - "pytest -q tests/test_replay_time_provenance.py tests/test_backtest_settlement_value_outcome.py"
+      - "python scripts/audit_replay_fidelity.py"
+    downstream:
+      - "state/zeus_backtest.db"
+      - "docs/reference/data_inventory.md"
+    stop_conditions:
+      - "Do not promote replay/backtest output into live strategy authority."
+      - "If PnL is N/A due missing prices, do not coerce it to zero."
+  - id: "add a data backfill"
+    match:
+      - "data backfill"
+      - "data rebuild"
+      - "db rebuild"
+      - "calibration rebuild"
+      - "settlement rebuild"
+      - "backfill"
+    required_law:
+      - "No DB mutation without a dedicated data/rebuild packet and dry-run evidence."
+      - "Rebuilt rows require authority/provenance labels."
+      - "Live math certification is blocked until data_rebuild_topology criteria are certified."
+      - "WU settlement coverage alone is not strategy replay coverage."
+    allowed_files:
+      - "scripts/rebuild_settlements.py"
+      - "scripts/rebuild_calibration.py"
+      - "scripts/backfill_wu_daily_all.py"
+      - "src/data/ingestion_guard.py"
+      - "src/data/rebuild_validators.py"
+      - "src/types/observation_atom.py"
+      - "tests/test_rebuild_pipeline.py"
+      - "tests/test_rebuild_validators.py"
+      - "tests/test_data_rebuild_relationships.py"
+    forbidden_files:
+      - "state/*.db"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "python scripts/topology_doctor.py --data-rebuild"
+      - "python scripts/topology_doctor.py --scripts"
+      - "pytest -q tests/test_rebuild_pipeline.py tests/test_rebuild_validators.py tests/test_data_rebuild_relationships.py"
+    downstream:
+      - "state/zeus-world.db"
+      - "src/calibration/store.py"
+      - "src/engine/evaluator.py"
+      - "src/strategy/market_fusion.py"
+    stop_conditions:
+      - "Do not certify live math while data_rebuild_topology.live_math_certification.allowed is false."
+      - "Do not coerce missing replay PnL to zero."
+      - "Do not use diagnostic backtest output to authorize live strategy changes."
+  - id: "add or change script"
+    match:
+      - "script"
+      - "diagnostic script"
+      - "audit script"
+      - "probe"
+      - "one-off"
+      - "tooling"
+    required_law:
+      - "Check architecture/script_manifest.yaml before adding a top-level script."
+      - "Prefer extending a long_lived script over adding a parallel tool."
+      - "One-off scripts must use lifecycle=packet_ephemeral, task_YYYY-MM-DD_<purpose>.py naming, and delete_by=YYYY-MM-DD."
+      - "Reusable scripts must use stable naming and lifecycle=long_lived."
+      - "Deprecated scripts must be fail-closed or removed in a cleanup packet."
+    allowed_files:
+      - "scripts/<script>.py"
+      - "scripts/<script>.sh"
+      - "architecture/script_manifest.yaml"
+      - "scripts/AGENTS.md"
+      - "tests/test_topology_doctor.py"
+      - "scripts/topology_doctor.py"
+      - "docs/authority/zeus_packet_discipline.md"
+    forbidden_files:
+      - "state/*.db"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+      - "docs/data improve large pack/**"
+    gates:
+      - "python scripts/topology_doctor.py --scripts"
+      - "pytest -q tests/test_topology_doctor.py -k scripts"
+    downstream:
+      - "architecture/script_manifest.yaml"
+      - "scripts/AGENTS.md"
+      - "docs/authority/zeus_packet_discipline.md"
+    stop_conditions:
+      - "Do not leave anonymous one-off probes in scripts/."
+      - "Do not add a new script when an existing long_lived script can be extended."
+      - "Do not let diagnostic/report scripts write canonical DB truth."
+  - id: "extract historical lore"
+    match:
+      - "history"
+      - "lore"
+      - "archive"
+      - "work packet"
+      - "progress"
+      - "philosophy"
+    required_law:
+      - "Work packets and progress logs are evidence sources, not default reading material."
+      - "Extract failure modes, wrong moves, correct rules, antibodies, residual risks, invalidation conditions, and task routing."
+      - "Do not promote historical narrative into active law without a machine-checkable antibody or explicit residual-risk status."
+    allowed_files:
+      - "architecture/history_lore.yaml"
+      - "scripts/topology_doctor.py"
+      - "tests/test_topology_doctor.py"
+      - "architecture/AGENTS.md"
+      - "architecture/topology_schema.yaml"
+    forbidden_files:
+      - "state/*.db"
+      - ".claude/worktrees/**"
+      - "docs/data improve large pack/**"
+    gates:
+      - "python scripts/topology_doctor.py --history-lore"
+      - "pytest -q tests/test_topology_doctor.py -k history_lore"
+    downstream:
+      - "AGENTS.md"
+      - "workspace_map.md"
+      - "architecture/topology.yaml"
+    stop_conditions:
+      - "Do not bulk-summarize archives into active context."
+      - "Do not make low-density progress files default reads after their useful lore is extracted."

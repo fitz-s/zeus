@@ -553,8 +553,12 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
     forbidden_hits: list[str] = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel in {"src/state/db.py", "src/state/ledger.py"} or rel.startswith(
-            "tests/"
+        if (
+            rel in {"src/state/db.py", "src/state/ledger.py"}
+            or rel.startswith("tests/")
+            or rel.startswith(".claude/")
+            or rel.startswith(".omx/")
+            or rel.startswith("docs/archives/")
         ):
             continue
         if "apply_architecture_kernel_schema(" in path.read_text(errors="ignore"):

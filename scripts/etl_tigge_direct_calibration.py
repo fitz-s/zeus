@@ -33,6 +33,7 @@ from src.calibration.effective_sample_size import build_decision_groups, write_d
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection as get_connection, init_schema
 from src.types import Bin
 from scripts.backfill_tigge_snapshot_p_raw import p_raw_from_member_values
@@ -182,7 +183,7 @@ def run_etl(dry_run: bool = False) -> dict:
     """).fetchall():
         key = (row["city"], row["target_date"])
         settlements[key] = {
-            "value": round(float(row["settlement_value"])),
+            "value": round_wmo_half_up_value(float(row["settlement_value"])),
             "winning_bin": row["winning_bin"],
         }
 

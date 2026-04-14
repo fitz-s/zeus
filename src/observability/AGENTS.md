@@ -1,6 +1,6 @@
 # src/observability AGENTS
 
-Zone: K4 — Extension (monitoring, reporting)
+Zone: K2_runtime — derived operator read model
 
 ## What this code does (and WHY)
 
@@ -16,7 +16,7 @@ Zeus is not a black box. Every cycle, `status_summary.py` writes a 5-section hea
 
 - Status summary is DERIVED, never canonical — do not read it back as truth
 - Output is live-only derived status via `src/config.state_path()`
-- K4 zone — no planning lock required, but cannot import from K0/K1/K2 internals (only public interfaces)
+- K2_runtime evidence applies here: status-summary changes need runtime trace or targeted tests. This surface is derived/read-model only and must not become canonical truth.
 
 ## Common mistakes agents make here
 

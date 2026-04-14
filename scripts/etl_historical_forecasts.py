@@ -20,6 +20,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.config import cities_by_name
 
 
@@ -134,26 +135,12 @@ def _compute_model_skill(conn):
     """Compute per-city×season×source MAE and bias from historical_forecasts JOIN settlements."""
     conn.execute("DELETE FROM model_skill")  # Recompute from scratch
 
-    rows = conn.execute("""
-        SELECT f.city,
-               f.source,
-               AVG(ABS(f.forecast_high - ROUND(s.settlement_value))) as mae,
-               AVG(f.forecast_high - ROUND(s.settlement_value)) as bias,
-               COUNT(*) as n
-        FROM historical_forecasts f
-        JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date
-        WHERE f.lead_days = 1
-          AND s.settlement_value IS NOT NULL
-        GROUP BY f.city, f.source
-        HAVING COUNT(*) >= 10
-    """).fetchall()
-
     # We need season — do a second pass with Python grouping
     from collections import defaultdict
 
     detail_rows = conn.execute("""
         SELECT f.city, f.target_date, f.source,
-               f.forecast_high, ROUND(s.settlement_value) as settlement_value
+               f.forecast_high, s.settlement_value
         FROM historical_forecasts f
         JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date
         WHERE f.lead_days = 1
@@ -164,7 +151,8 @@ def _compute_model_skill(conn):
     for r in detail_rows:
         season = season_from_date_with_city(r["target_date"], r["city"])
         key = (r["city"], season, r["source"])
-        error = r["forecast_high"] - r["settlement_value"]
+        settlement_value = round_wmo_half_up_value(float(r["settlement_value"]))
+        error = r["forecast_high"] - settlement_value
         grouped[key].append(error)
 
     import numpy as np

@@ -14,6 +14,7 @@ import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
 from src.config import edge_n_bootstrap
+from src.contracts.settlement_semantics import round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,
@@ -186,11 +187,10 @@ class MarketAnalysis:
 
         Mirrors EnsembleSignal._simulate_settlement() logic.
         precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses numpy's default round_half_to_even (banker's rounding).
+        Uses WMO asymmetric half-up rounding: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
         """
-        inv = 1.0 / self._precision if self._precision > 0 else 1.0
-        return np.round(values * inv) / inv
+        return round_wmo_half_up_values(values, self._precision)
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int

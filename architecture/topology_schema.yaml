@@ -1,0 +1,119 @@
+schema_version: 1
+purpose: >
+  Schema for Zeus's compiled topology graph. The graph is an index over existing
+  authority surfaces; it must not redefine zones.yaml, invariants.yaml, or
+  negative_constraints.yaml.
+
+required_top_level_keys:
+  - schema_version
+  - metadata
+  - coverage_roots
+  - root_governed_files
+  - state_surfaces
+  - required_active_pointers
+  - registry_directories
+  - reference_fact_specs
+  - digest_profiles
+
+node_required_fields:
+  - path
+  - status
+  - scope
+  - zone
+  - authority_role
+  - forbidden_misread
+
+enums:
+  status:
+    - active
+    - conditional
+    - archived
+    - generated
+    - scratch
+    - deprecated
+    - shadow
+  scope:
+    - global
+    - scoped
+    - historical
+    - runtime
+    - shadow
+  authority_role:
+    - executable_law
+    - schema_law
+    - registry
+    - reference_only
+    - operations_pointer
+    - derived_diagnostic
+    - runtime_support
+    - canonical_truth
+    - legacy_artifact
+    - scratch_artifact
+    - shadow_worktree
+
+strict_issue_codes:
+  - missing_schema_key
+  - missing_coverage_root
+  - missing_active_pointer
+  - stale_registry_entry
+  - unregistered_tracked_file
+  - reference_authority_without_enforcement
+  - hidden_active_doc
+  - unclassified_root_artifact
+  - unclassified_state_surface
+  - shadow_runtime_authority_reference
+  - wmo_law_gate_missing
+  - source_file_role_mismatch
+  - history_lore_empty
+  - history_lore_duplicate_id
+  - history_lore_required_field_missing
+  - history_lore_invalid_status
+  - history_lore_invalid_severity
+  - history_lore_missing_routing
+  - history_lore_missing_antibody
+  - history_lore_open_gap_without_residual
+  - history_lore_digest_too_thin
+  - context_budget_manifest_missing
+  - context_budget_file_missing
+  - context_budget_file_over
+  - context_budget_digest_card_over
+  - context_budget_digest_text_over
+  - context_budget_invalid_value
+  - context_budget_route_over
+  - agents_zone_mismatch
+  - agents_planning_lock_downgrade
+  - planning_lock_required
+  - planning_lock_evidence_invalid
+  - code_idiom_manifest_missing
+  - code_idiom_required_field_missing
+  - code_idiom_duplicate_id
+  - code_idiom_owner_gate_missing
+  - code_idiom_example_missing
+  - code_idiom_example_without_pattern
+  - code_idiom_unregistered_occurrence
+  - self_check_root_reference_missing
+  - self_check_required_read_missing
+  - self_check_stale_cross_reference
+  - runtime_mode_source_missing
+  - runtime_mode_required_field_missing
+  - runtime_mode_enum_missing
+  - runtime_mode_value_missing
+  - runtime_mode_path_missing
+  - runtime_mode_test_missing
+  - runtime_mode_root_reference_missing
+  - test_relationship_manifest_missing_path
+  - test_relationship_manifest_missing
+  - test_relationship_manifest_missing_symbol
+  - test_relationship_manifest_protects_missing
+  - reference_replacement_missing_entry
+  - reference_replacement_stale_entry
+  - reference_replacement_required_field_missing
+  - reference_replacement_invalid_status
+  - reference_replacement_invalid_action
+  - reference_replacement_default_read_mismatch
+  - reference_replacement_delete_unsafe
+  - reference_replacement_replacement_missing
+  - map_maintenance_manifest_missing
+  - map_maintenance_missing_path_glob
+  - map_maintenance_missing_companion
+  - map_maintenance_companion_missing

@@ -4,15 +4,16 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Design principle
 
-**Flat mesh architecture.** Three active subdirectories plus archives. Each directory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent context loading fast — agents follow links, not directories.
+**Flat mesh architecture.** Four active subdirectories plus archives. Each directory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent context loading fast — agents follow links, not directories.
 
 ## Folders
 
 | Directory | Purpose | Files |
 |-----------|---------|-------|
-| `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 6 |
-| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, pending diagnostic project plans | 10 |
-| `operations/` | Live control-entry pointer + current work packets | 3 |
+| `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 7 |
+| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, math specification notes | 8 |
+| `operations/` | Live control-entry pointer + current work packets | 4 |
+| `runbooks/` | Operator runbooks | 2 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 
 ## Active top-level docs
@@ -23,6 +24,7 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 - `authority/zeus_current_delivery.md` — active delivery law (authority order, planning lock, packet routing)
 - `known_gaps.md` — active operational gap register
 - `operations/current_state.md` — single live control-entry pointer; current branch / packet truth
+- `runbooks/live-operation.md` — day-to-day live daemon operation runbook
 - `../workspace_map.md` — directory guide and file placement rules (repo root)
 
 ## Archives

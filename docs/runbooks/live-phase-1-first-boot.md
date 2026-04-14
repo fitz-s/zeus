@@ -1,7 +1,7 @@
 # Zeus Live Phase 1: First Boot Runbook
 
-Authority: `docs/governance/zeus_autonomous_delivery_constitution.md`
-Applies to: First live daemon boot after paper validation.
+Authority: `docs/authority/zeus_current_delivery.md`
+Applies to: First live daemon boot after non-live validation.
 
 ---
 
@@ -12,8 +12,8 @@ Before starting, verify all of the following:
 - [ ] `ZEUS_MODE=live` will be set in daemon environment
 - [ ] macOS Keychain entries present: `openclaw-metamask-private-key`, `openclaw-polymarket-funder-address`, `zeus_discord_webhook`
 - [ ] `state/` directory exists and is writable
-- [ ] Paper mode ran >=24h without errors
-- [ ] Full test suite shows <=25 failures (pre-live invariants pass)
+- [ ] Shadow/backtest validation produced no blocking safety issues
+- [ ] Blocking live-safety gates pass: `tests/test_live_safety_invariants.py`, `tests/test_runtime_guards.py`, `tests/test_config.py`, and `scripts/check_advisory_gates.py`
 
 ---
 

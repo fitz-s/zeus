@@ -12,9 +12,11 @@ Structural Decision: "The instrument must carry its own settlement contract."
 Same pattern as HeldSideProbability preventing probability space flips.
 """
 
+import ast
 import numpy as np
 import pytest
 from datetime import date
+from pathlib import Path
 
 from src.types import Bin
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -345,10 +347,10 @@ def test_persistence_discount_requires_adequate_samples():
 # ---- Integer Rounding Must Be Unit-Aware ----
 
 def test_no_hardcoded_integer_rounding_for_celsius():
-    """np.round().astype(int) in bootstrap/day0 is wrong for °C if
-    settlement precision is 0.1°C.
+    """Signal and bootstrap settlement paths must not hand-roll rounding.
 
-    Search for hardcoded integer rounding in signal computation paths.
+    WMO settlement rounding lives in SettlementSemantics. K3 signal/strategy
+    paths may call that law, but must not reintroduce NumPy banker's rounding.
     """
     import inspect
     from src.strategy import market_analysis
@@ -356,33 +358,116 @@ def test_no_hardcoded_integer_rounding_for_celsius():
 
     for module in [market_analysis, day0_signal]:
         source = inspect.getsource(module)
-        if "astype(int)" in source:
-            # This is a known issue — integer rounding is hardcoded
-            # Should use SettlementSemantics.precision to determine rounding
+        for forbidden in ("astype(int)", "np.round("):
+            if forbidden not in source:
+                continue
             pytest.fail(
-                f"{module.__name__} uses hardcoded astype(int) rounding. "
-                f"Must use SettlementSemantics.precision for unit-aware rounding."
+                f"{module.__name__} uses hardcoded settlement rounding via {forbidden}. "
+                "Must use SettlementSemantics/WMO rounding law for unit-aware settlement."
             )
 
 
 # ---- Settlement Precision Contract Enforcement ----
 
 def test_settlement_semantics_round_single():
-    """round_single() must return an integer for precision=1.0 contracts."""
+    """round_single() must use WMO asymmetric half-up, not banker's rounding."""
     sem_f = SettlementSemantics.default_wu_fahrenheit("KLGA")
-    assert sem_f.round_single(72.4) == 72.0
-    assert sem_f.round_single(72.5) == 72.0  # round_half_to_even: 72.5 → 72
-    assert sem_f.round_single(73.5) == 74.0  # round_half_to_even: 73.5 → 74
+    assert sem_f.rounding_rule == "wmo_half_up"
+    assert sem_f.round_single(52.45) == 52.0
+    assert sem_f.round_single(52.5) == 53.0
+    assert sem_f.round_single(74.5) == 75.0
 
     sem_c = SettlementSemantics.default_wu_celsius("EGLL")
+    assert sem_c.rounding_rule == "wmo_half_up"
     assert sem_c.round_single(4.4) == 4.0
     assert sem_c.round_single(4.6) == 5.0
 
-    # Negative temperatures (Moscow winter, sub-zero Celsius)
-    assert sem_c.round_single(-15.5) == -16.0  # round_half_to_even
-    assert sem_c.round_single(-0.5) == 0.0     # round_half_to_even: -0.5 → 0
+    # Negative values round up the number line: floor(x + 0.5).
+    assert sem_c.round_single(-0.5) == 0.0
+    assert sem_c.round_single(-1.5) == -1.0
+    assert sem_c.round_single(-2.5) == -2.0
     assert sem_c.round_single(-3.7) == -4.0
     assert sem_c.round_single(0.0) == 0.0
+
+
+def test_signal_and_strategy_settle_paths_use_wmo_rounding():
+    """Day0 and bootstrap settlement paths must match the K0 WMO contract."""
+    from src.signal.day0_signal import Day0Signal
+    from src.strategy.market_analysis import MarketAnalysis
+
+    values = np.array([52.5, 74.5, -0.5, -1.5, -2.5])
+    expected = np.array([53.0, 75.0, 0.0, -1.0, -2.0])
+
+    day0 = Day0Signal.__new__(Day0Signal)
+    day0._precision = 1.0
+    np.testing.assert_array_equal(day0._settle(values), expected)
+
+    analysis = MarketAnalysis.__new__(MarketAnalysis)
+    analysis._precision = 1.0
+    np.testing.assert_array_equal(analysis._settle(values), expected)
+
+
+def test_no_banker_rounding_rule_in_active_settlement_surfaces():
+    """Active machine-readable settlement surfaces must not name banker rounding."""
+    root = Path(__file__).resolve().parents[1]
+    surfaces = [
+        "src/contracts/settlement_semantics.py",
+        "src/signal/day0_signal.py",
+        "src/strategy/market_analysis.py",
+        "state/assumptions.json",
+        "config/reality_contracts/data.yaml",
+        "scripts/backfill_wu_daily_all.py",
+        "scripts/onboard_cities.py",
+    ]
+
+    offenders = [
+        path
+        for path in surfaces
+        if "round_half_to_even" in (root / path).read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_no_python_banker_rounding_of_settlement_values_in_active_code():
+    """Active source/scripts must not derive settlement outcomes with Python round()."""
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+
+    def expression_mentions_settlement_value(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name) and "settlement_value" in node.id:
+            return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return "settlement_value" in node.value
+        if isinstance(node, ast.Attribute) and "settlement_value" in node.attr:
+            return True
+        return any(expression_mentions_settlement_value(child) for child in ast.iter_child_nodes(node))
+
+    for base in ("src", "scripts"):
+        for path in sorted((root / base).rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(root).as_posix()
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            lines = source.splitlines()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_python_round = isinstance(func, ast.Name) and func.id == "round"
+                is_numpy_round = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "round"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id in {"np", "numpy"}
+                )
+                if not (is_python_round or is_numpy_round):
+                    continue
+                if any(expression_mentions_settlement_value(arg) for arg in node.args):
+                    line = lines[node.lineno - 1].strip() if node.lineno else ""
+                    offenders.append(f"{rel}:{node.lineno}: {line}")
+
+    assert offenders == []
 
 
 def test_settlement_semantics_assert_rejects_nan():
@@ -428,8 +513,14 @@ def test_no_raw_settlement_writes_bypass_contract():
         rel = py_file.relative_to(project_root)
         # Skip test files, __pycache__, and .venv
         rel_str = str(rel)
-        if (rel_str.startswith("tests/") or "__pycache__" in rel_str
-                or ".venv" in rel_str):
+        if (
+            rel_str.startswith("tests/")
+            or rel_str.startswith(".claude/")
+            or rel_str.startswith(".omx/")
+            or rel_str.startswith("docs/archives/")
+            or "__pycache__" in rel_str
+            or ".venv" in rel_str
+        ):
             continue
 
         source = py_file.read_text(errors="ignore")

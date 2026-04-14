@@ -20,6 +20,7 @@ from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name, get_mode
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
@@ -722,7 +723,7 @@ def harvest_settlement(
             range_label=label, p_raw=p_raw, outcome=outcome,
             lead_days=lead_days, season=season, cluster=city.cluster,
             forecast_available_at=now,
-            settlement_value=(round(float(settlement_value))
+            settlement_value=(round_wmo_half_up_value(float(settlement_value))
                               if settlement_value is not None else None),
         )
         count += 1

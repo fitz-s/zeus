@@ -1,0 +1,33 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "Runtime Mode Navigation Closure"
+  purpose: >
+    Machine-readable index for Zeus discovery modes. Modes are parameters to
+    one CycleRunner path, not separate runtimes.
+
+source: src/engine/discovery_mode.py
+required_modes:
+  opening_hunt:
+    enum: OPENING_HUNT
+    purpose: "Fresh-market discovery before positions mature."
+    timing_rule: "Fresh markets < 24h old"
+  update_reaction:
+    enum: UPDATE_REACTION
+    purpose: "Respond to post-forecast-update market repricing."
+    timing_rule: "24h+ markets, not day0"
+  day0_capture:
+    enum: DAY0_CAPTURE
+    purpose: "Settlement-day observation-heavy capture."
+    timing_rule: "Markets < 6h to settlement"
+
+shared_runtime_path:
+  - src/main.py
+  - src/engine/cycle_runner.py
+  - src/engine/evaluator.py
+  - src/engine/discovery_mode.py
+
+required_tests:
+  - tests/test_runtime_guards.py
+  - tests/test_fdr.py
+  - tests/test_day0_runtime_observation_context.py

@@ -374,11 +374,11 @@ def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = 
                 resolution_source=f"scaffold_{city_name}",
                 measurement_unit="F",
                 precision=1.0,
-                rounding_rule="round_half_to_even",
+                rounding_rule="wmo_half_up",
                 finalization_time="12:00:00Z",
             )
-        # Validate settlement contract before writing scaffold rows
-        sem.round_single(0.0, context=f"scaffold_validate:{city_name}")
+        # Validate settlement contract before writing scaffold rows.
+        sem.assert_settlement_value(0.0, context=f"scaffold_validate:{city_name}")
         for d in range(days):
             target = today - timedelta(days=d)
             try:

@@ -1,6 +1,6 @@
 # src/types AGENTS
 
-Zone: Cross-cutting (unit safety)
+Zone: K0_frozen_kernel — cross-cutting unit safety
 
 ## What this code does (and WHY)
 

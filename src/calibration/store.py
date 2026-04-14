@@ -18,6 +18,7 @@ from typing import Optional
 
 import numpy as np
 
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection
 
 
@@ -72,7 +73,7 @@ def add_calibration_pair(
     settlement_value is stored for audit only \u2014 defensive round to integer per contract.
     """
     if settlement_value is not None:
-        settlement_value = round(float(settlement_value))
+        settlement_value = round_wmo_half_up_value(float(settlement_value))
     if decision_group_id is None:
         decision_group_id = f"{city}|{target_date}|{forecast_available_at}|lead={lead_days:g}"
     conn.execute("""

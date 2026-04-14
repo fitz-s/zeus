@@ -8,10 +8,13 @@ Every package subdirectory has its own `AGENTS.md` with zone-specific rules, dom
 
 ## Zone map
 
-The canonical file-level zone map lives in `architecture/zones.yaml`.
-Use this file only as a navigation summary. If it disagrees with `architecture/zones.yaml`, the YAML wins.
+`architecture/zones.yaml` defines zone grammar and package boundaries.
+`architecture/source_rationale.yaml` defines file-level roles, hazards, write
+routes, and downstream gates for `src/**`.
 
-`src/state/` should be treated as a mixed navigation cluster when reading docs. Consult `architecture/zones.yaml` for file-level ownership before editing any file there.
+Use this file only as a navigation summary. If prose disagrees with those
+machine maps, the maps win. Treat `src/state/` as a mixed navigation cluster;
+consult `source_rationale.yaml` before editing any file there.
 
 ## Standalone files
 
@@ -28,5 +31,5 @@ Imports flow downward only: K4 → K3 → K2 → K1 → K0. Never upward. Enforc
 ## Rules
 
 - Read the zone-specific `AGENTS.md` before editing any file
-- Classify your change (math / architecture / governance) before starting — see root `AGENTS.md` §5
+- Classify your change (math / architecture / governance) before starting — see root `AGENTS.md`
 - A math change BECOMES architecture if it touches lifecycle states, strategy_key grammar, unit semantics, or truth surfaces

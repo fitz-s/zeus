@@ -17,99 +17,99 @@
 # Fahrenheit cities
 
 - contract_id: SETTLEMENT_SOURCE_NYC
-  assumption: Settlement temperature for NYC markets comes from Weather Underground (WU), integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled NYC weather market; confirm WU is cited as settlement source"
+  assumption: Settlement temperature for NYC markets comes from Weather Underground (WU), integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled NYC weather market; confirm WU is cited as settlement source; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000  # 30 days — settlement source changes are infrequent
   criticality: blocking
   on_change_handlers: [update_settlement_source_NYC]
 
 - contract_id: SETTLEMENT_SOURCE_CHICAGO
-  assumption: Settlement temperature for Chicago markets comes from Weather Underground (WU), integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Chicago weather market"
+  assumption: Settlement temperature for Chicago markets comes from Weather Underground (WU), integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Chicago weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_CHICAGO]
 
 - contract_id: SETTLEMENT_SOURCE_ATLANTA
-  assumption: Settlement temperature for Atlanta markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Atlanta weather market"
+  assumption: Settlement temperature for Atlanta markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Atlanta weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_ATLANTA]
 
 - contract_id: SETTLEMENT_SOURCE_MIAMI
-  assumption: Settlement temperature for Miami markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Miami weather market"
+  assumption: Settlement temperature for Miami markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Miami weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_MIAMI]
 
 - contract_id: SETTLEMENT_SOURCE_DALLAS
-  assumption: Settlement temperature for Dallas markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Dallas weather market"
+  assumption: Settlement temperature for Dallas markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Dallas weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_DALLAS]
 
 - contract_id: SETTLEMENT_SOURCE_AUSTIN
-  assumption: Settlement temperature for Austin markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Austin weather market"
+  assumption: Settlement temperature for Austin markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Austin weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_AUSTIN]
 
 - contract_id: SETTLEMENT_SOURCE_HOUSTON
-  assumption: Settlement temperature for Houston markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Houston weather market"
+  assumption: Settlement temperature for Houston markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Houston weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_HOUSTON]
 
 - contract_id: SETTLEMENT_SOURCE_SEATTLE
-  assumption: Settlement temperature for Seattle markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Seattle weather market"
+  assumption: Settlement temperature for Seattle markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Seattle weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_SEATTLE]
 
 - contract_id: SETTLEMENT_SOURCE_LOS_ANGELES
-  assumption: Settlement temperature for Los Angeles markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Los Angeles weather market"
+  assumption: Settlement temperature for Los Angeles markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Los Angeles weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_LOS_ANGELES]
 
 - contract_id: SETTLEMENT_SOURCE_SAN_FRANCISCO
-  assumption: Settlement temperature for San Francisco markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled San Francisco weather market"
+  assumption: Settlement temperature for San Francisco markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled San Francisco weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_SAN_FRANCISCO]
 
 - contract_id: SETTLEMENT_SOURCE_DENVER
-  assumption: Settlement temperature for Denver markets comes from WU, integer Fahrenheit, round_half_to_even.
-  current_value: {source: "WU", unit: "F", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Denver weather market"
+  assumption: Settlement temperature for Denver markets comes from WU, integer Fahrenheit, wmo_half_up.
+  current_value: {source: "WU", unit: "F", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Denver weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
@@ -118,45 +118,45 @@
 # Celsius cities
 
 - contract_id: SETTLEMENT_SOURCE_LONDON
-  assumption: Settlement temperature for London markets comes from WU, integer Celsius, round_half_to_even.
-  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled London weather market"
+  assumption: Settlement temperature for London markets comes from WU, integer Celsius, wmo_half_up.
+  current_value: {source: "WU", unit: "C", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled London weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_LONDON]
 
 - contract_id: SETTLEMENT_SOURCE_PARIS
-  assumption: Settlement temperature for Paris markets comes from WU, integer Celsius, round_half_to_even.
-  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Paris weather market"
+  assumption: Settlement temperature for Paris markets comes from WU, integer Celsius, wmo_half_up.
+  current_value: {source: "WU", unit: "C", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Paris weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_PARIS]
 
 - contract_id: SETTLEMENT_SOURCE_SEOUL
-  assumption: Settlement temperature for Seoul markets comes from WU, integer Celsius, round_half_to_even.
-  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Seoul weather market"
+  assumption: Settlement temperature for Seoul markets comes from WU, integer Celsius, wmo_half_up.
+  current_value: {source: "WU", unit: "C", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Seoul weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_SEOUL]
 
 - contract_id: SETTLEMENT_SOURCE_SHANGHAI
-  assumption: Settlement temperature for Shanghai markets comes from WU, integer Celsius, round_half_to_even.
-  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Shanghai weather market"
+  assumption: Settlement temperature for Shanghai markets comes from WU, integer Celsius, wmo_half_up.
+  current_value: {source: "WU", unit: "C", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Shanghai weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking
   on_change_handlers: [update_settlement_source_SHANGHAI]
 
 - contract_id: SETTLEMENT_SOURCE_TOKYO
-  assumption: Settlement temperature for Tokyo markets comes from WU, integer Celsius, round_half_to_even.
-  current_value: {source: "WU", unit: "C", rounding: "round_half_to_even"}
-  verification_method: "Check Polymarket market resolution details for a settled Tokyo weather market"
+  assumption: Settlement temperature for Tokyo markets comes from WU, integer Celsius, wmo_half_up.
+  current_value: {source: "WU", unit: "C", rounding: "wmo_half_up"}
+  verification_method: "Check Polymarket market resolution details for a settled Tokyo weather market; verify WU/NWS integer display uses WMO half-up rounding (floor(x + 0.5))"
   last_verified: "2026-04-03T00:00:00+00:00"
   ttl_seconds: 2592000
   criticality: blocking

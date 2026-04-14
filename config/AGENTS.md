@@ -6,8 +6,10 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 
 | File | Purpose |
 |------|---------|
-| `settings.json` | All runtime parameters (single source of truth) — cycle intervals, thresholds, Kelly multipliers, risk limits |
+| `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
 | `cities.json` | 16 cities with coordinates, WU stations, peak hours, temperature units (F/C) |
+| `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
+| `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |
 | `reality_contracts/execution.yaml` | External assumption contract: Polymarket execution behavior |
 | `reality_contracts/protocol.yaml` | External assumption contract: Polymarket protocol rules |
@@ -16,6 +18,6 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 
 ## Rules
 
-- `settings.json` is the single source of truth for runtime config — no other config files
+- `settings.json` is the source for tunable runtime parameters. Other config files have scoped authority for cities, generated data bounds/correlation, provenance, and reality contracts.
 - Reality contracts (INV-11) define what Zeus assumes about external systems — when assumptions break, contracts flag it
 - Changes to `provenance_registry.yaml` require tracing to source literature/data

@@ -18,6 +18,7 @@ from src.contracts import (
     recompute_native_probability,
     SettlementSemantics,
 )
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
@@ -400,7 +401,9 @@ def _check_persistence_anomaly(
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
-                deltas.append(predicted_high - round(float(row["settlement_value"])))
+                deltas.append(
+                    predicted_high - round_wmo_half_up_value(float(row["settlement_value"]))
+                )
 
         if not deltas:
             logger.warning(

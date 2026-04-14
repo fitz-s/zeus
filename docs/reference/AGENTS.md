@@ -4,16 +4,18 @@ Reference material — domain model, technical orientation, data status, methodo
 
 ## Default vs conditional read path
 
-**Default reads** (most tasks):
+**Default reads** (when a digest requests reference context):
 - `zeus_domain_model.md`
-- `repo_overview.md`
-- `data_inventory.md` when data/runtime status matters
 
 **Conditional reads** (load only when the task directly requires them):
+- `repo_overview.md`
+- `data_inventory.md` when data/runtime status matters
 - `data_strategy.md`
 - `statistical_methodology.md`
 - `quantitative_research.md`
 - `market_microstructure.md`
+
+Replacement/deletion eligibility is tracked in `architecture/reference_replacement.yaml`.
 
 ## File registry
 
@@ -23,7 +25,7 @@ Reference material — domain model, technical orientation, data status, methodo
 | `repo_overview.md` | Technical orientation for first-time readers — architecture, runtime, testing, operations |
 | `data_inventory.md` | Current data source status — what's available, what's missing, utilization status, quality assessments |
 | `data_strategy.md` | Data improvement roadmap and priorities |
-| `datafix_2026-04-12_backtest_pollution_repair_pending_project.md` | Pending project plan for backtest pollution repair; parked until upstream raw/observed/statistical ingestion is fixed and re-audited |
 | `statistical_methodology.md` | Statistical methods — Monte Carlo, calibration, FDR, Kelly, bootstrap |
 | `quantitative_research.md` | Research findings and experiment results |
 | `market_microstructure.md` | Polymarket CLOB mechanics — order types, spreads, fill quality |
+| `zeus_math_spec.md` | Reference math/specification notes; executable law and authority manifests win on disagreement |

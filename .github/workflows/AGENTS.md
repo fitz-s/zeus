@@ -17,3 +17,9 @@ Workflow files control gate severity and maintenance cost.
 ## Do not
 - hard-block on missing external workspace artifacts
 - add noisy hooks or redundant gates without net-protection value
+
+## File Registry
+
+| File | Purpose |
+|------|---------|
+| `architecture_advisory_gates.yml` | Architecture/topology CI lanes: blocking stable gates plus advisory staged checks |
