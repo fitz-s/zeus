@@ -1,14 +1,28 @@
-"""5-layer write-time IngestionGuard for temperature observations.
+"""Write-time IngestionGuard for temperature observations.
 
 Any layer failure raises a typed IngestionRejected subclass, making the
 corresponding ObservationAtom unconstructable.
 
-Layer order (executed by validate()):
-  1. check_unit_consistency   — Earth record cross-check + city.settlement_unit cross-check
+Active layer order (executed by validate()):
+  1. check_unit_consistency   — Earth record cross-check + city.settlement_unit
   2. check_physical_bounds    — TIGGE p01/p99 lookup (lat-band fallback if null)
-  3. check_seasonal_plausibility — hemisphere-aware monthly envelope
+  3. — DELETED — (was hemisphere-uniform seasonal envelope)
   4. check_collection_timing  — fetch must be after local peak_hour on target_date
   5. check_dst_boundary       — spring-forward missing hours are rejected
+
+Layer 3 history: the original check_seasonal_plausibility used a single
+_N_ENVELOPE / _S_ENVELOPE pair applied uniformly to every city in the
+hemisphere. This was a category error — "Austin March" and "Seattle March"
+are both N-hemisphere month 3 but have radically different climate
+distributions, so one envelope either false-rejected Austin hot days or
+let Seattle garbage through. Confirmed 22 false positives in a single
+backfill run (Austin/Houston N-hemisphere heat, Sao Paulo/Buenos Aires
+S-hemisphere autumn/winter warm days). Deleted 2026-04-13.
+
+The replacement strategy is:
+  - Layer 1 Earth records catches catastrophic magnitude errors (Houston 160°F)
+  - Post-ingestion relationship tests alert on day-to-day delta >40°F or
+    climate z-score >3 without silently dropping the row
 
 Unit-consistency runs FIRST so mislabelled rows are caught before numeric
 bounds checks, which would otherwise pass nonsensical values silently.
@@ -41,8 +55,17 @@ class UnitConsistencyViolation(IngestionRejected):
     """Layer 1: unit mislabelling detected (Earth record check or city.settlement_unit mismatch)."""
 
 
-class SeasonalPlausibilityViolation(IngestionRejected):
-    """Layer 3: value outside hemisphere-aware seasonal envelope for city/month."""
+# Layer 3 (SeasonalPlausibilityViolation) deleted 2026-04-13 after 22 confirmed
+# false-positive rejections in a single backfill run (Austin/Houston N-hemisphere
+# heat, Sao Paulo/Buenos Aires S-hemisphere autumn/winter warm days). The
+# hemisphere-uniform _N_ENVELOPE / _S_ENVELOPE applied one envelope to every
+# city in the hemisphere regardless of climate zone, making Austin (hot subtropical)
+# and Seattle (mild marine) share the same March upper bound of 95°F — which
+# rejected legitimate Austin hot days. Root cause is "one-size-fits-all envelope
+# for all cities" — a category error, not a tuning problem. Replaced by:
+#   - Layer 1 Earth records (already catches magnitude errors like Houston 160°F)
+#   - Post-ingestion relationship tests (day-to-day delta continuity, climate
+#     z-score) that alert without silently dropping data
 
 
 class CollectionTimingViolation(IngestionRejected):
@@ -235,48 +258,13 @@ class IngestionGuard:
                 f"[{lower}, {upper}]\u00b0F (|lat|={abs_lat:.1f}\u00b0, fallback path)"
             )
 
-    # ------------------------------------------------------------------
-    # Layer 3 — seasonal plausibility (hemisphere-aware)
-    # ------------------------------------------------------------------
-
-    #: Northern hemisphere monthly envelope (°F, generous bounds).
-    _N_ENVELOPE: dict[int, tuple[float, float]] = {
-        1: (-20.0, 90.0),  2: (-15.0, 92.0),  3: (-10.0, 95.0),
-        4: (0.0, 100.0),   5: (20.0, 105.0),  6: (35.0, 112.0),
-        7: (45.0, 115.0),  8: (45.0, 115.0),  9: (30.0, 110.0),
-        10: (10.0, 100.0), 11: (-5.0, 92.0),  12: (-15.0, 88.0),
-    }
-
-    #: Southern hemisphere monthly envelope (°F) — months are flipped seasons.
-    _S_ENVELOPE: dict[int, tuple[float, float]] = {
-        1: (35.0, 112.0),  2: (35.0, 112.0),  3: (25.0, 105.0),
-        4: (15.0, 95.0),   5: (5.0, 85.0),    6: (-5.0, 78.0),
-        7: (-10.0, 75.0),  8: (-5.0, 78.0),   9: (5.0, 85.0),
-        10: (15.0, 95.0),  11: (25.0, 105.0), 12: (35.0, 110.0),
-    }
-
-    def check_seasonal_plausibility(
-        self,
-        city: str,
-        value_f: float,
-        month: int,
-        hemisphere: str,
-    ) -> None:
-        """Layer 3: hemisphere-aware seasonal envelope check (conservative fallback).
-
-        This layer is intentionally broad — city-specific precision comes from
-        Layer 2.  It catches gross seasonal inversions (e.g. Wellington -40°C
-        in July labelled as southern hemisphere but layer 2 fallback allowed it).
-        """
-        envelope = self._N_ENVELOPE if hemisphere == "N" else self._S_ENVELOPE
-        lower, upper = envelope[month]
-        if not (lower <= value_f <= upper):
-            type(self)._increment_rejected()
-            self._log_availability_failure(city, date.today(), "SeasonalPlausibilityViolation", {"value_f": value_f, "lower": lower, "upper": upper, "month": month, "hemisphere": hemisphere})
-            raise SeasonalPlausibilityViolation(
-                f"{city} (hemisphere={hemisphere!r}) month={month}: "
-                f"{value_f}\u00b0F outside seasonal envelope [{lower}, {upper}]\u00b0F"
-            )
+    # Layer 3 (check_seasonal_plausibility) deleted 2026-04-13 — see comment
+    # at module top. The hemisphere-uniform _N_ENVELOPE / _S_ENVELOPE was a
+    # category error: Austin and Seattle shared the same March upper bound of
+    # 95°F even though Austin commonly hits 97-100°F in March. Widening the
+    # envelope would just shift the false-positive boundary to a different
+    # (city, month) pair. Layer 1 Earth records + future relationship tests
+    # are the replacement.
 
     # ------------------------------------------------------------------
     # Layer 4 — collection timing
@@ -384,8 +372,7 @@ class IngestionGuard:
         self.check_unit_consistency(city, raw_value, raw_unit, declared_unit)
         # Layer 2 — physical bounds (TIGGE-derived or lat-band fallback)
         self.check_physical_bounds(city, value_f, month)
-        # Layer 3 — seasonal plausibility
-        self.check_seasonal_plausibility(city, value_f, month, hemisphere)
+        # Layer 3 — DELETED (hemisphere-uniform envelope was a category error)
         # Layer 4 — collection timing
         self.check_collection_timing(city, fetch_utc, target_date, peak_hour)
         # Layer 5 — DST boundary

@@ -23,7 +23,6 @@ from src.data.ingestion_guard import (
     DstBoundaryViolation,
     IngestionGuard,
     PhysicalBoundsViolation,
-    SeasonalPlausibilityViolation,
     UnitConsistencyViolation,
 )
 from src.types.observation_atom import IngestionRejected
@@ -67,11 +66,14 @@ def test_guard_rejects_lagos_89c_settlement(guard: IngestionGuard) -> None:
 def test_guard_rejects_wellington_out_of_range_settlement(guard: IngestionGuard) -> None:
     """Contamination 2: Wellington -40u00b0C in month=7 (southern hemisphere winter).
 
-    -40u00b0C = -40u00b0F; -40u00b0F is outside Wellingtonu2019s seasonal envelope for July.
-    Wellingtonu2019s TIGGE p01 for July is well above -40u00b0C.
-    Expect PhysicalBoundsViolation or SeasonalPlausibilityViolation.
+    -40u00b0C = -40u00b0F; Wellington's TIGGE p01 for July is well above -40u00b0C.
+    Since Layer 3 was deleted 2026-04-13, the rejection path is now
+    PhysicalBoundsViolation (TIGGE p01 guard, Layer 2). Accept any
+    IngestionRejected subclass to keep the test robust against future layer
+    rearrangements; the important invariant is that this contamination
+    never reaches the DB, not which specific layer catches it.
     """
-    with pytest.raises((PhysicalBoundsViolation, SeasonalPlausibilityViolation)):
+    with pytest.raises(IngestionRejected):
         guard.validate(
             city="Wellington",
             raw_value=-40.0,
