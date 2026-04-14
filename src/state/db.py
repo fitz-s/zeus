@@ -841,6 +841,36 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
 
+        -- K2 data-coverage index — the immune system's memory for live data ingestion.
+        -- One row per expected (data_table × city × data_source × target_date × sub_key);
+        -- live appenders flip rows to WRITTEN, scanners write MISSING for unrecorded
+        -- expected rows, and known exceptions (HKO incomplete-flag days, UKMO pre-start,
+        -- new-city onboard lag) are pinned as LEGITIMATE_GAP so the scanner won't
+        -- keep re-attempting them. Distinct from `availability_fact` which logs
+        -- runtime cycle/order outages — this table is specifically a data-ingestion
+        -- coverage ledger.
+        CREATE TABLE IF NOT EXISTS data_coverage (
+            data_table  TEXT NOT NULL
+                CHECK (data_table IN ('observations','observation_instants','solar_daily','forecasts')),
+            city        TEXT NOT NULL,
+            data_source TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            sub_key     TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL
+                CHECK (status IN ('WRITTEN','LEGITIMATE_GAP','FAILED','MISSING')),
+            reason      TEXT,
+            fetched_at  TEXT NOT NULL,
+            expected_at TEXT,
+            retry_after TEXT,
+            PRIMARY KEY (data_table, city, data_source, target_date, sub_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_status
+            ON data_coverage(status, data_table);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_scan
+            ON data_coverage(data_table, city, data_source, target_date);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_retry
+            ON data_coverage(status, retry_after) WHERE status = 'FAILED';
+
         -- Availability/outage fact log (observability — kernel §availability_fact)
         CREATE TABLE IF NOT EXISTS availability_fact (
             availability_id TEXT PRIMARY KEY,
