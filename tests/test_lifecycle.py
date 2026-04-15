@@ -168,6 +168,8 @@ class TestHarvester:
             bin_labels=bin_labels,
             p_raw_vector=p_raw,
             lead_days=3.0,
+            forecast_issue_time="2026-01-12T00:00:00Z",
+            source_model_version="test_lifecycle_v1",
         )
         conn.commit()
 

@@ -24,8 +24,8 @@ REPO_ROOT = Path(__file__).parent.parent
 
 # ==================== City config completeness ====================
 
-def test_all_46_cities_present():
-    assert len(cities_by_name) == 46
+def test_all_51_cities_present():
+    assert len(cities_by_name) == 51
 
 
 def test_every_city_has_all_critical_fields():
@@ -38,7 +38,10 @@ def test_every_city_has_all_critical_fields():
         assert isinstance(city.lon, float) and -180 <= city.lon <= 180, f"{name}: lon={city.lon}"
         assert city.timezone, f"{name}: empty timezone"
         assert city.settlement_unit in ("F", "C"), f"{name}: unit={city.settlement_unit!r}"
-        assert city.wu_station, f"{name}: empty wu_station"
+        if city.settlement_source_type in {"hko", "cwa_station"}:
+            assert city.wu_station is None or city.wu_station, f"{name}: invalid wu_station"
+        else:
+            assert city.wu_station, f"{name}: empty wu_station"
         assert city.cluster, f"{name}: empty cluster"
         assert city.country_code, f"{name}: empty country_code"
         assert 10 <= city.historical_peak_hour <= 20, f"{name}: historical_peak_hour={city.historical_peak_hour}"
@@ -60,6 +63,8 @@ def test_wu_station_is_icao_format():
     """ICAO codes are 4 uppercase letters."""
     pattern = re.compile(r'^[A-Z]{4}$')
     for name, city in cities_by_name.items():
+        if city.settlement_source_type in {"hko", "cwa_station"}:
+            continue
         assert pattern.match(city.wu_station), f"{name}: wu_station={city.wu_station!r}"
 
 
@@ -69,13 +74,15 @@ def test_country_code_is_iso2_uppercase():
         assert city.country_code.isupper(), f"{name}: country_code={city.country_code!r}"
 
 
-def test_cities_json_matches_city_stations():
-    """scripts/backfill_wu_daily_all.py CITY_STATIONS must match cities.json for all 46 cities.
+def test_wu_cities_json_matches_city_stations():
+    """scripts/backfill_wu_daily_all.py CITY_STATIONS must match WU cities.
 
     Invariant: config and backfill script cannot drift.
     """
     from scripts.backfill_wu_daily_all import CITY_STATIONS
     for name, city in cities_by_name.items():
+        if city.settlement_source_type != "wu_icao":
+            continue
         assert name in CITY_STATIONS, f"{name} missing from CITY_STATIONS"
         icao, cc, unit = CITY_STATIONS[name]
         assert city.wu_station == icao, f"{name}: wu_station mismatch {city.wu_station} vs {icao}"
@@ -234,7 +241,7 @@ def test_hong_kong_is_hko_source_type():
 
 
 def test_all_non_special_cities_are_wu_icao():
-    special_types = {"Hong Kong": "hko", "Istanbul": "noaa", "Moscow": "noaa", "Taipei": "cwa_station"}
+    special_types = {"Hong Kong": "hko", "Istanbul": "noaa", "Moscow": "noaa", "Tel Aviv": "noaa"}
     for name, city in cities_by_name.items():
         if name in special_types:
             assert city.settlement_source_type == special_types[name], f"{name}: expected {special_types[name]!r}, got {city.settlement_source_type!r}"

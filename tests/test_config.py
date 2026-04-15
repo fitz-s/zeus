@@ -28,14 +28,8 @@ from src.config import (
 from src.contracts.settlement_semantics import SettlementSemantics
 
 
-@pytest.mark.skip(reason="Phase2: paper mode removed")
-def test_settings_loads_all_required_keys():
-    s = Settings()
-    assert s.mode == "paper"
-    assert s.capital_base_usd == 150.0
-    assert s["discovery"]["opening_hunt_interval_min"] == 30
-    assert s["discovery"]["ecmwf_open_data_times_utc"] == ["01:30", "13:30"]
-    assert s["sizing"]["kelly_multiplier"] == 0.25
+## Paper mode test removed — Zeus is live-only (Phase 1 decommission).
+## Original test asserted Settings().mode == "paper", which is no longer valid.
 
 
 def test_settings_missing_key_raises():
@@ -55,7 +49,7 @@ def test_settings_no_fallback_pattern():
 
 def test_cities_load():
     cities = load_cities()
-    assert len(cities) == 46  # 46 cities after global expansion
+    assert len(cities) == 51  # 51 cities after global expansion
     names = {c.name for c in cities}
     assert "NYC" in names
     assert "London" in names
@@ -221,9 +215,9 @@ def test_city_airport_coordinates():
     chi = by_name["Chicago"]
     assert abs(chi.lat - 41.9742) < 0.01
 
-    # London: Heathrow (~51.48), NOT city center (~51.51)
+    # London: City Airport (~51.505), NOT city center (~51.51) or Heathrow.
     lon = by_name["London"]
-    assert abs(lon.lat - 51.4775) < 0.01
+    assert abs(lon.lat - 51.5053) < 0.01
 
 
 def test_city_wu_station_icao():
@@ -233,7 +227,7 @@ def test_city_wu_station_icao():
     assert by_name["NYC"].wu_station == "KLGA"
     assert by_name["Chicago"].wu_station == "KORD"
     assert by_name["Seattle"].wu_station == "KSEA"
-    assert by_name["London"].wu_station == "EGLL"
+    assert by_name["London"].wu_station == "EGLC"
 
 
 def test_city_aliases():

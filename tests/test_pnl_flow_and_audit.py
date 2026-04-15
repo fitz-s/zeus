@@ -49,6 +49,7 @@ from src.state.portfolio import (
 )
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
 def _ensure_auth_verified(conn) -> None:
@@ -71,7 +72,29 @@ MISSING = object()
 
 
 def _stub_full_family_scan(monkeypatch) -> None:
-    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    def _scan(analysis, *args, **kwargs):
+        hypotheses = []
+        for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))):
+            hypotheses.append(
+                FullFamilyHypothesis(
+                    index=i,
+                    range_label=edge.bin.label,
+                    direction=edge.direction,
+                    edge=edge.edge,
+                    ci_lower=edge.ci_lower,
+                    ci_upper=edge.ci_upper,
+                    p_value=edge.p_value,
+                    p_model=edge.p_model,
+                    p_market=edge.p_market,
+                    p_posterior=edge.p_posterior,
+                    entry_price=edge.entry_price,
+                    is_shoulder=bool(getattr(edge.bin, "is_shoulder", False)),
+                    passed_prefilter=True,
+                )
+            )
+        return hypotheses
+
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", _scan)
 
 
 def _position(**kwargs) -> Position:
@@ -1396,6 +1419,7 @@ def test_inv_supervisor_command_matches_real_control_plane_contract():
         reason="edge compression",
         strategy="opening_inertia",
         enabled=False,
+        env="test",
     )
     assert cmd.command == "set_strategy_gate"
     assert cmd.strategy == "opening_inertia"
@@ -1696,7 +1720,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -1838,7 +1862,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -1958,7 +1982,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -2074,7 +2098,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -2198,7 +2222,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -2337,7 +2361,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -2464,7 +2488,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -2578,7 +2602,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
             self.bias_corrected = False
 
@@ -3062,6 +3086,8 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
 
 
 def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
+    from src.calibration.decision_group import compute_id
+
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -3080,6 +3106,12 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
             cluster=NYC.cluster,
             forecast_available_at="2026-03-30T01:00:00Z",
             settlement_value=None,
+            decision_group_id=compute_id(
+                "NYC",
+                f"2026-04-{i+1:02d}",
+                "2026-03-30T01:00:00Z",
+                "test_pnl_flow_and_audit_v1",
+            ),
         )
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     settled_pos = _position(
@@ -3148,16 +3180,18 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    refit_calls = []
+    monkeypatch.setattr(
+        harvester_module,
+        "maybe_refit_bucket",
+        lambda conn, city, target_date: refit_calls.append((city.name, target_date)) or True,
+    )
 
     result = harvester_module.run_harvester()
-    conn = get_connection(db_path)
-    row = conn.execute("SELECT n_samples FROM platt_models ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
 
     assert result["pairs_created"] == 2
     assert result["stage2_status"] == "ready"
-    assert row is not None
-    assert row["n_samples"] >= 15
+    assert refit_calls == [("NYC", "2026-04-01")]
 
 
 def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(

@@ -346,6 +346,9 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
         _ = pos.selected_method
     p_market = None
     if getattr(edge_ctx, "p_market", None) is not None and len(edge_ctx.p_market) > 0:
+        # Bug #64: edge_ctx.p_market from monitor_refresh is single-element
+        # [held_bin_price], so index 0 is correct here. The held_bin_index
+        # routing happens in monitor_refresh._build_all_bins.
         p_market = float(edge_ctx.p_market[0])
     elif getattr(pos, "last_monitor_market_price", None) is not None:
         p_market = float(pos.last_monitor_market_price)
@@ -518,9 +521,10 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitor_skipped_quarantine_placeholder"] = summary.get("monitor_skipped_quarantine_placeholder", 0) + 1
             continue
 
+        hours_to_settlement = None
+        monitor_result_written = False
         try:
             city = deps.cities_by_name.get(pos.city)
-            hours_to_settlement = None
             if city is not None:
                 hours_to_settlement = lead_hours_to_target(
                     pos.target_date,
@@ -575,6 +579,15 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             exit_reason = exit_decision.reason
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
                 summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
+                if hours_to_settlement is not None and hours_to_settlement <= 6.0:
+                    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+                    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_chain_missing_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": f"incomplete_exit_context:{exit_reason}",
+                        }
+                    )
                 deps.logger.warning(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,
@@ -591,6 +604,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     neg_edge_count=pos.neg_edge_count,
                 )
             )
+            monitor_result_written = True
             summary["monitors"] += 1
 
             if should_exit:
@@ -618,6 +632,36 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 portfolio_dirty = True
         except Exception as e:
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e)
+            summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
+            reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
+            if hours_to_settlement is None:
+                try:
+                    city = deps.cities_by_name.get(pos.city)
+                    if city is not None:
+                        lead_hours_to_target(pos.target_date, city.timezone, deps._utcnow())
+                except Exception:
+                    reason_prefix = f"time_context_failed:{e.__class__.__name__}"
+            near_settlement = (
+                hours_to_settlement is None
+                or hours_to_settlement <= 6.0
+                or pos.state in {"day0_window", "pending_exit"}
+            )
+            if near_settlement and not monitor_result_written and "execution failed" not in str(e).lower():
+                summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+                summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+                summary.setdefault("monitor_chain_missing_reasons", []).append(
+                    {"position_id": pos.trade_id, "reason": reason_prefix}
+                )
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=pos.last_monitor_prob or pos.p_posterior,
+                        fresh_edge=pos.last_monitor_edge,
+                        should_exit=False,
+                        exit_reason=f"MONITOR_CHAIN_MISSING:{reason_prefix}",
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
 
     return portfolio_dirty, tracker_dirty
 
@@ -836,6 +880,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             outcomes=market["outcomes"],
             hours_since_open=market["hours_since_open"],
             hours_to_resolution=market["hours_to_resolution"],
+            temperature_metric=str(market.get("temperature_metric", "high") or "high"),
             event_id=market.get("event_id", ""),
             slug=market.get("slug", ""),
             observation=obs,

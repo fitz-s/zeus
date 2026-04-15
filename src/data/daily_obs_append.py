@@ -124,14 +124,14 @@ CITY_STATIONS: dict[str, tuple[str, str, str]] = {
     "Sao Paulo":     ("SBGR", "BR", "C"),
     "Toronto":       ("CYYZ", "CA", "C"),
     # Europe
-    "London":        ("EGLL", "GB", "C"),
+    "London":        ("EGLC", "GB", "C"),
     "Paris":         ("LFPG", "FR", "C"),
     "Munich":        ("EDDM", "DE", "C"),
     "Madrid":        ("LEMD", "ES", "C"),
     "Milan":         ("LIMC", "IT", "C"),
     "Warsaw":        ("EPWA", "PL", "C"),
-    "Moscow":        ("UUEE", "RU", "C"),
-    "Istanbul":      ("LTFM", "TR", "C"),
+    "Amsterdam":     ("EHAM", "NL", "C"),
+    "Helsinki":      ("EFHK", "FI", "C"),
     "Ankara":        ("LTAC", "TR", "C"),
     "Tel Aviv":      ("LLBG", "IL", "C"),
     # Asia
@@ -141,13 +141,16 @@ CITY_STATIONS: dict[str, tuple[str, str, str]] = {
     "Chengdu":       ("ZUUU", "CN", "C"),
     "Chongqing":     ("ZUCK", "CN", "C"),
     "Wuhan":         ("ZHHH", "CN", "C"),
+    "Guangzhou":     ("ZGGG", "CN", "C"),
     # Hong Kong is intentionally NOT in CITY_STATIONS — HKO is the
     # authoritative Polymarket settlement source for HK.
     "Tokyo":         ("RJTT", "JP", "C"),
     "Seoul":         ("RKSI", "KR", "C"),
-    "Taipei":        ("RCTP", "TW", "C"),
+    "Taipei":        ("RCSS", "TW", "C"),
     "Singapore":     ("WSSS", "SG", "C"),
     "Lucknow":       ("VILK", "IN", "C"),
+    "Karachi":       ("OPKC", "PK", "C"),
+    "Manila":        ("RPLL", "PH", "C"),
     # Oceania
     "Wellington":    ("NZWN", "NZ", "C"),
     "Auckland":      ("NZAA", "NZ", "C"),
@@ -158,11 +161,11 @@ CITY_STATIONS: dict[str, tuple[str, str, str]] = {
     "Jeddah":        ("OEJN", "SA", "C"),
     # Southeast Asia
     "Kuala Lumpur":  ("WMKK", "MY", "C"),
-    "Jakarta":       ("WIII", "ID", "C"),
-    # Asia-Northeast
+    "Jakarta":       ("WIHH", "ID", "C"),
+    # Northeast Asia
     "Busan":         ("RKPK", "KR", "C"),
     # Latin America
-    "Panama City":   ("MPTO", "PA", "C"),
+    "Panama City":   ("MPMG", "PA", "C"),
 }
 
 #: WU data_source string as it appears in both `observations.source` and
@@ -523,6 +526,7 @@ def _build_atom_pair(
     data_source_version: str,
     api_endpoint: str,
     provenance: dict,
+    fetch_utc: datetime | None = None,
 ) -> tuple[ObservationAtom, ObservationAtom]:
     """Build a (high_atom, low_atom) pair with full K1-C provenance fields.
 
@@ -556,7 +560,9 @@ def _build_atom_pair(
     window_start_utc = window_start_local.astimezone(timezone.utc)
     window_end_utc = window_end_local.astimezone(timezone.utc)
 
-    fetch_utc = datetime.now(timezone.utc)
+    # Bug #39: prefer caller-provided timestamp (response completion time)
+    if fetch_utc is None:
+        fetch_utc = datetime.now(timezone.utc)
     season = season_from_date(target_d.isoformat(), lat=city_cfg.lat)
 
     # Internal sanity first — cheap, catches inverted rows immediately.

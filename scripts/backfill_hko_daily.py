@@ -338,12 +338,14 @@ def run_backfill(
                     raw_value=high_val,
                     raw_unit="C",
                     declared_unit="C",
+                    target_date=target_d,
                 )
                 _GUARD.check_unit_consistency(
                     city=_CITY_NAME,
                     raw_value=low_val,
                     raw_unit="C",
                     declared_unit="C",
+                    target_date=target_d,
                 )
                 if low_val > high_val:
                     raise IngestionRejected(

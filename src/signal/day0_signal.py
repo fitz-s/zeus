@@ -103,7 +103,7 @@ class Day0Signal:
         """
         return round_wmo_half_up_values(values, self._precision)
 
-    def p_vector(self, bins: list[Bin], n_mc: int | None = None) -> np.ndarray:
+    def p_vector(self, bins: list[Bin], n_mc: int | None = None, rng=None) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.
 
         For each MC iteration:
@@ -122,7 +122,7 @@ class Day0Signal:
         n_members = len(self.ens_remaining)
         p = np.zeros(n_bins)
 
-        rng = np.random.default_rng()
+        rng = rng if rng is not None else np.random.default_rng()
         obs_weight = self.observation_weight()
 
         for _ in range(n_mc):

@@ -156,7 +156,7 @@ def run_migration(
             row_counts["settlements"]["after"] = n_after
             steps.append(f"DEL  settlements: {n_before} -> {n_after} rows")
 
-        # calibration_pairs: wipe all (rebuilt by rebuild_calibration.py)
+        # calibration_pairs: wipe all (rebuilt by rebuild_calibration_pairs_canonical.py)
         if _table_exists(conn, "calibration_pairs"):
             n_before = _count(conn, "calibration_pairs")
             conn.execute("DELETE FROM calibration_pairs WHERE authority != 'VERIFIED'")

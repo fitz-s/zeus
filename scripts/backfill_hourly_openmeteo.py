@@ -215,6 +215,7 @@ def _validate_hourly_reading(city_name: str, r: dict) -> str | None:
             raw_value=r["temp_current"],
             raw_unit=r["temp_unit"],
             declared_unit=declared_unit,
+            target_date=date.fromisoformat(r["target_date"]),
         )
         # Layer 3 (check_seasonal_plausibility) deleted 2026-04-13.
         # See src/data/ingestion_guard.py module docstring for rationale.

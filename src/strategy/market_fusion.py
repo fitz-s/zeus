@@ -189,7 +189,10 @@ def compute_posterior(
     if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
         market = VigTreatment.from_raw(p_market).clean_prices
     else:
-        market = p_market
+        # Bug #7: sparse monitor vectors have zeros for non-held bins.
+        # Impute p_cal for missing entries to prevent zero-dilution
+        # during normalization (held bin inflated, siblings suppressed).
+        market = np.where(p_market > 0, p_market, p_cal)
     if bins is not None and len(bins) == len(p_cal):
         alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
         raw = alpha_vec * p_cal + (1.0 - alpha_vec) * market

@@ -22,6 +22,7 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.contracts.hold_value import HoldValue
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
     enter_chain_quarantined_runtime_state,
@@ -450,10 +451,15 @@ class Position:
                 applied=applied,
             )
         else:
+            best_bid = exit_context.best_bid
+            if exit_context.day0_active and best_bid is None:
+                applied.append("best_bid_proxy_from_current_market_price")
+                applied.append("best_bid_proxy_tick_discount")
+                best_bid = max(0.0, float(exit_context.current_market_price) * 0.95)
             return self._buy_yes_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=exit_context.best_bid,
+                best_bid=best_bid,
                 day0_active=bool(exit_context.day0_active),
                 applied=applied,
             )
@@ -484,7 +490,12 @@ class Position:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
-            if shares * best_bid <= shares * current_p_posterior:
+            hold_value = HoldValue.compute(
+                gross_value=shares * current_p_posterior,
+                fee_cost=0.0,
+                time_cost=0.0,
+            )
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -524,7 +535,12 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            if shares * best_bid <= shares * current_p_posterior:
+            hold_value = HoldValue.compute(
+                gross_value=shares * current_p_posterior,
+                fee_cost=0.0,
+                time_cost=0.0,
+            )
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -1291,8 +1307,8 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
 def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
     """T2-E: Chain-journal merge for live position queries.
 
-    Paper mode or no chain_view: return local positions only.
-    Live mode with chain_view: merge chain truth (shares/price) with
+    No chain_view or stale chain_view: return local positions only.
+    With valid chain_view: merge chain truth (shares/price) with
     local metadata (city, range, direction, decision context).
     """
     if chain_view is None or getattr(chain_view, "is_stale", True):

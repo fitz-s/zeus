@@ -2,7 +2,7 @@
 
 The **independent sample unit** for calibration is the decision group:
 
-    g = (city, target_date, forecast_available_at, source_model_version)
+    g = (city, target_date, issue_time, source_model_version)
 
 All pair rows from a single ensemble snapshot at a single issue_time share
 the same underlying forecast and are NOT independent. Every statistical

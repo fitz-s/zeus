@@ -1,6 +1,6 @@
 {
   "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly — do not use downtown or approximate coordinates.",
-  "_settlement_source_discipline": "ROUTINE CHECK NEEDED. Polymarket can change a city's settlement source / station / unit at any time (verified via 2026-04-14 cross-validation: Istanbul and Moscow are NOAA, London moved to EGLC, Jakarta to WIHH, Panama City to MPMG, Taipei to CWA station 46692, London unit transitioned F->C). Audit all active markets' description fields at least monthly and whenever a recalibration or new city onboarding is planned. Single source of truth: the market description text of the most recent active market for each city. settlement_source_type values: 'wu_icao' (default), 'hko' (Hong Kong Observatory), 'noaa' (weather.gov timeseries), 'cwa_station' (Taiwan Central Weather Administration).",
+  "_settlement_source_discipline": "ROUTINE CHECK NEEDED. Polymarket can change a city's settlement source / station / unit at any time (verified via 2026-04-15 cross-validation: Istanbul and Moscow are NOAA, London moved to EGLC, Jakarta to WIHH, Panama City to MPMG, Taipei moved to Wunderground Songshan/RCSS (was CWA/46692), Tel Aviv moved to NOAA/LLBG (was Wunderground/LLBG), London unit transitioned F->C). Audit all active markets' description fields at least monthly and whenever a recalibration or new city onboarding is planned. Single source of truth: the market description text of the most recent active market for each city. settlement_source_type values: 'wu_icao' (default), 'hko' (Hong Kong Observatory), 'noaa' (weather.gov timeseries), 'cwa_station' (Taiwan Central Weather Administration).",
   "cities": [
     {
       "name": "Amsterdam",
@@ -1145,18 +1145,18 @@
       "noaa": null,
       "lat": 25.0374,
       "lon": 121.5056,
-      "wu_station": "46692",
+      "wu_station": "RCSS",
       "wu_pws": null,
       "meteostat_station": null,
-      "airport_name": "Taipei CWA Station 46692 (Zhongzheng)",
+      "airport_name": "Taipei Songshan Airport",
       "country_code": "TW",
-      "settlement_source": "https://www.cwa.gov.tw/V8/C/W/OBS_Station.html?ID=46692",
+      "settlement_source": "https://www.wunderground.com/history/daily/tw/taipei/RCSS",
       "timezone": "Asia/Taipei",
       "cluster": "Taipei",
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.5,
-      "settlement_source_type": "cwa_station",
+      "settlement_source_type": "wu_icao",
       "instrument_noise_override": 0.1
     },
     {
@@ -1178,12 +1178,13 @@
       "meteostat_station": null,
       "airport_name": "Ben Gurion International Airport",
       "country_code": "IL",
-      "settlement_source": "https://www.wunderground.com/history/daily/il/tel-aviv/LLBG",
+      "settlement_source": "https://www.weather.gov/wrh/timeseries?site=LLBG",
       "timezone": "Asia/Jerusalem",
       "cluster": "Tel Aviv",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.5
+      "diurnal_amplitude_c": 7.5,
+      "settlement_source_type": "noaa"
     },
     {
       "name": "Tokyo",

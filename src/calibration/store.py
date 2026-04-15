@@ -83,8 +83,11 @@ def add_calibration_pair(
     """
     if settlement_value is not None:
         settlement_value = round_wmo_half_up_value(float(settlement_value))
-    if decision_group_id is None:
-        decision_group_id = f"{city}|{target_date}|{forecast_available_at}|lead={lead_days:g}"
+    if decision_group_id is None or not str(decision_group_id).strip():
+        raise ValueError(
+            "decision_group_id is required; use "
+            "src.calibration.decision_group.compute_id() to generate it"
+        )
     conn.execute("""
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days,
@@ -111,6 +114,7 @@ def get_pairs_for_bucket(
     cluster: str,
     season: str,
     authority_filter: str = 'VERIFIED',
+    bin_source_filter: str | None = None,
 ) -> list[dict]:
     """Get calibration pairs for a bucket (cluster \u00d7 season).
 
@@ -121,15 +125,23 @@ def get_pairs_for_bucket(
     If the authority column is absent (pre-migration DB), the filter is
     silently skipped so existing callers are not broken by the schema gap.
 
-    Returns list of dicts with keys: p_raw, lead_days, outcome, range_label.
+    Returns list of dicts with keys: p_raw, lead_days, outcome, range_label,
+    decision_group_id.
     """
     if authority_filter == 'any':
+        bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
+        params = (
+            (cluster, season, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season)
+        )
         rows = conn.execute("""
-            SELECT p_raw, lead_days, outcome, range_label
+            SELECT p_raw, lead_days, outcome, range_label, decision_group_id
             FROM calibration_pairs
             WHERE cluster = ? AND season = ?
+            {bin_clause}
             ORDER BY target_date
-        """, (cluster, season)).fetchall()
+        """.format(bin_clause=bin_clause), params).fetchall()
     elif not _has_authority_column(conn):
         # M7 fix: pre-migration DB without authority column.
         # If caller requests UNVERIFIED, return empty list to prevent false-positive
@@ -138,12 +150,19 @@ def get_pairs_for_bucket(
         # can exist on a pre-migration DB.
         return []
     else:
+        bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
+        params = (
+            (cluster, season, authority_filter, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season, authority_filter)
+        )
         rows = conn.execute("""
-            SELECT p_raw, lead_days, outcome, range_label
+            SELECT p_raw, lead_days, outcome, range_label, decision_group_id
             FROM calibration_pairs
             WHERE cluster = ? AND season = ? AND authority = ?
+            {bin_clause}
             ORDER BY target_date
-        """, (cluster, season, authority_filter)).fetchall()
+        """.format(bin_clause=bin_clause), params).fetchall()
 
     result = []
     for row in rows:
@@ -173,6 +192,48 @@ def get_pairs_count(
         SELECT COUNT(*) FROM calibration_pairs
         WHERE cluster = ? AND season = ? AND authority = ?
     """, (cluster, season, authority_filter)).fetchone()[0]
+
+
+def get_decision_group_count(
+    conn: sqlite3.Connection,
+    cluster: str,
+    season: str,
+    authority_filter: str = "VERIFIED",
+) -> int:
+    """Count independent decision groups in a calibration bucket."""
+    if authority_filter == "any" or not _has_authority_column(conn):
+        row = conn.execute("""
+            SELECT COUNT(DISTINCT decision_group_id) FROM calibration_pairs
+            WHERE cluster = ? AND season = ? AND decision_group_id IS NOT NULL
+        """, (cluster, season)).fetchone()
+    else:
+        row = conn.execute("""
+            SELECT COUNT(DISTINCT decision_group_id) FROM calibration_pairs
+            WHERE cluster = ? AND season = ? AND authority = ?
+              AND decision_group_id IS NOT NULL
+        """, (cluster, season, authority_filter)).fetchone()
+    return int(row[0] or 0)
+
+
+def canonical_pairs_ready_for_refit(conn: sqlite3.Connection) -> bool:
+    """Check whether VERIFIED calibration pairs are exclusively canonical."""
+    row = conn.execute("""
+        SELECT
+            SUM(CASE WHEN authority = 'VERIFIED'
+                      AND bin_source = 'canonical_v1'
+                      AND decision_group_id IS NOT NULL
+                      AND decision_group_id != ''
+                     THEN 1 ELSE 0 END) AS canonical_rows,
+            SUM(CASE WHEN authority = 'VERIFIED'
+                      AND (bin_source != 'canonical_v1'
+                           OR decision_group_id IS NULL
+                           OR decision_group_id = '')
+                     THEN 1 ELSE 0 END) AS unsafe_rows
+        FROM calibration_pairs
+    """).fetchone()
+    canonical_rows = int(row["canonical_rows"] or 0) if row else 0
+    unsafe_rows = int(row["unsafe_rows"] or 0) if row else 0
+    return canonical_rows > 0 and unsafe_rows == 0
 
 
 def save_platt_model(

@@ -24,6 +24,7 @@ from src.data.ingestion_guard import (
     IngestionGuard,
     PhysicalBoundsViolation,
     UnitConsistencyViolation,
+    UnknownCityViolation,
 )
 from src.types.observation_atom import IngestionRejected
 
@@ -167,6 +168,17 @@ def test_guard_rejection_increments_count(guard: IngestionGuard) -> None:
     assert IngestionGuard.rejected_count == baseline + 1
 
 
+def test_guard_rejects_unknown_raw_unit(guard: IngestionGuard) -> None:
+    with pytest.raises(UnitConsistencyViolation, match="not one of"):
+        guard.check_unit_consistency(
+            city="NYC",
+            raw_value=72.0,
+            raw_unit="degF",
+            declared_unit="F",
+            target_date=date(2026, 1, 15),
+        )
+
+
 def test_guard_collection_timing_before_peak_hour(guard: IngestionGuard) -> None:
     """LA fetched at UTC 12:00 (= ~04:00-05:00 PDT) is before peak_hour=16 u2192 CollectionTimingViolation.
 
@@ -183,6 +195,37 @@ def test_guard_collection_timing_before_peak_hour(guard: IngestionGuard) -> None
             fetch_utc=fetch_utc,
             target_date=target,
             peak_hour=16.0,
+        )
+
+
+def test_guard_collection_timing_respects_fractional_peak_hour(guard: IngestionGuard) -> None:
+    """Fractional peak_hour compares minutes, not just integer fetch hour."""
+    target = date(2026, 1, 15)
+    # Hong Kong local 14:45, after peak_hour 14.5. Integer-hour comparison
+    # used to reject this as "14 < 14.5".
+    fetch_utc = datetime(2026, 1, 15, 6, 45, tzinfo=timezone.utc)
+    guard.check_collection_timing(
+        city="Hong Kong",
+        fetch_utc=fetch_utc,
+        target_date=target,
+        peak_hour=14.5,
+    )
+
+
+def test_guard_unknown_city_fails_closed(guard: IngestionGuard) -> None:
+    with pytest.raises(UnknownCityViolation):
+        guard.check_physical_bounds(
+            "Not A City",
+            72.0,
+            1,
+            target_date=date(2026, 1, 15),
+        )
+    with pytest.raises(UnknownCityViolation):
+        guard.check_collection_timing(
+            city="Not A City",
+            fetch_utc=datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc),
+            target_date=date(2026, 1, 15),
+            peak_hour=14.0,
         )
 
 

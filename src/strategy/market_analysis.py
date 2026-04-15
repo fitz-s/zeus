@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
+from src.calibration.platt import ExtendedPlattCalibrator, logit_safe
 from src.config import edge_n_bootstrap
 from src.contracts.settlement_semantics import round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
@@ -23,6 +23,7 @@ from src.signal.forecast_uncertainty import (
 )
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
+from src.types.market import bin_probability_from_values
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class MarketAnalysis:
         forecast_source: str = "",
         bias_corrected: bool | None = None,
         bias_reference: dict | None = None,
+        rng_seed: int | None = None,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -96,6 +98,7 @@ class MarketAnalysis:
             ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
+        self._rng = np.random.default_rng(rng_seed)
 
     def _posterior_with_bootstrapped_bin(self, bin_idx: int, p_cal_boot: float) -> np.ndarray:
         p_cal_boot_vector = np.array(self.p_cal, dtype=float)
@@ -219,8 +222,11 @@ class MarketAnalysis:
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
-        rng = np.random.default_rng()
+        rng = self._rng
         bootstrap_edges = np.zeros(n)
+
+        input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
+        is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
             # Layer 1: resample ENS members + instrument noise
@@ -228,25 +234,25 @@ class MarketAnalysis:
             noised = sample + rng.normal(0, self._sigma, n_members)
             measured = self._settle(noised)
 
-            # Compute p_raw for this bin from resampled members
-            p_raw_boot = self._bin_probability(measured, b)
+            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
+            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
-            # Layer 2: sample Platt parameterization
+            # Layer 2: sample Platt parameterization for ALL bins
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_input = p_raw_boot
-                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
-                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
-                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
-                logit = np.log(p_clamped / (1.0 - p_clamped))
-                z = A * logit + B * self._lead_days + C
-                p_cal_boot = 1.0 / (1.0 + np.exp(-z))
+                p_cal_boot_all = np.empty(len(self.bins))
+                for j, bb in enumerate(self.bins):
+                    p_input = p_raw_all[j]
+                    if is_wnd:
+                        p_input = p_raw_all[j] / bb.width if bb.width is not None and bb.width > 0 else p_raw_all[j]
+                    z = A * logit_safe(p_input) + B * self._lead_days + C
+                    p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
-                p_cal_boot = p_raw_boot
+                p_cal_boot_all = p_raw_all
 
-            p_post = self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
-            bootstrap_edges[i] = p_post - self.p_market[bin_idx]
+            p_post = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)
+            bootstrap_edges[i] = p_post[bin_idx] - self.p_market[bin_idx]
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
         p_value = float(np.mean(bootstrap_edges <= 0))
@@ -275,32 +281,36 @@ class MarketAnalysis:
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
-        rng = np.random.default_rng()
+        rng = self._rng
         bootstrap_edges = np.zeros(n)
+
+        input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
+        is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
             measured = self._settle(noised)
 
-            p_raw_boot = self._bin_probability(measured, b)
+            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
+            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
             if platt_params:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_input = p_raw_boot
-                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
-                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
-                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
-                logit = np.log(p_clamped / (1.0 - p_clamped))
-                z = A * logit + B * self._lead_days + C
-                p_cal_boot = 1.0 / (1.0 + np.exp(-z))
+                p_cal_boot_all = np.empty(len(self.bins))
+                for j, bb in enumerate(self.bins):
+                    p_input = p_raw_all[j]
+                    if is_wnd:
+                        p_input = p_raw_all[j] / bb.width if bb.width is not None and bb.width > 0 else p_raw_all[j]
+                    z = A * logit_safe(p_input) + B * self._lead_days + C
+                    p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
-                p_cal_boot = p_raw_boot
+                p_cal_boot_all = p_raw_all
 
-            p_post_no = 1.0 - self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
+            p_post_yes = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)[bin_idx]
             p_market_no = 1.0 - self.p_market[bin_idx]
-            bootstrap_edges[i] = p_post_no - p_market_no
+            bootstrap_edges[i] = (1.0 - p_post_yes) - p_market_no
 
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))
@@ -313,9 +323,4 @@ class MarketAnalysis:
     @staticmethod
     def _bin_probability(measured: np.ndarray, b: Bin) -> float:
         """Compute fraction of measured values falling in bin."""
-        if b.is_open_low:
-            return float(np.mean(measured <= b.high))
-        elif b.is_open_high:
-            return float(np.mean(measured >= b.low))
-        else:
-            return float(np.mean((measured >= b.low) & (measured <= b.high)))
+        return bin_probability_from_values(measured, b)

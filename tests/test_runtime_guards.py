@@ -48,6 +48,7 @@ from src.state.portfolio import (
 )
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge, Day0TemporalContext
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
 NYC = City(
@@ -113,6 +114,32 @@ def _edge() -> BinEdge:
         p_value=0.02,
         vwmp=0.35,
     )
+
+
+def _stub_full_family_scan(monkeypatch) -> None:
+    def _scan(analysis, *args, **kwargs):
+        hypotheses = []
+        for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))):
+            hypotheses.append(
+                FullFamilyHypothesis(
+                    index=i,
+                    range_label=edge.bin.label,
+                    direction=edge.direction,
+                    edge=edge.edge,
+                    ci_lower=edge.ci_lower,
+                    ci_upper=edge.ci_upper,
+                    p_value=edge.p_value,
+                    p_model=edge.p_model,
+                    p_market=edge.p_market,
+                    p_posterior=edge.p_posterior,
+                    entry_price=edge.entry_price,
+                    is_shoulder=bool(getattr(edge.bin, "is_shoulder", False)),
+                    passed_prefilter=True,
+                )
+            )
+        return hypotheses
+
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", _scan)
 
 
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
@@ -2683,7 +2710,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=3000):
@@ -2776,7 +2803,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
-    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 4.0)
@@ -2835,7 +2862,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=3000):
@@ -2901,7 +2928,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
-    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degenerate CI must not reach sizing")))
 
@@ -2963,7 +2990,7 @@ def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=3000):
@@ -3098,7 +3125,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             }
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 44.0)
 
         def spread(self):
@@ -3149,7 +3176,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "Day0Signal", DummyDay0Signal)
-    def _remaining_for_day0(members_hourly, times, timezone_name, target_d, now=None):
+    def _remaining_for_day0(members_hourly, times, timezone_name, target_d, now=None, **kwargs):
         calls["day0_now"] = now
         return np.full(51, 44.0), 6.0
     monkeypatch.setattr(evaluator_module, "remaining_member_maxes_for_day0", _remaining_for_day0)
@@ -3157,7 +3184,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
-    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -3323,7 +3350,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     )
 
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 55.0)
 
         def p_raw_vector(self, bins):
@@ -3390,7 +3417,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
-    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
 
     decisions = evaluator_module.evaluate_candidate(
@@ -3463,41 +3490,8 @@ def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypat
     assert decisions[0].agreement == "CROSSCHECK_UNAVAILABLE"
 
 
-@pytest.mark.skip(reason="Phase2: paper_mode removed")
-def test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode():
-    edge_ctx = type(
-        "EdgeContext",
-        (),
-        {
-            "p_posterior": 0.41,
-            "p_market": np.array([0.46]),
-            "divergence_score": 0.0,
-            "market_velocity_1h": 0.0,
-        },
-    )()
-    pos = Position(
-        trade_id="paper-buy-yes",
-        market_id="m1",
-        city="NYC",
-        cluster="US-Northeast",
-        target_date="2026-04-01",
-        bin_label="39-40°F",
-        direction="buy_yes",
-        state="holding",
-        last_monitor_prob=0.41,
-        last_monitor_prob_is_fresh=True,
-        last_monitor_market_price=0.46,
-        last_monitor_market_price_is_fresh=True,
-    )
-
-    ctx = cycle_runtime._build_exit_context(
-        pos,
-        edge_ctx,
-        hours_to_settlement=4.0,
-        ExitContext=ExitContext,
-    )
-
-    assert ctx.best_bid == pytest.approx(0.46)
+## Paper-mode test removed — Zeus is live-only (Phase 1 decommission).
+## Original: test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode
 
 
 def test_build_exit_context_preserves_missing_best_bid_for_exit_audit():
@@ -4816,95 +4810,10 @@ def test_execute_exit_rejected_orderresult_preserves_retry_semantics(monkeypatch
     assert pos.last_exit_error == "sell_api_down"
 
 
-@pytest.mark.skip(reason="Phase2: paper_mode removed")
-def test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode():
-    pos = _position(state="day0_window")
-    portfolio = PortfolioState(positions=[pos])
-    ctx = ExitContext(
-        fresh_prob=0.41,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.46,
-        current_market_price_is_fresh=True,
-        best_bid=0.45,
-        best_ask=0.49,
-        market_vig=None,
-        hours_to_settlement=2.0,
-        position_state="day0_window",
-        day0_active=True,
-        exit_reason="forward edge failed",
-    )
-    intent = exit_lifecycle_module.build_exit_intent(pos, ctx)
 
-    outcome = exit_lifecycle_module.execute_exit(
-        portfolio=portfolio,
-        position=pos,
-        exit_context=ctx,
-        exit_intent=intent,
-    )
-
-    assert outcome == "paper_exit: forward edge failed"
-    assert pos in portfolio.positions
-    assert pos.state == "economically_closed"
-    assert pos.exit_state == "sell_filled"
-
-
-@pytest.mark.skip(reason="Phase2: paper_mode removed")
-def test_execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present():
-    from src.engine.lifecycle_events import build_entry_canonical_write
-    from src.state.ledger import append_many_and_project, apply_architecture_kernel_schema
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
-
-    pos = _position(state="day0_window")
-    pos.day0_entered_at = "2026-03-30T01:00:00Z"
-    portfolio = PortfolioState(positions=[pos])
-    entry_events, entry_projection = build_entry_canonical_write(
-        pos,
-        decision_id="dec-1",
-        source_module="src.engine.cycle_runtime",
-    )
-    append_many_and_project(conn, entry_events, entry_projection)
-
-    ctx = ExitContext(
-        fresh_prob=0.41,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.46,
-        current_market_price_is_fresh=True,
-        best_bid=0.45,
-        best_ask=0.49,
-        market_vig=None,
-        hours_to_settlement=2.0,
-        position_state="day0_window",
-        day0_active=True,
-        exit_reason="forward edge failed",
-    )
-
-    outcome = exit_lifecycle_module.execute_exit(
-        portfolio=portfolio,
-        position=pos,
-        exit_context=ctx,
-        conn=conn,
-    )
-
-    phase_row = conn.execute(
-        "SELECT phase FROM position_current WHERE position_id = ?",
-        (pos.trade_id,),
-    ).fetchone()
-    event_row = conn.execute(
-        "SELECT event_type, phase_before, phase_after FROM position_events WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
-        (pos.trade_id,),
-    ).fetchone()
-    conn.close()
-
-    assert outcome == "paper_exit: forward edge failed"
-    assert phase_row["phase"] == "economically_closed"
-    assert dict(event_row) == {
-        "event_type": "EXIT_ORDER_FILLED",
-        "phase_before": "pending_exit",
-        "phase_after": "economically_closed",
-    }
+## Paper-mode tests removed — Zeus is live-only (Phase 1 decommission).
+## Original: test_execute_exit_accepts_prebuilt_exit_intent_in_paper_mode
+## Original: test_execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present
 
 
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):

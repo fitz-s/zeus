@@ -46,6 +46,12 @@ def normalize_bin_probability_for_calibration(
     return float(p_raw) / float(bin_width)
 
 
+def logit_safe(p: float | np.ndarray, eps: float = P_CLAMP_LOW):
+    """Finite logit transform with symmetric clipping."""
+    p_clamped = np.clip(p, eps, 1.0 - eps)
+    return np.log(p_clamped / (1.0 - p_clamped))
+
+
 class ExtendedPlattCalibrator:
     """Platt calibrator with lead_days as second input feature.
 
@@ -67,8 +73,10 @@ class ExtendedPlattCalibrator:
         lead_days: np.ndarray,
         outcomes: np.ndarray,
         bin_widths: np.ndarray | None = None,
+        decision_group_ids: np.ndarray | None = None,
         n_bootstrap: int | None = None,
         regularization_C: float = 1.0,
+        rng: np.random.Generator | None = None,
     ) -> None:
         """Fit Platt model on (p_raw, lead_days, outcome) triples.
 
@@ -92,6 +100,25 @@ class ExtendedPlattCalibrator:
                 f"Cannot fit Platt with n={len(p_raw)} < 15. "
                 f"Per spec §3.3: use P_raw directly for n < 15."
             )
+        if rng is None:
+            rng = np.random.default_rng()
+        group_ids = None
+        unique_groups = None
+        if decision_group_ids is not None:
+            group_ids = np.asarray(decision_group_ids, dtype=object)
+            if len(group_ids) != len(outcomes):
+                raise ValueError(
+                    "decision_group_ids must have same length as outcomes: "
+                    f"{len(group_ids)} != {len(outcomes)}"
+                )
+            if any(group_id is None or str(group_id) == "" for group_id in group_ids):
+                raise ValueError("decision_group_ids must not contain null/empty values")
+            unique_groups = np.array(sorted({str(group_id) for group_id in group_ids}), dtype=object)
+            if len(unique_groups) < 15:
+                raise ValueError(
+                    f"Cannot fit Platt with n_eff={len(unique_groups)} < 15. "
+                    f"Per spec §3.3: use P_raw directly for n_eff < 15."
+                )
 
         X = self._build_features(p_raw, lead_days, bin_widths=bin_widths)
         self.input_space = (
@@ -103,14 +130,20 @@ class ExtendedPlattCalibrator:
         self.A = float(lr.coef_[0][0])
         self.B = float(lr.coef_[0][1])
         self.C = float(lr.intercept_[0])
-        self.n_samples = len(outcomes)
+        self.n_samples = len(unique_groups) if unique_groups is not None else len(outcomes)
         self.fitted = True
 
         # Bootstrap parameter uncertainty (spec §3.1)
         self.bootstrap_params = []
-        rng = np.random.default_rng()
         for _ in range(n_bootstrap):
-            idx = rng.choice(len(outcomes), len(outcomes), replace=True)
+            if group_ids is not None and unique_groups is not None:
+                sampled_groups = rng.choice(unique_groups, len(unique_groups), replace=True)
+                idx = np.concatenate([
+                    np.flatnonzero(group_ids == group_id)
+                    for group_id in sampled_groups
+                ])
+            else:
+                idx = rng.choice(len(outcomes), len(outcomes), replace=True)
             try:
                 lr_b = self._fit_lr(X[idx], outcomes[idx], regularization_C)
                 self.bootstrap_params.append((
@@ -135,8 +168,7 @@ class ExtendedPlattCalibrator:
         if not self.fitted:
             raise RuntimeError("Calibrator not fitted. Call fit() first.")
 
-        p_clamped = np.clip(p_raw, P_CLAMP_LOW, P_CLAMP_HIGH)
-        logit = np.log(p_clamped / (1 - p_clamped))
+        logit = logit_safe(p_raw)
         z = self.A * logit + self.B * lead_days + self.C
         p_cal = 1.0 / (1.0 + np.exp(-z))
 
@@ -167,8 +199,7 @@ class ExtendedPlattCalibrator:
                 normalize_bin_probability_for_calibration(float(p), bin_width=float(w) if w is not None else None)
                 for p, w in zip(p_raw, bin_widths)
             ], dtype=np.float64)
-        p_clamped = np.clip(p_raw, P_CLAMP_LOW, P_CLAMP_HIGH)
-        logits = np.log(p_clamped / (1 - p_clamped))
+        logits = logit_safe(p_raw)
         return np.column_stack([logits, lead_days])
 
     @staticmethod

@@ -83,8 +83,10 @@ class City:
     meteostat_station: Optional[str] = None
     airport_name: str = ""
     settlement_source: str = ""
+    country_code: str = ""
     settlement_source_type: str = "wu_icao"  # "wu_icao" | "hko" | "noaa" | "cwa_station"
     diurnal_amplitude: float = 12.0
+    historical_peak_hour: float = 15.0
     # Optional per-city instrument noise override (in city.settlement_unit).
     # See src/signal/ensemble_signal.py::sigma_instrument_for_city for the
     # rationale. Default None means use the unit-keyed ASOS spec from
@@ -182,15 +184,14 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
             noaa_gx = None
             noaa_gy = None
 
-        unit = c["unit"]
-        amp = _unit_diurnal_amplitude(c, unit)
-
         if "cluster" not in c:
             raise KeyError(
                 f"City {name!r} missing from city metadata cluster field. "
                 "Cluster taxonomy must be explicit and single-sourced."
             )
         cluster = c["cluster"]
+        unit = c["unit"]
+        amp = _unit_diurnal_amplitude(c, unit)
 
         result.append(
             City(
@@ -207,8 +208,10 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 meteostat_station=c.get("meteostat_station"),
                 airport_name=c.get("airport_name", ""),
                 settlement_source=c.get("settlement_source", ""),
+                country_code=c["country_code"],
                 settlement_source_type=c.get("settlement_source_type") or "wu_icao",
                 diurnal_amplitude=amp,
+                historical_peak_hour=float(c.get("historical_peak_hour", 15.0)),
                 instrument_noise_override=(
                     float(c["instrument_noise_override"])
                     if c.get("instrument_noise_override") is not None

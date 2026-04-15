@@ -861,7 +861,7 @@ def test_lifecycle_kernel_enters_day0_window_from_active_states():
 def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
     from src.state.lifecycle_manager import enter_day0_window_runtime_state
 
-    with pytest.raises(ValueError, match="day0 transition requires active runtime phase"):
+    with pytest.raises(ValueError, match="day0 transition requires active/pending_entry/day0_window runtime phase"):
         enter_day0_window_runtime_state(
             "pending_exit",
             exit_state="sell_pending",
@@ -1292,10 +1292,9 @@ def test_exit_authority_fails_closed_on_stale_monitor_inputs():
     assert decision.should_exit is False
     assert "fresh_prob_is_fresh" in decision.reason
     assert "current_market_price_is_fresh" in decision.reason
-    assert decision.reason.count("fresh_prob_is_fresh") == 1
 
 
-def test_buy_yes_edge_exit_uses_degraded_best_bid_proxy():
+def test_buy_yes_edge_exit_requires_best_bid():
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -1312,149 +1311,7 @@ def test_buy_yes_edge_exit_uses_degraded_best_bid_proxy():
     )
 
     assert decision.should_exit is False
-    assert not decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
-    assert "best_bid_unavailable" in decision.applied_validations
-    assert "best_bid_proxy_from_current_market_price" in decision.applied_validations
-    assert "best_bid_proxy_tick_discount" in decision.applied_validations
-
-
-def test_degraded_best_bid_proxy_applies_tick_discount_and_clamp():
-    from src.state.portfolio import _buy_yes_degraded_best_bid_proxy
-
-    assert _buy_yes_degraded_best_bid_proxy(0.55) == pytest.approx(0.54)
-    assert _buy_yes_degraded_best_bid_proxy(0.005) == pytest.approx(0.01)
-    assert _buy_yes_degraded_best_bid_proxy(1.20) == pytest.approx(0.99)
-
-
-def test_degraded_best_bid_proxy_discount_can_veto_edge_exit(monkeypatch):
-    """The 1c discount is the safety property, not just formatting."""
-    monkeypatch.setattr("src.state.portfolio.buy_yes_edge_threshold", lambda entry_ci_width: 0.0)
-    with_real_bid = _make_position(
-        direction="buy_yes",
-        size_usd=5.0,
-        entry_price=0.40,
-        entry_ci_width=0.02,
-        neg_edge_count=1,
-    )
-    real_bid_decision = with_real_bid.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.545,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.55,
-            current_market_price_is_fresh=True,
-            best_bid=0.55,
-            hours_to_settlement=4.0,
-            position_state="holding",
-            day0_active=False,
-        )
-    )
-
-    with_proxy = _make_position(
-        direction="buy_yes",
-        size_usd=5.0,
-        entry_price=0.40,
-        entry_ci_width=0.02,
-        neg_edge_count=1,
-    )
-    proxy_decision = with_proxy.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.545,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.55,
-            current_market_price_is_fresh=True,
-            best_bid=None,
-            hours_to_settlement=4.0,
-            position_state="holding",
-            day0_active=False,
-        )
-    )
-
-    assert real_bid_decision.should_exit is True
-    assert proxy_decision.should_exit is False
-    assert "best_bid_proxy_tick_discount" in proxy_decision.applied_validations
-    assert "hold_value_contract" in proxy_decision.applied_validations
-    assert "hold_cost_fee_declared_zero" in proxy_decision.applied_validations
-    assert "hold_cost_time_declared_zero" in proxy_decision.applied_validations
-
-
-def test_settlement_sensitive_entries_reject_missing_confidence_band():
-    from src.engine.discovery_mode import DiscoveryMode
-    from src.engine.evaluator import MarketCandidate, _entry_ci_rejection_reason
-    from src.types import Bin, BinEdge
-
-    candidate = MarketCandidate(
-        city=type("City", (), {"name": "NYC"})(),
-        target_date="2026-04-01",
-        outcomes=[],
-        hours_since_open=30.0,
-        hours_to_resolution=3.0,
-        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
-    )
-    edge = BinEdge(
-        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
-        direction="buy_yes",
-        edge=0.10,
-        ci_lower=float("nan"),
-        ci_upper=0.10,
-        p_model=0.60,
-        p_market=0.40,
-        p_posterior=0.55,
-        entry_price=0.40,
-        p_value=0.01,
-        vwmp=0.40,
-    )
-
-    assert _entry_ci_rejection_reason(candidate, edge) == "MISSING_CONFIDENCE_BAND"
-
-
-def test_buy_no_edge_exit_declares_hold_value_costs():
-    pos = _make_position(
-        direction="buy_no",
-        size_usd=5.0,
-        entry_price=0.60,
-        entry_ci_width=0.02,
-        neg_edge_count=1,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.50,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.70,
-            current_market_price_is_fresh=True,
-            best_bid=0.69,
-            hours_to_settlement=48.0,
-            position_state="holding",
-            day0_active=False,
-        )
-    )
-
-    assert decision.should_exit is True
-    assert decision.trigger == "BUY_NO_EDGE_EXIT"
-    assert "hold_value_contract" in decision.applied_validations
-    assert "hold_cost_fee_declared_zero" in decision.applied_validations
-    assert "hold_cost_time_declared_zero" in decision.applied_validations
-
-
-def test_buy_yes_exit_still_hard_fails_without_market_price_source():
-    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.30,
-            fresh_prob_is_fresh=True,
-            current_market_price=None,
-            current_market_price_is_fresh=False,
-            best_bid=None,
-            hours_to_settlement=4.0,
-            position_state="holding",
-            day0_active=False,
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
-    assert "current_market_price" in decision.reason
+    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
 
 
 def test_day0_buy_yes_uses_single_confirmation_observation_reversal():

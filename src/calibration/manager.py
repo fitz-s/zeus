@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from src.calibration.platt import ExtendedPlattCalibrator, calibrate_and_normalize
 from src.calibration.store import (
     get_pairs_for_bucket,
-    get_pairs_count,
+    get_decision_group_count,
     load_platt_model,
     save_platt_model,
 )
@@ -144,12 +144,18 @@ def get_calibrator(
             if refit is not None:
                 level = maturity_level(refit.n_samples)
                 return refit, level
-        cal = _model_data_to_calibrator(model_data)
-        level = maturity_level(model_data["n_samples"])
-        return cal, level
+            logger.warning(
+                "Ignoring stale raw-probability Platt model for %s; "
+                "width-normalized refit unavailable",
+                bk,
+            )
+        else:
+            cal = _model_data_to_calibrator(model_data)
+            level = maturity_level(model_data["n_samples"])
+            return cal, level
 
     # Check if we have enough pairs to fit on the fly
-    n = get_pairs_count(conn, cluster, season)
+    n = get_decision_group_count(conn, cluster, season)
     _, _, level3 = calibration_maturity_thresholds()
     if n >= level3:
         cal = _fit_from_pairs(conn, cluster, season)
@@ -164,6 +170,12 @@ def get_calibrator(
         bk_fb = bucket_key(fallback_cluster, season)
         model_data = load_platt_model(conn, bk_fb)
         if model_data is not None and model_data["n_samples"] >= level3:
+            if model_data.get("input_space") != "width_normalized_density":
+                logger.warning(
+                    "Skipping stale raw-probability fallback Platt model for %s",
+                    bk_fb,
+                )
+                continue
             cal = _model_data_to_calibrator(model_data)
             level = maturity_level(model_data["n_samples"])
             return cal, max(level, 3)  # Fallback is at most level 3
@@ -191,17 +203,31 @@ def _fit_from_pairs(
     conn, cluster: str, season: str
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs."""
-    pairs = get_pairs_for_bucket(conn, cluster, season)
+    pairs = get_pairs_for_bucket(conn, cluster, season, bin_source_filter="canonical_v1")
     _, _, level3 = calibration_maturity_thresholds()
     if len(pairs) < level3:
         return None
 
+    decision_group_ids = np.array([p.get("decision_group_id") for p in pairs], dtype=object)
+    if any(group_id is None or str(group_id) == "" for group_id in decision_group_ids):
+        logger.warning("Platt fit refused for %s_%s: missing decision_group_id", cluster, season)
+        return None
+    n_eff = len({str(group_id) for group_id in decision_group_ids})
+    if n_eff < level3:
+        return None
+    if not _canonical_pair_groups_valid(pairs):
+        logger.warning("Platt fit refused for %s_%s: invalid canonical group shape", cluster, season)
+        return None
+
     p_raw = np.array([p["p_raw"] for p in pairs])
+    if not np.isfinite(p_raw).all() or np.any((p_raw < 0.0) | (p_raw > 1.0)):
+        logger.warning("Platt fit refused for %s_%s: p_raw outside [0, 1]", cluster, season)
+        return None
     lead_days = np.array([p["lead_days"] for p in pairs])
     outcomes = np.array([p["outcome"] for p in pairs])
     bin_widths = np.array([p.get("bin_width") for p in pairs], dtype=object)
 
-    level = maturity_level(len(pairs))
+    level = maturity_level(n_eff)
     reg_C = regularization_for_level(level)
 
     cal = ExtendedPlattCalibrator()
@@ -211,6 +237,7 @@ def _fit_from_pairs(
             lead_days,
             outcomes,
             bin_widths=bin_widths,
+            decision_group_ids=decision_group_ids,
             regularization_C=reg_C,
         )
     except Exception as e:
@@ -229,6 +256,24 @@ def _fit_from_pairs(
     conn.commit()
 
     return cal
+
+
+def _canonical_pair_groups_valid(pairs: list[dict]) -> bool:
+    groups: dict[str, dict] = {}
+    for pair in pairs:
+        group_id = str(pair.get("decision_group_id") or "")
+        group = groups.setdefault(group_id, {"rows": 0, "positives": 0, "labels": set()})
+        group["rows"] += 1
+        group["positives"] += int(pair.get("outcome") == 1)
+        group["labels"].add(str(pair.get("range_label")))
+    for group in groups.values():
+        if group["rows"] not in (92, 102):
+            return False
+        if group["positives"] != 1:
+            return False
+        if len(group["labels"]) != group["rows"]:
+            return False
+    return True
 
 
 def maybe_refit_bucket(conn, city: City, target_date: str) -> bool:

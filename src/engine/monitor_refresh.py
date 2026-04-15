@@ -623,6 +623,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             from src.strategy.market_analysis import MarketAnalysis
             held_idx = bootstrap_ctx["held_idx"]
             bins = bootstrap_ctx["bins"]
+            if len(bootstrap_ctx["member_maxes"]) == 0:
+                raise ValueError("Bootstrap context has no member_maxes")
             p_market_arr = np.zeros(len(bins))
             # A1: MarketAnalysis expects YES-side market prices (entry convention).
             # For buy_no, current_p_market is native NO-side — convert back to YES.

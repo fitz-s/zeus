@@ -34,13 +34,17 @@ Promotion thresholds computed by these modules may be reported in status_summary
 
 ## 4. Replay demotion
 
-`src/engine/replay.py` self-declares these limitations:
-- Uniform prior (no market price linkage)
-- Flat $5 sizing (no active Kelly)
-- No bootstrap/FDR
-- Coverage gaps
+`src/engine/replay.py` operates under `diagnostic_non_promotion` authority.
 
-Until these are resolved, replay output carries `authority: "evaluation_only"`. It may:
+Current limitation reality (code-observed, not blanket):
+- Market price linkage: tracked per-subject as `full`, `partial`, or `none` via `_market_price_linkage_limitations()`; PnL availability depends on linkage state
+- Sizing: flat $5 (no active Kelly cascade)
+- Bootstrap/FDR: not applied in replay path
+- Coverage: gaps exist; provenance sources tracked per-outcome
+
+The code is more nuanced than "no market price linkage" — it distinguishes linkage states and reports limitations explicitly. However, active sizing parity (Kelly) and selection-family parity (FDR) remain absent, so replay output remains non-promotional.
+
+Until active sizing parity and selection-family parity are established, replay output carries `authority: "evaluation_only"`. It may:
 - Report comparative metrics
 - Surface regressions between code versions
 - Inform hypothesis generation

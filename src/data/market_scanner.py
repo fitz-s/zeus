@@ -22,11 +22,35 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
 
+_LOW_METRIC_KEYWORDS = (
+    "lowest temperature",
+    "low temperature",
+    "lowest temp",
+    "minimum temperature",
+    "minimum temp",
+    "min temperature",
+    "daily low",
+    "overnight low",
+    "coldest temperature",
+)
+
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
+
+
+def infer_temperature_metric(*text_surfaces: str) -> str:
+    """Infer market metric from free text.
+
+    Returns:
+        "low" when text clearly describes daily lows; otherwise "high".
+    """
+    text = " ".join(str(surface or "") for surface in text_surfaces).lower()
+    if any(keyword in text for keyword in _LOW_METRIC_KEYWORDS):
+        return "low"
+    return "high"
 
 
 def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, retries: int = 3) -> httpx.Response:
@@ -229,6 +253,25 @@ def _parse_event(
     if not outcomes:
         return None
 
+    metric_surfaces = [
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("description", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        metric_surfaces.extend(
+            [
+                market.get("question", ""),
+                market.get("title", ""),
+                market.get("description", ""),
+                market.get("groupItemTitle", ""),
+                market.get("group_item_title", ""),
+            ]
+        )
+    temperature_metric = infer_temperature_metric(*metric_surfaces)
+
     # Compute hours since market opened
     created_str = event.get("createdAt") or event.get("created_at")
     hours_since_open = 24.0
@@ -245,6 +288,7 @@ def _parse_event(
         "title": event.get("title", ""),
         "city": city,
         "target_date": target_date,
+        "temperature_metric": temperature_metric,
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         "outcomes": outcomes,

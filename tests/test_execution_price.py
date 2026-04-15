@@ -17,6 +17,7 @@ from src.contracts.execution_price import (
     ExecutionPriceContractError,
     polymarket_fee,
 )
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +391,28 @@ class TestEvaluatorWiring:
             ),
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
-        monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            evaluator_module,
+            "scan_full_hypothesis_family",
+            lambda analysis, *args, **kwargs: [
+                FullFamilyHypothesis(
+                    index=1,
+                    range_label=edge.bin.label,
+                    direction=edge.direction,
+                    edge=edge.edge,
+                    ci_lower=edge.ci_lower,
+                    ci_upper=edge.ci_upper,
+                    p_value=edge.p_value,
+                    p_model=edge.p_model,
+                    p_market=edge.p_market,
+                    p_posterior=edge.p_posterior,
+                    entry_price=edge.entry_price,
+                    is_shoulder=False,
+                    passed_prefilter=True,
+                )
+                for edge in analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))
+            ],
+        )
         monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
         monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
         monkeypatch.setattr(evaluator_module, "kelly_size", capture_kelly)
@@ -447,7 +469,6 @@ class TestEvaluatorWiring:
                 max_portfolio_heat_pct=1.0,
                 max_correlated_pct=1.0,
                 max_city_pct=1.0,
-                max_region_pct=1.0,
                 min_order_usd=0.01,
             ),
             entry_bankroll=1000.0,
@@ -472,7 +493,6 @@ class TestEvaluatorWiring:
                 max_portfolio_heat_pct=1.0,
                 max_correlated_pct=1.0,
                 max_city_pct=1.0,
-                max_region_pct=1.0,
                 min_order_usd=0.01,
             ),
             entry_bankroll=1000.0,

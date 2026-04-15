@@ -223,6 +223,7 @@ class EnsembleSignal:
         target_date: date,
         settlement_semantics: SettlementSemantics,
         decision_time: datetime | None = None,
+        temperature_metric: str = "high",
     ):
         """
         Args:

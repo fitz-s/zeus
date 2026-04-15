@@ -287,8 +287,10 @@ PIPELINE_STEPS = [
     },
     {
         "id": "calibration_pairs",
-        "name": "Generate calibration pairs from ENS + settlements",
-        "script": "generate_calibration_pairs.py",
+        "name": "Canonical calibration-pair rebuild from verified ENS + observations",
+        "script": "rebuild_calibration_pairs_canonical.py",
+        "extra_args": ["--dry-run"],
+        "optional": True,
     },
 ]
 

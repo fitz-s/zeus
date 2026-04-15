@@ -239,8 +239,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return False
 
     def _emit_rescue_event(position, *, rescued_at: str) -> None:
-        # Rescue events are now written as canonical lifecycle events (P9).
-        pass
+        # Bug #54: log rescue for observability (canonical write is in
+        # _append_canonical_rescue_if_available).
+        logger.info(
+            "RESCUE: %s rescued at %s (chain_state=%s, shares=%.4f, entry=%.4f)",
+            getattr(position, "trade_id", "?"),
+            rescued_at,
+            getattr(position, "chain_state", "?"),
+            getattr(position, "shares", 0.0),
+            getattr(position, "entry_price", 0.0),
+        )
 
     def _sync_reconciled_trade_lifecycle(position) -> None:
         if update_trade_lifecycle is None:
@@ -442,6 +450,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         pos.trade_id, local_shares, chain.size,
                     )
                     corrected.chain_state = "size_mismatch_unresolved"
+                    corrected.shares = local_shares
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )

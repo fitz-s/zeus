@@ -103,12 +103,13 @@ class TestComputePosterior:
         np.testing.assert_allclose(result, expected)
         assert not np.allclose(result, legacy_post_blend)
 
-    def test_sparse_monitor_market_vector_is_not_de_vigged(self):
+    def test_sparse_monitor_market_vector_imputes_missing_sibling_prices(self):
         p_cal = np.array([0.30, 0.40, 0.30])
         p_market = np.array([0.00, 0.95, 0.00])
 
         result = compute_posterior(p_cal, p_market, 0.5)
-        raw = 0.5 * p_cal + 0.5 * p_market
+        imputed_market = np.array([0.30, 0.95, 0.30])
+        raw = 0.5 * p_cal + 0.5 * imputed_market
         expected = raw / raw.sum()
         incorrectly_devigged = 0.5 * p_cal + 0.5 * np.array([0.0, 1.0, 0.0])
 

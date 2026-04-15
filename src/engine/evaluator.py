@@ -76,6 +76,7 @@ class MarketCandidate:
     outcomes: list[dict]
     hours_since_open: float
     hours_to_resolution: float
+    temperature_metric: str = "high"
     event_id: str = ""
     slug: str = ""
     observation: Optional[dict] = None
@@ -258,6 +259,11 @@ def _forecast_source_key(model_name: str | None) -> str:
     if text.startswith("openmeteo"):
         return "openmeteo"
     return text
+
+
+def _normalize_temperature_metric(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    return "low" if text == "low" else "high"
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -636,6 +642,9 @@ def evaluate_candidate(
     city = candidate.city
     target_date = candidate.target_date
     outcomes = candidate.outcomes
+    temperature_metric = _normalize_temperature_metric(
+        getattr(candidate, "temperature_metric", "high")
+    )
     is_day0_mode = candidate.discovery_mode == "day0_capture"
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
@@ -716,7 +725,8 @@ def evaluate_candidate(
             city, 
             target_d, 
             settlement_semantics=settlement_semantics,
-            decision_time=decision_time
+            decision_time=decision_time,
+            temperature_metric=temperature_metric,
         )
     except ValueError as e:
         return [EdgeDecision(
@@ -745,14 +755,15 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "solar_context"],
             )]
 
-        remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
+        remaining_member_extrema, hours_remaining = remaining_member_maxes_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],
             city.timezone,
             target_d,
             now=temporal_context.current_utc_timestamp,
+            temperature_metric=temperature_metric,
         )
-        if remaining_member_maxes.size == 0:
+        if remaining_member_extrema.size == 0:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
@@ -763,20 +774,40 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
+        if temperature_metric == "low" and candidate.observation.get("low_so_far") is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["Day0 low observation unavailable"],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "ens_fetch"],
+            )]
+
         day0 = Day0Signal(
             observed_high_so_far=float(candidate.observation["high_so_far"]),
+            observed_low_so_far=(
+                float(candidate.observation["low_so_far"])
+                if candidate.observation.get("low_so_far") is not None
+                else None
+            ),
             current_temp=float(candidate.observation["current_temp"]),
             hours_remaining=hours_remaining,
-            member_maxes_remaining=remaining_member_maxes,
+            member_maxes_remaining=remaining_member_extrema,
+            member_mins_remaining=remaining_member_extrema,
             unit=city.settlement_unit,
             observation_source=str(candidate.observation.get("source", "")),
             observation_time=candidate.observation.get("observation_time"),
             current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
             temporal_context=temporal_context,
+            temperature_metric=temperature_metric,
         )
         p_raw = day0.p_vector(bins)
         day0_forecast_context = day0.forecast_context()
-        ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
+        ensemble_spread = TemperatureDelta(
+            float(np.std(remaining_member_extrema)), city.settlement_unit
+        )
         entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0
     else:
@@ -830,6 +861,9 @@ def evaluate_candidate(
         )
         entry_validations.extend(["platt_calibration", "normalization", "authority_verified"])
     else:
+        # No calibration data is consumed on the uncalibrated path, so the
+        # market-fusion authority gate is not applicable to Platt rows.
+        _authority_verified = True
         p_cal = p_raw.copy()
 
     # Market prices via VWMP
@@ -937,8 +971,12 @@ def evaluate_candidate(
                 city.timezone,
                 times=gfs_result["times"],
             )
-            gfs_maxes = gfs_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
-            gfs_measured = settlement_semantics.round_values(gfs_maxes)
+            gfs_metric_values = (
+                gfs_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
+                if temperature_metric == "low"
+                else gfs_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
+            )
+            gfs_measured = settlement_semantics.round_values(gfs_metric_values)
             n_gfs = len(gfs_measured)
             gfs_p = np.zeros(len(bins))
             for i, b in enumerate(bins):

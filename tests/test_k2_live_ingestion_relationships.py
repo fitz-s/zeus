@@ -264,9 +264,11 @@ def test_R5_guard_rejection_uses_legitimate_gap_not_failed() -> None:
     import src.data.daily_obs_append as mod
     original = mod._fetch_wu_icao_daily_highs_lows
     try:
-        mod._fetch_wu_icao_daily_highs_lows = lambda *a, **kw: {
-            "2025-06-01": (200.0, 190.0),  # impossible — guard will reject
-        }
+        mod._fetch_wu_icao_daily_highs_lows = lambda *a, **kw: mod.WuDailyFetchResult(
+            payload={
+                "2025-06-01": (200.0, 190.0),  # impossible — guard will reject
+            }
+        )
         stats = append_wu_city(
             "Houston",
             [date(2025, 6, 1)],
@@ -293,6 +295,152 @@ def test_R5_guard_rejection_uses_legitimate_gap_not_failed() -> None:
     )
     assert gap_row["reason"] == CoverageReason.GUARD_REJECTED
     assert stats["guard_rejected"] == 1
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "auth_failed"),
+    [
+        (CoverageReason.AUTH_ERROR, True),
+        (CoverageReason.HTTP_429, False),
+        (CoverageReason.HTTP_5XX, False),
+        (CoverageReason.PARSE_ERROR, False),
+    ],
+)
+def test_R5_wu_fetch_failure_reason_reaches_coverage(
+    failure_reason: str,
+    auth_failed: bool,
+) -> None:
+    """WU fetch failures must not collapse into a generic empty payload.
+
+    Relationship: the fetch layer classifies upstream failures, and
+    append_wu_city must preserve that reason in data_coverage so operators can
+    distinguish auth, rate-limit, server, and parse failures.
+    """
+    conn = _memdb()
+    import src.data.daily_obs_append as mod
+
+    original = mod._fetch_wu_icao_daily_highs_lows
+    try:
+        mod._fetch_wu_icao_daily_highs_lows = lambda *a, **kw: mod.WuDailyFetchResult(
+            payload={},
+            failure_reason=failure_reason,
+            retryable=not auth_failed,
+            auth_failed=auth_failed,
+            error="synthetic failure",
+        )
+        stats = mod.append_wu_city(
+            "NYC",
+            [date(2026, 4, 10)],
+            conn,
+            rebuild_run_id="test",
+        )
+    finally:
+        mod._fetch_wu_icao_daily_highs_lows = original
+
+    row = conn.execute(
+        """
+        SELECT status, reason FROM data_coverage
+        WHERE data_table='observations' AND city='NYC'
+          AND data_source='wu_icao_history' AND target_date='2026-04-10'
+        """
+    ).fetchone()
+    assert row["status"] == CoverageStatus.FAILED.value
+    assert row["reason"] == failure_reason
+    assert stats["fetch_errors"] == 1
+    assert stats["missing_from_api"] == 0
+
+
+def test_R5_empty_wu_payload_is_not_network_error() -> None:
+    """A usable empty WU response is SOURCE_NOT_PUBLISHED_YET, not transport failure."""
+    conn = _memdb()
+    import src.data.daily_obs_append as mod
+
+    original = mod._fetch_wu_icao_daily_highs_lows
+    try:
+        mod._fetch_wu_icao_daily_highs_lows = lambda *a, **kw: mod.WuDailyFetchResult(
+            payload={}
+        )
+        stats = mod.append_wu_city(
+            "NYC",
+            [date(2026, 4, 10)],
+            conn,
+            rebuild_run_id="test",
+        )
+    finally:
+        mod._fetch_wu_icao_daily_highs_lows = original
+
+    row = conn.execute(
+        """
+        SELECT status, reason FROM data_coverage
+        WHERE data_table='observations' AND city='NYC'
+          AND data_source='wu_icao_history' AND target_date='2026-04-10'
+        """
+    ).fetchone()
+    assert row["status"] == CoverageStatus.FAILED.value
+    assert row["reason"] == CoverageReason.SOURCE_NOT_PUBLISHED_YET
+    assert stats["fetch_errors"] == 0
+    assert stats["missing_from_api"] == 1
+
+
+def test_R5_wu_observation_upsert_preserves_row_identity() -> None:
+    """Duplicate live WU writes update the observation row without delete+insert."""
+    conn = _memdb()
+    from src.data.daily_obs_append import _build_atom_pair, _write_atom_with_coverage
+
+    target_d = date(2025, 1, 15)
+    first_high, first_low = _build_atom_pair(
+        city_name="NYC",
+        target_d=target_d,
+        high_val=50.0,
+        low_val=30.0,
+        raw_unit="F",
+        target_unit="F",
+        station_id="KLGA:US",
+        source="wu_icao_history",
+        rebuild_run_id="first",
+        data_source_version="wu_icao_v1_2026",
+        api_endpoint="test://",
+        provenance={"run": "first"},
+    )
+    _write_atom_with_coverage(conn, first_high, first_low, data_source="wu_icao_history")
+    conn.commit()
+
+    row1 = conn.execute(
+        "SELECT id, high_temp, low_temp, rebuild_run_id FROM observations "
+        "WHERE city='NYC' AND target_date='2025-01-15' AND source='wu_icao_history'"
+    ).fetchone()
+
+    second_high, second_low = _build_atom_pair(
+        city_name="NYC",
+        target_d=target_d,
+        high_val=52.0,
+        low_val=31.0,
+        raw_unit="F",
+        target_unit="F",
+        station_id="KLGA:US",
+        source="wu_icao_history",
+        rebuild_run_id="second",
+        data_source_version="wu_icao_v1_2026",
+        api_endpoint="test://",
+        provenance={"run": "second"},
+    )
+    _write_atom_with_coverage(conn, second_high, second_low, data_source="wu_icao_history")
+    conn.commit()
+
+    row2 = conn.execute(
+        "SELECT id, high_temp, low_temp, rebuild_run_id FROM observations "
+        "WHERE city='NYC' AND target_date='2025-01-15' AND source='wu_icao_history'"
+    ).fetchone()
+    coverage = conn.execute(
+        "SELECT status FROM data_coverage WHERE city='NYC' "
+        "AND data_source='wu_icao_history' AND target_date='2025-01-15'"
+    ).fetchone()
+
+    assert row2["id"] == row1["id"]
+    assert row2["high_temp"] == 52.0
+    assert row2["low_temp"] == 31.0
+    assert row2["rebuild_run_id"] == "second"
+    assert coverage["status"] == CoverageStatus.WRITTEN.value
 
 
 # ---------------------------------------------------------------------------

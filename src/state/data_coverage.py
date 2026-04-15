@@ -87,6 +87,7 @@ class CoverageReason:
     # be a retry loop for permanent states.
 
     # FAILED reasons — transient, retry after embargo.
+    AUTH_ERROR = "AUTH_ERROR"
     HTTP_429 = "HTTP_429"
     HTTP_5XX = "HTTP_5XX"
     NETWORK_ERROR = "NETWORK_ERROR"

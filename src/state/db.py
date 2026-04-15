@@ -65,7 +65,10 @@ def get_backtest_connection() -> sqlite3.Connection:
 def get_trade_connection_with_world() -> sqlite3.Connection:
     """Trade connection with shared DB ATTACHed for cross-DB joins."""
     conn = get_trade_connection()
-    conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+    # Guard: skip ATTACH if 'world' schema already present (connection reuse)
+    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" not in attached:
+        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     return conn
 
 
@@ -1588,7 +1591,7 @@ def log_probability_trace_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO probability_trace_fact (
+        INSERT INTO probability_trace_fact (
             trace_id,
             decision_id,
             decision_snapshot_id,
@@ -1619,6 +1622,34 @@ def log_probability_trace_fact(
             recorded_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trace_id) DO UPDATE SET
+            decision_id=excluded.decision_id,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            mode=excluded.mode,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            entry_method=excluded.entry_method,
+            selected_method=excluded.selected_method,
+            trace_status=excluded.trace_status,
+            missing_reason_json=excluded.missing_reason_json,
+            bin_labels_json=excluded.bin_labels_json,
+            p_raw_json=excluded.p_raw_json,
+            p_cal_json=excluded.p_cal_json,
+            p_market_json=excluded.p_market_json,
+            p_posterior_json=excluded.p_posterior_json,
+            p_posterior=excluded.p_posterior,
+            alpha=excluded.alpha,
+            agreement=excluded.agreement,
+            n_edges_found=excluded.n_edges_found,
+            n_edges_after_fdr=excluded.n_edges_after_fdr,
+            rejection_stage=excluded.rejection_stage,
+            availability_status=excluded.availability_status,
+            recorded_at=excluded.recorded_at
         """,
         (
             f"probtrace:{decision_id}",
@@ -1732,12 +1763,28 @@ def log_model_eval_run(
         return {"status": "skipped_missing_table", "table": "model_eval_run"}
     conn.execute(
         """
-        INSERT OR REPLACE INTO model_eval_run (
+        INSERT INTO model_eval_run (
             run_id, model_name, model_version, task_name, data_source,
             split_method, train_start, train_end, test_start, test_end,
             scorer_json, config_json, metrics_json, status, created_at, completed_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            model_name=excluded.model_name,
+            model_version=excluded.model_version,
+            task_name=excluded.task_name,
+            data_source=excluded.data_source,
+            split_method=excluded.split_method,
+            train_start=excluded.train_start,
+            train_end=excluded.train_end,
+            test_start=excluded.test_start,
+            test_end=excluded.test_end,
+            scorer_json=excluded.scorer_json,
+            config_json=excluded.config_json,
+            metrics_json=excluded.metrics_json,
+            status=excluded.status,
+            created_at=excluded.created_at,
+            completed_at=excluded.completed_at
         """,
         (
             run_id,
@@ -1782,11 +1829,20 @@ def log_selection_family_fact(
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
     conn.execute(
         """
-        INSERT OR REPLACE INTO selection_family_fact (
+        INSERT INTO selection_family_fact (
             family_id, cycle_mode, decision_snapshot_id, city, target_date,
             strategy_key, discovery_mode, created_at, meta_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(family_id) DO UPDATE SET
+            cycle_mode=excluded.cycle_mode,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            created_at=excluded.created_at,
+            meta_json=excluded.meta_json
         """,
         (
             family_id,
@@ -1837,13 +1893,32 @@ def log_selection_hypothesis_fact(
     direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
     conn.execute(
         """
-        INSERT OR REPLACE INTO selection_hypothesis_fact (
+        INSERT INTO selection_hypothesis_fact (
             hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
             range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
             tested, passed_prefilter, selected_post_fdr, rejection_stage,
             recorded_at, meta_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(hypothesis_id) DO UPDATE SET
+            family_id=excluded.family_id,
+            decision_id=excluded.decision_id,
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            p_value=excluded.p_value,
+            q_value=excluded.q_value,
+            ci_lower=excluded.ci_lower,
+            ci_upper=excluded.ci_upper,
+            edge=excluded.edge,
+            tested=excluded.tested,
+            passed_prefilter=excluded.passed_prefilter,
+            selected_post_fdr=excluded.selected_post_fdr,
+            rejection_stage=excluded.rejection_stage,
+            recorded_at=excluded.recorded_at,
+            meta_json=excluded.meta_json
         """,
         (
             hypothesis_id,
@@ -1898,12 +1973,30 @@ def log_model_eval_point(
         return {"status": "skipped_missing_table", "table": "model_eval_point"}
     conn.execute(
         """
-        INSERT OR REPLACE INTO model_eval_point (
+        INSERT INTO model_eval_point (
             point_id, run_id, point_type, reference_id, city, target_date,
             bucket_key, lead_days, y_true, p_raw, p_cal, p_post, log_loss,
             brier, crps, ece_bin, meta_json, recorded_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(point_id) DO UPDATE SET
+            run_id=excluded.run_id,
+            point_type=excluded.point_type,
+            reference_id=excluded.reference_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            bucket_key=excluded.bucket_key,
+            lead_days=excluded.lead_days,
+            y_true=excluded.y_true,
+            p_raw=excluded.p_raw,
+            p_cal=excluded.p_cal,
+            p_post=excluded.p_post,
+            log_loss=excluded.log_loss,
+            brier=excluded.brier,
+            crps=excluded.crps,
+            ece_bin=excluded.ece_bin,
+            meta_json=excluded.meta_json,
+            recorded_at=excluded.recorded_at
         """,
         (
             point_id,
@@ -1950,12 +2043,23 @@ def upsert_promotion_registry(
         return {"status": "skipped_missing_table", "table": "promotion_registry"}
     conn.execute(
         """
-        INSERT OR REPLACE INTO promotion_registry (
+        INSERT INTO promotion_registry (
             promotion_id, model_name, model_version, task_name, status,
             eval_run_id, decision_reason, effective_at, retired_at, meta_json,
             recorded_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(promotion_id) DO UPDATE SET
+            model_name=excluded.model_name,
+            model_version=excluded.model_version,
+            task_name=excluded.task_name,
+            status=excluded.status,
+            eval_run_id=excluded.eval_run_id,
+            decision_reason=excluded.decision_reason,
+            effective_at=excluded.effective_at,
+            retired_at=excluded.retired_at,
+            meta_json=excluded.meta_json,
+            recorded_at=excluded.recorded_at
         """,
         (
             promotion_id,
@@ -2065,7 +2169,7 @@ def log_opportunity_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO opportunity_fact (
+        INSERT INTO opportunity_fact (
             decision_id,
             candidate_id,
             city,
@@ -2089,6 +2193,27 @@ def log_opportunity_fact(
             recorded_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(decision_id) DO UPDATE SET
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            entry_method=excluded.entry_method,
+            snapshot_id=excluded.snapshot_id,
+            p_raw=excluded.p_raw,
+            p_cal=excluded.p_cal,
+            p_market=excluded.p_market,
+            alpha=excluded.alpha,
+            best_edge=excluded.best_edge,
+            ci_width=excluded.ci_width,
+            rejection_stage=excluded.rejection_stage,
+            rejection_reason_json=excluded.rejection_reason_json,
+            availability_status=excluded.availability_status,
+            should_trade=excluded.should_trade,
+            recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
         """,
         (
             str(getattr(decision, "decision_id", "") or ""),
@@ -2146,7 +2271,7 @@ def log_availability_fact(
     payload = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
     conn.execute(
         """
-        INSERT OR REPLACE INTO availability_fact (
+        INSERT INTO availability_fact (
             availability_id,
             scope_type,
             scope_key,
@@ -2157,6 +2282,14 @@ def log_availability_fact(
             details_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(availability_id) DO UPDATE SET
+            scope_type=excluded.scope_type,
+            scope_key=excluded.scope_key,
+            failure_type=excluded.failure_type,
+            started_at=excluded.started_at,
+            ended_at=excluded.ended_at,
+            impact=excluded.impact,
+            details_json=excluded.details_json
         """,
         (
             availability_id,
@@ -2269,7 +2402,7 @@ def log_execution_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO execution_fact (
+        INSERT INTO execution_fact (
             intent_id,
             position_id,
             decision_id,
@@ -2287,6 +2420,21 @@ def log_execution_fact(
             terminal_exec_status
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(intent_id) DO UPDATE SET
+            position_id=excluded.position_id,
+            decision_id=excluded.decision_id,
+            order_role=excluded.order_role,
+            strategy_key=excluded.strategy_key,
+            posted_at=excluded.posted_at,
+            filled_at=excluded.filled_at,
+            voided_at=excluded.voided_at,
+            submitted_price=excluded.submitted_price,
+            fill_price=excluded.fill_price,
+            shares=excluded.shares,
+            fill_quality=excluded.fill_quality,
+            latency_seconds=excluded.latency_seconds,
+            venue_status=excluded.venue_status,
+            terminal_exec_status=excluded.terminal_exec_status
         """,
         (
             intent_id,
@@ -2372,7 +2520,7 @@ def log_outcome_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO outcome_fact (
+        INSERT INTO outcome_fact (
             position_id,
             strategy_key,
             entered_at,
@@ -2388,6 +2536,19 @@ def log_outcome_fact(
             chain_corrections_count
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(position_id) DO UPDATE SET
+            strategy_key=excluded.strategy_key,
+            entered_at=excluded.entered_at,
+            exited_at=excluded.exited_at,
+            settled_at=excluded.settled_at,
+            exit_reason=excluded.exit_reason,
+            admin_exit_reason=excluded.admin_exit_reason,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            pnl=excluded.pnl,
+            outcome=excluded.outcome,
+            hold_duration_hours=excluded.hold_duration_hours,
+            monitor_count=excluded.monitor_count,
+            chain_corrections_count=excluded.chain_corrections_count
         """,
         (
             position_id,
@@ -3448,10 +3609,20 @@ def upsert_control_override(
         return {"status": "skipped_missing_table", "table": "control_overrides"}
     conn.execute(
         """
-        INSERT OR REPLACE INTO control_overrides (
+        INSERT INTO control_overrides (
             override_id, target_type, target_key, action_type, value,
             issued_by, issued_at, effective_until, reason, precedence
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(override_id) DO UPDATE SET
+            target_type=excluded.target_type,
+            target_key=excluded.target_key,
+            action_type=excluded.action_type,
+            value=excluded.value,
+            issued_by=excluded.issued_by,
+            issued_at=excluded.issued_at,
+            effective_until=excluded.effective_until,
+            reason=excluded.reason,
+            precedence=excluded.precedence
         """,
         (
             override_id,

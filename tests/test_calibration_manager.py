@@ -24,6 +24,7 @@ from src.calibration.manager import (
     edge_threshold_multiplier,
     get_calibrator,
 )
+from src.calibration.decision_group import compute_id
 from src.calibration.store import (
     add_calibration_pair,
     get_pairs_for_bucket,
@@ -59,6 +60,15 @@ LONDON = City(
     timezone="Europe/London", cluster="London",
     settlement_unit="C", wu_station="EGLL",
 )
+
+
+def _decision_group_id(
+    city: str,
+    target_date: str,
+    forecast_available_at: str,
+    source_model_version: str = "test_calibration_manager_v1",
+) -> str:
+    return compute_id(city, target_date, forecast_available_at, source_model_version)
 
 
 class TestBucketRouting:
@@ -153,6 +163,11 @@ class TestStoreRoundTrip:
                 p_raw=0.1 * (i % 11), outcome=1 if i == 5 else 0,
                 lead_days=3.0, season="DJF", cluster="US-Northeast",
                 forecast_available_at="2026-01-01T00:00:00Z",
+                decision_group_id=_decision_group_id(
+                    "NYC",
+                    f"2026-01-{i+1:02d}",
+                    "2026-01-01T00:00:00Z",
+                ),
             )
         conn.commit()
         _ensure_auth_verified(conn)
@@ -162,6 +177,56 @@ class TestStoreRoundTrip:
         assert all("p_raw" in p for p in pairs)
         assert all("lead_days" in p for p in pairs)
         assert all("outcome" in p for p in pairs)
+
+        conn.close()
+
+    def test_bias_corrected_persisted_through_harvest(self, tmp_path):
+        """ZDM-01: bias_corrected lineage — harvester must propagate bias state to stored pairs."""
+        conn = self._get_test_conn(tmp_path)
+
+        # Simulate harvest with bias_corrected=True
+        from src.execution.harvester import harvest_settlement
+        city = NYC
+        n = harvest_settlement(
+            conn, city, "2026-01-15",
+            winning_bin_label="bin_3",
+            bin_labels=[f"bin_{i}" for i in range(11)],
+            p_raw_vector=[0.05 * i for i in range(11)],
+            lead_days=3.0,
+            forecast_available_at="2026-01-14T00:00:00Z",
+            source_model_version="test_bias_corrected_v1",
+            bias_corrected=True,
+        )
+        conn.commit()
+        _ensure_auth_verified(conn)
+
+        assert n == 11
+        rows = conn.execute(
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
+        ).fetchall()
+        assert len(rows) == 11
+        assert all(row["bias_corrected"] == 1 for row in rows), \
+            "All pairs from bias-corrected harvest must have bias_corrected=1"
+
+        # Simulate harvest with bias_corrected=False
+        n2 = harvest_settlement(
+            conn, city, "2026-01-16",
+            winning_bin_label="bin_5",
+            bin_labels=[f"bin_{i}" for i in range(11)],
+            p_raw_vector=[0.05 * i for i in range(11)],
+            lead_days=2.0,
+            forecast_available_at="2026-01-15T00:00:00Z",
+            source_model_version="test_bias_corrected_v1",
+            bias_corrected=False,
+        )
+        conn.commit()
+
+        rows2 = conn.execute(
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-16'"
+        ).fetchall()
+        assert len(rows2) == 11
+        assert all(row["bias_corrected"] == 0 for row in rows2), \
+            "All pairs from non-bias-corrected harvest must have bias_corrected=0"
 
         conn.close()
 
@@ -187,6 +252,11 @@ class TestDecisionGroupAccounting:
                     cluster="US-Northeast",
                     forecast_available_at=forecast_available_at,
                     settlement_value=41.0,
+                    decision_group_id=_decision_group_id(
+                        "NYC",
+                        target_date,
+                        forecast_available_at,
+                    ),
                 )
         conn.commit()
         _ensure_auth_verified(conn)
@@ -240,6 +310,11 @@ class TestDecisionGroupAccounting:
             cluster="US-Northeast",
             forecast_available_at="2025-12-30T00:00:00Z",
             settlement_value=40.0,
+            decision_group_id=_decision_group_id(
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+            ),
         )
         _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
@@ -256,7 +331,11 @@ class TestDecisionGroupAccounting:
 
         assert row["n"] == 1
         assert row["recorded_at"] == "t2"
-        assert pair["decision_group_id"] == "NYC|2026-01-01|2025-12-30T00:00:00Z|lead=2"
+        assert pair["decision_group_id"] == _decision_group_id(
+            "NYC",
+            "2026-01-01",
+            "2025-12-30T00:00:00Z",
+        )
         assert pair["bias_corrected"] == 0
 
     def test_build_decision_group_for_key_targets_one_group(self, tmp_path):
@@ -275,6 +354,11 @@ class TestDecisionGroupAccounting:
             forecast_available_at="2025-12-30T00:00:00Z",
             settlement_value=40.0,
             bias_corrected=True,
+            decision_group_id=_decision_group_id(
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+            ),
         )
         _ensure_auth_verified(conn)
 
@@ -287,7 +371,11 @@ class TestDecisionGroupAccounting:
         conn.close()
 
         assert group is not None
-        assert group.group_id == "NYC|2026-01-01|2025-12-30T00:00:00Z|lead=2"
+        assert group.group_id == _decision_group_id(
+            "NYC",
+            "2026-01-01",
+            "2025-12-30T00:00:00Z",
+        )
         assert group.bias_corrected == 1
         assert group.n_pair_rows == 1
 
@@ -308,6 +396,12 @@ class TestDecisionGroupAccounting:
                     cluster="US-Northeast",
                     forecast_available_at="2025-12-30T00:00:00Z",
                     settlement_value=41.0,
+                    decision_group_id=_decision_group_id(
+                        "NYC",
+                        "2026-01-01",
+                        "2025-12-30T00:00:00Z",
+                        f"test_calibration_manager_v1_lead_{lead_days:g}",
+                    ),
                 )
 
         _ensure_auth_verified(conn)
@@ -328,8 +422,18 @@ class TestDecisionGroupAccounting:
 
         assert written == 2
         assert {group.group_id for group in groups} == {
-            "NYC|2026-01-01|2025-12-30T00:00:00Z|lead=1",
-            "NYC|2026-01-01|2025-12-30T00:00:00Z|lead=2",
+            _decision_group_id(
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+                "test_calibration_manager_v1_lead_1",
+            ),
+            _decision_group_id(
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+                "test_calibration_manager_v1_lead_2",
+            ),
         }
         assert mixed["n"] == 0
 
@@ -350,6 +454,11 @@ class TestDecisionGroupAccounting:
                     cluster="US-Northeast",
                     forecast_available_at=f"2025-12-{group_idx + 20:02d}T00:00:00Z",
                     settlement_value=41.0,
+                    decision_group_id=_decision_group_id(
+                        "NYC",
+                        f"2026-01-{group_idx + 1:02d}",
+                        f"2025-12-{group_idx + 20:02d}T00:00:00Z",
+                    ),
                 )
         _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
@@ -370,6 +479,223 @@ class TestDecisionGroupAccounting:
             "decision_group_maturity_level": 4,
             "maturity_inflated": True,
         }]
+
+    def test_decision_group_collision_is_rejected(self, tmp_path):
+        conn = get_connection(tmp_path / "test_group_collision.db")
+        init_schema(conn)
+        group_id = _decision_group_id(
+            "NYC",
+            "2026-01-01",
+            "2025-12-30T00:00:00Z",
+            "collision-test",
+        )
+        for target_date in ("2026-01-01", "2026-01-02"):
+            add_calibration_pair(
+                conn,
+                "NYC",
+                target_date,
+                "39-40°F",
+                p_raw=0.4,
+                outcome=1,
+                lead_days=2.0,
+                season="DJF",
+                cluster="US-Northeast",
+                forecast_available_at="2025-12-30T00:00:00Z",
+                settlement_value=40.0,
+                decision_group_id=group_id,
+            )
+        _ensure_auth_verified(conn)
+        with pytest.raises(ValueError, match="collision"):
+            build_decision_groups(conn)
+        conn.close()
+
+    def test_fit_from_pairs_rejects_truncated_canonical_groups(self, tmp_path):
+        from src.calibration.manager import _fit_from_pairs
+
+        conn = get_connection(tmp_path / "test_truncated_canonical.db")
+        init_schema(conn)
+        for group_idx in range(15):
+            add_calibration_pair(
+                conn,
+                "NYC",
+                f"2026-01-{group_idx + 1:02d}",
+                "39-40°F",
+                p_raw=0.4,
+                outcome=1,
+                lead_days=2.0,
+                season="DJF",
+                cluster="US-Northeast",
+                forecast_available_at="2025-12-30T00:00:00Z",
+                settlement_value=40.0,
+                decision_group_id=_decision_group_id(
+                    "NYC",
+                    f"2026-01-{group_idx + 1:02d}",
+                    "2025-12-30T00:00:00Z",
+                    f"truncated-{group_idx}",
+                ),
+                bin_source="canonical_v1",
+                authority="VERIFIED",
+            )
+
+        assert _fit_from_pairs(conn, "US-Northeast", "DJF") is None
+        saved = conn.execute("SELECT COUNT(*) FROM platt_models").fetchone()[0]
+        conn.close()
+        assert saved == 0
+
+    def test_init_schema_migrates_legacy_group_key_without_data_loss(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE calibration_decision_group (
+                group_id TEXT PRIMARY KEY,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                forecast_available_at TEXT NOT NULL,
+                cluster TEXT NOT NULL,
+                season TEXT NOT NULL,
+                lead_days REAL NOT NULL,
+                settlement_value REAL,
+                winning_range_label TEXT,
+                bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+                n_pair_rows INTEGER NOT NULL,
+                n_positive_rows INTEGER NOT NULL,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(city, target_date, forecast_available_at)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO calibration_decision_group (
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-group",
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+                "US-Northeast",
+                "DJF",
+                1.0,
+                40.0,
+                "39-40°F",
+                0,
+                11,
+                1,
+                "legacy-recorded-at",
+            ),
+        )
+
+        init_schema(conn)
+
+        preserved = conn.execute(
+            "SELECT * FROM calibration_decision_group WHERE group_id = 'legacy-group'"
+        ).fetchone()
+        assert preserved is not None
+        assert preserved["recorded_at"] == "legacy-recorded-at"
+        assert preserved["n_pair_rows"] == 11
+        assert preserved["lead_days"] == 1.0
+
+        conn.execute(
+            """
+            INSERT INTO calibration_decision_group (
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lead-two-group",
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+                "US-Northeast",
+                "DJF",
+                2.0,
+                40.0,
+                "39-40°F",
+                0,
+                11,
+                1,
+                "new-recorded-at",
+            ),
+        )
+        # Same city/date/time/lead with a distinct source-version group_id is
+        # legal; source_model_version lives inside group_id.
+        conn.execute(
+            """
+            INSERT INTO calibration_decision_group (
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "same-four-key-different-source",
+                "NYC",
+                "2026-01-01",
+                "2025-12-30T00:00:00Z",
+                "US-Northeast",
+                "DJF",
+                2.0,
+                11,
+                1,
+                "same-four-key",
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO calibration_decision_group (group_id, city, target_date, "
+                "forecast_available_at, cluster, season, lead_days, n_pair_rows, "
+                "n_positive_rows, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "lead-two-group",
+                    "NYC",
+                    "2026-01-01",
+                    "2025-12-30T00:00:00Z",
+                    "US-Northeast",
+                    "DJF",
+                    3.0,
+                    11,
+                    1,
+                    "duplicate-group-id",
+                ),
+            )
+        conn.close()
 
 
 class TestBlockedOOSCalibration:
@@ -396,6 +722,11 @@ class TestBlockedOOSCalibration:
                 cluster="US-Northeast",
                 forecast_available_at=forecast_available_at,
                 settlement_value=float(low),
+                decision_group_id=_decision_group_id(
+                    "NYC",
+                    target_date,
+                    forecast_available_at,
+                ),
             )
 
     def test_blocked_oos_writes_eval_run_and_points(self, tmp_path):
@@ -532,6 +863,7 @@ class TestGetCalibrator:
             A=1.0, B=0.1, C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
+            input_space="width_normalized_density",
         )
         conn.commit()
 
@@ -545,3 +877,25 @@ class TestGetCalibrator:
         assert 0.001 <= result <= 0.999
 
         conn.close()
+
+    def test_stale_raw_space_model_is_not_returned_without_upgrade_pairs(self, tmp_path):
+        db_path = tmp_path / "test_stale_raw.db"
+        conn = get_connection(db_path)
+        init_schema(conn)
+        save_platt_model(
+            conn,
+            "NYC_DJF",
+            A=1.0,
+            B=0.1,
+            C=-0.5,
+            bootstrap_params=[(1.0, 0.1, -0.5)] * 5,
+            n_samples=200,
+            input_space="raw_probability",
+        )
+        conn.commit()
+
+        cal, level = get_calibrator(conn, NYC, "2026-01-15")
+        conn.close()
+
+        assert cal is None
+        assert level == 4

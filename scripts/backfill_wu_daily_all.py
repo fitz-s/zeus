@@ -181,9 +181,7 @@ CITY_STATIONS = {
     "Chongqing":     ("ZUCK", "CN", "C"),
     "Wuhan":         ("ZHHH", "CN", "C"),
     "Guangzhou":     ("ZGGG", "CN", "C"),  # 2026-04-14: added per Polymarket market text (Baiyun)
-    # Taipei is handled by Taiwan CWA (station 46692), not WU.
-    # Do not re-add under WU — intentionally excluded per settlement_source_type="cwa_station".
-    # "Taipei":        ("RCTP", "TW", "C"),
+    "Taipei":        ("RCSS", "TW", "C"),
     # Hong Kong is handled by a separate HKO fetcher
     # (scripts/backfill_hko_daily.py). HKO is the authoritative Polymarket
     # settlement source for HK, not WU/VHHH. The VHHH airport (Chek Lap Kok)

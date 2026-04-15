@@ -141,6 +141,12 @@ root_governed_files:
     zone: root
     authority_role: runtime_support
     forbidden_misread: Dependency list is not architecture authority.
+  - path: "pytest.ini"
+    status: active
+    scope: global
+    zone: root
+    authority_role: test_collection_config
+    forbidden_misread: Pytest collection config prevents archived work packets from becoming active tests.
   - path: ".importlinter"
     status: active
     scope: global

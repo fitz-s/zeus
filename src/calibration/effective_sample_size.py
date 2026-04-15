@@ -30,14 +30,6 @@ class CalibrationDecisionGroup:
     n_positive_rows: int
 
 
-def _lead_key(lead_days: float) -> str:
-    return f"{float(lead_days):g}"
-
-
-def _group_id(city: str, target_date: str, forecast_available_at: str, lead_days: float) -> str:
-    return f"{city}|{target_date}|{forecast_available_at}|lead={_lead_key(lead_days)}"
-
-
 def build_decision_groups(
     conn: sqlite3.Connection,
     authority_filter: str = "VERIFIED",
@@ -47,31 +39,41 @@ def build_decision_groups(
     K4.5 H5 fix: filters by authority='VERIFIED' by default.
     Pass authority_filter='any' to include all rows (diagnostics only).
     """
-    if authority_filter == "any":
-        where_clause = ""
-        params: tuple = ()
-    else:
-        where_clause = "WHERE authority = ?"
+    clauses = ["decision_group_id IS NOT NULL", "decision_group_id != ''"]
+    params: tuple = ()
+    if authority_filter != "any":
+        clauses.append("authority = ?")
         params = (authority_filter,)
+    where_clause = "WHERE " + " AND ".join(clauses)
 
     rows = conn.execute(
         f"""
         SELECT
-            city,
-            target_date,
-            forecast_available_at,
+            decision_group_id,
+            MIN(city) AS city,
+            MIN(target_date) AS target_date,
+            MIN(forecast_available_at) AS forecast_available_at,
             MIN(cluster) AS cluster,
             MIN(season) AS season,
-            lead_days,
+            MIN(lead_days) AS lead_days,
             MAX(settlement_value) AS settlement_value,
             MAX(CASE WHEN outcome = 1 THEN range_label ELSE NULL END) AS winning_range_label,
             COALESCE(MAX(bias_corrected), 0) AS bias_corrected,
             COUNT(*) AS n_pair_rows,
-            SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS n_positive_rows
+            SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS n_positive_rows,
+            COUNT(DISTINCT city) AS distinct_city,
+            COUNT(DISTINCT target_date) AS distinct_target_date,
+            COUNT(DISTINCT forecast_available_at) AS distinct_forecast_available_at,
+            COUNT(DISTINCT lead_days) AS distinct_lead_days,
+            COUNT(DISTINCT cluster) AS distinct_cluster,
+            COUNT(DISTINCT season) AS distinct_season,
+            COUNT(DISTINCT bin_source) AS distinct_bin_source,
+            COUNT(DISTINCT range_label) AS distinct_range_label,
+            MAX(bin_source) AS bin_source
         FROM calibration_pairs
         {where_clause}
-        GROUP BY city, target_date, forecast_available_at, lead_days
-        ORDER BY city, target_date, forecast_available_at, lead_days
+        GROUP BY decision_group_id
+        ORDER BY city, target_date, forecast_available_at, lead_days, decision_group_id
         """,
         params,
     ).fetchall()
@@ -82,9 +84,10 @@ def build_decision_groups(
         target_date = str(row["target_date"])
         forecast_available_at = str(row["forecast_available_at"])
         lead_days = float(row["lead_days"] or 0.0)
+        _raise_on_group_collision(row)
         groups.append(
             CalibrationDecisionGroup(
-                group_id=_group_id(city, target_date, forecast_available_at, lead_days),
+                group_id=str(row["decision_group_id"]),
                 city=city,
                 target_date=target_date,
                 forecast_available_at=forecast_available_at,
@@ -128,40 +131,54 @@ def build_decision_group_for_key(
     )
     if authority_filter != "any":
         params = params + (authority_filter,)
-    row = conn.execute(
+    rows = conn.execute(
         f"""
         SELECT
-            city,
-            target_date,
-            forecast_available_at,
+            decision_group_id,
+            MIN(city) AS city,
+            MIN(target_date) AS target_date,
+            MIN(forecast_available_at) AS forecast_available_at,
             MIN(cluster) AS cluster,
             MIN(season) AS season,
-            lead_days,
+            MIN(lead_days) AS lead_days,
             MAX(settlement_value) AS settlement_value,
             MAX(CASE WHEN outcome = 1 THEN range_label ELSE NULL END) AS winning_range_label,
             COALESCE(MAX(bias_corrected), 0) AS bias_corrected,
             COUNT(*) AS n_pair_rows,
-            SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS n_positive_rows
+            SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS n_positive_rows,
+            COUNT(DISTINCT city) AS distinct_city,
+            COUNT(DISTINCT target_date) AS distinct_target_date,
+            COUNT(DISTINCT forecast_available_at) AS distinct_forecast_available_at,
+            COUNT(DISTINCT lead_days) AS distinct_lead_days,
+            COUNT(DISTINCT cluster) AS distinct_cluster,
+            COUNT(DISTINCT season) AS distinct_season,
+            COUNT(DISTINCT bin_source) AS distinct_bin_source,
+            COUNT(DISTINCT range_label) AS distinct_range_label,
+            MAX(bin_source) AS bin_source
         FROM calibration_pairs
         WHERE city = ?
           AND target_date = ?
           AND forecast_available_at = ?
           {lead_filter}
           {auth_filter}
-        GROUP BY city, target_date, forecast_available_at, lead_days
+          AND decision_group_id IS NOT NULL
+        GROUP BY decision_group_id
         """,
         params,
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not rows:
         return None
+    if len(rows) > 1:
+        raise ValueError(
+            "Multiple decision_group_id values matched "
+            f"{city}/{target_date}/{forecast_available_at}; pass lead_days "
+            "and source_model_version-specific context to disambiguate"
+        )
+    row = rows[0]
+    _raise_on_group_collision(row)
     row_lead_days = float(row["lead_days"] or 0.0)
     return CalibrationDecisionGroup(
-        group_id=_group_id(
-            str(row["city"]),
-            str(row["target_date"]),
-            str(row["forecast_available_at"]),
-            row_lead_days,
-        ),
+        group_id=str(row["decision_group_id"]),
         city=str(row["city"]),
         target_date=str(row["target_date"]),
         forecast_available_at=str(row["forecast_available_at"]),
@@ -174,6 +191,42 @@ def build_decision_group_for_key(
         n_pair_rows=int(row["n_pair_rows"] or 0),
         n_positive_rows=int(row["n_positive_rows"] or 0),
     )
+
+
+def _raise_on_group_collision(row: sqlite3.Row) -> None:
+    conflicted = [
+        field
+        for field in (
+            "city",
+            "target_date",
+            "forecast_available_at",
+            "lead_days",
+            "cluster",
+            "season",
+            "bin_source",
+        )
+        if int(row[f"distinct_{field}"] or 0) > 1
+    ]
+    if conflicted:
+        raise ValueError(
+            "decision_group_id collision with conflicting metadata fields "
+            f"{conflicted}: {row['decision_group_id']!r}"
+        )
+    if row["bin_source"] == "canonical_v1" and int(row["n_positive_rows"] or 0) != 1:
+        raise ValueError(
+            "canonical decision group must have exactly one positive row: "
+            f"{row['decision_group_id']!r} has {row['n_positive_rows']}"
+        )
+    if row["bin_source"] == "canonical_v1" and int(row["n_pair_rows"] or 0) not in (92, 102):
+        raise ValueError(
+            "canonical decision group has truncated pair rows: "
+            f"{row['decision_group_id']!r} has {row['n_pair_rows']}"
+        )
+    if row["bin_source"] == "canonical_v1" and int(row["distinct_range_label"] or 0) != int(row["n_pair_rows"] or 0):
+        raise ValueError(
+            "canonical decision group has duplicate range labels: "
+            f"{row['decision_group_id']!r}"
+        )
 
 
 def summarize_bucket_health(groups: list[CalibrationDecisionGroup]) -> list[dict]:
@@ -301,20 +354,13 @@ def write_decision_groups(
         conn.executemany(
             """
             UPDATE calibration_pairs
-            SET decision_group_id = ?, bias_corrected = ?
-            WHERE city = ?
-              AND target_date = ?
-              AND forecast_available_at = ?
-              AND lead_days = ?
+            SET bias_corrected = ?
+            WHERE decision_group_id = ?
             """,
             [
                 (
-                    group.group_id,
                     group.bias_corrected,
-                    group.city,
-                    group.target_date,
-                    group.forecast_available_at,
-                    group.lead_days,
+                    group.group_id,
                 )
                 for group in groups
             ],

@@ -2,6 +2,13 @@
 
 **v2.2 (2026-04-13)**: scope narrowing per user directive — this packet is strictly **collect + store code preparation** while TIGGE download completes. Any change that only matters when running Platt recalibrate (i.e., utilization) is deferred to §10.1 post-packet. Specifically moved OUT of §5 and INTO §10.1: **Change J (logit_safe eps alignment)**, **Change K (Platt bootstrap by decision_group)**, **Change N (live `_bin_probability` histogram)**, and the **Change G.7 proposal (manager.py n_eff counter)** raised from relationship test R9. Rationale: none of these affect data that is collected or written; they affect how the Platt fit consumes that data. No point changing them until TIGGE coverage is complete and the at-recalibrate-time packet runs. The 11 remaining Changes (A, B, C, D, E, F, G.1–G.6, H, I, L, M) form the new scope boundary.
 
+**2026-04-14 refit-preflight update**: the at-recalibrate-time fixes J/K/N/G.7
+have now been implemented before data refit: `logit_safe` exists, Platt
+bootstrap can resample decision groups, manager/refit maturity uses n_eff, and
+live bin probability now uses the shared bin helper. The unresolved eps policy
+question remains whether to keep the current conservative `0.01` clamp or move
+to the math-spec `1e-6` in a measured refit experiment.
+
 **v2.1 (2026-04-13)**: iteration 2 fixes per Critic ITERATE verdict — §16 authority gate fact correction (MUST-FIX 1), Change G fallback deletion (MUST-FIX 2), Change N live `_bin_probability` fix (MUST-FIX 3, Option A), §8.1 statistical correction (SHOULD-FIX 1), Change M UTC-explicit `issue_time` (SHOULD-FIX 2), Change G test G3 SQLite round-trip clarification (SHOULD-FIX 3), test F1 analytical tolerance (SHOULD-FIX 4), E2E fixture bump to 60 days (SHOULD-FIX 5), staged Bin migration ADR note (SHOULD-FIX 6).
 
 **v2 (2026-04-13 earlier)**: second-order trap corrections per user review — decision_group_id hash stability, ±inf JSON boundary safety, square-matrix training window.
@@ -28,14 +35,14 @@
 | `ensemble_snapshots` DB row count | **0** (GRIB on disk not yet ingested to DB) |
 | Live forecast path | Open-Meteo API (temporary fallback); TIGGE GRIB is intended canonical |
 | Live calibration Y source | Polymarket `winningOutcome` via harvester (separate from rebuild path) |
-| Rebuild training data path | `backfill_wu_daily_all → rebuild_settlements → rebuild_calibration → refit_platt` |
+| Rebuild training data path | `backfill_wu_daily_all → rebuild_settlements → rebuild_calibration_pairs_canonical → refit_platt` |
 | `SettlementSemantics` rounding rule | **FIXED in Packet 1** — active rule is `wmo_half_up`; verify before any rebuild |
-| `init_schema` on production DB | **BROKEN** — not idempotent for pre-K1 schema |
-| `decision_group_id` population coverage | **UNVERIFIED** across all insert paths |
-| `Bin` outer-boundary ±inf support | **UNVERIFIED** |
-| Logit clipping in Platt | **UNVERIFIED** |
-| Bootstrap resampling unit | **UNVERIFIED** (may be row-level instead of decision_group) |
-| `authority='VERIFIED'` live-path gate | **NOT YET BUILT** — see §16 for detail |
+| `init_schema` on production DB | Refit-preflight repair makes `calibration_decision_group` lead-key migration data-preserving; broader production schema checks still run at Step 0 |
+| `decision_group_id` population coverage | API/refit-gated: pair writers must pass explicit nonblank IDs; refit rejects missing IDs |
+| `Bin` outer-boundary ±inf support | Implemented as staged `None`/±inf compatibility with JSON sentinel helpers |
+| Logit clipping in Platt | `logit_safe()` implemented; eps value remains an explicit refit policy decision |
+| Bootstrap resampling unit | Platt parameter bootstrap supports decision-group resampling when IDs are supplied |
+| `authority='VERIFIED'` live-path gate | Store/refit paths filter VERIFIED rows; canonical-only refit gate added |
 
 ---
 
@@ -122,7 +129,7 @@ Bootstrap CI (`zeus_math_spec.md §8.2`) and fractional Kelly (`§10`) both assu
 The independent sample unit is the **decision group** (`zeus_math_spec.md §12.1`):
 
 ```
-g = (city, target_date, forecast_available_at, source_model_version)
+g = (city, target_date, issue_time, source_model_version)
 n_eff = #{g}
 ```
 
@@ -143,9 +150,11 @@ Data:
 
 Storage:
 - Table: `ensemble_snapshots`
-- Columns (atom): `(city, target_date, issue_time, lead_hours, members_json, authority, provenance_metadata, source_model_version)`
+- Columns (atom): `(city, target_date, issue_time, lead_hours, members_json, authority, provenance_metadata, model_version, data_version)`
 - `members_json` = list of 51 floats (daily maxes per member)
-- `source_model_version` = string identifying the TIGGE cycle / GRIB version; **must be populated** because it's a component of `decision_group_id`
+- `source_model_version` is the logical identity value passed to
+  `compute_id(...)`; in the current schema it is derived from `data_version`
+  with `model_version` as an explicit fallback.
 - `authority = 'VERIFIED'` only after passing §3 guardrails + blessed pipeline
 - `provenance_metadata` = JSON with `{grib_file_path, extractor_version, ingest_run_id, regional_or_per_city}`
 
@@ -199,8 +208,9 @@ Every row that reaches `authority='VERIFIED'` in any of the 5 tables must pass t
 **What it prevents**: a market with a gap in its bin set (missing outer `-inf` / `+inf` bins, or a missing intermediate integer) silently producing `outcome_yes = 0` for every bin, violating the "exactly one winning bin" invariant (`zeus_math_spec.md §5.3`, `§11.2`).
 
 **Where it runs**: `src/types/market.py::validate_bin_topology(market_bins) -> None` (new helper). Called:
-1. **Pre-pair-generation** (`rebuild_calibration.py` Step 6): before generating any `calibration_pairs` for a (city, target_date), validate that market's bins.
-2. **Live entry gate**: before creating a `trade_decision`, `evaluator.py` already has hard gates; add this check as belt-and-suspenders.
+1. **Pre-pair-generation** (`rebuild_calibration_pairs_canonical.py` Step 6): before generating any `calibration_pairs` for a (city, target_date), validate that market's bins.
+2. **Live entry gate**: pending follow-up. The helper exists, but evaluator
+   wiring is not yet present and must not be claimed as complete.
 
 **Validation logic**:
 ```python
@@ -287,7 +297,9 @@ Using `strftime('%Y-%m-%d')` on a normalized `datetime.date` and `strftime('%Y-%
 
 **Additional controls**:
 1. `compute_id()` is the **ONLY** hash producer. `semantic_linter` rule forbids `sha1`/`md5`/`hashlib` on identifier-generation paths outside `src/calibration/decision_group.py`.
-2. **NOT NULL constraint**: `calibration_pairs.decision_group_id` NOT NULL in schema; add a DB-level constraint test.
+2. **Write/refit gate**: `add_calibration_pair()` refuses blank IDs and
+   `refit_platt.py` refuses VERIFIED rows with missing IDs. The current schema
+   remains nullable for legacy DB compatibility.
 3. **Coverage assertion**: SQL check after rebuild:
    ```sql
    SELECT COUNT(*) FROM calibration_pairs WHERE decision_group_id IS NULL;
@@ -302,7 +314,7 @@ Using `strftime('%Y-%m-%d')` on a normalized `datetime.date` and `strftime('%Y-%
 
 **What it prevents**: attempting to iterate over `range(b.low, b.high)` when `b.high = float('inf')` causes `OverflowError` or infinite loop. Must use **comprehension over histogram keys**, not range-based iteration.
 
-**Where it runs**: `src/signal/ensemble_signal.py::p_raw_vector` and `scripts/rebuild_calibration.py` both call into the same Monte Carlo histogram code (per `zeus_math_spec.md §12.3` equivalence rule).
+**Where it runs**: `src/signal/ensemble_signal.py::p_raw_vector` and `scripts/rebuild_calibration_pairs_canonical.py` both call into the same Monte Carlo histogram code (per `zeus_math_spec.md §12.3` equivalence rule).
 
 **Correct implementation**:
 ```python
@@ -384,8 +396,8 @@ Each defect violates one or more guardrails. Must be fixed before any data is co
 | D5 | `IngestionGuard.check_unit_consistency` Sub-check b skips unknown units | `src/data/ingestion_guard.py:143-179` | §3.1 (Rankine/unknown passes silently) | Change **C** |
 | D6 | `IngestionGuard.validate()` else branch defaults unknown units to F | `src/data/ingestion_guard.py:378` | §3.1 | Change **C** |
 | D7 | `check_seasonal_plausibility` trusts caller-supplied hemisphere | `src/data/ingestion_guard.py:258` | (metadata integrity) | Change **C** |
-| D8 | `rebuild_calibration.py` uses simplified local `p_raw`, not live `p_raw_vector` | `scripts/rebuild_calibration.py` (docstring TODO) | (`zeus_math_spec.md §12.3` equivalence) | Change **F** |
-| D9 | `calibration_pairs.decision_group_id` coverage unverified; legacy inserts may write NULL | `scripts/generate_calibration_pairs.py:39-48` + other call sites | §3.3 | Change **G** |
+| D8 | Legacy `rebuild_calibration.py` used simplified local `p_raw`, not live `p_raw_vector` | `scripts/rebuild_calibration.py` (retired fail-closed) | (`zeus_math_spec.md §12.3` equivalence) | Change **F** |
+| D9 | `calibration_pairs.decision_group_id` coverage unverified; legacy inserts may write NULL | `scripts/generate_calibration_pairs.py` (retired fail-closed) + other call sites | §3.3 | Change **G** |
 | D10 | `Bin.low/high` ±inf representation unverified; outer-bin Polymarket markets may fail to load | `src/types/market.py` | §3.2, §3.4 | Change **H** |
 | D11 | No `bin_topology_check` helper exists | (not yet implemented) | §3.2 | Change **I** |
 | D12 | Logit clamping in Platt unverified; Monte Carlo with `p=0` or `p=1` may NaN the loss | `src/calibration/platt.py` | (`zeus_math_spec.md §6.1`) | Change **J** |
@@ -401,7 +413,7 @@ Each defect violates one or more guardrails. Must be fixed before any data is co
 |---|---|---|---|---|
 | D18 | `compute_id()` uses `.isoformat()` which produces different strings for `date`, naive `datetime`, and tz-aware `datetime` — same snapshot via different paths gets different hashes | `src/calibration/decision_group.py` (once created) | §3.3 | Change **G** (extended) |
 | D19 | `json.dumps()` on Bin objects produces RFC 8259-invalid `"Infinity"` — crashes strict parsers | `src/types/market.py` (any JSON export path) | §3.5 | Change **H** (extended) |
-| D20 | Training window includes asymmetric 70-day 24h-only tail (2023-10-23 → 2023-12-31) — distorts Platt B (lead_days slope) and long-lead CI | `scripts/rebuild_calibration.py` training window config | §0.5 Principle 3 | §8 training window (config change only) |
+| D20 | Training window includes asymmetric 70-day 24h-only tail (2023-10-23 → 2023-12-31) — distorts Platt B (lead_days slope) and long-lead CI | canonical rebuild training window config | §0.5 Principle 3 | §8 training window (config change only) |
 
 **New defects added in v2.1**:
 
@@ -446,12 +458,15 @@ Letter-coded so you can approve individually and so agents can land one at a tim
 - Current implementation already calls `self.settlement_semantics.round_values(values)` — fix propagates automatically once D lands
 - Add regression test verifying Monte Carlo rounds match WU rule for known extremes
 
-### Change F — `scripts/rebuild_calibration.py` use live Bin/Monte Carlo pipeline
-- Remove "simplified local p_raw computation"
-- Import `src/signal/ensemble_signal.py::p_raw_vector` (the same function the live evaluator calls)
-- Use `src/types/market.py::Bin` taxonomy directly from `market_events` (don't reconstruct bins from label strings)
-- Monte Carlo histogram computed once per snapshot per §3.4 pattern (NOT once per bin)
-- Fixes D8
+### Change F — retire legacy `scripts/rebuild_calibration.py`
+- `scripts/rebuild_calibration.py` is retained only as a fail-closed tombstone.
+- The active calibration-pair rebuild path is
+  `scripts/rebuild_calibration_pairs_canonical.py`.
+- The canonical path uses `src/signal/ensemble_signal.py::p_raw_vector_from_maxes`,
+  `SettlementSemantics`, and canonical bin grids instead of the retired
+  simplified local p_raw/bin-taxonomy path.
+- Fixes D8 by removing the old write surface rather than redirecting through
+  an ambiguous legacy command name.
 
 ### Change G — `calibration_pairs.decision_group_id` hash + audit (v2 extended + v2.1 fallback deletion)
 - Add module `src/calibration/decision_group.py::compute_id(city, target_date, issue_time, source_model_version) -> str`
@@ -462,7 +477,8 @@ Letter-coded so you can approve individually and so agents can land one at a tim
 - Every `add_calibration_pair` call site must pass a non-null `decision_group_id` from this function
 - Add `semantic_linter` rule forbidding `sha1/md5/hashlib` on identifier-generation paths outside `src/calibration/decision_group.py`
 - Add SQL gate in `refit_platt.py`: refuse to fit if `COUNT(*) FROM calibration_pairs WHERE decision_group_id IS NULL > 0`
-- Deprecate `scripts/generate_calibration_pairs.py` (superseded by `rebuild_calibration.py`)
+- Deprecate `scripts/generate_calibration_pairs.py` (superseded by
+  `rebuild_calibration_pairs_canonical.py`)
 - **G.6 (new in v2.1): DELETE the fallback at `src/calibration/store.py:70-71`** that generates `f"{city}|{target_date}|{forecast_available_at}|lead={lead_days:g}"`. Replace with `raise TypeError('decision_group_id must be provided explicitly; call src.calibration.decision_group.compute_id() to generate it')`. This makes the monopoly structural, not caller-policed. Without this deletion, the NOT NULL constraint is satisfied by a plausible-looking naive string — the defect category survives.
 - Note on D18 (hash fragility): the fix requires BOTH the new `compute_id()` function (G.1-G.5) AND the deletion of the legacy fallback (G.6). One without the other leaves the defect live.
 - Fixes D9, D18, D21
@@ -482,23 +498,21 @@ Letter-coded so you can approve individually and so agents can land one at a tim
 ### Change I — `src/types/market.py::validate_bin_topology` helper
 - New function implementing the §3.2 validation (sorted bins, -inf left edge, +inf right edge, no integer gaps)
 - Raises `BinTopologyError` on any failure
-- Called from `rebuild_calibration.py` and `evaluator.py`
+- Called from `rebuild_calibration_pairs_canonical.py`; live evaluator gate
+  wiring remains pending.
 - Unit tests cover: happy case; missing -inf; missing +inf; gap between bins; empty set
-- Fixes D11
+- Fixes the canonical-rebuild side of D11; live-market gate remains open.
 
-### Change J — **DEFERRED to §10.1 post-packet** (v2.2 scope narrowing)
-Original scope: add `logit_safe(p, eps=1e-6)` helper in `src/calibration/platt.py`.
-Deferral reason: the current code already clips at `P_CLAMP_LOW = 0.01`, `P_CLAMP_HIGH = 0.99` in `src/calibration/platt.py:22-23,138,170`. Functionally Platt fit survives `p_raw = 0.0 / 1.0` (relationship test R7 is GREEN today). The only live question is whether the spec's `eps = 1e-6` should override the code's `eps = 0.01`, and that decision only matters when Platt is re-fit — at recalibrate time, not at data-collection time. See §10.1.
+### Change J — `logit_safe` implemented; eps policy still open
+`src/calibration/platt.py` now centralizes finite logit clipping in
+`logit_safe(...)`. The code still uses the conservative `P_CLAMP_LOW = 0.01`
+default; the open decision is whether a measured refit experiment should move
+that to the math-spec `1e-6`.
 
-### Change K — **DEFERRED to §10.1 post-packet** (v2.2 scope narrowing)
-Original scope: fix bootstrap to resample decision_groups instead of rows.
-**Target correction (v2.2)**: relationship test R8 revealed this plan previously mis-located the bug. `src/strategy/market_analysis.py:185-244` `_bootstrap_bin` resamples **ENS weather members** (51 members, the σ_ensemble layer), which is correct and must NOT be changed. The actual row-level bootstrap violating decision_group independence is at **`src/calibration/platt.py:112-113`**:
-```python
-for _ in range(n_bootstrap):
-    idx = rng.choice(len(outcomes), len(outcomes), replace=True)
-```
-The `bootstrap_params` list produced there is then consumed by `market_analysis.py:220, 236` as the σ_parameter layer. So the upstream fix is in `platt.py`, not `market_analysis.py`.
-Deferral reason: the Platt bootstrap fix only changes output when Platt is re-fit, which happens at recalibrate time. Deferred to §10.1 with the corrected target location already recorded. Data-layer prerequisite: `decision_group_id` must be populated (Change G.1–G.6, in scope); that ensures the at-recalibrate-time fix has the column it needs to resample by.
+### Change K — Platt bootstrap by decision_group implemented
+`ExtendedPlattCalibrator.fit(...)` now accepts `decision_group_ids` and
+bootstraps by sampled decision groups when provided. ENS member bootstrap in
+`market_analysis.py` remains member-level because it represents σ_ensemble.
 
 ### Change L — Run `scripts/extract_tigge_region_member_vectors_multistep.py` against existing `raw/tigge_ecmwf_ens_regions/` (no code change, script already exists)
 - Script is in `/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/`
@@ -514,15 +528,14 @@ Deferral reason: the Platt bootstrap fix only changes output when Platt is re-fi
   - Convert Kelvin → city settlement unit if needed (per `zeus_math_spec.md §1.5`)
   - Validate via `src/data/rebuild_validators.py::validate_ensemble_snapshot_for_calibration` (existing K1 validator)
   - Write row to `ensemble_snapshots` with `authority='VERIFIED'` and `provenance_metadata` populated
-  - Populate `source_model_version` (critical for `decision_group_id` §3.3)
+  - Populate `data_version` / `model_version` so `source_model_version` can be derived for `decision_group_id` (§3.3)
 - Idempotent via `INSERT OR REPLACE` keyed on `(city, target_date, issue_time, lead_hours)`
 - **M.7 (new in v2.1)**: `issue_time` MUST be written to SQLite as UTC-explicit ISO string via `dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')`. NEVER use `.isoformat()` or naive datetime. Rationale: if `issue_time` is written as naive or as `+00:00` suffix, then when `compute_id()` reads it back via `datetime.fromisoformat()`, it produces a naive or offset-aware datetime respectively — and the round-trip string from strftime will differ. Using the explicit `Z`-suffix format guarantees `datetime.fromisoformat()` round-trip produces a UTC-aware datetime that strftime formats identically. Verify round-trip in integration test (Step 3 gate).
 - Fixes D15
 
-### Change N — **DEFERRED to §10.1 post-packet** (v2.2 scope narrowing)
-Original scope: replace `src/strategy/market_analysis.py::_bin_probability` (lines 313-321) range-based branch logic with histogram-based lookup shared with the rebuild path, per `zeus_math_spec.md §12.3` equivalence requirement.
-Deferral reason: `market_analysis.py` is the **live trading path**. This packet is strictly collect + store code preparation. The live path works correctly today with the current `Bin.low / high = None` open-edge convention; any divergence from the rebuild path only matters when both are running simultaneously at recalibrate time. Also, Change N depends on Change H having landed (±inf Bin support), so sequencing naturally places it post-H. The §12.3 equivalence invariant is still the target — just executed in the at-recalibrate-time packet, not this one.
-Consequence for Change F (which stays in scope): `rebuild_calibration.py` may inline `bin_probability_from_histogram` instead of extracting it to a shared module, since there is no second caller in this packet. Extraction to a shared location can be done at post-packet time when N lands.
+### Change N — live bin probability equivalence implemented
+`market_analysis._bin_probability` and `ensemble_signal.p_raw_vector_from_maxes`
+now route through shared `src/types/market.py` bin containment/count helpers.
 - Fixes D22 — **deferred**
 
 ---
@@ -547,7 +560,8 @@ Each step has (a) a gate condition, (b) a rollback criterion, (c) the guardrail(
 - Run `init_schema` (Change A) — ensures all K1 + authority columns + `schema_migrations` tracking
 - **Gate**: `schema_migrations` table has row with `schema_version='K1+A+WMO'`; all 5 tables have authority column; no unintended wipe
 - **Rollback**: `sqlite3 db_backup_prestep1.sqlite ".backup db.sqlite"` (restore from pre-step backup)
-- **Guardrails exercised**: §3.3 (schema supports decision_group_id NOT NULL)
+- **Guardrails exercised**: §3.3 (schema carries decision_group_id; API/refit
+  gates enforce non-null for active learning rows)
 
 ### Step 2 — Multi-step GRIB extraction (Change L)
 - Run `extract_tigge_region_member_vectors_multistep.py` on the regional cache
@@ -562,10 +576,12 @@ Each step has (a) a gate condition, (b) a rollback criterion, (c) the guardrail(
   - Load 51 members
   - Convert Kelvin → city unit if needed
   - Validate via `validate_ensemble_snapshot_for_calibration`
-  - Write with `authority='VERIFIED'`, populate `source_model_version`
+  - Write with `authority='VERIFIED'`, populate `model_version` and `data_version`
   - Write `issue_time` as UTC-explicit ISO string per M.7
-- **Gate**: `SELECT COUNT(*) FROM ensemble_snapshots WHERE authority='VERIFIED'` matches expected row count; no NaN members; every row has `source_model_version` populated; round-trip `issue_time` → `compute_id()` test passes for 100 sampled rows
-- **Rollback**: `DELETE FROM ensemble_snapshots WHERE rebuild_run_id = <this run>`
+- **Gate**: `SELECT COUNT(*) FROM ensemble_snapshots WHERE authority='VERIFIED'` matches expected row count; no NaN members; every row has `model_version` and `data_version` populated; round-trip `issue_time` + derived source version → `compute_id()` test passes for 100 sampled rows
+- **Rollback**: restore DB backup or delete rows by the audited ingest manifest/run
+  metadata once task #53 defines it; current schema has no `rebuild_run_id` on
+  `ensemble_snapshots`.
 - **Guardrails exercised**: §3.1 (via rebuild_validators Kelvin check; the Change D-fixed rounding applies if any conversion happens)
 
 ### Step 4 — Historical WU daily backfill → `observations`
@@ -582,25 +598,26 @@ Each step has (a) a gate condition, (b) a rollback criterion, (c) the guardrail(
 - Run `scripts/rebuild_settlements.py --no-dry-run`
 - Reads VERIFIED observations; applies `SettlementSemantics.assert_settlement_value` (now Change D-fixed); writes VERIFIED settlements
 - **Gate**: `settlement count ≈ observation count`; no NaN `settlement_value`; every settlement has `settlement_source` populated
-- **Rollback**: `DELETE FROM settlements WHERE rebuild_run_id=<this run>`
+- **Rollback**: restore DB backup or delete the Step 5 settlement slice by
+  `(city, target_date, authority)` after dry-run accounting; current schema has
+  no `rebuild_run_id` on `settlements`.
 - **Guardrails exercised**: §3.1 (runtime assertion — every settlement_value written goes through `wmo_half_up`)
 
-### Step 6 — Derive `calibration_pairs` (Change F — live Bin/Monte Carlo)
-- Run fixed `rebuild_calibration.py`
-- For each (city, target_date) with VERIFIED settlement:
+### Step 6 — Derive `calibration_pairs` (Change F — canonical Bin/Monte Carlo)
+- Run `scripts/rebuild_calibration_pairs_canonical.py`
+- For each VERIFIED ensemble snapshot with a matching VERIFIED observation:
   - Load VERIFIED `ensemble_snapshots` for all (issue_time, lead_hours) pairs targeting that date
-  - Load `market_events` for that (city, target_date) → bin set
-  - Run `validate_bin_topology(bins)` (§3.2) — **skip entire day on failure**, log to `availability_fact`
-  - For each snapshot, run Monte Carlo ONCE (per §3.4 pattern), get integer histogram
-  - For each bin, sum histogram via `bin_probability_from_histogram`
+  - Build the fixed canonical grid for the city's settlement unit; fixed grids
+    are topology-tested in `tests/test_calibration_bins_canonical.py`
+  - For each snapshot, run `p_raw_vector_from_maxes` once against the canonical grid
   - Compute `decision_group_id = compute_id(city, target_date, issue_time, source_model_version)` (Change G §3.3 — explicit strftime, UTC-normalized)
-  - Write pair rows (yes + no directions) with `decision_group_id` NOT NULL
+  - Write canonical pair rows with explicit nonblank `decision_group_id`
 - **Gate**:
   - per (city × season) bucket pair count ≥ 15 OR explicitly flagged insufficient (no silent dropout)
-  - `SELECT COUNT(*) FROM calibration_pairs WHERE decision_group_id IS NULL = 0`
+  - `SELECT COUNT(*) FROM calibration_pairs WHERE authority='VERIFIED' AND (decision_group_id IS NULL OR decision_group_id='') = 0`
   - Hash stability sample: 1000 rows re-computed and verified (3 code paths per §14 TRAP A test)
-  - BinTopology quarantine count ≤ 5% of expected days (if higher, investigate before proceeding)
-- **Rollback**: `DELETE FROM calibration_pairs WHERE rebuild_run_id=<this run>`
+  - canonical grid topology tests pass for both F and C grids
+- **Rollback**: `DELETE FROM calibration_pairs WHERE bin_source='canonical_v1'`
 - **Guardrails exercised**: §3.2 (topology scan), §3.3 (hash stability), §3.4 (histogram boundary), §3.5 (no Bin JSON leakage), §3.1 (indirect via Monte Carlo rounding)
 
 ### Step 7 — Refit Platt models
@@ -764,10 +781,10 @@ This packet is strictly **collect + store code preparation**. The at-recalibrate
 
 | Original label | Scope | Target file(s) | Blocker / prerequisite |
 |---|---|---|---|
-| **Change J** (logit_safe eps alignment) | Decide whether to tighten `P_CLAMP_LOW / HIGH` from the code's 0.01 to the math spec's 1e-6 and rename into a `logit_safe(p, eps)` helper | `src/calibration/platt.py` | Requires re-running Platt fit to measure impact; pre-TIGGE-completion fit would be thrown away |
-| **Change K** (Platt bootstrap by decision_group) | Replace `rng.choice(len(outcomes), ..., replace=True)` at `src/calibration/platt.py:112-113` with decision_group-level resampling. **Target location corrected from v2.1** — the bug is in `platt.py`, not `market_analysis.py:185-244` (which correctly resamples ENS members for the σ_ensemble layer) | `src/calibration/platt.py:110-125` | Requires `decision_group_id` to be populated on `calibration_pairs` (Change G.1–G.6, in this packet) |
-| **Change N** (live `_bin_probability` histogram) | Replace range-based `_bin_probability` at `src/strategy/market_analysis.py:313-321` with `bin_probability_from_histogram` for §12.3 equivalence with the rebuild path | `src/strategy/market_analysis.py` | Requires Change H (±inf Bin) landed. This packet lands H; N can then be done any time before recalibrate |
-| **Change G.7** (n_eff in manager) | Redirect `maturity_level` callers in `src/calibration/manager.py:186` from `len(pairs)` to `len({p['decision_group_id'] for p in pairs})` so bucket maturity reflects independent samples, not correlated bin rows | `src/calibration/manager.py` | Requires `decision_group_id` populated (Change G.1–G.6, this packet). Only matters when the next Platt fit runs |
+| **Change J** (eps alignment) | `logit_safe` exists; choose whether to tighten the default eps from `0.01` to `1e-6` after measuring refit impact | `src/calibration/platt.py` | User/math decision |
+| **Change K** (Platt bootstrap by decision_group) | Implemented for `ExtendedPlattCalibrator.fit(..., decision_group_ids=...)` | `src/calibration/platt.py` | Refit must pass group IDs |
+| **Change N** (live `_bin_probability` histogram) | Implemented through shared bin value helper | `src/strategy/market_analysis.py`, `src/types/market.py` | Validate on refit dry-run |
+| **Change G.7** (n_eff in manager) | Implemented in manager/refit bucket counts | `src/calibration/manager.py`, `scripts/refit_platt.py` | Requires populated IDs |
 
 ### Deferred relationship tests (already in `tests/test_data_rebuild_relationships.py` plan, then pruned out of this packet)
 
@@ -782,7 +799,8 @@ When the at-recalibrate-time packet runs, it inherits everything this packet lea
 - `calibration_pairs` rows with `decision_group_id` populated by `compute_id()` (Change G.1–G.6, in scope here)
 - `Bin` type supports ±inf edges (Change H, in scope here)
 - `validate_bin_topology` helper exists (Change I, in scope here)
-- `rebuild_calibration.py` produces pairs via WMO Monte Carlo histogram (Change F, in scope here)
+- `rebuild_calibration_pairs_canonical.py` produces pairs via WMO Monte Carlo
+  histogram (Change F, in scope here)
 - `ensemble_snapshots` rows written with UTC-explicit `issue_time` (Change M.7, in scope here)
 
 The post-packet's job is to make Platt fit consume those inputs correctly. No data migration, no backfill — just code changes to 3 files (`platt.py`, `manager.py`, `market_analysis.py`) and one test file re-green cycle.
@@ -862,11 +880,15 @@ The post-packet's job is to make Platt fit consume those inputs correctly. No da
 2. `test_simulate_settlement_negative_boundary` — member=-1.5°F, sigma=0, output=-1 (not -2)
 3. `test_monte_carlo_rounding_matches_settlement_semantics` — run MC with sigma=0 on 51 identical members at 74.5; assert all reported integers are 75
 
-**Change F** (rebuild_calibration uses live pipeline):
-1. `test_rebuild_calibration_imports_p_raw_vector` — assert `rebuild_calibration.py` does not contain the string 'simplified local p_raw'
-2. `test_rebuild_calibration_uses_live_bins_not_label_strings` — mock `market_events` with known Bin objects; assert the same Bin objects are passed to MC, not reconstructed strings
-3. `test_rebuild_calibration_mc_runs_once_per_snapshot` — patch `p_raw_vector` to count calls; for a market with 5 bins, assert it's called once (not 5 times)
-4. **F1-supplementary (new in v2.1)**: Construct a synthetic 51-member distribution (mean=75°F, std=2°F). Run the fixed `rebuild_calibration.py` logic on this distribution for a `Bin(low=73, high=77)` target. Compute analytically expected probability (normal CDF with WMO integer rounding + Monte Carlo noise σ=0.5°F). Assert the computed `p_raw_yes` matches the analytical value within a tolerance of ±0.02. This catches implementations that pass the string-absence check but still compute p_raw incorrectly.
+**Change F** (legacy rebuild fails closed; canonical rebuild owns live pipeline):
+1. `test_legacy_rebuild_calibration_fails_closed` — executing
+   `scripts/rebuild_calibration.py` returns non-zero, prints the canonical
+   replacement, and performs no DB work.
+2. `test_canonical_rebuild_imports_live_mc_path` — assert
+   `rebuild_calibration_pairs_canonical.py` imports `p_raw_vector_from_maxes`,
+   `SettlementSemantics`, and canonical grid helpers.
+3. `test_canonical_rebuild_requires_write_gates` — assert canonical script keeps
+   `--force` and `--allow-unaudited-ensemble` gates.
 
 **Change G** (decision_group hash stability — TRAP A):
 1. `test_compute_id_explicit_strftime_date_types` — same (city, target_date as date, issue_time as UTC datetime) produces same hash as (city, same date as datetime, same issue_time via DB round-trip)
@@ -909,7 +931,7 @@ The post-packet's job is to make Platt fit consume those inputs correctly. No da
 
 **Change M** (ingest_grib_to_snapshots idempotency + UTC issue_time):
 1. `test_ingest_idempotent_via_insert_or_replace` — run twice for same (city, date, issue_time, lead_hours); assert row count is 1, not 2
-2. `test_ingest_populates_source_model_version` — assert ingested row has non-null `source_model_version`
+2. `test_ingest_populates_model_and_data_version` — assert ingested row has non-null `model_version` and `data_version`
 3. `test_ingest_converts_kelvin_correctly` — member=300K for an F city; assert `members_json` value ≈ 80.33 (not still 300)
 4. `test_ingest_issue_time_utc_explicit_roundtrip` (M.7 test) — write a row via `ingest_grib_to_snapshots.py` with `issue_time=datetime(2024,6,1,12,tzinfo=timezone.utc)`; read back `issue_time` string from DB; parse via `datetime.fromisoformat()`; call `compute_id()` with the result; assert the resulting hash matches `compute_id()` called with the original Python `datetime(2024,6,1,12,tzinfo=timezone.utc)`. This is the SQLite PATH 2 round-trip from TRAP A test, applied specifically to the M.7 write path.
 
@@ -970,7 +992,10 @@ Synthetic TIGGE JSON + synthetic WU observations. Runs A→N→Step 1→…→St
 - **Step 6**: calibration pair generation logs per-(city, target_date) status: generated / quarantined(BinTopologyError) / skipped(no snapshot). Final: `Generated N pairs from M decision_groups; K days quarantined.`
 - **Step 7**: refit logs per-(city × season) bucket: n_eff, fit_status (fit/skipped/failed), A/B/C coefficients. Any NaN coefficient is a hard error.
 - **Step 8**: replay logs hard gate results. Step 8.1 logs A/B/C shift statistics (all 3 coefficients) and accept/reject decision for the 70-day tail.
-- **All steps**: `rebuild_run_id` written to all rows so a mid-run failure can be identified by `WHERE rebuild_run_id = X` and rolled back cleanly.
+- **All steps**: rollback must use actual schema-supported keys. Today only
+  selected tables carry `rebuild_run_id`; canonical calibration-pair rollback
+  uses `bin_source='canonical_v1'`, and future audited GRIB ingest must define
+  its run marker in task #53 before live DB mutation.
 
 ---
 
@@ -1060,14 +1085,25 @@ Expected last commits: `6cc8b26 K4.5.1 commit 3`, `1fb04a1 K4.5.1 commit 2`, etc
 
 ### Authority gate status (CRITICAL — read this before touching any code)
 
-The `authority='VERIFIED'` live-path gate is **NOT yet present in main source code**. Specifically:
-- `get_pairs_for_bucket` in `src/calibration/store.py` has NO authority filter (confirmed at lines 92-97: the WHERE clause is `WHERE cluster = ? AND season = ?` only)
-- `load_platt_model` in `src/calibration/store.py` has NO authority filter (confirmed at lines 148-153: the WHERE clause is `WHERE bucket_key = ? AND is_active = 1` only)
-- `src/strategy/evaluator.py` has zero `authority` column references anywhere in the file
-- `src/strategy/market_fusion.py` has zero `authority` column references anywhere in the file
-- The `authority` field exists in schema definitions and test fixtures but is not enforced as a live-path gate
+The calibration-store authority gate changed during the 2026-04-14
+refit-preflight repair. Current source status:
 
-The live-path gate will be established as part of Change G's `refit_platt.py` SQL gate and a follow-on commit that adds `authority='VERIFIED'` filtering to `get_pairs_for_bucket` and `load_platt_model`. **Treat the authority gate as a TARGET of the rebuild, NOT as a pre-existing feature.** Any investigator report claiming otherwise is wrong (or the code changed since that report was written).
+- `get_pairs_for_bucket` in `src/calibration/store.py` defaults to
+  `authority_filter='VERIFIED'`, and the refit/manager paths also request
+  `bin_source_filter='canonical_v1'`.
+- `load_platt_model` in `src/calibration/store.py` now loads only active
+  `authority='VERIFIED'` models.
+- `scripts/refit_platt.py` refuses to fit unless VERIFIED pairs are exclusively
+  canonical_v1 rows with nonblank `decision_group_id`.
+- This does **not** mean all live decision seams are authority-complete:
+  evaluator/market-fusion authority propagation and broader stale-model
+  governance remain separate follow-up work.
+
+Treat the calibration-store gate as present, but treat the wider live-path
+authority story as only partially closed. Any report claiming the old
+`get_pairs_for_bucket` / `load_platt_model` authority gap still exists is stale;
+any report claiming evaluator/market-fusion authority is fully solved is an
+overclaim.
 
 ### Known gaps — do NOT re-investigate
 
@@ -1096,7 +1132,9 @@ Verify this plan with the user ("proceed with Changes A-N?"), then start writing
 ## 17. Open questions / deferred decisions
 
 - **§8.1 tail evaluation timing**: should the 70-day tail evaluation run immediately after Step 7 (before Step 8 hard gates), or as a separate post-rebuild analysis pass? Current plan: separate pass. Change if operational sequencing needs it.
-- **`rebuild_run_id` format**: no spec exists yet for what value this takes. Suggestion: ISO8601 timestamp of run start. Implementation choice can be made at Change M time.
+- **Run marker format for future audited ingest**: task #53 must define the
+  actual schema-supported run marker before live GRIB ingestion. Do not assume
+  every rebuild table has `rebuild_run_id`.
 - **Sandbox DB path**: Step 1 requires a sandbox DB for testing backfill before production run. Path not specified — implementation agent should confirm with user before Step 1.
 - **Staged vs atomic Bin migration (Change H)**: executor must grep `b.low is None` call sites before landing Change H. If ≤5, atomic; if >10, staged. Decision deferred to execution time.
-- **`bin_probability_from_histogram` shared location**: Change N requires this function be importable by both `rebuild_calibration.py` and `market_analysis.py`. Executor should place it in `src/types/market.py` (co-located with `Bin`) or `src/signal/ensemble_signal.py` (co-located with `p_raw_vector`), whichever avoids circular import. Check import graph at execution time.
+- **`bin_probability_from_histogram` shared location**: Change N requires this function be importable by both the canonical rebuild path and `market_analysis.py`. Executor should place it in `src/types/market.py` (co-located with `Bin`) or `src/signal/ensemble_signal.py` (co-located with `p_raw_vector`), whichever avoids circular import. Check import graph at execution time.

@@ -138,7 +138,7 @@ Dynamic mult cascade (base = 0.25):
 Final: f* × mult × bankroll = 0.30 × 0.105 × $10,000 = $315
 ```
 
-**Cascade floor**: multiplier is bounded to [0.001, 1.0]. NaN → 0.001. This ensures positions are never zero-sized through floating-point collapse (INV-05: risk levels must change behavior, including at the sizing layer).
+**Cascade floor**: multiplier must be positive. NaN or non-positive multiplier raises `ValueError` (fail-closed; no fabricated floor). This ensures positions are never sized through floating-point collapse (INV-05: risk levels must change behavior, including at the sizing layer).
 
 **Key file**: `src/strategy/kelly.py`
 
@@ -153,7 +153,7 @@ Three reconciliation rules (run every cycle before trading):
 2. **Local exists, NOT on chain** → VOID immediately (local state is a hallucination)
 3. **Chain exists, NOT local** → QUARANTINE 48h (unknown asset, forced exit eval)
 
-Paper mode skips reconciliation. Live mode: mandatory.
+Reconciliation is mandatory on every cycle (Zeus is live-only; paper mode was decommissioned in Phase 1).
 
 **Key file**: `src/state/chain_reconciliation.py`
 
@@ -280,7 +280,7 @@ When facing N surface-level problems, do not write N patches. Find K structural 
 
 **Examples from Zeus:**
 - 22 chain-safety mechanisms = 5 structural decisions
-- 10 paper/live isolation mechanisms = 3 structural decisions
+- 10 mode-isolation mechanisms = 3 structural decisions (historical; paper mode decommissioned Phase 1)
 - The `state_path()` function = 1 structural decision that covers all per-process file isolation
 
 The test for a structural decision: does it eliminate a *class* of problems, or just one instance? If one instance, it is a patch. If a class, it is a structural decision.
@@ -295,7 +295,7 @@ Zeus classifies all persistent data into three layers with distinct isolation se
 | **Decision data** | Records of Zeus's choices and their outcomes | Shared + `env` column discriminator | `trade_decisions`, `chronicle`, `position_events` |
 | **Process state** | Mutable runtime state of a running instance | Physically isolated via `state_path()` | `positions-{mode}.json`, `strategy_tracker-{mode}.json`, `risk_state` |
 
-**Why this matters**: World data can be safely shared between paper and live modes because it is objective. Decision data must be tagged so paper decisions never contaminate live analytics. Process state must be physically separate because two concurrent instances writing the same file corrupt both.
+**Why this matters**: World data can be safely shared across execution contexts because it is objective. Decision data must be tagged so diagnostic/backtest decisions never contaminate live analytics. Process state must be physically separate because two concurrent instances writing the same file corrupt both.
 
 ## 15. Code-data mismatch: the DST case study
 

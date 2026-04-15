@@ -56,7 +56,7 @@ criteria:
   square_lead_matrix_coverage:
     status: target_not_certified
     source: docs/operations/data_rebuild_plan.md#8
-    protects: [scripts/rebuild_calibration.py, scripts/refit_platt.py]
+    protects: [scripts/rebuild_calibration_pairs_canonical.py, scripts/refit_platt.py]
     required_tests: [tests/test_data_rebuild_relationships.py]
     certification_gate: "Training matrix has symmetric lead coverage before estimating Platt lead-days coefficient."
     blocks_live_math_certification: true
@@ -68,7 +68,7 @@ criteria:
       - src/data/ingestion_guard.py
       - src/data/rebuild_validators.py
       - scripts/rebuild_settlements.py
-      - scripts/rebuild_calibration.py
+      - scripts/rebuild_calibration_pairs_canonical.py
       - scripts/refit_platt.py
     required_tests:
       - tests/test_authority_gate.py
@@ -122,8 +122,9 @@ rebuilt_row_contract:
     ensemble_snapshots:
       authority_required: true
       provenance_required: true
-      required_fields: [source_model_version, issue_time, available_at, members_json]
-      producer_script: scripts/etl_tigge_ens.py
+      required_fields: [model_version, data_version, issue_time, available_at, members_json]
+      producer_script: scripts/ingest_grib_to_snapshots.py
+      producer_status: pending_task_53_audited_grib_to_snapshots
     settlements:
       authority_required: true
       provenance_required: true
@@ -134,7 +135,7 @@ rebuilt_row_contract:
       authority_required: true
       provenance_required: true
       required_fields: [decision_group_id, forecast_available_at, lead_days, range_label, p_raw, outcome]
-      producer_contract: scripts/rebuild_calibration.py
+      producer_contract: scripts/rebuild_calibration_pairs_canonical.py
     platt_models:
       authority_required: true
       provenance_required: true

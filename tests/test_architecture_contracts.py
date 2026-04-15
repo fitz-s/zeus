@@ -1117,6 +1117,7 @@ def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
         "voided",
         "quarantined",
         "admin_closed",
+        "unknown",
     )
 
 

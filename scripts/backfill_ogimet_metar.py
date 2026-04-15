@@ -390,7 +390,11 @@ def _write_day(
         city.name, local_date.isoformat(), target.source_tag,
         high, low, city.settlement_unit,
         target.station, fetch_utc.isoformat(),
-        high, target.unit, city.settlement_unit, "daily_max",
+        # value_type CHECK constraint accepts 'high' | 'low' | 'mean' only.
+        # We anchor the row on the daily high (raw_value column carries it),
+        # with low_temp populated as a sibling field — matches the WU
+        # backfill convention.
+        high, target.unit, city.settlement_unit, "high",
         fetch_utc.isoformat(), local_time.isoformat(),
         bucket["first_utc"].isoformat(), bucket["last_utc"].isoformat(),
         city.timezone, utc_offset_minutes, int(dst_active),

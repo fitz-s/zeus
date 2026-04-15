@@ -712,6 +712,7 @@ def harvest_settlement(
     forecast_available_at: Optional[str] = None,
     source_model_version: Optional[str] = None,
     settlement_value: Optional[float] = None,
+    bias_corrected: Optional[bool] = None,
 ) -> int:
     """Generate calibration pairs from a settled market.
 
@@ -721,6 +722,12 @@ def harvest_settlement(
     season = season_from_date(target_date, lat=city.lat)
     now = forecast_available_at or datetime.now(timezone.utc).isoformat()
     issue_time = forecast_issue_time or now
+    if bias_corrected is None:
+        try:
+            from src.config import settings
+            bias_corrected = settings.bias_correction_enabled
+        except Exception:
+            bias_corrected = False
     if p_raw_vector and not source_model_version:
         raise ValueError(
             "source_model_version is required when harvesting calibration pairs"
@@ -747,6 +754,7 @@ def harvest_settlement(
                 issue_time,
                 source_model_version or "",
             ),
+            bias_corrected=bool(bias_corrected),
         )
         count += 1
 

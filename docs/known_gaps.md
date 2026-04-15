@@ -112,14 +112,13 @@
 **Problem:** 只查 `target_date - 1 day` 的 settlement。如果连续多天都有异常温度变化，只看一天不够。
 **Proposed antibody:** 查最近 3 天的 settlements，取 average delta。
 
-### [OPEN] alpha_overrides 只有伦敦验证为盈利
+### [CLOSED — 2026-04-15] alpha_overrides 只有伦敦验证为盈利
 **Context:** 数学验证显示只有 London 的 alpha override 预期盈利。其他城市的 override 可能 negative EV。
-**Proposed antibody:** 需要 per-city alpha override validation。如果验证不通过，disable override for that city。
+**Resolution:** `compute_alpha` 已将 override 机制标记为废弃，override 表 0 rows。Override 路径不再活跃，不需要 per-city validation。如果未来需要恢复，须作为新 packet 重新评估。
 
-### [OPEN] Harvester 不知道 bias correction 是否开启
+### [CLOSED — 2026-04-15] Harvester 不知道 bias correction 是否开启
 **Location:** `src/execution/harvester.py` — `harvest_settlement()` 生成 calibration pairs
-**Problem:** Harvester 生产的 calibration pairs 的 p_raw 可能和 live signal 不一致（如果 live 开了 bias correction 但 harvester 没有）。
-**Proposed antibody:** Harvester 生成 pairs 时应该使用和 evaluator 相同的 bias correction 设置。或在 calibration_pairs 里记录 `bias_corrected: bool`。
+**Resolution:** `harvest_settlement()` now accepts `bias_corrected: Optional[bool]` parameter. When None, reads `settings.bias_correction_enabled`. The value is passed through to `add_calibration_pair()`. Test added in `test_calibration_manager.py::test_bias_corrected_persisted_through_harvest`.
 
 ### [STALE-UNVERIFIED] Open-Meteo quota contention is workspace-wide, not Zeus-only
 **Location:** Zeus + `51 source data` + Rainstorm-era ingestion loops

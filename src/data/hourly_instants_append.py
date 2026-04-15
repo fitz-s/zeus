@@ -212,6 +212,7 @@ def _validate_hourly_reading(city_name: str, r: dict) -> str | None:
             raw_value=r["temp_current"],
             raw_unit=r["temp_unit"],
             declared_unit=declared_unit,
+            target_date=date.fromisoformat(r["target_date"]),
         )
         _GUARD.check_dst_boundary(city=city_name, local_time=r["local_dt"])
     except UnitConsistencyViolation:

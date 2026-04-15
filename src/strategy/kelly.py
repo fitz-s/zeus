@@ -35,9 +35,13 @@ def kelly_size(
     safety_cap_usd: optional hard ceiling in USD. When provided, clips output
         and emits a structured log record with the original pre-clip size.
     """
-    if p_posterior <= entry_price:
+    if entry_price <= 0.0 or entry_price >= 1.0:
         return 0.0
-    if entry_price >= 1.0:
+    if bankroll <= 0.0:
+        return 0.0
+    if not (0.0 <= p_posterior <= 1.0):
+        return 0.0
+    if p_posterior <= entry_price:
         return 0.0
 
     f_star = (p_posterior - entry_price) / (1.0 - entry_price)

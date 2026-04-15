@@ -311,10 +311,10 @@ def test_rebuild_calibration_requires_verified_observations(tmp_path):
     _add_authority_columns(conn)
 
     # Seed VERIFIED snapshots for NYC
-    _seed_ensemble_snapshots(conn, city="NYC", authority="VERIFIED", n=3)
+    _seed_ensemble_snapshots(conn, city="NYC", authority="VERIFIED", n=4)
 
-    # Seed only 2 VERIFIED observations (1 snapshot has no observation)
-    _seed_observations(conn, city="NYC", authority="VERIFIED", n=2)
+    # Seed only 3 VERIFIED observations (1 snapshot has no observation)
+    _seed_observations(conn, city="NYC", authority="VERIFIED", n=3)
     conn.commit()
     conn.close()
 
@@ -331,8 +331,8 @@ def test_rebuild_calibration_requires_verified_observations(tmp_path):
     )
     conn2.commit()
 
-    # 3 snapshots processed; 1 skipped (no settlement for day 3)
-    assert summary.snapshots_processed == 2
+    # 3 snapshots processed; 1 skipped for missing VERIFIED observation.
+    assert summary.snapshots_processed == 3
     assert summary.snapshots_no_observation == 1
 
     # All written pairs have authority='VERIFIED'

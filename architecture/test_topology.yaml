@@ -96,9 +96,13 @@ categories:
     - tests/test_observation_instants_etl.py
     - tests/test_platt.py
     - tests/test_k3_5_fix_pack.py
+    - tests/test_k3_slice_p.py
+    - tests/test_k3_slice_q.py
     - tests/test_k6_slice_m.py
     - tests/test_k6_slice_n.py
     - tests/test_k7_slice_o.py
+    - tests/test_k8_slice_r.py
+    - tests/test_k8_slice_s.py
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
@@ -250,14 +254,6 @@ high_sensitivity_skips:
       - "Registry YAML not yet created"
       - "PyYAML not installed"
     sunset: Remove once provenance registry dependency is always present in test env.
-  tests/test_runtime_guards.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Runtime guard law still has paper-mode-removal skips in a live-only repo.
-    skip_count: 3
-    reason_patterns:
-      - "Phase2: paper_mode removed"
-    sunset: Resolve in live-only runtime guard cleanup packet.
   tests/test_wu_scheduler.py:
     owner: topology-program
     packet: Packet 6

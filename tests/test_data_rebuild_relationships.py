@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import subprocess
+import sys
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -129,69 +131,205 @@ def test_r1_wmo_scalar_helper_matches_vector_helper():
 # ---------------------------------------------------------------------------
 
 def test_r2_rebuild_calibration_uses_live_monte_carlo_pipeline():
-    """Invariant (Change F, narrowed per v2.2 scope): `scripts/rebuild_calibration.py`
-    must produce training pairs via the live Monte Carlo + WMO rounding
-    pipeline, not via a simplified local p_raw computation.
+    """Invariant (Change F): the legacy `rebuild_calibration.py` entrypoint
+    fails closed and points operators at the canonical rebuild script.
 
-    After Change F:
-      (a) the file must not contain the legacy 'simplified local p_raw'
-          docstring or a homegrown histogram function
-      (b) it must import a p_raw-producing function that routes through
-          `SettlementSemantics` or `round_wmo_half_up_values`
-          (either by importing `EnsembleSignal` / `p_raw_vector` or by
-          calling the rounding helpers directly)
-
-    This is the narrowed F-only relationship: the packet guarantees data
-    generation correctness, not F/N equivalence. F/N equivalence (the
-    original R2.2) is deferred to the post-this-packet at-recalibrate-time
-    packet along with Change N — see data_rebuild_plan.md §10.1.
-
-    Change: F (in scope)
-    Deferred companion: N (post-packet)
-    Authority: data_rebuild_plan.md v2.2 §5 Change F, §10.1
-    Status: RED
+    The active implementation is `rebuild_calibration_pairs_canonical.py`.
+    Keeping the old command as a redirect would make the retired surface look
+    valid, so this test requires an explicit non-zero tombstone.
     """
     from pathlib import Path
 
-    script = Path(__file__).resolve().parent.parent / "scripts" / "rebuild_calibration.py"
-    if not script.exists():
-        pytest.fail(f"scripts/rebuild_calibration.py not found at {script}")
+    root = Path(__file__).resolve().parent.parent
+    script = root / "scripts" / "rebuild_calibration.py"
+    canonical = root / "scripts" / "rebuild_calibration_pairs_canonical.py"
 
     source = script.read_text()
 
-    # (a) Legacy simplified-p_raw docstring must be gone
     legacy_markers = [
         "simplified local p_raw",
         "simplified p_raw",
         "bin taxonomy may differ",
+        "_compute_p_raw_for_bins",
     ]
     stale = [m for m in legacy_markers if m in source]
     if stale:
         pytest.fail(
-            f"rebuild_calibration.py still contains legacy simplified-p_raw "
-            f"markers: {stale}. Change F: replace local p_raw with live "
-            f"Monte Carlo via EnsembleSignal.p_raw_vector or equivalent "
-            f"WMO-rounding path."
+            f"retired rebuild_calibration.py still contains legacy executable "
+            f"markers: {stale}."
         )
 
-    # (b) Must route through the live WMO-correct pipeline.
-    # Accept any of:
-    #   - imports EnsembleSignal or p_raw_vector
-    #   - imports round_wmo_half_up_value(s) directly
-    #   - imports SettlementSemantics
-    wmo_routed = any(marker in source for marker in [
-        "EnsembleSignal",
-        "p_raw_vector",
-        "round_wmo_half_up_value",
+    proc = subprocess.run(
+        [sys.executable, str(script), "--dry-run", "--db", "/tmp/should-not-exist.db"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "rebuild_calibration_pairs_canonical.py" in proc.stderr
+    assert "retired" in proc.stderr
+
+    canonical_source = canonical.read_text()
+    for marker in [
+        "p_raw_vector_from_maxes",
         "SettlementSemantics",
-    ])
-    if not wmo_routed:
-        pytest.fail(
-            "rebuild_calibration.py does not import any WMO-correct Monte "
-            "Carlo pipeline. Change F: import EnsembleSignal / p_raw_vector "
-            "or the round_wmo_half_up helpers and compute p_raw via the "
-            "same path the live evaluator uses."
+        "grid_for_city",
+        "--force",
+        "--allow-unaudited-ensemble",
+    ]:
+        assert marker in canonical_source
+
+
+def test_r2_canonical_rebuild_refuses_unaudited_with_nonzero_status():
+    from src.state.db import init_schema
+    from scripts.rebuild_calibration_pairs_canonical import rebuild
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, issue_time, valid_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, data_version,
+            authority
         )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "NYC",
+            "2026-01-01",
+            "2025-12-30T00:00:00Z",
+            "2026-01-01T12:00:00Z",
+            "2025-12-30T08:00:00Z",
+            "2025-12-30T08:00:00Z",
+            48.0,
+            json.dumps([72.0] * 51),
+            "ecmwf_tigge",
+            "tigge_step024_v1_test",
+            "VERIFIED",
+        ),
+    )
+
+    stats = rebuild(
+        conn,
+        dry_run=True,
+        force=False,
+        allow_unaudited_ensemble=False,
+    )
+    assert stats.refused is True
+
+
+def test_r2_canonical_rebuild_refuses_empty_live_replacement():
+    from src.state.db import init_schema
+    from scripts.rebuild_calibration_pairs_canonical import rebuild
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs (
+            city, target_date, range_label, p_raw, outcome, lead_days,
+            season, cluster, forecast_available_at, decision_group_id,
+            authority, bin_source
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "NYC",
+            "2026-01-01",
+            "39-40°F",
+            0.5,
+            1,
+            1.0,
+            "DJF",
+            "NYC",
+            "2025-12-31T00:00:00Z",
+            "existing-canonical",
+            "VERIFIED",
+            "canonical_v1",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no eligible snapshots"):
+        rebuild(conn, dry_run=False, force=True, allow_unaudited_ensemble=True)
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs WHERE bin_source='canonical_v1'"
+    ).fetchone()[0]
+    assert remaining == 1
+
+
+def test_r2_canonical_rebuild_refuses_partial_live_replacement():
+    from src.state.db import init_schema
+    from scripts.rebuild_calibration_pairs_canonical import rebuild
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    members = json.dumps([72.0] * 51)
+    for day in ("2026-01-01", "2026-01-02"):
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots (
+                city, target_date, issue_time, valid_time, available_at,
+                fetch_time, lead_hours, members_json, model_version, data_version,
+                authority
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "NYC",
+                day,
+                "2025-12-31T00:00:00Z",
+                f"{day}T12:00:00Z",
+                "2025-12-31T08:00:00Z",
+                "2025-12-31T08:00:00Z",
+                24.0,
+                members,
+                "ecmwf_tigge",
+                f"canonical-test-{day}",
+                "VERIFIED",
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO observations (city, target_date, source, high_temp, low_temp, unit, authority)
+        VALUES ('NYC', '2026-01-01', 'wu_icao_history', 72.0, 60.0, 'F', 'VERIFIED')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs (
+            city, target_date, range_label, p_raw, outcome, lead_days,
+            season, cluster, forecast_available_at, decision_group_id,
+            authority, bin_source
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "NYC",
+            "2025-12-01",
+            "39-40°F",
+            0.5,
+            1,
+            1.0,
+            "DJF",
+            "NYC",
+            "2025-11-30T00:00:00Z",
+            "existing-canonical",
+            "VERIFIED",
+            "canonical_v1",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no matching VERIFIED observation"):
+        rebuild(conn, dry_run=False, force=True, n_mc=10, allow_unaudited_ensemble=True)
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs WHERE decision_group_id='existing-canonical'"
+    ).fetchone()[0]
+    assert remaining == 1
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +362,22 @@ def test_r3_compute_id_exists_and_rejects_naive_datetime():
             issue_time=datetime(2024, 1, 15, 0, 0),  # naive: no tzinfo
             source_model_version="tigge_v1",
         )
+
+
+def test_r3_tigge_issue_time_uses_cycle_data_time():
+    from scripts.etl_tigge_ens import tigge_issue_time_from_members
+
+    members = [
+        {"data_date": "20240601", "data_time": "1200"},
+        {"data_date": "20240601", "data_time": "1200"},
+    ]
+    assert tigge_issue_time_from_members(members) == "2024-06-01T12:00:00Z"
+
+    with pytest.raises(ValueError, match="disagree"):
+        tigge_issue_time_from_members([
+            {"data_date": "20240601", "data_time": "0000"},
+            {"data_date": "20240601", "data_time": "1200"},
+        ])
 
 
 def test_r3_compute_id_stable_across_three_paths():

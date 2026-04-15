@@ -26,18 +26,23 @@ REPRESENTATIVE_SHARED_SCRIPTS = (
     "scripts/etl_observation_instants.py",
     "scripts/etl_diurnal_curves.py",
     "scripts/etl_temp_persistence.py",
-    "scripts/etl_tigge_direct_calibration.py",
     "scripts/refit_platt.py",
-    "scripts/etl_tigge_ens.py",
-    "scripts/etl_tigge_calibration.py",
     "scripts/run_replay.py",
 )
 
 
 def _seed_tigge_members(path: Path, *, base_value: float) -> None:
+    data_date = path.parent.name
     payload = {
         "generated_at": "2026-01-01T08:00:00Z",
-        "members": [{"value_native_unit": base_value + (i * 0.01)} for i in range(51)],
+        "members": [
+            {
+                "value_native_unit": base_value + (i * 0.01),
+                "data_date": data_date,
+                "data_time": "0000",
+            }
+            for i in range(51)
+        ],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -67,11 +72,13 @@ def test_etl_recalibrate_launches_expected_scripts_via_repo_venv(monkeypatch):
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
         "etl_hourly_observations.py",
-        "etl_tigge_direct_calibration.py",
-        "refit_platt.py",
         "run_replay.py",
     ]
-    for cmd, capture_output, text, timeout in calls[:7]:
+    launched = {Path(call[0][1]).name for call in calls}
+    assert "etl_tigge_direct_calibration.py" not in launched
+    assert "generate_calibration_pairs.py" not in launched
+    assert "refit_platt.py" not in launched
+    for cmd, capture_output, text, timeout in calls[:5]:
         assert cmd[0] == str(EXPECTED_SUBPROCESS_PYTHON)
         assert Path(cmd[1]).is_absolute()
         assert capture_output is True
@@ -92,6 +99,49 @@ def test_etl_recalibrate_launches_expected_scripts_via_repo_venv(monkeypatch):
     assert capture_output is True
     assert text is True
     assert timeout == 600
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "etl_tigge_ens.py",
+        "etl_tigge_calibration.py",
+        "etl_tigge_direct_calibration.py",
+    ],
+)
+def test_retired_tigge_direct_scripts_fail_closed(script_name):
+    result = subprocess.run(
+        [str(EXPECTED_SUBPROCESS_PYTHON), str(ROOT / "scripts" / script_name)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "retired" in result.stderr
+
+
+def test_etl_recalibrate_skips_refit_until_explicit_canonical_cascade(monkeypatch):
+    import src.main as main_module
+
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def _run(cmd, *, capture_output, text, timeout):
+        calls.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    main_module._etl_recalibrate()
+
+    launched = {Path(cmd[1]).name for cmd in calls}
+    assert "refit_platt.py" not in launched
+    assert "etl_tigge_direct_calibration.py" not in launched
 
 
 @pytest.mark.parametrize("script_rel", REPRESENTATIVE_SHARED_SCRIPTS)
@@ -134,6 +184,7 @@ def test_representative_shared_scripts_import_from_outside_repo_cwd(script_rel, 
     }
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writer is fail-closed")
 def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monkeypatch):
     from scripts import etl_tigge_calibration as etl
     import src.calibration.manager as calibration_manager_module
@@ -197,6 +248,7 @@ def test_etl_tigge_calibration_preserves_all_steps_and_lead_hours(tmp_path, monk
     assert pair_count == 22
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writer is fail-closed")
 def test_etl_tigge_calibration_uses_settlement_value_when_winning_bin_missing(tmp_path, monkeypatch):
     from scripts import etl_tigge_calibration as etl
     import src.calibration.manager as calibration_manager_module
@@ -236,6 +288,7 @@ def test_etl_tigge_calibration_uses_settlement_value_when_winning_bin_missing(tm
     assert positive_count == 1
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writers are fail-closed")
 def test_tigge_scripts_expose_configured_city_coverage_gap():
     from scripts import etl_tigge_calibration as tigge_cal
     from scripts import etl_tigge_direct_calibration as direct_cal
@@ -341,6 +394,7 @@ def _tigge_member(member: int, *, forecast_type: str, value: float) -> dict:
     }
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writers are fail-closed")
 def test_tigge_etl_member_normalization_deduplicates_identical_grib_messages():
     from scripts import etl_tigge_calibration as tigge_cal
     from scripts import etl_tigge_direct_calibration as direct_cal
@@ -358,6 +412,7 @@ def test_tigge_etl_member_normalization_deduplicates_identical_grib_messages():
         assert normalized[-1]["member"] == 50
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writers are fail-closed")
 def test_tigge_etl_member_normalization_rejects_conflicting_duplicates():
     from scripts import etl_tigge_calibration as tigge_cal
     from scripts import etl_tigge_direct_calibration as direct_cal
@@ -372,6 +427,7 @@ def test_tigge_etl_member_normalization_rejects_conflicting_duplicates():
             module._normalize_tigge_members([duplicate_a, duplicate_b])
 
 
+@pytest.mark.skip(reason="retired TIGGE direct calibration writers are fail-closed")
 def test_tigge_etl_member_normalization_rejects_oversized_legacy_records():
     from scripts import etl_tigge_calibration as tigge_cal
     from scripts import etl_tigge_direct_calibration as direct_cal
