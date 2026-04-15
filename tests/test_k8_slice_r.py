@@ -112,3 +112,48 @@ class TestDay0SignalRng:
         r1 = sig.p_vector(bins, rng=np.random.default_rng(77))
         r2 = sig.p_vector(bins, rng=np.random.default_rng(77))
         np.testing.assert_array_equal(r1, r2)
+
+
+# ---------------------------------------------------------------------------
+# Bug #17: EnsembleSignal.p_raw_vector forwards rng
+# ---------------------------------------------------------------------------
+
+class TestEnsembleSignalRngForwarding:
+    """Verify that EnsembleSignal.p_raw_vector forwards rng to p_raw_vector_from_maxes."""
+
+    def test_p_raw_vector_accepts_rng_param(self):
+        """p_raw_vector signature includes rng parameter."""
+        import inspect
+        from src.signal.ensemble_signal import EnsembleSignal
+
+        sig = inspect.signature(EnsembleSignal.p_raw_vector)
+        assert "rng" in sig.parameters, "p_raw_vector must accept rng kwarg"
+
+    def test_p_raw_vector_rng_produces_deterministic_output(self):
+        """Same rng seed → same p_raw_vector output."""
+        from unittest.mock import patch
+        from src.signal.ensemble_signal import EnsembleSignal
+
+        bins = _bins_3()
+
+        # Patch the module-level function to capture kwargs
+        captured_kwargs = []
+
+        def capture_call(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return np.array([0.2, 0.5, 0.3])
+
+        with patch("src.signal.ensemble_signal.p_raw_vector_from_maxes", side_effect=capture_call):
+            # Use a real-ish object with the unbound method
+            class FakeES:
+                member_maxes = np.random.default_rng(42).normal(62, 3, size=20)
+                city = "fake_city"
+                settlement_semantics = "fake_sem"
+                p_raw_vector = EnsembleSignal.p_raw_vector
+
+            es = FakeES()
+            rng = np.random.default_rng(99)
+            es.p_raw_vector(bins, rng=rng)
+
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0].get("rng") is rng, "rng must be forwarded to p_raw_vector_from_maxes"

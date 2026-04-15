@@ -167,3 +167,89 @@ class TestBuyNoMath:
 
             # edge_no = -(edge_yes) algebraically
             assert edge_no == pytest.approx(-edge_yes, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Bug #8 continued: Platt-parameterized bootstrap path
+# ---------------------------------------------------------------------------
+
+class TestBootstrapWithPlattCalibrator:
+    """Exercise the Platt-parameterized bootstrap branch (calibrator!=None)."""
+
+    def test_platt_calibrator_bootstrap_produces_valid_ci(self):
+        """Bootstrap with mock Platt calibrator produces finite CI."""
+        from src.strategy.market_analysis import MarketAnalysis
+        from types import SimpleNamespace
+
+        bins = _bins_3()
+        rng = np.random.default_rng(42)
+        members = rng.normal(62, 3, size=20)
+
+        # Mock calibrator with fitted Platt params
+        calibrator = SimpleNamespace(
+            fitted=True,
+            bootstrap_params=np.array([
+                [0.5, -0.1, 0.2],
+                [0.6, -0.15, 0.25],
+                [0.4, -0.05, 0.15],
+            ]),
+            input_space="raw_probability",
+        )
+
+        p_cal = np.array([0.15, 0.55, 0.30])
+        p_market = np.array([0.18, 0.48, 0.34])
+
+        ma = MarketAnalysis(
+            p_raw=np.array([0.15, 0.55, 0.30]),
+            p_cal=p_cal,
+            p_market=p_market,
+            alpha=0.6,
+            bins=bins,
+            member_maxes=members,
+            calibrator=calibrator,
+            lead_days=2,
+            unit="F",
+            rng_seed=123,
+        )
+
+        ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=200)
+        assert np.isfinite(ci_lo)
+        assert np.isfinite(ci_hi)
+        assert ci_lo <= ci_hi
+        assert 0.0 <= p_val <= 1.0
+
+    def test_platt_no_side_bootstrap(self):
+        """Platt NO-side bootstrap produces valid CI."""
+        from src.strategy.market_analysis import MarketAnalysis
+        from types import SimpleNamespace
+
+        bins = _bins_3()
+        members = np.random.default_rng(42).normal(62, 3, size=20)
+
+        calibrator = SimpleNamespace(
+            fitted=True,
+            bootstrap_params=np.array([
+                [0.5, -0.1, 0.2],
+                [0.6, -0.15, 0.25],
+            ]),
+            input_space="raw_probability",
+        )
+
+        ma = MarketAnalysis(
+            p_raw=np.array([0.15, 0.55, 0.30]),
+            p_cal=np.array([0.15, 0.55, 0.30]),
+            p_market=np.array([0.18, 0.48, 0.34]),
+            alpha=0.6,
+            bins=bins,
+            member_maxes=members,
+            calibrator=calibrator,
+            lead_days=2,
+            unit="F",
+            rng_seed=456,
+        )
+
+        ci_lo, ci_hi, p_val = ma._bootstrap_bin_no(1, n=200)
+        assert np.isfinite(ci_lo)
+        assert np.isfinite(ci_hi)
+        assert ci_lo <= ci_hi
+        assert 0.0 <= p_val <= 1.0

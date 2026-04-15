@@ -238,7 +238,7 @@ class MarketAnalysis:
             p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
             # Layer 2: sample Platt parameterization for ALL bins
-            if platt_params:
+            if has_platt:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
                 p_cal_boot_all = np.empty(len(self.bins))
@@ -295,7 +295,7 @@ class MarketAnalysis:
             # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
             p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
-            if platt_params:
+            if has_platt:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
                 p_cal_boot_all = np.empty(len(self.bins))
