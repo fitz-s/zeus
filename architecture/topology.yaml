@@ -417,7 +417,8 @@ docs_subroots:
   - path: "docs/operations"
     role: operations
     requires_agents: true
-    allow_non_markdown: false
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".json"]
   - path: "docs/runbooks"
     role: runbook
     requires_agents: true

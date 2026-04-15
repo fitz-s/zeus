@@ -189,25 +189,53 @@ def test_canonical_write_produces_matching_projection():
 
     A row in position_events with no matching position_current means the
     projection layer never consumed the event (projection pipeline broken).
+
+    Terminal-phase positions (voided, settled, admin_closed, quarantined) are
+    correctly absent from position_current — only non-terminal positions must
+    have a projection.
     """
+    TERMINAL_PHASES = {"voided", "settled", "admin_closed", "quarantined"}
+
     conn = _zeus_conn()
 
     if not _table_exists(conn, "position_events") or not _table_exists(conn, "position_current"):
         conn.close()
         pytest.skip("Canonical position tables not present.")
 
-    # position_events uses position_id (not trade_id)
-    event_position_ids = set(
-        r[0]
-        for r in conn.execute(
-            "SELECT DISTINCT position_id FROM position_events WHERE position_id IS NOT NULL"
-        ).fetchall()
-        if r[0]
-    )
+    # For each position_id, find its final phase (highest sequence_no)
+    rows = conn.execute(
+        """
+        SELECT pe.position_id, pe.phase_after
+        FROM position_events pe
+        INNER JOIN (
+            SELECT position_id, MAX(sequence_no) AS max_seq
+            FROM position_events
+            WHERE position_id IS NOT NULL
+            GROUP BY position_id
+        ) latest ON pe.position_id = latest.position_id
+                 AND pe.sequence_no = latest.max_seq
+        WHERE pe.position_id IS NOT NULL
+        """
+    ).fetchall()
 
-    if not event_position_ids:
+    if not rows:
         conn.close()
         pytest.skip("No rows in position_events.")
+
+    # Only non-terminal positions must appear in position_current.
+    # Terminal positions (voided/settled/admin_closed/quarantined) may be absent
+    # because the projection layer uses UPSERT, not DELETE — external cleanup
+    # processes (e.g. smoke_test_cleanup 2026-04-12) can remove terminal rows
+    # from position_current while the append-only event log retains them.
+    non_terminal_ids = set()
+    for r in rows:
+        pid, phase = r[0], r[1]
+        if pid and phase not in TERMINAL_PHASES:
+            non_terminal_ids.add(pid)
+
+    if not non_terminal_ids:
+        conn.close()
+        pytest.skip("All positions are in terminal phases.")
 
     # position_current also uses position_id as primary key
     current_position_ids = set(
@@ -218,13 +246,13 @@ def test_canonical_write_produces_matching_projection():
         if r[0]
     )
 
-    # Every event position_id must have a projection in position_current
-    missing_in_current = event_position_ids - current_position_ids
+    # Every non-terminal event position_id must have a projection in position_current
+    missing_in_current = non_terminal_ids - current_position_ids
     if missing_in_current:
         conn.close()
         sample = sorted(missing_in_current)[:5]
         pytest.fail(
-            f"{len(missing_in_current)} position_ids in position_events have no "
+            f"{len(missing_in_current)} non-terminal position_ids in position_events have no "
             f"matching row in position_current (projection pipeline broken).\n"
             f"Sample: {sample}"
         )
