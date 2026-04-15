@@ -1,4 +1,7 @@
 import pytest
+import json
+from contextlib import redirect_stdout
+from io import StringIO
 
 from scripts import topology_doctor
 
@@ -27,6 +30,14 @@ def reference_entry(manifest, path):
     return next(entry for entry in manifest["entries"] if entry["path"] == path)
 
 
+def run_cli_json(args):
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(args)
+    assert exit_code == 0
+    return json.loads(buffer.getvalue())
+
+
 def test_topology_strict_passes_after_residual_classification():
     result = topology_doctor.run_strict()
 
@@ -37,6 +48,94 @@ def test_topology_docs_mode_passes_with_active_data_package_excluded():
     result = topology_doctor.run_docs()
 
     assert_topology_ok(result)
+
+
+def test_cli_json_parity_for_docs_mode():
+    payload = run_cli_json(["--docs", "--json"])
+    result = topology_doctor.run_docs()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_cli_json_parity_for_digest_command():
+    args = [
+        "digest",
+        "--task",
+        "debug settlement rounding mismatch",
+        "--files",
+        "src/contracts/settlement_semantics.py",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_digest(
+        "debug settlement rounding mismatch",
+        ["src/contracts/settlement_semantics.py"],
+    )
+
+
+def test_cli_json_parity_for_context_pack_command():
+    args = [
+        "context-pack",
+        "--pack-type",
+        "debug",
+        "--task",
+        "debug settlement rounding mismatch",
+        "--files",
+        "src/contracts/settlement_semantics.py",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_context_pack(
+        "debug",
+        task="debug settlement rounding mismatch",
+        files=["src/contracts/settlement_semantics.py"],
+    )
+
+
+def test_cli_json_parity_for_core_map_command():
+    payload = run_cli_json(["core-map", "--profile", "probability-chain", "--json"])
+
+    assert payload == topology_doctor.build_core_map("probability-chain")
+
+
+def test_cli_json_parity_for_compiled_topology_shape():
+    payload = run_cli_json(["compiled-topology", "--json"])
+
+    assert payload["authority_status"] == "derived_not_authority"
+    assert payload["freshness_status"] == "ok"
+    assert {
+        "generated_at",
+        "source_manifests",
+        "docs_subroots",
+        "reviewer_visible_routes",
+        "local_only_routes",
+        "active_operations_surfaces",
+        "artifact_roles",
+        "broken_visible_routes",
+        "unclassified_docs_artifacts",
+    }.issubset(payload)
+
+
+def test_cli_json_parity_for_map_maintenance_command():
+    payload = run_cli_json([
+        "--map-maintenance",
+        "--changed-files",
+        "tests/test_topology_doctor.py",
+        "--json",
+    ])
+    result = topology_doctor.run_map_maintenance(["tests/test_topology_doctor.py"])
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
 
 
 def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):
