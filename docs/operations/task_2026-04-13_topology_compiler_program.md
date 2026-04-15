@@ -22,7 +22,14 @@ Build a machine-checkable topology layer so a zero-context agent can determine:
 | Packet 1 | closed | WMO half-up executable rounding law and recurrence gates |
 | Packet 2 | closed | topology compiler MVP and digest command |
 | Packet 3 | closed | docs mesh repair and authority normalization |
-| Packet 4 | pending | source file rationale map |
+| Packet 4 | closed | source file rationale map |
+
+## Packet 4 Acceptance
+
+- `architecture/source_rationale.yaml` exists with hazard badges, write routes, package defaults, and per-file entries.
+- `topology_doctor --source` exits 0 (zero missing rationale, zero stale entries, all required fields present).
+- All write-route-bearing files have correct route assignments.
+- `topology_doctor --strict` exits 0.
 
 ## Packet 3 Acceptance
 
