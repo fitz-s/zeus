@@ -31,7 +31,7 @@ plan.
 | `docs/reference/` | Conditional domain/math/data references | `docs/reference/AGENTS.md` |
 | `docs/operations/` | Active packet/control pointers | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
-| `docs/archives/` | Historical evidence only | `docs/archives/AGENTS.md`; do not default-read |
+| `docs/archives/` | Historical evidence only | `docs/archives/AGENTS.md`; work packets group by git lineage |
 | `architecture/` | Machine-checkable authority and topology | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
 | `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |
@@ -64,6 +64,7 @@ Prefer these over hand-maintained prose when they exist:
 
 | Manifest | Use |
 |----------|-----|
+| `architecture/self_check/authority_index.md` | High-risk zero-context authority order |
 | `architecture/invariants.yaml` | Invariant IDs and enforcement intent |
 | `architecture/zones.yaml` | Canonical file-level zone ownership |
 | `architecture/negative_constraints.yaml` | Forbidden moves and failure modes |
@@ -73,8 +74,11 @@ Prefer these over hand-maintained prose when they exist:
 | `architecture/script_manifest.yaml` | Script lifecycle, authority scope, read/write targets |
 | `architecture/data_rebuild_topology.yaml` | Data rebuild certification and non-promotion gates |
 | `architecture/history_lore.yaml` | Dense historical failure lessons and antibodies |
+| `architecture/artifact_lifecycle.yaml` | Artifact classes and minimum work-record contract |
 | `architecture/context_budget.yaml` | Entry-map budget and maintenance cadence |
+| `architecture/context_pack_profiles.yaml` | Task-shaped generated context-pack profiles |
 | `architecture/code_idioms.yaml` | Intentional non-obvious code shapes and their owner gates |
+| `architecture/core_claims.yaml` | Proof-backed semantic claims for generated topology views |
 | `architecture/runtime_modes.yaml` | Discovery mode index and shared CycleRunner path |
 | `architecture/reference_replacement.yaml` | Reference-doc replacement evidence and deletion eligibility |
 | `architecture/map_maintenance.yaml` | Added/deleted-file companion registry rules |
@@ -85,6 +89,12 @@ Prefer these over hand-maintained prose when they exist:
 |------|---------|
 | Default navigation | `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>` |
 | Task digest only | `python scripts/topology_doctor.py digest --task "<task>" --files <files>` |
+| Packet prefill | `python scripts/topology_doctor.py packet --packet-type refactor --scope <path> --task "<task>"` |
+| Context pack | `python scripts/topology_doctor.py context-pack --pack-type package_review\|debug --task "<task>" --files <files>` |
+| Work record | `python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>` |
+| Impact summary | `python scripts/topology_doctor.py impact --files <files>` |
+| Core map | `python scripts/topology_doctor.py core-map --profile probability-chain --json` |
+| Invariant slice | `python scripts/topology_doctor.py --invariants --zone K3_extension --json` |
 | Context budget | `python scripts/topology_doctor.py --context-budget --json` |
 | Lore cards | `python scripts/topology_doctor.py --history-lore --json` |
 | Source rationale | `python scripts/topology_doctor.py --source --json` |
@@ -97,10 +107,7 @@ Prefer these over hand-maintained prose when they exist:
 - `docs/archives/**` — historical evidence only.
 - `.omx/context/**` — micro-logs/evidence breadcrumbs, not governing law.
 - `docs/known_gaps.md` — load only when investigating active blockers.
-- Long math references such as `docs/reference/statistical_methodology.md` and
-  `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
-- `docs/data improve large pack/**` — active external package; do not edit,
-  move, normalize, or use as active authority.
+- Long math references such as `docs/reference/statistical_methodology.md` and `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
 
 ## Maintenance Rule
 
@@ -110,5 +117,4 @@ When adding, renaming, or deleting a file:
 2. Update this map only if directory-level structure changes.
 3. Update the relevant machine manifest when one owns the registry.
 
-Run `python scripts/topology_doctor.py --context-budget --json` after every five
-completed packets or when an entry/default-read file grows materially.
+Run `python scripts/topology_doctor.py --context-budget --json` after every five completed packets or when an entry/default-read file grows materially.

@@ -796,7 +796,7 @@ The post-packet's job is to make Platt fit consume those inputs correctly. No da
 - `docs/reference/statistical_methodology.md` — detailed statistics (Chinese). Rounding section patched.
 - `docs/reference/quantitative_research.md` — market microstructure and domain rationale.
 - `docs/reference/zeus_domain_model.md` — 16-city worked example of the probability chain.
-- Worktree `docs/data improve large pack/DB rebuild/` — investigator reports (zeus-understanding-*.md), tracer evidence (data-flow-trace-*.md), K5-refactor _superseded/ files. Historical reference; not authoritative.
+- Archived packet `docs/archives/work_packets/branches/data-improve/data_rebuild/2026-04-13_zeus_data_improve_large_pack/DB rebuild/` — investigator reports (zeus-understanding-*.md), tracer evidence (data-flow-trace-*.md), K5-refactor _superseded/ files. Historical reference; not authoritative.
 
 ---
 
@@ -1072,7 +1072,7 @@ The live-path gate will be established as part of Change G's `refit_platt.py` SQ
 ### Known gaps — do NOT re-investigate
 
 The following are already resolved. Do NOT spawn investigation agents for these:
-- TIGGE disk layout and file format: documented in §7.1 and investigator reports in `.claude/worktrees/data-rebuild/docs/data improve large pack/DB rebuild/`
+- TIGGE disk layout and file format: documented in §7.1 and investigator reports in `docs/archives/work_packets/branches/data-improve/data_rebuild/2026-04-13_zeus_data_improve_large_pack/DB rebuild/`
 - `ensemble_snapshots` is 0 rows: confirmed (GRIBs on disk, no ingestor run yet)
 - `SettlementSemantics` uses banker's rounding: confirmed at `src/contracts/settlement_semantics.py:30,81,96,120`
 - `compute_id()` `.isoformat()` fragility: root-caused in §3.3 of this plan

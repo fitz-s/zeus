@@ -71,6 +71,7 @@ strict_issue_codes:
   - history_lore_invalid_severity
   - history_lore_missing_routing
   - history_lore_missing_antibody
+  - history_lore_stale_antibody_reference
   - history_lore_open_gap_without_residual
   - history_lore_digest_too_thin
   - context_budget_manifest_missing
@@ -80,6 +81,25 @@ strict_issue_codes:
   - context_budget_digest_text_over
   - context_budget_invalid_value
   - context_budget_route_over
+  - context_budget_blocking_without_promotion
+  - artifact_lifecycle_manifest_missing
+  - artifact_lifecycle_record_contract_missing
+  - artifact_lifecycle_duplicate_class
+  - artifact_lifecycle_required_field_missing
+  - artifact_lifecycle_unknown_class
+  - artifact_lifecycle_rule_invalid
+  - work_record_required
+  - work_record_missing
+  - work_record_invalid_path
+  - work_record_field_missing
+  - work_record_git_status_failed
+  - context_pack_profiles_manifest_missing
+  - context_pack_profile_duplicate_id
+  - context_pack_profile_required_field_missing
+  - context_pack_profile_invalid_authority_status
+  - context_pack_profile_lore_policy_missing
+  - context_pack_input_missing
+  - context_pack_source_rationale_missing
   - agents_zone_mismatch
   - agents_planning_lock_downgrade
   - planning_lock_required
@@ -91,6 +111,17 @@ strict_issue_codes:
   - code_idiom_example_missing
   - code_idiom_example_without_pattern
   - code_idiom_unregistered_occurrence
+  - core_claims_manifest_missing
+  - core_claim_duplicate_id
+  - core_claim_required_field_missing
+  - core_claim_invalid_status
+  - core_claim_invalid_source
+  - core_claim_source_missing
+  - core_claim_invalid_proof_target
+  - core_claim_proof_target_missing
+  - core_claim_gate_target_missing
+  - core_map_profile_invalid
+  - core_map_reference_authority_leak
   - self_check_root_reference_missing
   - self_check_required_read_missing
   - self_check_stale_cross_reference
@@ -113,6 +144,7 @@ strict_issue_codes:
   - reference_replacement_default_read_mismatch
   - reference_replacement_delete_unsafe
   - reference_replacement_replacement_missing
+  - reference_claim_proof_invalid
   - map_maintenance_manifest_missing
   - map_maintenance_invalid_mode
   - map_maintenance_git_status_failed

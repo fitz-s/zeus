@@ -8,6 +8,7 @@ without ALSO reading its provenance context (like the entry method).
 Also enforces K3 cluster collapse: no regional cluster literal strings in src/.
 """
 
+import argparse
 import ast
 import re
 import sys
@@ -220,15 +221,22 @@ def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
     return violations
 
 
+def _python_files_for_target(target: Path) -> list[Path]:
+    if target.is_file():
+        return [target] if target.suffix == ".py" else []
+    return list(target.rglob("*.py"))
+
+
 def run_linter(src_path: Path) -> int:
-    """Run the linter over all Python files in the source tree."""
+    """Run the linter over a Python file or every Python file under a directory."""
     total_violations = 0
     checked_files = 0
 
-    python_files = list(src_path.rglob("*.py"))
+    python_files = _python_files_for_target(src_path)
+    target_is_dir = src_path.is_dir()
 
     for py_file in python_files:
-        if py_file.name.startswith("test_"):
+        if target_is_dir and py_file.name.startswith("test_"):
             continue  # Skip tests unless we decide invariant specs need linters too
 
         try:
@@ -269,10 +277,27 @@ def run_linter(src_path: Path) -> int:
     return 0
 
 
+def run_linter_targets(targets: list[Path]) -> int:
+    if not targets:
+        return run_linter(Path(__file__).parent.parent / "src")
+    exit_code = 0
+    for target in targets:
+        if not target.exists():
+            print(f"Error: {target} not found.")
+            exit_code = 1
+            continue
+        exit_code = max(exit_code, run_linter(target))
+    return exit_code
+
+
 if __name__ == "__main__":
-    src_dir = Path(__file__).parent.parent / "src"
-    if not src_dir.exists():
-        print(f"Error: {src_dir} not found.")
-        sys.exit(1)
-        
-    sys.exit(run_linter(src_dir))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        nargs="*",
+        default=None,
+        help="Check specific Python files or directories. Omit for full src/ scan.",
+    )
+    args = parser.parse_args()
+    targets = [Path(item) for item in args.check] if args.check is not None else []
+    sys.exit(run_linter_targets(targets))

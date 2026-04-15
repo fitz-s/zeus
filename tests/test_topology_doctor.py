@@ -1,32 +1,54 @@
+import pytest
+
 from scripts import topology_doctor
+
+
+def assert_topology_ok(result):
+    if not result.ok:
+        pytest.fail(topology_doctor.format_issues(result.issues), pytrace=False)
+    assert result.issues == []
+
+
+def assert_navigation_ok(payload):
+    if not payload["ok"]:
+        issues = [
+            topology_doctor.TopologyIssue(
+                code=f"{issue['lane']}:{issue['code']}",
+                path=issue["path"],
+                message=issue["message"],
+                severity=issue["severity"],
+            )
+            for issue in payload["issues"]
+        ]
+        pytest.fail(topology_doctor.format_issues(issues), pytrace=False)
+
+
+def reference_entry(manifest, path):
+    return next(entry for entry in manifest["entries"] if entry["path"] == path)
 
 
 def test_topology_strict_passes_after_residual_classification():
     result = topology_doctor.run_strict()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_docs_mode_passes_with_active_data_package_excluded():
     result = topology_doctor.run_docs()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_source_mode_covers_all_tracked_src_files():
     result = topology_doctor.run_source()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_tests_mode_classifies_actual_suite_and_law_gate():
     result = topology_doctor.run_tests()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_tests_mode_checks_relationship_manifest_symbols(monkeypatch):
@@ -143,64 +165,55 @@ def test_tests_mode_rejects_high_sensitivity_skip_count_drift(monkeypatch):
 def test_topology_scripts_mode_covers_all_top_level_scripts():
     result = topology_doctor.run_scripts()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_data_rebuild_mode_encodes_certification_blockers():
     result = topology_doctor.run_data_rebuild()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_history_lore_mode_validates_dense_cards():
     result = topology_doctor.run_history_lore()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_context_budget_mode_passes_after_entry_slimming():
     result = topology_doctor.run_context_budget()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_agents_coherence_mode_matches_machine_zones():
     result = topology_doctor.run_agents_coherence()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_idioms_mode_registers_non_obvious_code_shapes():
     result = topology_doctor.run_idioms()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_self_check_coherence_mode_aligns_zero_context_overlay():
     result = topology_doctor.run_self_check_coherence()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_runtime_modes_mode_keeps_discovery_modes_visible():
     result = topology_doctor.run_runtime_modes()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_topology_reference_replacement_mode_tracks_reference_docs():
     result = topology_doctor.run_reference_replacement()
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_map_maintenance_requires_test_topology_for_new_test_file(monkeypatch):
@@ -235,16 +248,14 @@ def test_map_maintenance_allows_new_test_file_when_companion_present(monkeypatch
         mode="precommit",
     )
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_map_maintenance_does_not_require_registry_for_plain_modification(monkeypatch):
     monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["src/engine/evaluator.py"])
     result = topology_doctor.run_map_maintenance(["src/engine/evaluator.py"])
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_map_maintenance_advisory_reports_without_blocking(monkeypatch):
@@ -307,13 +318,123 @@ def test_map_maintenance_git_status_advisory_does_not_block(monkeypatch):
     assert any(issue.code == "map_maintenance_companion_missing" for issue in result.issues)
     assert all(issue.severity == "warning" for issue in result.issues)
 
+
+def test_map_maintenance_closeout_reports_all_companion_gaps(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_status_changes",
+        lambda: {
+            "scripts/new_tool.py": "added",
+            "tests/test_new_behavior.py": "added",
+            "src/contracts/new_contract.py": "added",
+        },
+    )
+    result = topology_doctor.run_map_maintenance(mode="closeout")
+
+    assert not result.ok
+    companion_gaps = [
+        issue for issue in result.issues if issue.code == "map_maintenance_companion_missing"
+    ]
+    assert len(companion_gaps) == 3
+    assert {issue.path for issue in companion_gaps} == {
+        "scripts/new_tool.py",
+        "tests/test_new_behavior.py",
+        "src/contracts/new_contract.py",
+    }
+
+
+def test_map_maintenance_requires_config_registry_for_new_config(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_status_changes",
+        lambda: {"config/new_runtime_knob.yaml": "added"},
+    )
+    result = topology_doctor.run_map_maintenance(mode="closeout")
+
+    assert not result.ok
+    assert any(
+        issue.path == "config/new_runtime_knob.yaml"
+        and "config/AGENTS.md" in issue.message
+        for issue in result.issues
+    )
+
+
+def test_map_maintenance_explicit_files_keep_git_status_kind(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_status_changes",
+        lambda: {
+            "scripts/old_tool.py": "deleted",
+            "scripts/new_tool.py": "added",
+        },
+    )
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["scripts/old_tool.py"])
+    result = topology_doctor.run_map_maintenance(
+        ["scripts/old_tool.py", "scripts/new_tool.py"],
+        mode="closeout",
+    )
+
+    assert not result.ok
+    assert any("deleted file requires" in issue.message for issue in result.issues)
+    assert any("added file requires" in issue.message for issue in result.issues)
+
+
+def test_root_state_classification_uses_git_visible_files(monkeypatch):
+    topology = {
+        "root_governed_files": [],
+        "state_surfaces": [{"path": "state/registered.log"}],
+    }
+    visible = [
+        "state/registered.log",
+        "state/unregistered-visible.log",
+        "unregistered-root.txt",
+    ]
+
+    monkeypatch.setattr(topology_doctor, "_git_visible_files", lambda: visible)
+
+    original_exists = topology_doctor.Path.exists
+    original_is_file = topology_doctor.Path.is_file
+
+    def fake_exists(self):
+        if self in {topology_doctor.ROOT / path for path in visible}:
+            return True
+        return original_exists(self)
+
+    def fake_is_file(self):
+        if self in {topology_doctor.ROOT / path for path in visible}:
+            return True
+        return original_is_file(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    monkeypatch.setattr(topology_doctor.Path, "is_file", fake_is_file)
+
+    issues = topology_doctor._check_root_and_state_classification(topology)
+
+    assert {issue.path for issue in issues} == {
+        "state/unregistered-visible.log",
+        "unregistered-root.txt",
+    }
+
+
+def test_format_issues_lists_each_issue_on_its_own_line():
+    issues = [
+        topology_doctor.TopologyIssue("code_a", "a.py", "first"),
+        topology_doctor.TopologyIssue("code_b", "b.py", "second", severity="warning"),
+    ]
+
+    text = topology_doctor.format_issues(issues)
+
+    assert "1. [error:code_a] a.py: first" in text
+    assert "2. [warning:code_b] b.py: second" in text
+
+
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(
         "fix settlement rounding in replay",
         ["src/engine/replay.py"],
     )
 
-    assert payload["ok"]
+    assert_navigation_ok(payload)
     assert payload["digest"]["profile"] == "change settlement rounding"
     assert payload["checks"]["context_budget"]["ok"]
     assert payload["checks"]["agents_coherence"]["ok"]
@@ -358,14 +479,24 @@ def test_planning_lock_uses_changed_file_count_not_read_budget():
     )
 
 
+def test_planning_lock_is_independent_from_context_assumptions():
+    digest = topology_doctor.build_digest("change lifecycle manager", ["src/state/lifecycle_manager.py"])
+    result = topology_doctor.run_planning_lock(
+        ["src/state/lifecycle_manager.py"],
+        "docs/operations/current_state.md",
+    )
+
+    assert digest["context_assumption"]["planning_lock_independent"] is True
+    assert_topology_ok(result)
+
+
 def test_planning_lock_accepts_current_state_as_evidence():
     result = topology_doctor.run_planning_lock(
         ["src/control/control_plane.py"],
         "docs/operations/current_state.md",
     )
 
-    assert result.ok
-    assert result.issues == []
+    assert_topology_ok(result)
 
 
 def test_idioms_mode_rejects_unregistered_semantic_guard(monkeypatch):
@@ -389,6 +520,22 @@ def test_self_check_coherence_rejects_missing_root_reference(monkeypatch):
         text = original_read_text(self, *args, **kwargs)
         if self.name == "AGENTS.md" and self.parent == topology_doctor.ROOT:
             return text.replace("architecture/self_check/zero_context_entry.md", "")
+        return text
+
+    monkeypatch.setattr(topology_doctor.Path, "read_text", fake_read_text)
+    result = topology_doctor.run_self_check_coherence()
+
+    assert not result.ok
+    assert any(issue.code == "self_check_root_reference_missing" for issue in result.issues)
+
+
+def test_self_check_coherence_rejects_missing_authority_index_reference(monkeypatch):
+    original_read_text = topology_doctor.Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        text = original_read_text(self, *args, **kwargs)
+        if self.name == "AGENTS.md" and self.parent == topology_doctor.ROOT:
+            return text.replace("architecture/self_check/authority_index.md", "")
         return text
 
     monkeypatch.setattr(topology_doctor.Path, "read_text", fake_read_text)
@@ -442,6 +589,98 @@ def test_reference_replacement_detects_default_read_mismatch(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "reference_replacement_default_read_mismatch" for issue in result.issues)
+
+
+def test_reference_replacement_validates_seed_claim_proofs():
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    claim_ids = {proof["claim_id"] for proof in entry["claim_proofs"]}
+
+    assert "WMO_HALF_UP_FORMULA" in claim_ids
+    assert "ZEUS_MATH_SPEC_REFERENCE_ONLY" in claim_ids
+    assert "DECISION_GROUP_INDEPENDENCE" in claim_ids
+    assert "OPEN_BOUNDARY_BINS" in claim_ids
+
+
+def test_reference_replacement_rejects_duplicate_claim_id(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    duplicate = {**entry["claim_proofs"][0], "claim_id": entry["claim_proofs"][1]["claim_id"]}
+    entry["claim_proofs"].append(duplicate)
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    result = topology_doctor.run_reference_replacement()
+
+    assert not result.ok
+    assert any(issue.code == "reference_claim_proof_invalid" and "duplicate" in issue.message for issue in result.issues)
+
+
+def test_reference_replacement_rejects_invalid_claim_proof_enum(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    entry["claim_proofs"][0] = {
+        **entry["claim_proofs"][0],
+        "claim_status": "open",
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    result = topology_doctor.run_reference_replacement()
+
+    assert not result.ok
+    assert any(issue.code == "reference_claim_proof_invalid" and "claim_status" in issue.message for issue in result.issues)
+
+
+def test_reference_replacement_rejects_missing_claim_proof_target(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    entry["claim_proofs"][0] = {
+        **entry["claim_proofs"][0],
+        "proof_targets": [{"kind": "blocking_test", "path": "tests/does_not_exist.py"}],
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    result = topology_doctor.run_reference_replacement()
+
+    assert not result.ok
+    assert any(issue.code == "reference_claim_proof_invalid" and "proof target missing" in issue.message for issue in result.issues)
+
+
+def test_reference_replacement_rejects_replaced_claim_without_gate(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    entry["claim_proofs"][0] = {
+        **entry["claim_proofs"][0],
+        "gates": [],
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    result = topology_doctor.run_reference_replacement()
+
+    assert not result.ok
+    assert any(issue.code == "reference_claim_proof_invalid" and "requires gates" in issue.message for issue in result.issues)
+
+
+def test_reference_replacement_delete_requires_final_claim_status(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    entry["delete_allowed"] = True
+    entry["replacement_status"] = "replaced"
+    entry["unique_remaining"] = []
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    result = topology_doctor.run_reference_replacement()
+
+    assert not result.ok
+    assert any(issue.code == "reference_replacement_delete_unsafe" and "final claim" in issue.message for issue in result.issues)
+
+
+def test_reference_artifact_digest_routes_to_reference_profile():
+    digest = topology_doctor.build_digest("reference artifact claim extraction for zeus_math_spec fact spec")
+
+    assert digest["profile"] == "reference artifact extraction"
+    assert "architecture/reference_replacement.yaml" in digest["allowed_files"]
+    assert any("Claim proofs point" in law for law in digest["required_law"])
+    assert "python scripts/topology_doctor.py --reference-replacement" in digest["gates"]
 
 
 def test_lore_digest_routes_discovery_mode_tasks():
@@ -788,7 +1027,28 @@ def test_history_lore_mode_rejects_critical_card_without_antibody(monkeypatch):
     assert any(issue.code == "history_lore_missing_antibody" for issue in result.issues)
 
 
-def test_context_budget_mode_can_block_when_promoted(monkeypatch):
+def test_history_lore_mode_rejects_stale_antibody_reference(monkeypatch):
+    lore = topology_doctor.load_history_lore()
+    lore["cards"] = [
+        {
+            **lore["cards"][0],
+            "id": "STALE_ANTIBODY",
+            "antibodies": {
+                "code": ["src/does/not/exist.py"],
+                "tests": ["tests/test_runtime_guards.py"],
+                "gates": ["python scripts/topology_doctor.py --history-lore"],
+            },
+        }
+    ]
+
+    monkeypatch.setattr(topology_doctor, "load_history_lore", lambda: lore)
+    result = topology_doctor.run_history_lore()
+
+    assert not result.ok
+    assert any(issue.code == "history_lore_stale_antibody_reference" for issue in result.issues)
+
+
+def test_context_budget_mode_rejects_blocking_without_promotion(monkeypatch):
     budget = {
         "file_budgets": [
             {
@@ -806,8 +1066,71 @@ def test_context_budget_mode_can_block_when_promoted(monkeypatch):
     result = topology_doctor.run_context_budget()
 
     assert not result.ok
+    assert any(issue.code == "context_budget_blocking_without_promotion" for issue in result.issues)
+
+
+def test_context_budget_mode_can_block_when_promoted(monkeypatch):
+    budget = {
+        "file_budgets": [
+            {
+                "path": "AGENTS.md",
+                "role": "boot_contract_only",
+                "max_lines": 1,
+                "enforcement": "blocking",
+                "promotion_packet": "docs/operations/task_2026-04-14_topology_context_efficiency/plan.md",
+            }
+        ],
+        "digest_budgets": {},
+        "default_read_path": {"max_pre_code_reads": 6},
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_context_budget", lambda: budget)
+    result = topology_doctor.run_context_budget()
+
+    assert not result.ok
     assert any(issue.code == "context_budget_file_over" for issue in result.issues)
     assert any(issue.severity == "error" for issue in result.issues)
+
+
+def test_artifact_lifecycle_mode_validates_manifest():
+    result = topology_doctor.run_artifact_lifecycle()
+
+    assert_topology_ok(result)
+
+
+def test_work_record_requires_record_for_repo_change():
+    result = topology_doctor.run_work_record(["scripts/topology_doctor.py"], None)
+
+    assert not result.ok
+    assert any(issue.code == "work_record_required" for issue in result.issues)
+
+
+def test_work_record_accepts_current_task_log():
+    result = topology_doctor.run_work_record(
+        ["scripts/topology_doctor.py", "architecture/artifact_lifecycle.yaml"],
+        "docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md",
+    )
+
+    assert_topology_ok(result)
+
+
+def test_work_record_rejects_unapproved_record_path():
+    result = topology_doctor.run_work_record(
+        ["scripts/topology_doctor.py"],
+        "tmp/work_log.md",
+    )
+
+    assert not result.ok
+    assert any(issue.code == "work_record_invalid_path" for issue in result.issues)
+
+
+def test_work_record_exempts_archived_packets():
+    result = topology_doctor.run_work_record(
+        ["docs/archives/work_packets/branches/data-improve/data_rebuild/2026-04-13_zeus_data_improve_large_pack/current_state.md"],
+        None,
+    )
+
+    assert_topology_ok(result)
 
 
 def test_context_budget_mode_checks_digest_card_budget(monkeypatch):
@@ -818,6 +1141,7 @@ def test_context_budget_mode_checks_digest_card_budget(monkeypatch):
                 "max_cards_per_digest": 1,
                 "max_zero_context_digest_chars": 10000,
                 "enforcement": "blocking",
+                "promotion_packet": "docs/operations/task_2026-04-14_topology_context_efficiency/plan.md",
                 "sample_tasks": ["certify data rebuild for live math"],
             }
         },
@@ -838,8 +1162,539 @@ def test_generic_digest_includes_effective_source_rationale_for_core_file():
     )
     rationale = digest["source_rationale"][0]
 
+    assert digest["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    assert digest["context_assumption"]["planning_lock_independent"] is True
     assert rationale["zone"] == "K0_frozen_kernel"
     assert rationale["authority_role"] == "lifecycle_law"
     assert "upstream" in rationale
     assert "downstream" in rationale
     assert any("test_architecture_contracts.py" in gate for gate in rationale["gates"])
+
+
+def test_navigation_includes_context_assumption():
+    payload = topology_doctor.run_navigation(
+        "change lifecycle manager",
+        ["src/state/lifecycle_manager.py"],
+    )
+
+    assert_navigation_ok(payload)
+    assert payload["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    assert payload["context_assumption"] == payload["digest"]["context_assumption"]
+
+
+def test_invariants_slice_filters_by_zone():
+    payload = topology_doctor.build_invariants_slice("K3_extension")
+    ids = {invariant["id"] for invariant in payload["invariants"]}
+
+    assert payload["zone"] == "K3_extension"
+    assert "INV-04" in ids
+    assert "INV-06" in ids
+    assert "INV-07" not in ids
+
+
+def test_refactor_packet_prefill_for_engine_scope():
+    packet = topology_doctor.build_packet_prefill(
+        packet_type="refactor",
+        task="split cycle runner orchestration helpers",
+        scope="src/engine/",
+    )
+
+    assert packet["packet_type"] == "refactor_packet"
+    assert packet["scope"] == "src/engine"
+    assert packet["zones_touched"] == ["K2_runtime"]
+    assert "INV-06" in packet["invariants_touched"]
+    assert "src/engine/**" in packet["files_may_change"]
+    assert "src/contracts" in packet["files_may_not_change"]
+    assert "src/engine/AGENTS.md" in packet["required_reads"]
+    assert "architecture/source_rationale.yaml" in packet["required_reads"]
+    assert any("semantic_linter.py --check src/engine" in gate for gate in packet["ci_gates_required"])
+    assert packet["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+
+
+def test_refactor_packet_prefill_detects_cross_zone_files():
+    packet = topology_doctor.build_packet_prefill(
+        packet_type="refactor",
+        task="extract evaluator strategy helper",
+        files=["src/engine/cycle_runner.py", "src/strategy/market_analysis.py"],
+    )
+
+    assert "K2_runtime" in packet["zones_touched"]
+    assert "K3_extension" in packet["zones_touched"]
+    assert packet["replay_required"] is True
+    assert any("tests/test_market_analysis.py" in test for test in packet["tests_required"])
+
+
+def test_refactor_packet_prefill_keeps_file_scope_literal():
+    packet = topology_doctor.build_packet_prefill(
+        packet_type="refactor",
+        task="refactor platt calibration",
+        scope="src/calibration/platt.py",
+    )
+
+    assert packet["files_may_change"] == ["src/calibration/platt.py"]
+    assert "src/calibration/platt.py/**" not in packet["files_may_change"]
+
+
+def test_impact_reports_write_routes_and_tests_for_store():
+    impact = topology_doctor.build_impact(["src/calibration/store.py"])
+    entry = impact["entries"][0]
+
+    assert entry["path"] == "src/calibration/store.py"
+    assert entry["zone"] == "K3_extension"
+    assert "calibration_persistence_write" in entry["write_routes"]
+    assert "tests/test_platt.py" in impact["aggregate"]["tests_required"]
+    assert "python scripts/semantic_linter.py --check src/calibration/store.py" in impact["aggregate"]["static_checks"]
+    assert impact["context_assumption"]["planning_lock_independent"] is True
+
+
+def test_impact_marks_missing_relations_provisional_for_platt():
+    impact = topology_doctor.build_impact(["src/calibration/platt.py"])
+    entry = impact["entries"][0]
+
+    assert entry["confidence"] == "provisional"
+    assert entry["relations_complete"] is False
+    assert "missing_relations" in impact["context_assumption"]["confidence_basis"]
+
+
+def test_context_pack_profiles_mode_validates_manifest():
+    result = topology_doctor.run_context_packs()
+
+    assert_topology_ok(result)
+
+
+def test_package_review_context_pack_shapes_k1_style_review():
+    files = [
+        "src/contracts/execution_price.py",
+        "src/types/observation_atom.py",
+        "src/contracts/provenance_registry.py",
+        "src/supervisor_api/contracts.py",
+        "src/config.py",
+        "src/engine/evaluator.py",
+        "src/strategy/kelly.py",
+        "src/strategy/market_fusion.py",
+        "src/data/market_scanner.py",
+        "src/state/portfolio.py",
+        "src/riskguard/policy.py",
+    ]
+
+    packet = topology_doctor.build_context_pack(
+        "auto",
+        task="K1 package-level review for contract/provenance/settings consistency",
+        files=files,
+    )
+
+    assert packet["pack_type"] == "package_review"
+    assert packet["authority_status"] == "generated_review_packet_not_authority"
+    assert packet["selected_by"] == {"requested": "auto", "selected": "package_review"}
+    assert set(packet["zones_touched"]) >= {"K0_frozen_kernel", "K1_governance", "K2_runtime", "K3_extension"}
+    assert "files_may_change" not in packet
+    assert packet["changed_files"] == sorted(files)
+    assert packet["route_health"]["ok"] is True
+    assert packet["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    assert "context_pack_profile" in packet["context_assumption"]["confidence_basis"]
+    assert any("coherent contract system" in question for question in packet["cross_slice_questions"])
+    assert any(surface["path"] == "src/strategy/kelly.py" for surface in packet["contract_surfaces"])
+    assert any(claim["claim_id"] == "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY" for claim in packet["proof_claims_touched"])
+    assert any(gap["kind"] == "provisional_relation_gap" for gap in packet["coverage_gaps"])
+    assert any(risk["kind"] == "cross_zone_contract_review" for risk in packet["downstream_risks"])
+    assert "python scripts/semantic_linter.py --check " + " ".join(sorted(files)) in packet["static_checks"]
+
+
+def test_package_review_separates_route_health_from_repo_health(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "run_core_claims",
+        lambda: topology_doctor.StrictResult(
+            ok=False,
+            issues=[
+                topology_doctor.TopologyIssue(
+                    code="core_claim_gate_target_missing",
+                    path="architecture/core_claims.yaml:FAKE",
+                    message="synthetic repo-health issue",
+                )
+            ],
+        ),
+    )
+
+    packet = topology_doctor.build_context_pack(
+        "package_review",
+        task="package review",
+        files=["src/engine/evaluator.py"],
+    )
+
+    assert packet["route_health"]["ok"] is True
+    assert packet["repo_health"]["ok"] is False
+    assert packet["repo_health"]["checks"]["core_claims"]["blocking_count"] == 1
+    assert packet["blocking_for_this_pack"] == []
+
+
+def test_package_review_lore_keeps_broad_matches_summary_only(monkeypatch):
+    lore = {
+        "cards": [
+            {
+                "id": "DIRECT_CARD",
+                "status": "active_law",
+                "severity": "high",
+                "failure_mode": "direct failure",
+                "wrong_moves": ["full direct card may include wrong moves"],
+                "correct_rule": "direct rule",
+                "routing": {"task_terms": [], "file_patterns": ["src/engine/evaluator.py"]},
+                "zero_context_digest": "direct digest",
+            },
+            {
+                "id": "BROAD_CARD",
+                "status": "active_law",
+                "severity": "high",
+                "failure_mode": "broad failure",
+                "wrong_moves": ["broad wrong moves must not be dumped"],
+                "correct_rule": "broad rule",
+                "routing": {"task_terms": ["package review"], "file_patterns": []},
+                "zero_context_digest": "broad digest",
+            },
+        ]
+    }
+    monkeypatch.setattr(topology_doctor, "load_history_lore", lambda: lore)
+
+    packet = topology_doctor.build_context_pack(
+        "package_review",
+        task="package review",
+        files=["src/engine/evaluator.py"],
+    )
+
+    assert packet["lore"]["direct_evidence"][0]["id"] == "DIRECT_CARD"
+    assert packet["lore"]["direct_evidence"][0]["zero_context_digest"] == "direct digest"
+    assert "wrong_moves" not in packet["lore"]["direct_evidence"][0]
+    assert packet["lore"]["broad_relevant"][0]["id"] == "BROAD_CARD"
+    assert packet["lore"]["broad_relevant"][0]["zero_context_digest"] == "broad digest"
+    assert "wrong_moves" not in packet["lore"]["broad_relevant"][0]
+
+
+def test_debug_context_pack_shapes_single_file_symptom():
+    packet = topology_doctor.build_context_pack(
+        "debug",
+        task="debug settlement rounding mismatch in replay",
+        files=["src/contracts/settlement_semantics.py"],
+    )
+    text = str(packet)
+
+    assert packet["pack_type"] == "debug"
+    assert packet["authority_status"] == "generated_debug_packet_not_authority"
+    assert packet["symptom"] == "debug settlement rounding mismatch in replay"
+    assert packet["target_files"] == ["src/contracts/settlement_semantics.py"]
+    assert packet["route_health"]["ok"] is True
+    assert packet["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    assert "context_pack_profile" in packet["context_assumption"]["confidence_basis"]
+    assert any(surface["path"] == "src/contracts/settlement_semantics.py" for surface in packet["contract_surfaces"])
+    assert any(claim["claim_id"] == "WMO_HALF_UP_FORMULA" for claim in packet["proof_claims_touched"])
+    assert any(check["id"] == "semantic_linter_target" for check in packet["red_green_checks"])
+    assert any(check["id"] == "targeted_tests" for check in packet["red_green_checks"])
+    assert any(boundary["kind"] == "verified_claim_boundary" for boundary in packet["suspected_boundaries"])
+    assert "files_may_change" not in packet
+    assert "write_scope" not in packet
+    assert "root_cause" not in packet
+    assert "complete_understanding" not in text
+
+
+def test_debug_context_pack_marks_provisional_boundaries():
+    packet = topology_doctor.build_context_pack(
+        "debug",
+        task="debug platt calibration regression",
+        files=["src/calibration/platt.py"],
+    )
+
+    assert any(gap["kind"] == "provisional_relation_gap" for gap in packet["coverage_gaps"])
+    assert any(
+        boundary["kind"] == "unknown_relation_boundary"
+        and boundary["confidence"] == "provisional"
+        for boundary in packet["suspected_boundaries"]
+    )
+
+
+def test_debug_context_pack_lore_is_tiered_summary_only(monkeypatch):
+    lore = {
+        "cards": [
+            {
+                "id": "DIRECT_DEBUG_CARD",
+                "status": "active_law",
+                "severity": "high",
+                "failure_mode": "direct failure body must not be dumped",
+                "wrong_moves": ["wrong move must not be dumped"],
+                "correct_rule": "direct rule",
+                "routing": {"task_terms": [], "file_patterns": ["src/engine/evaluator.py"]},
+                "zero_context_digest": "direct debug digest",
+            },
+            {
+                "id": "BROAD_DEBUG_CARD",
+                "status": "active_law",
+                "severity": "high",
+                "failure_mode": "broad failure body must not be dumped",
+                "wrong_moves": ["broad wrong move must not be dumped"],
+                "correct_rule": "broad rule",
+                "routing": {"task_terms": ["debug"], "file_patterns": []},
+                "zero_context_digest": "broad debug digest",
+            },
+        ]
+    }
+    monkeypatch.setattr(topology_doctor, "load_history_lore", lambda: lore)
+
+    packet = topology_doctor.build_context_pack(
+        "debug",
+        task="debug evaluator failure",
+        files=["src/engine/evaluator.py"],
+    )
+
+    assert packet["lore"]["direct_evidence"][0]["id"] == "DIRECT_DEBUG_CARD"
+    assert packet["lore"]["direct_evidence"][0]["zero_context_digest"] == "direct debug digest"
+    assert "wrong_moves" not in packet["lore"]["direct_evidence"][0]
+    assert "failure_mode" not in packet["lore"]["direct_evidence"][0]
+    assert packet["lore"]["broad_relevant"][0]["id"] == "BROAD_DEBUG_CARD"
+    assert packet["lore"]["broad_relevant"][0]["zero_context_digest"] == "broad debug digest"
+    assert "wrong_moves" not in packet["lore"]["broad_relevant"][0]
+    assert "failure_mode" not in packet["lore"]["broad_relevant"][0]
+
+
+def test_context_pack_auto_selects_debug_without_stealing_package_review():
+    debug_packet = topology_doctor.build_context_pack(
+        "auto",
+        task="debug market fusion regression",
+        files=["src/strategy/market_fusion.py"],
+    )
+    review_packet = topology_doctor.build_context_pack(
+        "auto",
+        task="package-level review for contract consistency after debug fixes",
+        files=["src/contracts/execution_price.py", "src/strategy/kelly.py"],
+    )
+
+    assert debug_packet["selected_by"] == {"requested": "auto", "selected": "debug"}
+    assert review_packet["selected_by"] == {"requested": "auto", "selected": "package_review"}
+
+
+def test_context_pack_auto_rejects_ambiguous_task():
+    with pytest.raises(ValueError, match="package_review or debug"):
+        topology_doctor.build_context_pack(
+            "auto",
+            task="inspect this area",
+            files=["src/strategy/market_fusion.py"],
+        )
+
+
+def test_core_map_probability_chain_is_proof_backed_and_bounded():
+    payload = topology_doctor.build_core_map("probability-chain")
+    text = str(payload)
+    settlement = next(node for node in payload["nodes"] if node["id"] == "settlement_semantics")
+    wmo_fact = settlement["facts"][0]
+
+    assert payload["authority_status"] == "generated_view_not_authority"
+    assert payload["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    assert "core_map_profile" in payload["context_assumption"]["confidence_basis"]
+    assert len(payload["nodes"]) <= 8
+    assert len(payload["edges"]) <= 8
+    assert wmo_fact["claim_id"] == "WMO_HALF_UP_FORMULA"
+    assert wmo_fact["confidence"] == "verified_claim"
+    assert "floor(x + 0.5)" in wmo_fact["text"]
+    assert "round(value + 0.5)" not in text
+    assert "Python round" not in text
+    assert all(edge["confidence"] == "proof_backed_edge" for edge in payload["edges"])
+    assert not payload["invalid"]
+
+
+def test_core_claims_mode_validates_first_wave_claims():
+    result = topology_doctor.run_core_claims()
+    claims = topology_doctor.load_core_claims()["claims"]
+    claim_ids = {claim["claim_id"] for claim in claims}
+
+    assert_topology_ok(result)
+    assert {
+        "TEMPERATURE_DELTA_SCALE_ONLY",
+        "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY",
+        "ALPHA_TARGET_COMPATIBILITY",
+        "VIG_BEFORE_BLEND",
+    }.issubset(claim_ids)
+
+
+def test_core_map_probability_chain_uses_core_claims():
+    payload = topology_doctor.build_core_map("probability-chain")
+    node_claims = {
+        node["id"]: {fact["claim_id"] for fact in node["facts"]}
+        for node in payload["nodes"]
+    }
+
+    assert "ALPHA_TARGET_COMPATIBILITY" in node_claims["evaluator"]
+    assert "VIG_BEFORE_BLEND" in node_claims["market_fusion"]
+    assert "TEMPERATURE_DELTA_SCALE_ONLY" in node_claims["market_fusion"]
+    assert "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY" in node_claims["kelly"]
+
+
+def test_core_claims_mode_rejects_missing_proof_target(monkeypatch):
+    manifest = topology_doctor.load_core_claims()
+    manifest["claims"][0]["proof_targets"][0]["path"] = "src/nope.py"
+
+    monkeypatch.setattr(topology_doctor, "load_core_claims", lambda: manifest)
+    result = topology_doctor.run_core_claims()
+
+    assert not result.ok
+    assert any(issue.code == "core_claim_proof_target_missing" for issue in result.issues)
+
+
+def test_core_claims_mode_rejects_missing_locator(monkeypatch):
+    manifest = topology_doctor.load_core_claims()
+    manifest["claims"][0]["proof_targets"][0]["locator"] = "NO_SUCH_LOCATOR"
+
+    monkeypatch.setattr(topology_doctor, "load_core_claims", lambda: manifest)
+    result = topology_doctor.run_core_claims()
+
+    assert not result.ok
+    assert any("locator missing" in issue.message for issue in result.issues)
+
+
+def test_core_claims_mode_rejects_cross_manifest_duplicate(monkeypatch):
+    manifest = topology_doctor.load_core_claims()
+    manifest["claims"][0]["claim_id"] = "WMO_HALF_UP_FORMULA"
+
+    monkeypatch.setattr(topology_doctor, "load_core_claims", lambda: manifest)
+    result = topology_doctor.run_core_claims()
+
+    assert not result.ok
+    assert any(issue.code == "core_claim_duplicate_id" for issue in result.issues)
+
+
+def test_core_map_rejects_unreplaced_core_claim(monkeypatch):
+    manifest = topology_doctor.load_core_claims()
+    claim = next(item for item in manifest["claims"] if item["claim_id"] == "VIG_BEFORE_BLEND")
+    claim["claim_status"] = "partial_replacement_candidate"
+
+    monkeypatch.setattr(topology_doctor, "load_core_claims", lambda: manifest)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("required claim VIG_BEFORE_BLEND is not replaced" in item for item in payload["invalid"])
+
+
+def test_core_map_mode_passes_current_profiles():
+    result = topology_doctor.run_core_maps()
+
+    assert_topology_ok(result)
+
+
+def test_core_map_missing_required_claim_is_invalid(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["nodes"][0] = {
+        **profile["nodes"][0],
+        "required_claims": ["DOES_NOT_EXIST"],
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("missing required claim" in item for item in payload["invalid"])
+
+
+def test_core_map_missing_edge_proof_is_invalid(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["edges"][0] = {
+        **profile["edges"][0],
+        "proof": {
+            **profile["edges"][0]["proof"],
+            "symbol": "NO_SUCH_SYMBOL",
+        },
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("edge settlement_semantics->ensemble_signal invalid" in item for item in payload["invalid"])
+
+
+def test_core_map_rejects_unknown_edge_endpoints(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["edges"][0] = {
+        **profile["edges"][0],
+        "from": "missing_node",
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("unknown edge endpoint" in item for item in payload["invalid"])
+
+
+def test_core_map_rejects_import_proof_on_unrelated_file(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["edges"][0] = {
+        **profile["edges"][0],
+        "proof": {
+            "kind": "import_or_call",
+            "path": "src/engine/evaluator.py",
+            "contains": "SettlementSemantics",
+        },
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("proof path must equal target node file" in item for item in payload["invalid"])
+
+
+def test_core_map_rejects_partial_required_claim(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["nodes"][0] = {
+        **profile["nodes"][0],
+        "required_claims": ["DECISION_GROUP_INDEPENDENCE"],
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("is not replaced" in item for item in payload["invalid"])
+
+
+def test_core_map_forbidden_phrase_guard_catches_round_variant(monkeypatch):
+    manifest = topology_doctor.load_reference_replacement()
+    entry = reference_entry(manifest, "docs/reference/zeus_math_spec.md")
+    entry["claim_proofs"][0] = {
+        **entry["claim_proofs"][0],
+        "assertion": "Settlement-aligned values use round( value + 0.5 ).",
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_reference_replacement", lambda: manifest)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("forbidden phrase emitted" in item for item in payload["invalid"])
+
+
+def test_core_map_relationship_test_requires_locator(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    missing_symbol = "DEFINITELY_ABSENT_" + "RELATIONSHIP_SYMBOL_XYZ"
+    profile["edges"][0] = {
+        **profile["edges"][0],
+        "proof": {
+            "kind": "relationship_test",
+            "path": "tests/test_topology_doctor.py",
+            "contains": missing_symbol,
+        },
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    payload = topology_doctor.build_core_map("probability-chain")
+
+    assert any("relationship_test proof text not found" in item for item in payload["invalid"])
+
+
+def test_core_map_rejects_reference_doc_authority_node(monkeypatch):
+    topology = topology_doctor.load_topology()
+    profile = next(item for item in topology["core_map_profiles"] if item["id"] == "probability-chain")
+    profile["nodes"].append(
+        {"id": "bad_reference", "file": "docs/reference/zeus_math_spec.md"}
+    )
+    profile["max_nodes"] = 20
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+    result = topology_doctor.run_core_maps()
+
+    assert not result.ok
+    assert any(issue.code == "core_map_reference_authority_leak" for issue in result.issues)

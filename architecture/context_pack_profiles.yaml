@@ -1,0 +1,95 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Topology Context Efficiency"
+  purpose: >
+    Task-shaped context pack contracts for agents. These profiles compose
+    existing topology primitives into work packets; they do not create new
+    authority and must keep provisional-context warnings visible.
+
+required_profile_fields:
+  - id
+  - purpose
+  - authority_status
+  - trigger_terms
+  - output_sections
+  - lore_policy
+  - review_questions
+
+profiles:
+  - id: package_review
+    purpose: >
+      Reviewer packet for cross-slice or package-level contract consistency
+      reviews. It synthesizes topology evidence into review questions instead
+      of emitting edit permission or a hand-written core map.
+    authority_status: generated_review_packet_not_authority
+    trigger_terms:
+      - package review
+      - package-level
+      - cross-slice
+      - contract consistency
+      - structural review
+      - k-package
+    output_sections:
+      - review_objective
+      - changed_files
+      - zones_touched
+      - contract_surfaces
+      - proof_claims_touched
+      - cross_slice_questions
+      - coverage_gaps
+      - downstream_risks
+      - tests_required
+      - static_checks
+      - route_health
+      - repo_health
+      - context_assumption
+    lore_policy:
+      direct_evidence: "File-pattern matches include id, severity, digest, and match reason by default."
+      broad_relevant: "Task-term matches include id, severity, digest, and match reason only."
+      expanded_available: "Read architecture/history_lore.yaml:<id> only when the review question makes that lore central."
+    review_questions:
+      - "Do the changed slices form one coherent contract system, or only local fixes?"
+      - "Which bug category is prevented now, and which instance-only fixes remain?"
+      - "Which downstream consumers must change behavior for the contract to matter?"
+      - "Which tests prove cross-module relationships rather than local construction?"
+      - "Which provisional topology relations require manual reading before verdict?"
+
+  - id: debug
+    purpose: >
+      Short debugging packet for a symptom tied to one or more files. It turns
+      topology evidence into checks, likely boundaries, and context-expansion
+      triggers without requiring the agent to read every boundary rule first.
+    authority_status: generated_debug_packet_not_authority
+    trigger_terms:
+      - debug
+      - diagnose
+      - bug
+      - failing
+      - failure
+      - mismatch
+      - regression
+      - traceback
+    output_sections:
+      - symptom
+      - target_files
+      - zones_touched
+      - suspected_boundaries
+      - contract_surfaces
+      - proof_claims_touched
+      - red_green_checks
+      - coverage_gaps
+      - downstream_risks
+      - route_health
+      - repo_health
+      - context_assumption
+    lore_policy:
+      direct_evidence: "File-pattern matches include id, severity, digest, and match reason by default."
+      broad_relevant: "Task-term matches include id, severity, digest, and match reason only."
+      expanded_available: "Read architecture/history_lore.yaml:<id> only when the check result points to that failure mode."
+    review_questions:
+      - "What is the smallest red check that reproduces the symptom?"
+      - "Which typed contract or authority surface should reject this category?"
+      - "Did the failure cross a source_rationale downstream boundary?"
+      - "Which provisional relation gap must be read before changing code?"
+      - "Which green check proves the fix without broad context loading?"

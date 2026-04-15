@@ -1,6 +1,7 @@
 schema_version: 1
 invariants:
   - id: INV-01
+    zones: [K2_runtime]
     statement: Exit is not local close.
     why: Monitor decisions must not directly imply terminal economic closure.
     enforced_by:
@@ -9,6 +10,7 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_negative_constraints_include_no_local_close
   - id: INV-02
+    zones: [K0_frozen_kernel, K2_runtime]
     statement: Settlement is not exit.
     why: Exit execution and final market settlement are distinct lifecycle facts.
     enforced_by:
@@ -16,6 +18,7 @@ invariants:
       schema:
         - migrations/2026_04_02_architecture_kernel.sql
   - id: INV-03
+    zones: [K0_frozen_kernel]
     statement: Canonical authority is append-first and projection-backed.
     why: Durable audit plus fast current-state reads require one canonical event stream and one deterministic projection.
     enforced_by:
@@ -25,6 +28,7 @@ invariants:
       scripts:
         - scripts/replay_parity.py
   - id: INV-04
+    zones: [K1_governance, K3_extension]
     statement: strategy_key is the sole governance key.
     why: edge_source, discovery_mode, and entry_method are metadata and must not compete as governance centers.
     enforced_by:
@@ -34,6 +38,7 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_strategy_key_manifest_is_frozen
   - id: INV-05
+    zones: [K1_governance, K3_extension]
     statement: Risk must change behavior.
     why: Advisory-only risk outputs are theater.
     enforced_by:
@@ -41,6 +46,7 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_risk_actions_exist_in_schema
   - id: INV-06
+    zones: [K0_frozen_kernel, K2_runtime, K3_extension]
     statement: Point-in-time truth beats hindsight truth.
     why: Learning must preserve decision-time truth and must not silently upgrade to later snapshots.
     enforced_by:
@@ -49,6 +55,7 @@ invariants:
       tests:
         - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
   - id: INV-07
+    zones: [K0_frozen_kernel]
     statement: Lifecycle grammar is finite and authoritative.
     why: Arbitrary state strings create semantic drift.
     enforced_by:
@@ -57,6 +64,7 @@ invariants:
         - migrations/2026_04_02_architecture_kernel.sql
       semgrep_rule_ids: [zeus-no-direct-phase-assignment]
   - id: INV-08
+    zones: [K0_frozen_kernel]
     statement: Canonical write path has one transaction boundary.
     why: Event append and projection update must succeed or fail together.
     enforced_by:
@@ -64,6 +72,7 @@ invariants:
       scripts:
         - scripts/check_kernel_manifests.py
   - id: INV-09
+    zones: [K2_runtime, K3_extension]
     statement: Missing data is first-class truth.
     why: Opportunity loss and degraded reliability must be explicit facts, not log noise.
     enforced_by:
@@ -71,6 +80,7 @@ invariants:
       schema:
         - migrations/2026_04_02_architecture_kernel.sql
   - id: INV-10
+    zones: [K1_governance]
     statement: LLM output is never authority.
     why: Generated code is only valid after packet, gates, and evidence.
     enforced_by:

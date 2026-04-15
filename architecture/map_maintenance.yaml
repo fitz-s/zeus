@@ -43,6 +43,18 @@ rules:
     required_companions:
       - architecture/script_manifest.yaml
     rationale: script_manifest owns top-level script registry and lifecycle.
+  - id: config_file_registry
+    path_globs: ["config/*.json", "config/*.yaml", "config/*.yml"]
+    on_change: [added, deleted]
+    required_companions:
+      - config/AGENTS.md
+    rationale: top-level config files are registered in config/AGENTS.md.
+  - id: reality_contract_registry
+    path_globs: ["config/reality_contracts/*.yaml", "config/reality_contracts/*.yml"]
+    on_change: [added, deleted]
+    required_companions:
+      - config/reality_contracts/AGENTS.md
+    rationale: reality contract config files are registered locally.
   - id: reference_doc_registry
     path_globs: ["docs/reference/*.md"]
     on_change: [added, deleted]

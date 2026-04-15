@@ -2,6 +2,10 @@
 
 Role: zero-context authority read index.
 
+Entry overlay: `architecture/self_check/zero_context_entry.md` explains when to
+use this order and how to refuse unsafe starts. The index below is the direct
+authority spine for high-risk zero-context work.
+
 ## Canonical Order
 
 1. `AGENTS.md`

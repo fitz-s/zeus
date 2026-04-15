@@ -49,6 +49,16 @@ allowed_lifecycles:
   - promotion_candidate
   - deprecated_fail_closed
 
+class_selection_guide:
+  enforcement: Repeatable repo policy, topology, structural lint, or contract gate.
+  diagnostic: Read-only investigation; output is stdout and cannot authorize live changes.
+  diagnostic_report_writer: Repeatable non-authority report artifact writer.
+  runtime_support: Operator/runtime health, heartbeat, watch, resume, or post-run support.
+  etl_writer: Repeatable external/world-data ingestion or backfill writer.
+  repair: Packet-approved repair with explicit dry-run/apply boundary.
+  config_writer: Repeatable config artifact generator from declared inputs.
+  stale_deprecated: Retained only to fail closed; canonical_command must be DO_NOT_RUN.
+
 long_lived_naming:
   allowed_prefixes:
     - check_
@@ -65,6 +75,10 @@ long_lived_naming:
     - generate_
     - build_
     - capture_
+    - post_
+    - resume_
+    - kickoff_
+    - watch_
   exceptions:
     _yaml_bootstrap.py: import bootstrap helper for script entrypoints
     antibody_scan.py: established operator diagnostic name
@@ -348,14 +362,37 @@ scripts:
   etl_observation_instants.py: {class: etl_writer}
   etl_solar_times.py: {class: etl_writer, external_inputs: [external_absolute_path]}
   etl_temp_persistence.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
-  etl_tigge_calibration.py: {class: etl_writer}
-  etl_tigge_direct_calibration.py: {class: etl_writer}
-  etl_tigge_ens.py: {class: etl_writer}
+  etl_tigge_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: legacy unaudited TIGGE direct calibration path superseded by canonical rebuild pipeline}
+  etl_tigge_direct_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: legacy unaudited TIGGE direct calibration path superseded by canonical rebuild pipeline}
+  etl_tigge_ens.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: partial single-step TIGGE path is unaudited and superseded by canonical rebuild pipeline}
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
-  generate_calibration_pairs.py: {class: etl_writer}
+  generate_calibration_pairs.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy market_events calibration-pair generator retired}
   generate_monthly_bounds.py: {class: config_writer}
   healthcheck.py: {class: runtime_support}
   heartbeat_dispatcher.py: {class: runtime_support, external_inputs: [openclaw_binary, host_log_path]}
+  ingest_grib_to_snapshots.py:
+    class: promotion_candidate
+    status: pending_implementation
+    lifecycle: promotion_candidate
+    owner_packet: task_2026-04-14_session_backlog_53
+    created_for: "Audited TIGGE GRIB-to-ensemble_snapshots ingestion replacement."
+    promotion_deadline: "2026-05-15"
+    promotion_decision: pending
+    authority_scope: world_data_write
+    reuse_when: "After task #53 implements audited TIGGE GRIB-to-snapshots ingestion."
+    do_not_use_when: "Before task #53 implementation and dry-run evidence exist."
+    canonical_command: DO_NOT_RUN
+    delete_policy: retain_until_implemented
+    read_targets: [external_tigge_grib_extracts]
+    write_targets: []
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [TIGGE_GRIB_CACHE]
+    dangerous_if_run: false
+    promotion_barrier: "Requires task #53 implementation, dry-run evidence, and reviewer approval."
+    required_helpers: [src.state.db.get_world_connection]
+    required_tests: [tests/test_data_rebuild_relationships.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
   live_smoke_test.py: {class: runtime_support}
   migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
@@ -367,7 +404,7 @@ scripts:
   parse_change_log.py: {class: utility}
   post_sequential_fillback.sh: {class: runtime_support, canonical_command: "bash scripts/post_sequential_fillback.sh <sequential_wrapper_pid>"}
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
-  rebuild_calibration.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy simplified-p_raw rebuild retired}
   rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
   rebuild_settlements.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}

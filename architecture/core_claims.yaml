@@ -1,0 +1,120 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Core Map Compiler"
+  purpose: >
+    Proof-backed semantic claims that generated topology views may emit as
+    verified facts. This is not a new authority source; every claim points to
+    executable contracts, tests, manifests, authority docs, or lore.
+
+required_claim_fields:
+  - claim_id
+  - claim_status
+  - assertion
+  - source
+  - proof_targets
+  - gates
+  - invalidation_condition
+
+allowed_claim_statuses:
+  - replaced
+  - partial_replacement_candidate
+  - intentionally_unpromoted
+  - stale_superseded
+
+allowed_source_kinds:
+  - executable_contract
+  - blocking_test
+  - machine_manifest
+  - history_lore
+  - authority_doc
+
+allowed_proof_target_kinds:
+  - executable_contract
+  - blocking_test
+  - machine_manifest
+  - history_lore
+  - authority_doc
+
+claims:
+  - claim_id: TEMPERATURE_DELTA_SCALE_ONLY
+    claim_status: replaced
+    assertion: "TemperatureDelta conversion is scale-only; it never applies the +32 absolute-temperature offset."
+    source:
+      kind: executable_contract
+      path: src/types/temperature.py
+      locator: TemperatureDelta.to
+    proof_targets:
+      - kind: executable_contract
+        path: src/types/temperature.py
+        locator: TemperatureDelta
+      - kind: blocking_test
+        path: tests/test_temperature.py
+        locator: test_delta_vs_absolute_differ
+    gates:
+      - pytest -q tests/test_temperature.py
+    invalidation_condition: "Only a unit semantics contract packet may alter TemperatureDelta conversion."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY
+    claim_status: replaced
+    assertion: "Kelly entry cost must flow through typed ExecutionPrice; implied market probability is not execution cost."
+    source:
+      kind: executable_contract
+      path: src/contracts/execution_price.py
+      locator: ExecutionPrice.assert_kelly_safe
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/execution_price.py
+        locator: ExecutionPrice
+      - kind: blocking_test
+        path: tests/test_no_bare_float_seams.py
+        locator: test_implied_probability_fails_kelly_safe
+    gates:
+      - pytest -q tests/test_no_bare_float_seams.py
+    invalidation_condition: "Only an execution-price contract packet may change Kelly cost semantics."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: ALPHA_TARGET_COMPATIBILITY
+    claim_status: replaced
+    assertion: "Alpha values carry an optimization target; Brier-optimized alpha must not be consumed as EV-safe alpha."
+    source:
+      kind: executable_contract
+      path: src/contracts/alpha_decision.py
+      locator: AlphaDecision.assert_target_compatible
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/alpha_decision.py
+        locator: AlphaDecision
+      - kind: blocking_test
+        path: tests/test_alpha_target_coherence.py
+        locator: test_brier_into_ev_raises
+      - kind: executable_contract
+        path: src/engine/evaluator.py
+        locator: value_for_consumer("ev")
+    gates:
+      - pytest -q tests/test_alpha_target_coherence.py
+    invalidation_condition: "Only an alpha-target contract packet may change consumer compatibility."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: VIG_BEFORE_BLEND
+    claim_status: replaced
+    assertion: "Vig normalization must happen before posterior blending through VigTreatment."
+    source:
+      kind: executable_contract
+      path: src/contracts/vig_treatment.py
+      locator: VigTreatment
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/vig_treatment.py
+        locator: applied_before_blend
+      - kind: executable_contract
+        path: src/strategy/market_fusion.py
+        locator: VigTreatment.from_raw
+      - kind: blocking_test
+        path: tests/test_no_bare_float_seams.py
+        locator: TestVigTreatmentSeam
+    gates:
+      - pytest -q tests/test_no_bare_float_seams.py
+    invalidation_condition: "Only a market-probability contract packet may change vig treatment order."
+    applicable_profiles: [probability-chain]

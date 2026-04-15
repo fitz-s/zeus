@@ -77,7 +77,7 @@ reading archives or guessing from local code shape.
 - `zones.yaml` defines zone grammar/package boundaries; `source_rationale.yaml`
   defines file-level roles/hazards/write routes for `src/**`.
 - K-zone legend: K0 = kernel/contracts/lifecycle truth, K1 = governance/risk/control, K2 = runtime/execution/operator read models, K3 = math/signal/calibration/strategy, K4 = experimental/ad hoc.
-- High-risk zero-context work also follows `architecture/self_check/zero_context_entry.md`.
+- High-risk zero-context work reads `architecture/self_check/authority_index.md` directly, then follows `architecture/self_check/zero_context_entry.md`.
 
 ## Default Navigation
 
@@ -160,6 +160,9 @@ Before editing, run planning-lock when relevant, classify the change
 the downstream relationship test or gate. If the relationship cannot be tested,
 the boundary is not understood.
 
+Before closeout, non-trivial repo-changing work updates a short work record;
+check with `python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>`.
+
 Git safety is summarized by lore card `UNCOMMITTED_AGENT_EDIT_LOSS`: never run
 destructive git commands or overwrite others' dirty work without explicit human
 approval.
@@ -177,8 +180,10 @@ When adding, renaming, or deleting a file:
 
 Unregistered files are invisible to future agents.
 
+Registry route: `src/**` -> `source_rationale.yaml`; `scripts/*` -> `script_manifest.yaml`; `tests/test_*.py` -> `test_topology.yaml`; `config/*` -> `config/AGENTS.md`; `config/reality_contracts/*` -> local `AGENTS.md`; `docs/reference/*` -> `docs/reference/AGENTS.md` + `reference_replacement.yaml`.
+
 During active refactors, subagents report map delta; the owner resolves it at
-slice/packet closeout. Machine check: `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`; omit `--changed-files` to use git status, pass files only to narrow a mixed workspace.
+slice/packet closeout. Machine check: `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`; omit `--changed-files` to use git status (staged, unstaged, untracked, deleted), pass files only to narrow a mixed workspace.
 
 ## Context Budget
 
@@ -199,7 +204,7 @@ Use digest first. Then load only relevant scoped sources:
 - Cross-module relationship tests: `tests/contracts/spec_validation_manifest.py`
   plus the digest-routed target tests.
 - Delivery/governance: `docs/authority/zeus_current_delivery.md`, `docs/operations/current_state.md`.
-- K0/K1/schema/governance entry: `architecture/self_check/zero_context_entry.md`.
+- K0/K1/schema/governance entry: `architecture/self_check/authority_index.md`, then `architecture/self_check/zero_context_entry.md`.
 - Math/data/backtest: digest-routed lore; `docs/reference/zeus_domain_model.md` only when deeper domain context is needed.
 - Data rebuild: `architecture/data_rebuild_topology.yaml`; live math remains blocked until certification criteria are proven.
 - Historical extraction: `architecture/history_lore.yaml`; archives and progress logs are evidence sources, not default context.

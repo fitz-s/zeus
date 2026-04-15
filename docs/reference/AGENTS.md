@@ -14,6 +14,7 @@ Reference material — domain model, technical orientation, data status, methodo
 - `statistical_methodology.md`
 - `quantitative_research.md`
 - `market_microstructure.md`
+- `zeus_math_spec.md` when math fact/spec context matters; executable law and authority manifests win
 
 Replacement/deletion eligibility is tracked in `architecture/reference_replacement.yaml`.
 

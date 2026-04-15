@@ -7,8 +7,14 @@ metadata:
     surfaces instead of allowing them to become default-read encyclopedias.
   enforcement_phase: advisory
   rationale: >
-    S0 measures context bloat first. Later slimming packets should reduce the
-    advisory overages, then promote selected budgets to blocking.
+    S0 measures context bloat first. These numbers are provisional starting
+    assumptions, not hard read-count limits. They should warn agents that a
+    starting packet may be insufficient; they must not suppress necessary
+    authority reads.
+  blocking_promotion_rule: >
+    A budget entry may use enforcement=blocking only when it carries explicit
+    governance promotion metadata such as promotion_packet or
+    blocking_authority.
 
 maintenance_cadence:
   run_after_completed_packets: 5
@@ -82,6 +88,8 @@ digest_budgets:
       - "fix DST diurnal rebuild"
       - "retune alpha tail treatment for buy_no EV"
       - "fix daily_loss in risk_state reporting"
+      - "reference artifact claim extraction"
+      - "zeus_math_spec fact spec"
 
 default_read_path:
   max_pre_code_reads: 6
@@ -105,6 +113,7 @@ default_read_path:
     - relevant machine manifest, such as zones.yaml/script_manifest.yaml/test_topology.yaml
     - topology_doctor digest for task
   rule: >
-    The budget is a soft ceiling for the pre-code navigation set, not a ban on
-    necessary authority reads. If a task needs more than the relevant ceiling,
-    use a digest or plan packet to justify and narrow the extra reads.
+    These budgets are provisional starting assumptions for the pre-code
+    navigation set, not a ban on necessary authority reads. If a task needs more
+    than the relevant ceiling, expand context and keep the reason tied to the
+    task boundary, truth owner, downstream behavior, or verification scope.

@@ -46,8 +46,11 @@ Changes here are architecture or governance changes, never “just docs.”
 | `script_manifest.yaml` | Script manifest with authority class, write targets, dry-run/apply metadata, and safety gates |
 | `data_rebuild_topology.yaml` | Data/rebuild certification criteria and non-promotion topology |
 | `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
+| `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |
 | `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
+| `context_pack_profiles.yaml` | Task-shaped context-pack profiles for generated agent work packets |
 | `code_idioms.yaml` | Registry for intentional non-obvious code shapes such as static-analysis hooks |
+| `core_claims.yaml` | Proof-backed semantic claims emitted by generated topology views |
 | `runtime_modes.yaml` | Discovery mode index: opening_hunt, update_reaction, day0_capture |
 | `reference_replacement.yaml` | Replacement matrix for bulky reference docs and deletion eligibility |
 | `map_maintenance.yaml` | Companion-registry rules for added/deleted files in active surfaces |

@@ -22,6 +22,17 @@ Use `architecture/script_manifest.yaml` for:
 Use `python scripts/topology_doctor.py --scripts --json` to check that top-level
 scripts are registered and safe for their declared class.
 
+## Class Quick Guide
+
+- `enforcement`: repeatable topology, policy, lint, or contract gate.
+- `diagnostic`: read-only investigation; stdout only; no live authorization.
+- `diagnostic_report_writer`: repeatable non-authority report artifact writer.
+- `runtime_support`: operator health/watch/resume/post-run support wrapper.
+- `etl_writer`: repeatable external/world-data ingestion or backfill writer.
+- `repair`: packet-approved repair with explicit dry-run/apply boundary.
+- `config_writer`: repeatable config artifact generator.
+- `stale_deprecated`: retained only to fail closed; `DO_NOT_RUN`.
+
 ## Core Rules
 
 - Check the manifest before adding a top-level script; reuse or extend existing

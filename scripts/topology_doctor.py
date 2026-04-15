@@ -25,15 +25,19 @@ yaml = import_yaml()
 ROOT = Path(__file__).resolve().parents[1]
 TOPOLOGY_PATH = ROOT / "architecture" / "topology.yaml"
 SCHEMA_PATH = ROOT / "architecture" / "topology_schema.yaml"
+INVARIANTS_PATH = ROOT / "architecture" / "invariants.yaml"
 SOURCE_RATIONALE_PATH = ROOT / "architecture" / "source_rationale.yaml"
 TEST_TOPOLOGY_PATH = ROOT / "architecture" / "test_topology.yaml"
 SCRIPT_MANIFEST_PATH = ROOT / "architecture" / "script_manifest.yaml"
 DATA_REBUILD_TOPOLOGY_PATH = ROOT / "architecture" / "data_rebuild_topology.yaml"
 HISTORY_LORE_PATH = ROOT / "architecture" / "history_lore.yaml"
 CONTEXT_BUDGET_PATH = ROOT / "architecture" / "context_budget.yaml"
+ARTIFACT_LIFECYCLE_PATH = ROOT / "architecture" / "artifact_lifecycle.yaml"
+CONTEXT_PACK_PROFILES_PATH = ROOT / "architecture" / "context_pack_profiles.yaml"
 CODE_IDIOMS_PATH = ROOT / "architecture" / "code_idioms.yaml"
 RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
 REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml"
+CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
 SKIP_PATTERN = re.compile(r"pytest\.mark\.skip|pytest\.skip\(")
 DANGEROUS_REVERSE_ANTIBODY_PATTERNS = (
@@ -78,6 +82,10 @@ def load_schema() -> dict[str, Any]:
     return _load_yaml(SCHEMA_PATH)
 
 
+def load_invariants() -> dict[str, Any]:
+    return _load_yaml(INVARIANTS_PATH)
+
+
 def load_source_rationale() -> dict[str, Any]:
     return _load_yaml(SOURCE_RATIONALE_PATH)
 
@@ -102,6 +110,14 @@ def load_context_budget() -> dict[str, Any]:
     return _load_yaml(CONTEXT_BUDGET_PATH)
 
 
+def load_artifact_lifecycle() -> dict[str, Any]:
+    return _load_yaml(ARTIFACT_LIFECYCLE_PATH)
+
+
+def load_context_pack_profiles() -> dict[str, Any]:
+    return _load_yaml(CONTEXT_PACK_PROFILES_PATH)
+
+
 def load_code_idioms() -> dict[str, Any]:
     return _load_yaml(CODE_IDIOMS_PATH)
 
@@ -114,6 +130,10 @@ def load_reference_replacement() -> dict[str, Any]:
     return _load_yaml(REFERENCE_REPLACEMENT_PATH)
 
 
+def load_core_claims() -> dict[str, Any]:
+    return _load_yaml(CORE_CLAIMS_PATH)
+
+
 def load_map_maintenance() -> dict[str, Any]:
     return _load_yaml(MAP_MAINTENANCE_PATH)
 
@@ -121,6 +141,17 @@ def load_map_maintenance() -> dict[str, Any]:
 def _git_ls_files() -> list[str]:
     proc = subprocess.run(
         ["git", "ls-files"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return sorted(line for line in proc.stdout.splitlines() if line)
+
+
+def _git_visible_files() -> list[str]:
+    proc = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -139,6 +170,13 @@ def _warning(code: str, path: str, message: str) -> TopologyIssue:
 
 def _declared_paths(items: list[dict[str, Any]]) -> set[str]:
     return {str(item.get("path", "")) for item in items if item.get("path")}
+
+
+def _path_declared(path: str, declared: set[str]) -> bool:
+    return path in declared or any(
+        any(char in pattern for char in "*?[") and fnmatch(path, pattern)
+        for pattern in declared
+    )
 
 
 def _registry_entries(agents_path: Path) -> set[str]:
@@ -339,27 +377,33 @@ def _check_docs_subtree_agents() -> list[TopologyIssue]:
 
 def _check_root_and_state_classification(topology: dict[str, Any]) -> list[TopologyIssue]:
     issues = []
+    visible_files = {
+        rel
+        for rel in _git_visible_files()
+        if (ROOT / rel).exists() and (ROOT / rel).is_file()
+    }
     root_declared = _declared_paths(topology.get("root_governed_files", []))
-    for path in sorted(ROOT.iterdir()):
-        if not path.is_file() or _is_root_scratch(path):
+    for rel in sorted(path for path in visible_files if "/" not in path):
+        path = ROOT / rel
+        if _is_root_scratch(path):
             continue
-        rel = path.relative_to(ROOT).as_posix()
-        if rel not in root_declared:
+        if not _path_declared(rel, root_declared):
             issues.append(
                 _issue("unclassified_root_artifact", rel, "repo-root file is not classified")
             )
 
     state_declared = _declared_paths(topology.get("state_surfaces", []))
-    state_dir = ROOT / "state"
-    if state_dir.exists():
-        for path in sorted(state_dir.iterdir()):
-            if not path.is_file() or path.name == ".DS_Store":
-                continue
-            rel = path.relative_to(ROOT).as_posix()
-            if rel not in state_declared:
-                issues.append(
-                    _issue("unclassified_state_surface", rel, "state/artifact file is not classified")
-                )
+    for rel in sorted(
+        path
+        for path in visible_files
+        if path.startswith("state/") and Path(path).parent.as_posix() == "state"
+    ):
+        if Path(rel).name == ".DS_Store":
+            continue
+        if not _path_declared(rel, state_declared):
+            issues.append(
+                _issue("unclassified_state_surface", rel, "state/artifact file is not classified")
+            )
     return issues
 
 
@@ -1183,6 +1227,59 @@ def _has_antibody(antibodies: Any) -> bool:
     return any(bool(antibodies.get(key)) for key in ("code", "tests", "gates", "docs"))
 
 
+def _history_lore_path_exists(value: str) -> bool:
+    if not value or " " in value:
+        return True
+    if any(char in value for char in "*?[]"):
+        return any(ROOT.glob(value))
+    if "/" not in value and "." not in value:
+        return True
+    return (ROOT / value).exists()
+
+
+def _gate_path_tokens(gate: str) -> list[str]:
+    tokens = []
+    for token in re.split(r"\s+", gate):
+        token = token.strip("'\"")
+        if token.startswith(("./", "../")):
+            token = token.removeprefix("./")
+        if token.startswith(("src/", "scripts/", "tests/", "architecture/", "docs/", "config/")):
+            tokens.append(token)
+    return tokens
+
+
+def _check_history_lore_antibody_references(
+    card_id: str,
+    antibodies: Any,
+) -> list[TopologyIssue]:
+    if not isinstance(antibodies, dict):
+        return []
+    issues: list[TopologyIssue] = []
+    path = f"architecture/history_lore.yaml:{card_id}"
+    for field in ("code", "tests", "docs"):
+        for ref in antibodies.get(field) or []:
+            ref = str(ref)
+            if not _history_lore_path_exists(ref):
+                issues.append(
+                    _issue(
+                        "history_lore_stale_antibody_reference",
+                        path,
+                        f"antibodies.{field} references missing path: {ref}",
+                    )
+                )
+    for gate in antibodies.get("gates") or []:
+        for ref in _gate_path_tokens(str(gate)):
+            if not _history_lore_path_exists(ref):
+                issues.append(
+                    _issue(
+                        "history_lore_stale_antibody_reference",
+                        path,
+                        f"antibodies.gates references missing path: {ref}",
+                    )
+                )
+    return issues
+
+
 def run_history_lore() -> StrictResult:
     lore = load_history_lore()
     issues: list[TopologyIssue] = []
@@ -1226,6 +1323,7 @@ def run_history_lore() -> StrictResult:
                         "critical/high active lore needs code, test, gate, or doc antibody",
                     )
                 )
+            issues.extend(_check_history_lore_antibody_references(card_id, card.get("antibodies")))
 
         if status == "open_gap" and _metadata_missing(card.get("residual_risk")):
             issues.append(_issue("history_lore_open_gap_without_residual", path, "open gaps need residual risk"))
@@ -1255,6 +1353,25 @@ def _budget_issue(
     return _warning(code, path, message)
 
 
+def _budget_has_blocking_promotion(spec: dict[str, Any]) -> bool:
+    return bool(spec.get("promotion_packet") or spec.get("blocking_authority"))
+
+
+def _budget_enforcement_issues(
+    spec: dict[str, Any],
+    path: str,
+) -> list[TopologyIssue]:
+    if str(spec.get("enforcement") or "advisory") == "blocking" and not _budget_has_blocking_promotion(spec):
+        return [
+            _issue(
+                "context_budget_blocking_without_promotion",
+                path,
+                "enforcement=blocking requires promotion_packet or blocking_authority",
+            )
+        ]
+    return []
+
+
 def _line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
 
@@ -1276,6 +1393,7 @@ def run_context_budget() -> StrictResult:
         enforcement = str(entry.get("enforcement") or "advisory")
         max_lines = entry.get("max_lines")
         path = ROOT / rel
+        issues.extend(_budget_enforcement_issues(entry, rel or "architecture/context_budget.yaml"))
         if not rel:
             issues.append(
                 _budget_issue(
@@ -1319,6 +1437,7 @@ def run_context_budget() -> StrictResult:
 
     lore_budget = ((budget.get("digest_budgets") or {}).get("history_lore") or {})
     lore_enforcement = str(lore_budget.get("enforcement") or "advisory")
+    issues.extend(_budget_enforcement_issues(lore_budget, "digest_budgets.history_lore"))
     max_cards = lore_budget.get("max_cards_per_digest")
     max_digest_chars = lore_budget.get("max_zero_context_digest_chars")
     if max_cards is not None and (not isinstance(max_cards, int) or max_cards <= 0):
@@ -1380,6 +1499,12 @@ def run_context_budget() -> StrictResult:
     for route, spec in (read_path.get("route_budgets") or {}).items():
         soft_limit = (spec or {}).get("soft_limit")
         expected_reads = (spec or {}).get("expected_reads") or []
+        issues.extend(
+            _budget_enforcement_issues(
+                spec or {},
+                f"default_read_path.route_budgets.{route}",
+            )
+        )
         if not isinstance(soft_limit, int) or soft_limit <= 0:
             issues.append(
                 _warning(
@@ -1571,6 +1696,7 @@ def run_self_check_coherence() -> StrictResult:
     )
 
     required_root_refs = [
+        "architecture/self_check/authority_index.md",
         "architecture/self_check/zero_context_entry.md",
         "Default Navigation",
         "What To Read By Task",
@@ -1586,14 +1712,16 @@ def run_self_check_coherence() -> StrictResult:
             )
 
     required_overlay_refs = [
-        "after root `AGENTS.md`",
-        "task digest",
+        "Minimum high-risk startup spine",
+        "architecture/self_check/authority_index.md",
+        "topology_doctor.py --navigation",
         "architecture/kernel_manifest.yaml",
         "architecture/invariants.yaml",
         "architecture/zones.yaml",
         "architecture/source_rationale.yaml",
         "docs/authority/zeus_current_architecture.md",
         "docs/authority/zeus_current_delivery.md",
+        "map-maintenance result",
     ]
     for needle in required_overlay_refs:
         if needle not in self_check:
@@ -1676,6 +1804,197 @@ def _reference_default_reads() -> set[str]:
     return set(re.findall(r"`([^`]+\.md)`", block))
 
 
+def _reference_conditional_reads() -> set[str]:
+    agents = ROOT / "docs" / "reference" / "AGENTS.md"
+    text = agents.read_text(encoding="utf-8", errors="ignore")
+    start = text.find("**Conditional reads**")
+    end = text.find("Replacement/deletion eligibility")
+    if start == -1 or end == -1 or end < start:
+        return set()
+    block = text[start:end]
+    return set(re.findall(r"`([^`]+\.md)`", block))
+
+
+def _validate_reference_claim_proofs(
+    entry_path: str,
+    entry: dict[str, Any],
+    manifest: dict[str, Any],
+    seen_claim_ids: set[str],
+) -> list[TopologyIssue]:
+    issues: list[TopologyIssue] = []
+    claim_proofs = entry.get("claim_proofs") or []
+    if "claim_proofs" in entry and not isinstance(entry.get("claim_proofs"), list):
+        return [
+            _issue(
+                "reference_claim_proof_invalid",
+                entry_path,
+                "claim_proofs must be a list",
+            )
+        ]
+
+    roles = set(manifest.get("allowed_claim_roles") or [])
+    statuses = set(manifest.get("allowed_claim_statuses") or [])
+    target_kinds = set(manifest.get("allowed_proof_target_kinds") or [])
+    nonblocking_roles = {"breadcrumb", "stale_claim", "derived_diagnostic"}
+    nonblocking_statuses = {"intentionally_unpromoted", "stale_superseded"}
+    invariant_roles = {"fact_spec", "failure_lore", "authority_candidate"}
+
+    for idx, proof in enumerate(claim_proofs):
+        claim_id = str(proof.get("claim_id") or f"claim[{idx}]")
+        proof_path = f"{entry_path}:{claim_id}"
+        if not proof.get("claim_id"):
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, "missing claim_id"))
+        elif claim_id in seen_claim_ids:
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, "duplicate claim_id"))
+        else:
+            seen_claim_ids.add(claim_id)
+
+        source = proof.get("source") or {}
+        if source.get("path") != entry_path:
+            issues.append(
+                _issue(
+                    "reference_claim_proof_invalid",
+                    proof_path,
+                    "source.path must equal parent reference entry path",
+                )
+            )
+        if _metadata_missing(source.get("locator")):
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, "source.locator is required"))
+
+        role = proof.get("claim_role")
+        status = proof.get("claim_status")
+        if role not in roles:
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, f"invalid claim_role {role!r}"))
+        if status not in statuses:
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, f"invalid claim_status {status!r}"))
+        if _metadata_missing(proof.get("assertion")):
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, "assertion is required"))
+
+        proof_targets = proof.get("proof_targets") or []
+        if proof_targets and not isinstance(proof_targets, list):
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, "proof_targets must be a list"))
+            proof_targets = []
+        for target in proof_targets:
+            kind = target.get("kind")
+            target_path = str(target.get("path") or "")
+            if kind not in target_kinds:
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, f"invalid proof target kind {kind!r}"))
+            if not target_path:
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, "proof target path is required"))
+                continue
+            if any(char in target_path for char in "*?[]"):
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, "proof target path must not be a glob"))
+            elif not (ROOT / target_path).exists():
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, f"proof target missing: {target_path}"))
+
+        gates = proof.get("gates") or []
+        if status == "replaced" and role not in nonblocking_roles:
+            if not proof_targets:
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, "replaced claim requires proof_targets"))
+            if not gates:
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, "replaced claim requires gates"))
+        if role in invariant_roles and _metadata_missing(proof.get("invalidation_condition")):
+            issues.append(_issue("reference_claim_proof_invalid", proof_path, f"{role} requires invalidation_condition"))
+        if role in nonblocking_roles or status in nonblocking_statuses:
+            if _metadata_missing(proof.get("nonblocking_reason")):
+                issues.append(_issue("reference_claim_proof_invalid", proof_path, "nonblocking claim requires nonblocking_reason"))
+
+    return issues
+
+
+def _claim_proof_index() -> dict[str, dict[str, Any]]:
+    manifest = load_reference_replacement()
+    index: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    for entry in manifest.get("entries") or []:
+        entry_path = str(entry.get("path") or "")
+        for proof in entry.get("claim_proofs") or []:
+            claim_id = str(proof.get("claim_id") or "")
+            if claim_id:
+                if claim_id in index:
+                    duplicates.add(claim_id)
+                index[claim_id] = {"entry_path": entry_path, **proof}
+    core_claims = load_core_claims()
+    for proof in core_claims.get("claims") or []:
+        claim_id = str(proof.get("claim_id") or "")
+        if claim_id:
+            if claim_id in index:
+                duplicates.add(claim_id)
+            source = proof.get("source") or {}
+            index[claim_id] = {"entry_path": source.get("path", ""), **proof}
+    if duplicates:
+        index["__DUPLICATES__"] = {"claim_ids": sorted(duplicates)}
+    return index
+
+
+def run_core_claims() -> StrictResult:
+    if not CORE_CLAIMS_PATH.exists():
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "core_claims_manifest_missing",
+                    "architecture/core_claims.yaml",
+                    "core claims manifest is missing",
+                )
+            ],
+        )
+    manifest = load_core_claims()
+    issues: list[TopologyIssue] = []
+    required = manifest.get("required_claim_fields") or []
+    statuses = set(manifest.get("allowed_claim_statuses") or [])
+    source_kinds = set(manifest.get("allowed_source_kinds") or [])
+    target_kinds = set(manifest.get("allowed_proof_target_kinds") or [])
+    seen: set[str] = set()
+    duplicate_claims = set(_claim_proof_index().get("__DUPLICATES__", {}).get("claim_ids", []))
+    for claim_id in sorted(duplicate_claims):
+        issues.append(
+            _issue(
+                "core_claim_duplicate_id",
+                f"architecture/core_claims.yaml:{claim_id}",
+                "claim_id duplicates another claim manifest",
+            )
+        )
+    for claim in manifest.get("claims") or []:
+        claim_id = str(claim.get("claim_id") or "<missing>")
+        path = f"architecture/core_claims.yaml:{claim_id}"
+        if claim_id in seen:
+            issues.append(_issue("core_claim_duplicate_id", path, "duplicate claim_id"))
+        seen.add(claim_id)
+        for field in required:
+            if _metadata_missing(claim.get(field)):
+                issues.append(_issue("core_claim_required_field_missing", path, f"missing {field}"))
+        if claim.get("claim_status") not in statuses:
+            issues.append(_issue("core_claim_invalid_status", path, f"invalid status {claim.get('claim_status')!r}"))
+        source = claim.get("source") or {}
+        if source.get("kind") not in source_kinds:
+            issues.append(_issue("core_claim_invalid_source", path, f"invalid source kind {source.get('kind')!r}"))
+        source_path = str(source.get("path") or "")
+        if source_path and not (ROOT / source_path).exists():
+            issues.append(_issue("core_claim_source_missing", path, f"source path missing: {source_path}"))
+        elif source_path and not _locator_exists(source_path, source.get("locator")):
+            issues.append(_issue("core_claim_source_missing", path, f"source locator missing: {source_path}:{source.get('locator')}"))
+        for target in claim.get("proof_targets") or []:
+            if target.get("kind") not in target_kinds:
+                issues.append(_issue("core_claim_invalid_proof_target", path, f"invalid proof target kind {target.get('kind')!r}"))
+            target_path = str(target.get("path") or "")
+            if not target_path or not (ROOT / target_path).exists():
+                issues.append(_issue("core_claim_proof_target_missing", path, f"proof target missing: {target_path}"))
+            elif not _locator_exists(target_path, target.get("locator")):
+                issues.append(
+                    _issue(
+                        "core_claim_proof_target_missing",
+                        path,
+                        f"proof target locator missing: {target_path}:{target.get('locator')}",
+                    )
+                )
+        for gate in claim.get("gates") or []:
+            for ref in _gate_path_tokens(str(gate)):
+                if not _history_lore_path_exists(ref):
+                    issues.append(_issue("core_claim_gate_target_missing", path, f"gate target missing: {ref}"))
+    return StrictResult(ok=not issues, issues=issues)
+
+
 def run_reference_replacement() -> StrictResult:
     manifest = load_reference_replacement()
     issues: list[TopologyIssue] = []
@@ -1698,6 +2017,8 @@ def run_reference_replacement() -> StrictResult:
         issues.append(_issue("reference_replacement_stale_entry", path, "replacement matrix entry has no reference doc"))
 
     default_reads = _reference_default_reads()
+    conditional_reads = _reference_conditional_reads()
+    seen_claim_ids: set[str] = set()
     for path, entry in sorted(entry_by_path.items()):
         short = Path(path).name
         for field in required:
@@ -1715,9 +2036,18 @@ def run_reference_replacement() -> StrictResult:
                     f"default_read={entry.get('default_read')} but docs/reference/AGENTS.md default reads contain {short}: {short in default_reads}",
                 )
             )
+        if entry.get("allowed_action") == "keep_conditional" and short not in conditional_reads:
+            issues.append(
+                _issue(
+                    "reference_replacement_default_read_mismatch",
+                    path,
+                    f"keep_conditional entry is missing from docs/reference/AGENTS.md conditional reads: {short}",
+                )
+            )
         for replacement in entry.get("replaced_by") or []:
             if not any(char in str(replacement) for char in "*?[]") and not (ROOT / str(replacement)).exists():
                 issues.append(_issue("reference_replacement_replacement_missing", path, f"replacement target missing: {replacement}"))
+        issues.extend(_validate_reference_claim_proofs(path, entry, manifest, seen_claim_ids))
         if entry.get("delete_allowed") is True:
             if entry.get("replacement_status") != "replaced":
                 issues.append(_issue("reference_replacement_delete_unsafe", path, "delete_allowed requires replacement_status=replaced"))
@@ -1725,6 +2055,19 @@ def run_reference_replacement() -> StrictResult:
                 issues.append(_issue("reference_replacement_delete_unsafe", path, "delete_allowed requires unique_remaining=[]"))
             if not entry.get("replaced_by"):
                 issues.append(_issue("reference_replacement_delete_unsafe", path, "delete_allowed requires replaced_by evidence"))
+            claim_proofs = entry.get("claim_proofs") or []
+            if not claim_proofs:
+                issues.append(_issue("reference_replacement_delete_unsafe", path, "delete_allowed requires claim_proofs"))
+            for proof in claim_proofs:
+                status = proof.get("claim_status")
+                if status not in {"replaced", "stale_superseded", "intentionally_unpromoted"}:
+                    issues.append(
+                        _issue(
+                            "reference_replacement_delete_unsafe",
+                            path,
+                            f"delete_allowed requires final claim proof status, got {status!r}",
+                        )
+                    )
 
     return StrictResult(ok=not issues, issues=issues)
 
@@ -1779,8 +2122,9 @@ def _git_status_changes() -> dict[str, str]:
 def _map_maintenance_changes(changed_files: list[str]) -> dict[str, str]:
     if not changed_files:
         return _git_status_changes()
+    git_changes = _git_status_changes()
     tracked = set(_git_ls_files())
-    return {path: _change_kind(path, tracked) for path in changed_files}
+    return {path: git_changes.get(path, _change_kind(path, tracked)) for path in changed_files}
 
 
 def run_map_maintenance(changed_files: list[str] | None = None, mode: str = "advisory") -> StrictResult:
@@ -1871,6 +2215,1275 @@ def _source_rationale_for(files: list[str]) -> list[dict[str, Any]]:
         entry.setdefault("gates", package_default.get("gates", []))
         enriched.append({"path": path, **entry})
     return enriched
+
+
+CONTEXT_EXPAND_TRIGGERS = [
+    "touched code crosses a zone boundary",
+    "tests fail outside the suggested scope",
+    "implementation needs files not listed in files_may_change",
+    "truth owner, lifecycle, DB, control, risk, or settlement owner is unclear",
+    "reviewer asks about authority or downstream behavior",
+    "target uses a write route not listed in the output",
+]
+
+
+def build_context_assumption(
+    *,
+    profile: str = "",
+    profile_kind: str = "digest_profile",
+    source_entries: list[dict[str, Any]] | None = None,
+    confidence_basis: list[str] | None = None,
+) -> dict[str, Any]:
+    basis = list(confidence_basis or [])
+    if profile:
+        basis.append(profile_kind)
+    entries = source_entries or []
+    if entries:
+        basis.append("source_rationale")
+        if any(not entry.get("upstream") and not entry.get("downstream") for entry in entries):
+            basis.append("missing_relations")
+    if not basis:
+        basis.append("topology_manifest")
+    return {
+        "sufficiency": "provisional_starting_packet",
+        "authority_status": "incomplete_context",
+        "confidence_basis": sorted(dict.fromkeys(basis)),
+        "expand_context_if": CONTEXT_EXPAND_TRIGGERS,
+        "planning_lock_independent": True,
+    }
+
+
+def _normalize_scope(scope: str | None) -> str:
+    if not scope:
+        return ""
+    return scope.strip().strip("/")
+
+
+def _scope_is_file(scope: str) -> bool:
+    if not scope:
+        return False
+    path = ROOT / scope
+    return path.is_file() or Path(scope).suffix != ""
+
+
+def _scope_agent_path(scope: str) -> str | None:
+    if not scope:
+        return None
+    path = ROOT / scope
+    if path.is_file():
+        path = path.parent
+    while path != ROOT and ROOT in path.parents:
+        agents = path / "AGENTS.md"
+        if agents.exists():
+            return agents.relative_to(ROOT).as_posix()
+        path = path.parent
+    return None
+
+
+def _zones_for_scope(scope: str) -> list[str]:
+    normalized = _normalize_scope(scope)
+    if not normalized:
+        return []
+    zones = load_topology()
+    zone_manifest = _load_yaml(ROOT / "architecture" / "zones.yaml")
+    touched: set[str] = set()
+    for zone, spec in (zone_manifest.get("zones") or {}).items():
+        for directory in spec.get("directories") or []:
+            directory = str(directory).strip("/")
+            if normalized == directory or normalized.startswith(f"{directory}/") or directory.startswith(f"{normalized}/"):
+                touched.add(str(zone))
+    if touched:
+        return sorted(touched)
+
+    rationale = load_source_rationale()
+    for prefix, spec in (rationale.get("package_defaults") or {}).items():
+        if normalized == prefix or normalized.startswith(f"{prefix}/") or prefix.startswith(f"{normalized}/"):
+            zone = spec.get("zone")
+            if zone:
+                touched.add(str(zone))
+    return sorted(touched)
+
+
+def _zones_for_files(files: list[str]) -> list[str]:
+    zones = {_zone_for_changed_file(file) for file in files}
+    zones.discard("unknown")
+    zones.discard("docs")
+    return sorted(zones)
+
+
+def _packet_zones(scope: str, files: list[str]) -> list[str]:
+    zones = set(_zones_for_scope(scope))
+    zones.update(_zones_for_files(files))
+    return sorted(zones)
+
+
+def _invariants_for_zones(zones: list[str]) -> list[dict[str, Any]]:
+    wanted = set(zones)
+    if not wanted:
+        return []
+    invariants = load_invariants().get("invariants") or []
+    return [
+        invariant
+        for invariant in invariants
+        if wanted & set(invariant.get("zones") or [])
+    ]
+
+
+def build_invariants_slice(zone: str | None = None) -> dict[str, Any]:
+    invariants = load_invariants().get("invariants") or []
+    if zone:
+        invariants = [
+            invariant
+            for invariant in invariants
+            if zone in set(invariant.get("zones") or [])
+        ]
+    return {
+        "zone": zone,
+        "count": len(invariants),
+        "invariants": invariants,
+    }
+
+
+def _files_may_not_change(zones_touched: list[str]) -> list[str]:
+    zone_manifest = _load_yaml(ROOT / "architecture" / "zones.yaml")
+    forbidden: list[str] = []
+    for zone, spec in (zone_manifest.get("zones") or {}).items():
+        if zone in zones_touched:
+            continue
+        forbidden.extend(str(item) for item in spec.get("directories") or [])
+    return sorted(dict.fromkeys(forbidden))
+
+
+def _package_gates(scope: str, files: list[str]) -> list[str]:
+    rationale = load_source_rationale()
+    defaults = rationale.get("package_defaults") or {}
+    candidates = [path for path in files]
+    if scope:
+        candidates.append(_normalize_scope(scope))
+    gates: list[str] = []
+    for target in candidates:
+        for prefix, spec in defaults.items():
+            if target == prefix or target.startswith(f"{prefix}/") or prefix.startswith(f"{target}/"):
+                gates.extend(spec.get("gates") or [])
+    for item in _source_rationale_for(files):
+        gates.extend(item.get("gates") or [])
+    return sorted(dict.fromkeys(gates))
+
+
+def _tests_for_packet(scope: str, files: list[str]) -> list[str]:
+    tests = []
+    for gate in _package_gates(scope, files):
+        tests.extend(re.findall(r"tests/[A-Za-z0-9_./-]+\.py", gate))
+    if not files:
+        return sorted(dict.fromkeys(tests))
+    test_topology = load_test_topology()
+    law_gate = test_topology.get("law_gate") or {}
+    targets = [*files]
+    for spec in law_gate.values():
+        protects = spec.get("protects") or []
+        if any(
+            target == protected
+            or protected.startswith(f"{target}/")
+            or target.startswith(f"{protected}/")
+            for target in targets
+            for protected in protects
+        ):
+            tests.extend(spec.get("tests") or [])
+    return sorted(dict.fromkeys(tests))
+
+
+def build_packet_prefill(
+    *,
+    packet_type: str,
+    task: str,
+    scope: str = "",
+    files: list[str] | None = None,
+) -> dict[str, Any]:
+    files = files or []
+    normalized_scope = _normalize_scope(scope)
+    zones_touched = _packet_zones(normalized_scope, files)
+    invariants = _invariants_for_zones(zones_touched)
+    scoped_agents = _scope_agent_path(normalized_scope) if normalized_scope else None
+    required_reads = [
+        "AGENTS.md",
+        "workspace_map.md",
+        "architecture/zones.yaml",
+        "architecture/negative_constraints.yaml",
+    ]
+    if invariants:
+        required_reads.append(
+            "architecture/invariants.yaml#"
+            + ",".join(invariant.get("id", "") for invariant in invariants)
+        )
+    else:
+        required_reads.append("architecture/invariants.yaml")
+    if normalized_scope.startswith("src") or any(file.startswith("src/") for file in files):
+        required_reads.append("architecture/source_rationale.yaml")
+    if scoped_agents:
+        required_reads.append(scoped_agents)
+
+    source_entries = _source_rationale_for(files)
+    if files:
+        files_may_change = files
+    elif normalized_scope and _scope_is_file(normalized_scope):
+        files_may_change = [normalized_scope]
+    elif normalized_scope:
+        files_may_change = [f"{normalized_scope}/**"]
+    else:
+        files_may_change = []
+    ci_gates = _package_gates(normalized_scope, files)
+    if files:
+        ci_gates.append("python scripts/semantic_linter.py --check " + " ".join(files))
+    elif normalized_scope.startswith("src/"):
+        ci_gates.append(f"python scripts/semantic_linter.py --check {normalized_scope}")
+
+    payload = {
+        "packet_type": f"{packet_type}_packet" if not packet_type.endswith("_packet") else packet_type,
+        "task": task,
+        "objective": "<fill>",
+        "why_this_now": "<fill>",
+        "why_not_other_approach": ["<fill>"],
+        "truth_layer": "<fill>",
+        "control_layer": "<fill>",
+        "evidence_layer": "<fill>",
+        "scope": normalized_scope,
+        "zones_touched": zones_touched,
+        "invariants_touched": [invariant.get("id") for invariant in invariants],
+        "required_reads": sorted(dict.fromkeys(required_reads)),
+        "files_may_change": files_may_change,
+        "files_may_not_change": _files_may_not_change(zones_touched),
+        "schema_changes": any(zone == "K0_frozen_kernel" for zone in zones_touched),
+        "ci_gates_required": sorted(dict.fromkeys(ci_gates)),
+        "tests_required": _tests_for_packet(normalized_scope, files),
+        "parity_required": any(zone == "K0_frozen_kernel" for zone in zones_touched),
+        "replay_required": any(zone == "K3_extension" for zone in zones_touched),
+        "rollback": "<fill>",
+        "acceptance": ["<fill>"],
+        "evidence_required": ["<fill>"],
+        "refactor_questions": [
+            "What truth surface becomes stronger after this refactor?",
+            "Which old surface becomes weaker or is scheduled for deletion?",
+            "How will no-behavior-change be proven?",
+        ],
+    }
+    payload["context_assumption"] = build_context_assumption(
+        profile=packet_type,
+        profile_kind="packet_prefill",
+        source_entries=source_entries,
+        confidence_basis=["topology_manifest", "package_default"],
+    )
+    return payload
+
+
+def build_impact(files: list[str]) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for entry in _source_rationale_for(files):
+        upstream = entry.get("upstream") or []
+        downstream = entry.get("downstream") or []
+        relations_complete = bool(upstream or downstream)
+        tests = _tests_for_packet("", [entry["path"]])
+        entries.append(
+            {
+                "path": entry["path"],
+                "zone": entry.get("zone", "unknown"),
+                "authority_role": entry.get("authority_role", ""),
+                "hazards": entry.get("hazards", []),
+                "write_routes": entry.get("write_routes", []),
+                "upstream": upstream,
+                "downstream": downstream,
+                "gates": entry.get("gates", []),
+                "tests": tests,
+                "relations_complete": relations_complete,
+                "confidence": "complete" if relations_complete else "provisional",
+                "missing_relation_reason": None if relations_complete else "source_rationale has no upstream/downstream relation for this file",
+            }
+        )
+
+    zones = sorted({entry.get("zone", "unknown") for entry in entries if entry.get("zone")})
+    write_routes = sorted({route for entry in entries for route in entry.get("write_routes", [])})
+    hazards = sorted({hazard for entry in entries for hazard in entry.get("hazards", [])})
+    tests_required = sorted({test for entry in entries for test in entry.get("tests", [])})
+    static_checks = [
+        "python scripts/semantic_linter.py --check " + " ".join(files)
+    ] if files else []
+    payload = {
+        "files": files,
+        "entries": entries,
+        "aggregate": {
+            "zones_touched": zones,
+            "cross_zone": len(set(zones)) > 1,
+            "write_routes": write_routes,
+            "hazards": hazards,
+            "tests_required": tests_required,
+            "static_checks": static_checks,
+            "files_may_not_change": _files_may_not_change(zones),
+        },
+    }
+    payload["context_assumption"] = build_context_assumption(
+        profile="impact",
+        profile_kind="impact_profile",
+        source_entries=entries,
+        confidence_basis=["source_rationale"],
+    )
+    return payload
+
+
+def _context_pack_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        str(profile.get("id")): profile
+        for profile in load_context_pack_profiles().get("profiles") or []
+        if profile.get("id")
+    }
+
+
+def run_context_packs() -> StrictResult:
+    if not CONTEXT_PACK_PROFILES_PATH.exists():
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "context_pack_profiles_manifest_missing",
+                    "architecture/context_pack_profiles.yaml",
+                    "context pack profiles manifest is missing",
+                )
+            ],
+        )
+    manifest = load_context_pack_profiles()
+    issues: list[TopologyIssue] = []
+    required = manifest.get("required_profile_fields") or []
+    seen: set[str] = set()
+    for idx, profile in enumerate(manifest.get("profiles") or []):
+        profile_id = str(profile.get("id") or f"profile[{idx}]")
+        path = f"architecture/context_pack_profiles.yaml:{profile_id}"
+        if profile_id in seen:
+            issues.append(_issue("context_pack_profile_duplicate_id", path, "duplicate context-pack profile id"))
+        seen.add(profile_id)
+        for field in required:
+            if _metadata_missing(profile.get(field)):
+                issues.append(_issue("context_pack_profile_required_field_missing", path, f"missing {field}"))
+        authority_status = str(profile.get("authority_status") or "")
+        if not authority_status.startswith("generated_") or not authority_status.endswith("_not_authority"):
+            issues.append(
+                _issue(
+                    "context_pack_profile_invalid_authority_status",
+                    path,
+                    "authority_status must mark generated output as not authority",
+                )
+            )
+        lore_policy = profile.get("lore_policy") or {}
+        for field in ("direct_evidence", "broad_relevant", "expanded_available"):
+            if _metadata_missing(lore_policy.get(field)):
+                issues.append(_issue("context_pack_profile_lore_policy_missing", path, f"missing lore_policy.{field}"))
+    return StrictResult(ok=not issues, issues=issues)
+
+
+def _path_matches_any(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch(path, pattern) for pattern in patterns)
+
+
+def _artifact_record_contract() -> dict[str, Any]:
+    return load_artifact_lifecycle().get("record_contract") or {}
+
+
+def _approved_work_record_path(path: str, contract: dict[str, Any] | None = None) -> bool:
+    contract = contract or _artifact_record_contract()
+    return _path_matches_any(path, [str(pattern) for pattern in contract.get("approved_record_globs") or []])
+
+
+def _record_exempt_path(path: str, contract: dict[str, Any] | None = None) -> bool:
+    contract = contract or _artifact_record_contract()
+    if _approved_work_record_path(path, contract):
+        return True
+    return _path_matches_any(path, [str(pattern) for pattern in contract.get("exempt_path_globs") or []])
+
+
+def run_artifact_lifecycle() -> StrictResult:
+    if not ARTIFACT_LIFECYCLE_PATH.exists():
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "artifact_lifecycle_manifest_missing",
+                    "architecture/artifact_lifecycle.yaml",
+                    "artifact lifecycle manifest is missing",
+                )
+            ],
+        )
+    manifest = load_artifact_lifecycle()
+    issues: list[TopologyIssue] = []
+    required = manifest.get("required_artifact_class_fields") or []
+    contract = manifest.get("record_contract") or {}
+    for field in ("minimum_fields", "approved_record_globs", "exempt_path_globs"):
+        if _metadata_missing(contract.get(field)):
+            issues.append(
+                _issue(
+                    "artifact_lifecycle_record_contract_missing",
+                    "architecture/artifact_lifecycle.yaml:record_contract",
+                    f"missing {field}",
+                )
+            )
+    classes: dict[str, dict[str, Any]] = {}
+    for idx, item in enumerate(manifest.get("artifact_classes") or []):
+        class_id = str(item.get("id") or f"artifact_class[{idx}]")
+        path = f"architecture/artifact_lifecycle.yaml:{class_id}"
+        if class_id in classes:
+            issues.append(_issue("artifact_lifecycle_duplicate_class", path, "duplicate artifact class id"))
+        classes[class_id] = item
+        for field in required:
+            if _metadata_missing(item.get(field)):
+                issues.append(_issue("artifact_lifecycle_required_field_missing", path, f"missing {field}"))
+
+    for idx, rule in enumerate(manifest.get("classification_rules") or []):
+        rule_id = str(rule.get("id") or f"classification_rule[{idx}]")
+        path = f"architecture/artifact_lifecycle.yaml:{rule_id}"
+        if _metadata_missing(rule.get("path_globs")):
+            issues.append(_issue("artifact_lifecycle_rule_invalid", path, "missing path_globs"))
+        artifact_class = str(rule.get("artifact_class") or "")
+        if artifact_class not in classes:
+            issues.append(
+                _issue(
+                    "artifact_lifecycle_unknown_class",
+                    path,
+                    f"unknown artifact_class {artifact_class!r}",
+                )
+            )
+        if _metadata_missing(rule.get("lifecycle")):
+            issues.append(_issue("artifact_lifecycle_rule_invalid", path, "missing lifecycle"))
+    return StrictResult(ok=not issues, issues=issues)
+
+
+def _record_text_has_field(text: str, field: str) -> bool:
+    return re.search(rf"^{re.escape(field)}:\s*\S", text, re.MULTILINE) is not None
+
+
+def run_work_record(
+    changed_files: list[str] | None = None,
+    record_path: str | None = None,
+) -> StrictResult:
+    if not ARTIFACT_LIFECYCLE_PATH.exists():
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "artifact_lifecycle_manifest_missing",
+                    "architecture/artifact_lifecycle.yaml",
+                    "artifact lifecycle manifest is missing",
+                )
+            ],
+        )
+    contract = _artifact_record_contract()
+    try:
+        changes = _map_maintenance_changes(changed_files or [])
+    except subprocess.CalledProcessError as exc:
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "work_record_git_status_failed",
+                    "<git-status>",
+                    f"could not read git status: {exc}",
+                )
+            ],
+        )
+
+    substantive = sorted(
+        path for path in changes
+        if not _record_exempt_path(path, contract)
+    )
+    if not substantive:
+        return StrictResult(ok=True, issues=[])
+
+    if not record_path:
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "work_record_required",
+                    "<work-record>",
+                    "repo-changing work requires a short work record; pass --work-record-path",
+                )
+            ],
+        )
+    if not _approved_work_record_path(record_path, contract):
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "work_record_invalid_path",
+                    record_path,
+                    "work record path is not approved by artifact_lifecycle.yaml",
+                )
+            ],
+        )
+    target = ROOT / record_path
+    if not target.exists() or not target.is_file():
+        return StrictResult(
+            ok=False,
+            issues=[
+                _issue(
+                    "work_record_missing",
+                    record_path,
+                    "work record file does not exist",
+                )
+            ],
+        )
+    text = target.read_text(encoding="utf-8", errors="ignore")
+    issues = [
+        _issue(
+            "work_record_field_missing",
+            record_path,
+            f"work record missing field {field!r}",
+        )
+        for field in contract.get("minimum_fields") or []
+        if not _record_text_has_field(text, str(field))
+    ]
+    return StrictResult(ok=not issues, issues=issues)
+
+
+def _strict_result_summary(result: StrictResult) -> dict[str, Any]:
+    return {
+        "ok": result.ok,
+        "issue_count": len(result.issues),
+        "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
+        "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
+        "issues": [asdict(issue) for issue in result.issues],
+    }
+
+
+def _route_health_for_context_pack(files: list[str]) -> dict[str, Any]:
+    issues: list[TopologyIssue] = []
+    source_files = [file for file in files if file.startswith("src/")]
+    rationale_paths = set((load_source_rationale().get("files") or {}).keys())
+    for file in files:
+        if not (ROOT / file).exists():
+            issues.append(_issue("context_pack_input_missing", file, "input file does not exist"))
+    for file in sorted(set(source_files) - rationale_paths):
+        issues.append(
+            _issue(
+                "context_pack_source_rationale_missing",
+                file,
+                "input source file has no source_rationale entry; review context cannot classify it",
+            )
+        )
+    return _strict_result_summary(StrictResult(ok=not issues, issues=issues))
+
+
+def _repo_health_for_context_pack() -> dict[str, Any]:
+    checks = {
+        "context_packs": run_context_packs(),
+        "context_budget": run_context_budget(),
+        "core_claims": run_core_claims(),
+        "core_maps": run_core_maps(),
+        "reference_replacement": run_reference_replacement(),
+    }
+    return {
+        "ok": all(result.ok for result in checks.values()),
+        "checks": {
+            name: {
+                "ok": result.ok,
+                "issue_count": len(result.issues),
+                "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
+                "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
+            }
+            for name, result in checks.items()
+        },
+    }
+
+
+def _proof_claims_for_files(files: list[str]) -> list[dict[str, Any]]:
+    wanted = set(files)
+    claims: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for claim_id, proof in sorted(_claim_proof_index().items()):
+        if claim_id == "__DUPLICATES__" or proof.get("claim_status") != "replaced":
+            continue
+        source = proof.get("source") or {}
+        proof_paths = {str(source.get("path") or proof.get("entry_path") or "")}
+        proof_paths.update(str(target.get("path") or "") for target in proof.get("proof_targets") or [])
+        if not wanted & proof_paths or claim_id in seen:
+            continue
+        seen.add(claim_id)
+        claims.append(
+            {
+                "claim_id": claim_id,
+                "assertion": proof.get("assertion", ""),
+                "confidence": "verified_claim",
+                "source": source or {"path": proof.get("entry_path", "")},
+                "proof_targets": proof.get("proof_targets", []),
+                "gates": proof.get("gates", []),
+            }
+        )
+    return claims
+
+
+def _lore_summary(card: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    return {
+        "id": card.get("id"),
+        "status": card.get("status"),
+        "severity": card.get("severity"),
+        "zero_context_digest": card.get("zero_context_digest"),
+        "match_reason": reason,
+        "expansion_hint": f"Read architecture/history_lore.yaml:{card.get('id')} only if this lore becomes central to the review.",
+    }
+
+
+def _layered_history_lore(task: str, files: list[str]) -> dict[str, Any]:
+    task_l = task.lower()
+    direct: list[dict[str, Any]] = []
+    broad: list[dict[str, Any]] = []
+    expanded: list[dict[str, str]] = []
+    seen_direct: set[str] = set()
+    seen_broad: set[str] = set()
+    for card in load_history_lore().get("cards") or []:
+        card_id = str(card.get("id") or "")
+        routing = card.get("routing") or {}
+        terms = [str(term).lower() for term in routing.get("task_terms", [])]
+        patterns = [str(pattern) for pattern in routing.get("file_patterns", [])]
+        matched_files = [file for file in files for pattern in patterns if fnmatch(file, pattern)]
+        term_hits = [term for term in terms if term and term in task_l]
+        if matched_files and card_id not in seen_direct:
+            direct.append(_lore_summary(card, reason="file_pattern:" + ",".join(sorted(set(matched_files)))))
+            seen_direct.add(card_id)
+        elif term_hits and card_id not in seen_broad:
+            broad.append(_lore_summary(card, reason="task_term:" + ",".join(sorted(set(term_hits)))))
+            seen_broad.add(card_id)
+        if (matched_files or term_hits) and card_id:
+            expanded.append(
+                {
+                    "id": card_id,
+                    "hint": f"Read architecture/history_lore.yaml:{card_id} if the reviewer needs the full failure history.",
+                }
+            )
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    direct.sort(key=lambda item: (severity_rank.get(str(item.get("severity")), 99), str(item.get("id"))))
+    broad.sort(key=lambda item: (severity_rank.get(str(item.get("severity")), 99), str(item.get("id"))))
+    return {
+        "direct_evidence": direct,
+        "broad_relevant": broad,
+        "expanded_available": expanded,
+    }
+
+
+def _context_pack_contract_surfaces(impact: dict[str, Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    claims_by_path: dict[str, list[str]] = {}
+    for claim in claims:
+        source = claim.get("source") or {}
+        if source.get("path"):
+            claims_by_path.setdefault(str(source["path"]), []).append(str(claim["claim_id"]))
+        for target in claim.get("proof_targets") or []:
+            if target.get("path"):
+                claims_by_path.setdefault(str(target["path"]), []).append(str(claim["claim_id"]))
+    surfaces: list[dict[str, Any]] = []
+    for entry in impact.get("entries") or []:
+        path = entry["path"]
+        surfaces.append(
+            {
+                "path": path,
+                "zone": entry.get("zone"),
+                "authority_role": entry.get("authority_role"),
+                "hazards": entry.get("hazards", []),
+                "relations_complete": entry.get("relations_complete", False),
+                "relation_confidence": entry.get("confidence", "provisional"),
+                "proof_claims": sorted(dict.fromkeys(claims_by_path.get(path, []))),
+                "tests": entry.get("tests", []),
+            }
+        )
+    return surfaces
+
+
+def _context_pack_coverage_gaps(impact: dict[str, Any], files: list[str]) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    entry_paths = {entry["path"] for entry in impact.get("entries") or []}
+    for file in sorted(set(files) - entry_paths):
+        if file.startswith("src/"):
+            gaps.append(
+                {
+                    "kind": "missing_source_rationale",
+                    "path": file,
+                    "confidence": "blocking_for_this_pack",
+                    "why": "source file is in the reviewed package but has no source_rationale entry",
+                }
+            )
+    for entry in impact.get("entries") or []:
+        if not entry.get("relations_complete"):
+            gaps.append(
+                {
+                    "kind": "provisional_relation_gap",
+                    "path": entry["path"],
+                    "confidence": "provisional",
+                    "why": entry.get("missing_relation_reason"),
+                }
+            )
+        if not entry.get("tests"):
+            gaps.append(
+                {
+                    "kind": "missing_targeted_tests",
+                    "path": entry["path"],
+                    "confidence": "provisional",
+                    "why": "no targeted tests were derived from gates or test topology",
+                }
+            )
+    return gaps
+
+
+def _context_pack_downstream_risks(impact: dict[str, Any]) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    aggregate = impact.get("aggregate") or {}
+    zones = aggregate.get("zones_touched") or []
+    if aggregate.get("cross_zone"):
+        risks.append(
+            {
+                "kind": "cross_zone_contract_review",
+                "confidence": "manifest_grounded",
+                "why": f"review spans zones {zones}; local slice reviews can miss boundary regressions",
+            }
+        )
+    for entry in impact.get("entries") or []:
+        for hazard in entry.get("hazards") or []:
+            risks.append(
+                {
+                    "kind": "hazard",
+                    "path": entry["path"],
+                    "hazard": hazard,
+                    "confidence": "manifest_grounded",
+                }
+            )
+        for downstream in entry.get("downstream") or []:
+            risks.append(
+                {
+                    "kind": "downstream_consumer",
+                    "path": entry["path"],
+                    "downstream": downstream,
+                    "confidence": "source_rationale",
+                }
+            )
+    return risks
+
+
+def _context_pack_questions(
+    profile: dict[str, Any],
+    impact: dict[str, Any],
+    claims: list[dict[str, Any]],
+    gaps: list[dict[str, Any]],
+) -> list[str]:
+    questions = list(profile.get("review_questions") or [])
+    if impact.get("aggregate", {}).get("cross_zone"):
+        questions.append("Which cross-zone assumptions changed, and which boundary test proves the handoff still works?")
+    if claims:
+        questions.append("For each verified claim touched here, is the downstream consumer actually forced to respect it?")
+    if any(gap.get("kind") == "provisional_relation_gap" for gap in gaps):
+        questions.append("Which provisional relation gaps need manual code reading before PASS/REVISE?")
+    return sorted(dict.fromkeys(questions))
+
+
+def _debug_red_green_checks(
+    *,
+    files: list[str],
+    impact: dict[str, Any],
+    claims: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    tests = impact.get("aggregate", {}).get("tests_required", [])
+    checks: list[dict[str, Any]] = []
+    if files:
+        checks.append(
+            {
+                "id": "semantic_linter_target",
+                "command": "python scripts/semantic_linter.py --check " + " ".join(files),
+                "confidence": "targeted_static_check",
+                "red_means": "A semantic boundary or provenance seam is violated near the target files.",
+                "green_means": "Configured semantic seam checks passed for this target set; it is not proof of full correctness.",
+            }
+        )
+    if tests:
+        checks.append(
+            {
+                "id": "targeted_tests",
+                "command": "pytest -q " + " ".join(tests),
+                "confidence": "manifest_derived",
+                "red_means": "The symptom may be covered by an existing target/law regression.",
+                "green_means": "Manifest-derived tests passed; expand if the symptom is not reproduced.",
+            }
+        )
+    for claim in claims:
+        for gate in claim.get("gates") or []:
+            checks.append(
+                {
+                    "id": f"claim_gate:{claim.get('claim_id')}",
+                    "command": gate,
+                    "confidence": "verified_claim_gate",
+                    "red_means": f"Claim {claim.get('claim_id')} is not currently defended by its gate.",
+                    "green_means": f"Claim {claim.get('claim_id')} gate passed; still inspect consumers if behavior remains wrong.",
+                }
+            )
+    checks.append(
+        {
+            "id": "context_pack_route_health",
+            "command": "python scripts/topology_doctor.py context-pack --pack-type debug --task \"<symptom>\" --files " + " ".join(files),
+            "confidence": "topology_route_check",
+            "red_means": "The debug packet cannot classify one or more target files.",
+            "green_means": "The starting packet is usable, but context_assumption still controls expansion.",
+        }
+    )
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for check in checks:
+        key = (str(check.get("id")), str(check.get("command")))
+        if key not in seen:
+            unique.append(check)
+            seen.add(key)
+    return unique
+
+
+def _debug_suspected_boundaries(
+    impact: dict[str, Any],
+    claims: list[dict[str, Any]],
+    gaps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    boundaries: list[dict[str, Any]] = []
+    for entry in impact.get("entries") or []:
+        boundaries.append(
+            {
+                "kind": "authority_surface",
+                "path": entry["path"],
+                "zone": entry.get("zone"),
+                "authority_role": entry.get("authority_role"),
+                "confidence": "source_rationale",
+            }
+        )
+        for downstream in entry.get("downstream") or []:
+            boundaries.append(
+                {
+                    "kind": "downstream_boundary",
+                    "path": entry["path"],
+                    "downstream": downstream,
+                    "confidence": "source_rationale",
+                }
+            )
+        for hazard in entry.get("hazards") or []:
+            boundaries.append(
+                {
+                    "kind": "hazard_boundary",
+                    "path": entry["path"],
+                    "hazard": hazard,
+                    "confidence": "manifest_grounded",
+                }
+            )
+    for claim in claims:
+        boundaries.append(
+            {
+                "kind": "verified_claim_boundary",
+                "claim_id": claim.get("claim_id"),
+                "assertion": claim.get("assertion"),
+                "confidence": "verified_claim",
+            }
+        )
+    for gap in gaps:
+        if gap.get("kind") == "provisional_relation_gap":
+            boundaries.append(
+                {
+                    "kind": "unknown_relation_boundary",
+                    "path": gap.get("path"),
+                    "confidence": "provisional",
+                    "why": gap.get("why"),
+                }
+            )
+    return boundaries
+
+
+def build_debug_context_pack(task: str, files: list[str]) -> dict[str, Any]:
+    profile = _context_pack_profiles().get("debug")
+    if not profile:
+        raise ValueError("missing context pack profile: debug")
+    target_files = sorted(dict.fromkeys(files))
+    impact = build_impact(target_files)
+    claims = _proof_claims_for_files(target_files)
+    gaps = _context_pack_coverage_gaps(impact, target_files)
+    risks = _context_pack_downstream_risks(impact)
+    route_health = _route_health_for_context_pack(target_files)
+    payload = {
+        "pack_type": "debug",
+        "authority_status": profile.get("authority_status", "generated_debug_packet_not_authority"),
+        "symptom": task,
+        "target_files": target_files,
+        "zones_touched": impact.get("aggregate", {}).get("zones_touched", []),
+        "suspected_boundaries": _debug_suspected_boundaries(impact, claims, gaps),
+        "contract_surfaces": _context_pack_contract_surfaces(impact, claims),
+        "proof_claims_touched": claims,
+        "red_green_checks": _debug_red_green_checks(files=target_files, impact=impact, claims=claims),
+        "coverage_gaps": gaps,
+        "downstream_risks": risks,
+        "tests_required": impact.get("aggregate", {}).get("tests_required", []),
+        "static_checks": impact.get("aggregate", {}).get("static_checks", []),
+        "debug_questions": _context_pack_questions(profile, impact, claims, gaps),
+        "lore": _layered_history_lore(task, target_files),
+        "route_health": route_health,
+        "repo_health": _repo_health_for_context_pack(),
+        "blocking_for_this_pack": route_health.get("issues", []),
+        "context_assumption": build_context_assumption(
+            profile="debug",
+            profile_kind="context_pack_profile",
+            source_entries=impact.get("entries", []),
+            confidence_basis=["impact_profile", "core_claims", "context_pack_profile"],
+        ),
+    }
+    return payload
+
+
+def _looks_like_package_review(task: str, files: list[str]) -> bool:
+    profile = _context_pack_profiles().get("package_review", {})
+    task_l = task.lower()
+    terms = [str(term).lower() for term in profile.get("trigger_terms") or []]
+    if any(term and term in task_l for term in terms):
+        return True
+    zones = build_impact(files).get("aggregate", {}).get("zones_touched", []) if files else []
+    return bool(files) and len(set(zones)) > 1 and "review" in task_l
+
+
+def _looks_like_debug(task: str, files: list[str]) -> bool:
+    if not files:
+        return False
+    profile = _context_pack_profiles().get("debug", {})
+    task_l = task.lower()
+    terms = [str(term).lower() for term in profile.get("trigger_terms") or []]
+    return any(term and term in task_l for term in terms)
+
+
+def build_package_review_context_pack(task: str, files: list[str]) -> dict[str, Any]:
+    profile = _context_pack_profiles().get("package_review")
+    if not profile:
+        raise ValueError("missing context pack profile: package_review")
+    changed_files = sorted(dict.fromkeys(files))
+    impact = build_impact(changed_files)
+    claims = _proof_claims_for_files(changed_files)
+    gaps = _context_pack_coverage_gaps(impact, changed_files)
+    risks = _context_pack_downstream_risks(impact)
+    route_health = _route_health_for_context_pack(changed_files)
+    payload = {
+        "pack_type": "package_review",
+        "authority_status": profile.get("authority_status", "generated_review_packet_not_authority"),
+        "review_objective": task,
+        "changed_files": changed_files,
+        "zones_touched": impact.get("aggregate", {}).get("zones_touched", []),
+        "contract_surfaces": _context_pack_contract_surfaces(impact, claims),
+        "proof_claims_touched": claims,
+        "cross_slice_questions": _context_pack_questions(profile, impact, claims, gaps),
+        "coverage_gaps": gaps,
+        "downstream_risks": risks,
+        "tests_required": impact.get("aggregate", {}).get("tests_required", []),
+        "static_checks": impact.get("aggregate", {}).get("static_checks", []),
+        "lore": _layered_history_lore(task, changed_files),
+        "route_health": route_health,
+        "repo_health": _repo_health_for_context_pack(),
+        "blocking_for_this_pack": route_health.get("issues", []),
+        "context_assumption": build_context_assumption(
+            profile="package_review",
+            profile_kind="context_pack_profile",
+            source_entries=impact.get("entries", []),
+            confidence_basis=["impact_profile", "core_claims", "context_pack_profile"],
+        ),
+    }
+    return payload
+
+
+def build_context_pack(pack_type: str, *, task: str, files: list[str]) -> dict[str, Any]:
+    selected = pack_type
+    if pack_type == "auto":
+        if _looks_like_package_review(task, files):
+            selected = "package_review"
+        elif _looks_like_debug(task, files):
+            selected = "debug"
+        else:
+            raise ValueError("auto context-pack currently selects package_review or debug only")
+    if selected == "package_review":
+        payload = build_package_review_context_pack(task, files)
+        payload["selected_by"] = {"requested": pack_type, "selected": selected}
+        return payload
+    if selected == "debug":
+        payload = build_debug_context_pack(task, files)
+        payload["selected_by"] = {"requested": pack_type, "selected": selected}
+        return payload
+    raise ValueError(f"unknown context pack type {pack_type!r}")
+
+
+def _core_map_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        str(profile.get("id")): profile
+        for profile in load_topology().get("core_map_profiles") or []
+        if profile.get("id")
+    }
+
+
+def _source_entry_by_path() -> dict[str, dict[str, Any]]:
+    rationale = load_source_rationale()
+    entries: dict[str, dict[str, Any]] = {}
+    for item in _source_rationale_for(list((rationale.get("files") or {}).keys())):
+        entries[item["path"]] = item
+    return entries
+
+
+def _validate_proof_target_exists(target: dict[str, Any]) -> bool:
+    target_path = str(target.get("path") or "")
+    if not target_path:
+        return False
+    return (ROOT / target_path).exists()
+
+
+def _locator_exists(path: str, locator: str | None) -> bool:
+    if not locator:
+        return False
+    target = ROOT / path
+    if not target.exists() or not target.is_file():
+        return False
+    text = target.read_text(encoding="utf-8", errors="ignore")
+    if locator in text:
+        return True
+    if target.suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return False
+        if "." in locator:
+            class_name, member_name = locator.split(".", 1)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == class_name:
+                    for item in node.body:
+                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name == member_name:
+                            return True
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == locator:
+                return True
+            if isinstance(node, ast.Attribute) and node.attr == locator:
+                return True
+            if isinstance(node, ast.Name) and node.id == locator:
+                return True
+    return False
+
+
+def _proof_contains(path: str, needle: str) -> bool:
+    if not needle:
+        return False
+    return needle in (ROOT / path).read_text(encoding="utf-8", errors="ignore")
+
+
+def _edge_proof_status(
+    edge: dict[str, Any],
+    *,
+    node_ids: set[str],
+    node_files: dict[str, str],
+    source_entries: dict[str, dict[str, Any]],
+) -> tuple[str, str | None]:
+    from_id = str(edge.get("from") or "")
+    to_id = str(edge.get("to") or "")
+    if from_id not in node_ids or to_id not in node_ids:
+        return ("invalid", f"unknown edge endpoint: {from_id}->{to_id}")
+
+    proof = edge.get("proof") or {}
+    kind = proof.get("kind")
+    path = str(proof.get("path") or "")
+    if kind == "profile_declared_provisional":
+        return ("profile_declared_provisional", None)
+    if not path or not (ROOT / path).exists():
+        return ("invalid", f"proof path missing: {path}")
+    if kind == "import_or_call":
+        module = str(proof.get("module") or "")
+        symbol = str(proof.get("symbol") or proof.get("contains") or "")
+        if path != node_files.get(to_id):
+            return ("invalid", f"import_or_call proof path must equal target node file {node_files.get(to_id)}")
+        if not module or not symbol:
+            return ("invalid", "import_or_call proof requires module and symbol")
+        text = (ROOT / path).read_text(encoding="utf-8", errors="ignore")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return ("invalid", f"cannot parse proof path: {path}")
+        imported = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == module:
+                imported = any(alias.name == symbol for alias in node.names)
+                if imported:
+                    break
+            if isinstance(node, ast.Import):
+                imported = any(alias.name == module for alias in node.names)
+                if imported:
+                    break
+        if not imported:
+            return ("invalid", f"import proof not found in {path}: {module}.{symbol}")
+        if symbol not in text:
+            return ("invalid", f"proof symbol not used in {path}: {symbol}")
+        return ("proof_backed_edge", None)
+    if kind == "relationship_test":
+        needle = str(proof.get("contains") or proof.get("locator") or "")
+        if not _proof_contains(path, needle):
+            return ("invalid", f"relationship_test proof text not found in {path}: {needle}")
+        return ("proof_backed_edge", None)
+    if kind == "source_rationale_downstream":
+        from_file = node_files.get(from_id, "")
+        to_file = node_files.get(to_id, "")
+        downstream = set((source_entries.get(from_file) or {}).get("downstream") or [])
+        if to_file not in downstream:
+            return ("invalid", f"source_rationale downstream does not link {from_file} -> {to_file}")
+        return ("proof_backed_edge", None)
+    return ("invalid", f"invalid edge proof kind: {kind!r}")
+
+
+CORE_MAP_FORBIDDEN_PATTERNS = (
+    re.compile(r"round\s*\(\s*(?:value|x)\s*\+\s*0\.5\s*\)", re.IGNORECASE),
+    re.compile(r"\bpython\s*(?:/numpy\s*)?(?:built-?in\s*)?round\b", re.IGNORECASE),
+    re.compile(r"\bnumpy\s+(?:round|around)\b", re.IGNORECASE),
+    re.compile(r"(?<!not )\bbanker(?:'s)?\s+round", re.IGNORECASE),
+)
+
+
+def _core_map_forbidden_hits(payload: dict[str, Any], phrases: list[Any]) -> list[str]:
+    serialized = json.dumps(payload)
+    hits = [str(phrase) for phrase in phrases if str(phrase) in serialized]
+    normalized = " ".join(serialized.split())
+    hits.extend(pattern.pattern for pattern in CORE_MAP_FORBIDDEN_PATTERNS if pattern.search(normalized))
+    return sorted(dict.fromkeys(hits))
+
+
+def build_core_map(profile_id: str) -> dict[str, Any]:
+    profiles = _core_map_profiles()
+    profile = profiles.get(profile_id)
+    if not profile:
+        raise ValueError(f"unknown core map profile {profile_id!r}")
+
+    node_specs = profile.get("nodes") or []
+    edge_specs = profile.get("edges") or []
+    max_nodes = int(profile.get("max_nodes") or len(node_specs))
+    max_edges = int(profile.get("max_edges") or len(edge_specs))
+    if len(node_specs) > max_nodes:
+        raise ValueError(f"core map profile {profile_id} exceeds max_nodes={max_nodes}")
+    if len(edge_specs) > max_edges:
+        raise ValueError(f"core map profile {profile_id} exceeds max_edges={max_edges}")
+
+    source_entries = _source_entry_by_path()
+    node_ids = {str(node.get("id") or "") for node in node_specs}
+    node_files = {
+        str(node.get("id") or ""): str(node.get("file") or "")
+        for node in node_specs
+    }
+    claim_index = _claim_proof_index()
+    nodes: list[dict[str, Any]] = []
+    invalid: list[str] = []
+
+    for node in node_specs:
+        node_id = str(node.get("id") or "")
+        node_file = str(node.get("file") or "")
+        source_entry = source_entries.get(node_file)
+        if not node_id or not node_file or not (ROOT / node_file).exists():
+            invalid.append(f"node {node_id or '<missing>'} missing file {node_file!r}")
+            continue
+        if not source_entry:
+            invalid.append(f"node {node_id} missing source_rationale entry for {node_file}")
+            continue
+
+        facts: list[dict[str, Any]] = []
+        for claim_id in node.get("required_claims") or []:
+            proof = claim_index.get(str(claim_id))
+            if not proof:
+                invalid.append(f"node {node_id} missing required claim {claim_id}")
+                continue
+            if proof.get("claim_status") != "replaced":
+                invalid.append(f"node {node_id} required claim {claim_id} is not replaced")
+                continue
+            bad_targets = [
+                target for target in proof.get("proof_targets") or []
+                if not _validate_proof_target_exists(target)
+            ]
+            if bad_targets:
+                invalid.append(f"claim {claim_id} has missing proof target")
+                continue
+            facts.append(
+                {
+                    "claim_id": claim_id,
+                    "text": proof.get("assertion", ""),
+                    "confidence": "verified_claim",
+                    "source": proof.get("source", {}),
+                    "proof_targets": proof.get("proof_targets", []),
+                    "gates": proof.get("gates", []),
+                }
+            )
+
+        nodes.append(
+            {
+                "id": node_id,
+                "file": node_file,
+                "zone": source_entry.get("zone", "unknown"),
+                "authority_role": source_entry.get("authority_role", ""),
+                "confidence": "manifest_grounded",
+                "why": source_entry.get("why", ""),
+                "hazards": source_entry.get("hazards", []),
+                "write_routes": source_entry.get("write_routes", []),
+                "facts": facts,
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    for edge in edge_specs:
+        confidence, reason = _edge_proof_status(
+            edge,
+            node_ids=node_ids,
+            node_files=node_files,
+            source_entries=source_entries,
+        )
+        if edge.get("required", True) and confidence != "proof_backed_edge":
+            invalid.append(f"edge {edge.get('from')}->{edge.get('to')} invalid: {reason}")
+        edges.append(
+            {
+                "from": edge.get("from"),
+                "to": edge.get("to"),
+                "confidence": confidence,
+                "proof": edge.get("proof", {}),
+                "invalid_reason": reason,
+            }
+        )
+
+    payload = {
+        "profile": profile_id,
+        "purpose": profile.get("purpose", ""),
+        "authority_status": "generated_view_not_authority",
+        "nodes": nodes,
+        "edges": edges,
+        "invalid": invalid,
+        "context_assumption": build_context_assumption(
+            profile=profile_id,
+            profile_kind="core_map_profile",
+            source_entries=[
+                {"path": node["file"], "upstream": [], "downstream": []}
+                for node in nodes
+            ],
+            confidence_basis=["topology_manifest", "source_rationale"],
+        ),
+    }
+    for hit in _core_map_forbidden_hits(payload, profile.get("forbidden_phrases") or []):
+        invalid.append(f"forbidden phrase emitted: {hit}")
+    return payload
+
+
+def run_core_maps() -> StrictResult:
+    issues: list[TopologyIssue] = []
+    profiles = _core_map_profiles()
+    for profile_id in sorted(profiles):
+        profile = profiles[profile_id]
+        for node in profile.get("nodes") or []:
+            node_file = str(node.get("file") or "")
+            if node_file.startswith("docs/reference/"):
+                issues.append(
+                    _issue(
+                        "core_map_reference_authority_leak",
+                        profile_id,
+                        f"reference doc cannot be a core-map authority node: {node_file}",
+                    )
+                )
+        try:
+            payload = build_core_map(profile_id)
+        except ValueError as exc:
+            issues.append(_issue("core_map_profile_invalid", profile_id, str(exc)))
+            continue
+        for item in payload.get("invalid") or []:
+            issues.append(_issue("core_map_profile_invalid", profile_id, str(item)))
+    return StrictResult(ok=not issues, issues=issues)
 
 
 def _data_rebuild_digest() -> dict[str, Any]:
@@ -1982,7 +3595,13 @@ def build_digest(task: str, files: list[str] | None = None) -> dict[str, Any]:
         "downstream": selected.get("downstream", []),
         "stop_conditions": selected.get("stop_conditions", []),
     }
-    payload["source_rationale"] = _source_rationale_for(source_files)
+    source_entries = _source_rationale_for(source_files)
+    payload["source_rationale"] = source_entries
+    payload["context_assumption"] = build_context_assumption(
+        profile=str(selected.get("id", "generic")),
+        source_entries=source_entries,
+        confidence_basis=["topology_manifest"],
+    )
     if selected.get("id") == "add a data backfill":
         payload["data_rebuild_topology"] = _data_rebuild_digest()
     if selected.get("id") == "add or change script":
@@ -2014,6 +3633,7 @@ def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
         "ok": not blocking,
         "task": task,
         "digest": digest,
+        "context_assumption": digest.get("context_assumption", {}),
         "checks": {
             lane: {
                 "ok": result.ok,
@@ -2032,9 +3652,39 @@ def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def _print_strict(result: StrictResult, *, as_json: bool = False) -> None:
+def format_issues(issues: list[TopologyIssue]) -> str:
+    if not issues:
+        return "no topology issues"
+    lines = [f"{len(issues)} topology issue(s):"]
+    for index, issue in enumerate(issues, 1):
+        lines.append(f"{index}. [{issue.severity}:{issue.code}] {issue.path}: {issue.message}")
+    return "\n".join(lines)
+
+
+def summarize_issues(issues: list[TopologyIssue]) -> str:
+    if not issues:
+        return "no topology issues"
+    counts: dict[tuple[str, str], int] = {}
+    for issue in issues:
+        key = (issue.severity, issue.code)
+        counts[key] = counts.get(key, 0) + 1
+    lines = [f"{len(issues)} topology issue(s)"]
+    for (severity, code), count in sorted(counts.items()):
+        lines.append(f"- {severity}:{code}: {count}")
+    return "\n".join(lines)
+
+
+def _print_strict(
+    result: StrictResult,
+    *,
+    as_json: bool = False,
+    summary_only: bool = False,
+) -> None:
     if as_json:
         print(json.dumps({"ok": result.ok, "issues": [asdict(i) for i in result.issues]}, indent=2))
+        return
+    if summary_only:
+        print(summarize_issues(result.issues))
         return
     if result.ok and not result.issues:
         print("topology check ok")
@@ -2057,13 +3707,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tests", action="store_true", help="Run Packet 5 test topology checks")
     parser.add_argument("--scripts", action="store_true", help="Run Packet 6 script manifest checks")
     parser.add_argument("--data-rebuild", action="store_true", help="Run Packet 8 data/rebuild topology checks")
+    parser.add_argument("--invariants", action="store_true", help="Emit invariant slice, optionally by --zone")
     parser.add_argument("--history-lore", action="store_true", help="Run historical lore card checks")
     parser.add_argument("--context-budget", action="store_true", help="Run context budget checks")
+    parser.add_argument("--artifact-lifecycle", action="store_true", help="Run artifact lifecycle/classification checks")
+    parser.add_argument("--work-record", action="store_true", help="Check that repo-changing work has a short work record")
+    parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
     parser.add_argument("--self-check-coherence", action="store_true", help="Check zero-context self-check alignment with root navigation")
     parser.add_argument("--runtime-modes", action="store_true", help="Check discovery/runtime mode manifest and root visibility")
     parser.add_argument("--reference-replacement", action="store_true", help="Check reference replacement matrix")
+    parser.add_argument("--core-claims", action="store_true", help="Check proof-backed core claim registry")
+    parser.add_argument("--core-maps", action="store_true", help="Check core-map profile compilation")
     parser.add_argument("--map-maintenance", action="store_true", help="Check companion registry updates for added/deleted files")
     parser.add_argument(
         "--map-maintenance-mode",
@@ -2077,74 +3733,121 @@ def main(argv: list[str] | None = None) -> int:
         "--changed-files",
         nargs="*",
         default=[],
-        help="Files for --planning-lock; optional map-maintenance override (omitted there reads git status)",
+        help="Files for --planning-lock; optional map-maintenance override (omitted there reads git status: staged, unstaged, untracked, deleted)",
     )
     parser.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path for --planning-lock")
+    parser.add_argument("--work-record-path", default=None, help="Work record path for --work-record")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
+    parser.add_argument("--summary-only", action="store_true", help="Emit issue counts by code instead of full issue list")
     parser.add_argument("--task", default="", help="Task string for --navigation")
     parser.add_argument("--files", nargs="*", default=[], help="Files for --navigation")
+    parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
     digest.add_argument("--task", required=True)
     digest.add_argument("--files", nargs="*", default=[])
     digest.add_argument("--json", action="store_true", help="Emit JSON")
+    packet = sub.add_parser("packet", help="Emit prefilled packet front matter from topology scope")
+    packet.add_argument("--packet-type", default="refactor", choices=["refactor"], help="Packet template type")
+    packet.add_argument("--scope", default="", help="Directory or file scope")
+    packet.add_argument("--files", nargs="*", default=[], help="Concrete files in scope")
+    packet.add_argument("--task", default="", help="Task statement")
+    packet.add_argument("--json", action="store_true", help="Emit JSON")
+    impact = sub.add_parser("impact", help="Emit provisional source impact summary")
+    impact.add_argument("--files", nargs="+", required=True, help="Source files to inspect")
+    impact.add_argument("--json", action="store_true", help="Emit JSON")
+    core_map = sub.add_parser("core-map", help="Emit generated core working map")
+    core_map.add_argument("--profile", required=True, help="Core-map profile id")
+    core_map.add_argument("--json", action="store_true", help="Emit JSON")
+    context_pack = sub.add_parser("context-pack", help="Emit task-shaped agent context packet")
+    context_pack.add_argument("--pack-type", default="auto", choices=["auto", "package_review", "debug"], help="Context-pack profile")
+    context_pack.add_argument("--task", required=True, help="Task statement")
+    context_pack.add_argument("--files", nargs="+", required=True, help="Files in the reviewed package")
+    context_pack.add_argument("--json", action="store_true", help="Emit JSON")
 
     args = parser.parse_args(argv)
     if args.strict:
         result = run_strict()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.docs:
         result = run_docs()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.source:
         result = run_source()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.tests:
         result = run_tests()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.scripts:
         result = run_scripts()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.data_rebuild:
         result = run_data_rebuild()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
+    if args.invariants:
+        payload = build_invariants_slice(args.zone)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(yaml.safe_dump(payload, sort_keys=False).strip())
+        return 0
     if args.history_lore:
         result = run_history_lore()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.context_budget:
         result = run_context_budget()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.artifact_lifecycle:
+        result = run_artifact_lifecycle()
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.work_record:
+        result = run_work_record(args.changed_files, args.work_record_path)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.context_packs:
+        result = run_context_packs()
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.agents_coherence:
         result = run_agents_coherence()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.idioms:
         result = run_idioms()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.self_check_coherence:
         result = run_self_check_coherence()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.runtime_modes:
         result = run_runtime_modes()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.reference_replacement:
         result = run_reference_replacement()
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.core_claims:
+        result = run_core_claims()
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.core_maps:
+        result = run_core_maps()
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.map_maintenance:
         result = run_map_maintenance(args.changed_files, mode=args.map_maintenance_mode)
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.navigation:
         payload = run_navigation(args.task or "general navigation", args.files)
@@ -2163,7 +3866,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload["ok"] else 1
     if args.planning_lock:
         result = run_planning_lock(args.changed_files, args.plan_evidence)
-        _print_strict(result, as_json=args.json)
+        _print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.command == "digest":
         payload = build_digest(args.task, args.files)
@@ -2201,6 +3904,53 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nhistory_lore:")
                 for card in payload["history_lore"]:
                     print(f"- {card['id']} [{card['severity']}/{card['status']}]: {card['zero_context_digest']}")
+        return 0
+    if args.command == "packet":
+        payload = build_packet_prefill(
+            packet_type=args.packet_type,
+            task=args.task,
+            scope=args.scope,
+            files=args.files,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(yaml.safe_dump(payload, sort_keys=False).strip())
+        return 0
+    if args.command == "impact":
+        payload = build_impact(args.files)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(yaml.safe_dump(payload, sort_keys=False).strip())
+        return 0
+    if args.command == "core-map":
+        try:
+            payload = build_core_map(args.profile)
+        except ValueError as exc:
+            print(f"core-map failed: {exc}", file=sys.stderr)
+            return 1
+        if payload.get("invalid"):
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(yaml.safe_dump(payload, sort_keys=False).strip())
+            return 1
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(yaml.safe_dump(payload, sort_keys=False).strip())
+        return 0
+    if args.command == "context-pack":
+        try:
+            payload = build_context_pack(args.pack_type, task=args.task, files=args.files)
+        except ValueError as exc:
+            print(f"context-pack failed: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(yaml.safe_dump(payload, sort_keys=False).strip())
         return 0
     parser.print_help()
     return 2

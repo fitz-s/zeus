@@ -1,0 +1,103 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Topology Context Efficiency"
+  purpose: >
+    Classify agent-created files by lifecycle and require a small work record
+    for repo-changing work. This is a routing contract, not a new authority
+    source.
+
+required_artifact_class_fields:
+  - id
+  - purpose
+  - active_paths
+  - archive_paths
+  - record_required
+
+record_contract:
+  applies_to: repo_changes
+  preferred_record: docs/operations/task_YYYY-MM-DD_slug/work_log.md
+  minimum_fields:
+    - Date
+    - Branch
+    - Task
+    - Changed files
+    - Summary
+    - Verification
+    - Next
+  approved_record_globs:
+    - docs/operations/task_????-??-??_*/work_log.md
+    - docs/operations/task_????-??-??_*.md
+    - .omx/context/**/*.md
+  exempt_path_globs:
+    - docs/archives/**
+    - .omx/**
+    - state/*.log
+    - state/*.pid
+    - state/*.tmp
+  rule: >
+    Any non-trivial repo-changing agent task needs a short record before
+    closeout. The record is evidence of what happened; it does not authorize the
+    change and does not replace tests or map maintenance.
+
+artifact_classes:
+  - id: active_work_record
+    purpose: Short factual record of what an agent changed, verified, and left next.
+    active_paths:
+      - docs/operations/task_YYYY-MM-DD_slug/work_log.md
+      - docs/operations/task_YYYY-MM-DD_slug.md
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
+      - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
+    record_required: false
+  - id: active_solution_package
+    purpose: Multi-file solution package kept as an atomic active unit.
+    active_paths:
+      - docs/operations/task_YYYY-MM-DD_slug/
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
+      - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
+    record_required: true
+  - id: generated_evidence
+    purpose: Test output, investigation notes, or diagnostic evidence that supports a task.
+    active_paths:
+      - docs/operations/task_YYYY-MM-DD_slug/evidence/
+      - .omx/context/
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/evidence/
+    record_required: true
+  - id: scratch_runtime_artifact
+    purpose: Runtime scratch output that should be ignored or explicitly classified before use as evidence.
+    active_paths:
+      - state/
+      - .omx/
+    archive_paths:
+      - not_archived
+    record_required: false
+
+classification_rules:
+  - id: active_operations_packet
+    path_globs:
+      - docs/operations/task_????-??-??_*.md
+      - docs/operations/task_????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: active
+    destination_rule: Keep only active packet/control work here.
+  - id: active_work_log
+    path_globs:
+      - docs/operations/task_????-??-??_*/work_log.md
+    artifact_class: active_work_record
+    lifecycle: active
+    destination_rule: Append concise entries; archive with the package.
+  - id: archived_branch_work_packet
+    path_globs:
+      - docs/archives/work_packets/branches/*/*/????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: archived
+    destination_rule: Archive under the branch where the work happened.
+  - id: archived_tree_work_packet
+    path_globs:
+      - docs/archives/work_packets/trees/*/*/????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: archived
+    destination_rule: Use only for persistent git worktree-bound packages.

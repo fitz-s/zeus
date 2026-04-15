@@ -347,12 +347,7 @@ registry_directories:
   - path: "config/reality_contracts"
   - path: ".github/workflows"
 
-docs_mode_excluded_roots:
-  - path: "docs/data improve large pack"
-    status: external_active_package
-    rationale: >
-      Active data-improvement package currently read by other agents. Packet 3
-      must not move, rename, edit, archive, or normalize this package.
+docs_mode_excluded_roots: []
 
 reference_fact_specs:
   - path: "docs/reference/zeus_math_spec.md"
@@ -363,6 +358,45 @@ reference_fact_specs:
       Newly written high-confidence math specification. It is not top-level
       authority, but its factual content should be reflected in executable
       contracts, authority manifests, tests, and packet plans.
+
+core_map_profiles:
+  - id: probability-chain
+    purpose: compact verified working view of probability-to-sizing flow
+    max_nodes: 8
+    max_edges: 8
+    forbidden_phrases:
+      - "round(value + 0.5)"
+      - "Python round"
+    nodes:
+      - id: settlement_semantics
+        file: src/contracts/settlement_semantics.py
+        required_claims: [WMO_HALF_UP_FORMULA]
+      - id: ensemble_signal
+        file: src/signal/ensemble_signal.py
+      - id: evaluator
+        file: src/engine/evaluator.py
+        required_claims: [ALPHA_TARGET_COMPATIBILITY]
+      - id: platt
+        file: src/calibration/platt.py
+      - id: market_fusion
+        file: src/strategy/market_fusion.py
+        required_claims: [VIG_BEFORE_BLEND, TEMPERATURE_DELTA_SCALE_ONLY]
+      - id: market_analysis
+        file: src/strategy/market_analysis.py
+      - id: fdr_filter
+        file: src/strategy/fdr_filter.py
+      - id: kelly
+        file: src/strategy/kelly.py
+        required_claims: [EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY]
+    edges:
+      - {from: settlement_semantics, to: ensemble_signal, required: true, proof: {kind: import_or_call, path: src/signal/ensemble_signal.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
+      - {from: ensemble_signal, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.signal.ensemble_signal, symbol: EnsembleSignal}}
+      - {from: platt, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.calibration.platt, symbol: calibrate_and_normalize}}
+      - {from: market_fusion, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_fusion, symbol: compute_alpha}}
+      - {from: market_fusion, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.strategy.market_fusion, symbol: compute_posterior}}
+      - {from: market_analysis, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_analysis, symbol: MarketAnalysis}}
+      - {from: fdr_filter, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.fdr_filter, symbol: fdr_filter}}
+      - {from: kelly, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.kelly, symbol: dynamic_kelly_mult}}
 
 digest_profiles:
   - id: "change settlement rounding"
@@ -441,7 +475,7 @@ digest_profiles:
       - "WU settlement coverage alone is not strategy replay coverage."
     allowed_files:
       - "scripts/rebuild_settlements.py"
-      - "scripts/rebuild_calibration.py"
+      - "scripts/rebuild_calibration_pairs_canonical.py"
       - "scripts/backfill_wu_daily_all.py"
       - "src/data/ingestion_guard.py"
       - "src/data/rebuild_validators.py"
@@ -492,7 +526,7 @@ digest_profiles:
       - "state/*.db"
       - ".claude/worktrees/**"
       - ".omx/**"
-      - "docs/data improve large pack/**"
+      - "docs/archives/work_packets/**"
     gates:
       - "python scripts/topology_doctor.py --scripts"
       - "pytest -q tests/test_topology_doctor.py -k scripts"
@@ -525,7 +559,6 @@ digest_profiles:
     forbidden_files:
       - "state/*.db"
       - ".claude/worktrees/**"
-      - "docs/data improve large pack/**"
     gates:
       - "python scripts/topology_doctor.py --history-lore"
       - "pytest -q tests/test_topology_doctor.py -k history_lore"
@@ -536,3 +569,44 @@ digest_profiles:
     stop_conditions:
       - "Do not bulk-summarize archives into active context."
       - "Do not make low-density progress files default reads after their useful lore is extracted."
+  - id: "reference artifact extraction"
+    match:
+      - "reference artifact"
+      - "reference replacement"
+      - "claim extraction"
+      - "zeus_math_spec"
+      - "fact spec"
+      - "stale reference"
+      - "bulky docs"
+      - "reference docs"
+    required_law:
+      - "Reference docs are evidence, not authority; executable contracts, tests, architecture manifests, and authority docs win."
+      - "Do not delete or compress docs/reference/** until reference_replacement.yaml proves replacement."
+      - "Claim proofs point to replacement evidence; they do not grant authority."
+      - "Keep claim proofs sparse and claim-level, not paragraph-level."
+    allowed_files:
+      - "architecture/reference_replacement.yaml"
+      - "architecture/topology.yaml"
+      - "architecture/topology_schema.yaml"
+      - "architecture/context_budget.yaml"
+      - "architecture/history_lore.yaml"
+      - "docs/reference/AGENTS.md"
+      - "scripts/topology_doctor.py"
+      - "tests/test_topology_doctor.py"
+    forbidden_files:
+      - "docs/reference/*.md content rewrites"
+      - "docs/archives/work_packets/**"
+      - ".omx/**"
+      - "state/*.db"
+      - "scripts/**"
+    gates:
+      - "python scripts/topology_doctor.py --reference-replacement"
+      - "python scripts/topology_doctor.py --context-budget"
+      - "pytest -q tests/test_topology_doctor.py -k 'reference_replacement or context_budget or digest'"
+    downstream:
+      - "docs/reference/AGENTS.md"
+      - "architecture/reference_replacement.yaml"
+      - "architecture/context_budget.yaml"
+    stop_conditions:
+      - "Do not broaden this package into stale scripts, state artifacts, DB cleanup, or active data-improvement work."
+      - "Do not set delete_allowed=true for a reference doc while unique_remaining is nonempty."
