@@ -119,3 +119,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_artifact_c
 Summary: Moved artifact lifecycle and work-record checker implementations into `topology_doctor_artifact_checks.py`; `topology_doctor.py` keeps wrapper functions for existing callers and CLI behavior.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'artifact_lifecycle or work_record'`; `python scripts/topology_doctor.py --artifact-lifecycle --summary-only`; `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_artifact_checks.py`.
 Next: Avoid splitting git-status-dependent map-maintenance until unrelated script dirty state is isolated.
+
+## 2026-04-15 — Reference/Core Claim Checker Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the reference replacement and core-claim checker family behind existing wrappers.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_reference_checks.py`, `architecture/script_manifest.yaml`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved reference replacement and core-claim checker implementations into `topology_doctor_reference_checks.py`; `topology_doctor.py` keeps wrapper functions for existing callers, core-map claim lookup, and CLI behavior.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'reference_replacement or core_claims or core_map or cli_json_parity'`; `python scripts/topology_doctor.py --reference-replacement --summary-only`; `python scripts/topology_doctor.py --core-claims --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_reference_checks.py`.
+Next: Defer map-maintenance splitting until dirty script changes are isolated.
