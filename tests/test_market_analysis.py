@@ -164,7 +164,8 @@ class TestComputePosterior:
 
         ci_lo, ci_hi, p_value = ma._bootstrap_bin(0, 5)
 
-        assert ma._posterior_with_bootstrapped_bin(0, 1.0)[0] == pytest.approx(0.875)
+        # Verify posterior with p_cal[0]=1.0 yields 0.875 (was _posterior_with_bootstrapped_bin)
+        assert compute_posterior(np.array([1.0, 0.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.875)
         assert ci_lo == pytest.approx(0.375)
         assert ci_hi == pytest.approx(0.375)
         assert p_value == 0.0
@@ -187,7 +188,8 @@ class TestComputePosterior:
 
         ci_lo, ci_hi, p_value = ma._bootstrap_bin_no(0, 5)
 
-        assert ma._posterior_with_bootstrapped_bin(0, 0.0)[0] == pytest.approx(0.25)
+        # Verify posterior with p_cal[0]=0.0 yields 0.25 (was _posterior_with_bootstrapped_bin)
+        assert compute_posterior(np.array([0.0, 1.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.25)
         assert ci_lo == pytest.approx(0.25)
         assert ci_hi == pytest.approx(0.25)
         assert p_value == 0.0
