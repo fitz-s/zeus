@@ -284,12 +284,15 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
 
+    temperature_metric = getattr(position, "temperature_metric", "high")
+
     remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
         ens_result["members_hourly"],
         ens_result["times"],
         city.timezone,
         target_d,
         now=temporal_context.current_utc_timestamp,
+        temperature_metric=temperature_metric,
     )
     if remaining_member_maxes.size == 0:
         _set_monitor_probability_fresh(position, False)
@@ -297,14 +300,21 @@ def _refresh_day0_observation(
 
     day0 = Day0Signal(
         observed_high_so_far=float(obs["high_so_far"]),
+        observed_low_so_far=(
+            float(obs["low_so_far"])
+            if obs.get("low_so_far") is not None
+            else None
+        ),
         current_temp=float(obs["current_temp"]),
         hours_remaining=hours_remaining,
         member_maxes_remaining=remaining_member_maxes,
+        member_mins_remaining=remaining_member_maxes,
         unit=city.settlement_unit,
         observation_source=str(obs.get("source", "")),
         observation_time=obs.get("observation_time"),
         current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
         temporal_context=temporal_context,
+        temperature_metric=temperature_metric,
     )
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
     all_bins, held_idx = _build_all_bins(position, city)

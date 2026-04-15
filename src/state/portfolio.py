@@ -143,6 +143,7 @@ class Position:
     direction: DirectionAlias  # Forces use of Direction(Enum)
 
     unit: str = "F"  # Blueprint v2: carried, never inferred
+    temperature_metric: str = "high"  # "high" or "low" — carried from market at entry
 
     # Provenance: which environment created this position (set once, never changed)
     env: str = "live"  # live-only (Phase 1 axiom)

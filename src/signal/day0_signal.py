@@ -45,6 +45,9 @@ class Day0Signal:
         current_local_hour: float | None = None,
         daylight_progress: float | None = None,
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        observed_low_so_far: float | None = None,
+        member_mins_remaining: np.ndarray | None = None,
+        temperature_metric: str = "high",
     ):
         """
         Args:
@@ -57,9 +60,12 @@ class Day0Signal:
                 daily peak has already passed (from diurnal_curves data)
         """
         self.obs_high = observed_high_so_far
+        self.obs_low = observed_low_so_far
         self.current_temp = current_temp
         self.hours_remaining = hours_remaining
         self.ens_remaining = member_maxes_remaining
+        self.ens_mins_remaining = member_mins_remaining
+        self.temperature_metric = temperature_metric
         self.unit = unit
         self._observation_source = observation_source
         self._observation_time = observation_time

@@ -258,6 +258,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
         env=get_mode(),
+        temperature_metric=getattr(candidate, "temperature_metric", "high"),
     )
 
 
