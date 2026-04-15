@@ -732,8 +732,6 @@ def evaluate_candidate(
     decision_reference = ens_result.get("fetch_time")
     lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, decision_reference))
 
-    # Store ENS snapshot (time-irreversible data collection)
-    snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
     if is_day0_mode:
         temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
         if temporal_context is None:
@@ -788,6 +786,8 @@ def evaluate_candidate(
         entry_validations = ["ens_fetch", "mc_instrument_noise"]
         lead_days_for_calibration = lead_days
 
+    # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate)
+    snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
     _store_snapshot_p_raw(conn, snapshot_id, p_raw)
 
     # Calibration
@@ -1078,7 +1078,8 @@ def evaluate_candidate(
     _fdr_family_size = len(full_family_hypotheses)
     entry_validations.append("bootstrap_ci")
 
-    # FDR filter
+    # FDR filter — full-family is the live standard.
+    # Legacy fdr_filter() is preserved for audit/comparison recording only.
     legacy_filtered = fdr_filter(edges)
     if _fdr_fallback:
         filtered = []
@@ -1093,7 +1094,15 @@ def evaluate_candidate(
             if (edge.bin.label, edge.direction) in selected_edge_keys
         ]
     else:
-        filtered = legacy_filtered
+        # Full-family scan succeeded but returned zero hypotheses — anomalous
+        # (any valid market has ≥1 bin × 2 directions). Fail closed instead of
+        # silently falling back to the legacy denominator-undercount path.
+        logger.warning(
+            "Full-family scan returned 0 hypotheses for %s/%s; failing closed",
+            candidate.city.name, candidate.target_date,
+        )
+        _fdr_fallback = True
+        filtered = []
     entry_validations.append("fdr_filter")
     try:
         _record_selection_family_facts(

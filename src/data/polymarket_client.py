@@ -6,6 +6,7 @@ All numeric fields from API are STRINGS — always float() before use.
 
 import json
 import logging
+import os
 import subprocess
 from typing import Optional
 
@@ -24,10 +25,12 @@ def _resolve_credentials() -> dict:
     Returns dict with 'private_key' and 'funder_address'.
     """
     try:
+        # Resolve OpenClaw root: OPENCLAW_HOME → ~/.openclaw
+        openclaw_root = os.environ.get("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
         # Read credentials via OpenClaw keychain resolver protocol
         result = subprocess.run(
             ["python3", "-c",
-             "import json, sys; sys.path.insert(0, '/Users/leofitz/.openclaw'); "
+             f"import json, sys; sys.path.insert(0, {openclaw_root!r}); "
              "from bin.keychain_resolver import read_keychain; "
              "pk = read_keychain('openclaw-metamask-private-key'); "
              "fa = read_keychain('openclaw-polymarket-funder-address'); "
@@ -49,10 +52,11 @@ class PolymarketClient:
 
     def __init__(self):
         self._clob_client = None
-        self._init_live_client()
 
-    def _init_live_client(self):
-        """Initialize py-clob-client with keychain credentials."""
+    def _ensure_client(self):
+        """Lazy init: connect to CLOB only on first real I/O."""
+        if self._clob_client is not None:
+            return
         from py_clob_client.client import ClobClient
 
         creds = _resolve_credentials()
@@ -152,6 +156,7 @@ class PolymarketClient:
             price=price, size=size, side=side_const, token_id=token_id
         )
 
+        self._ensure_client()
         signed = self._clob_client.create_order(order_args)
         result = self._clob_client.post_order(signed)
 
@@ -161,12 +166,14 @@ class PolymarketClient:
 
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
+        self._ensure_client()
         result = self._clob_client.cancel(order_id)
         logger.info("Order cancelled: %s → %s", order_id, result.get("status"))
         return result
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
+        self._ensure_client()
         try:
             if hasattr(self._clob_client, "get_order"):
                 result = self._clob_client.get_order(order_id)
@@ -184,6 +191,7 @@ class PolymarketClient:
 
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
+        self._ensure_client()
         try:
             from py_clob_client.clob_types import OpenOrderParams
 
@@ -244,6 +252,7 @@ class PolymarketClient:
 
     def get_balance(self) -> float:
         """Get USDC balance."""
+        self._ensure_client()
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
         resp = self._clob_client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -256,6 +265,7 @@ class PolymarketClient:
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
         """
+        self._ensure_client()
         try:
             result = self._clob_client.redeem(condition_id)
             logger.info("Redeemed condition %s → %s", condition_id, result)

@@ -110,7 +110,14 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
     return deps.reconcile_with_chain(portfolio, api_positions, conn=conn), True
 
 
-def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
+def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
+    """Cancel exchange orders that are not tracked locally.
+
+    Triple-confirmation guard (#63):
+      1. Order is NOT in local portfolio tracking (order_id / last_exit_order_id)
+      2. Order is NOT in execution_fact (recent command log) within 2 hours
+      3. Only then cancel — otherwise log warning and skip (quarantine)
+    """
     if not hasattr(clob, "get_open_orders"):
         return 0
 
@@ -120,10 +127,33 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
             tracked_order_ids.add(pos.order_id)
         if pos.last_exit_order_id:
             tracked_order_ids.add(pos.last_exit_order_id)
+
+    # Build set of recently-commanded order IDs from trade_decisions
+    recent_order_ids: set[str] = set()
+    if conn is not None:
+        try:
+            from src.state.db import _table_exists
+            if _table_exists(conn, "trade_decisions"):
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+                rows = conn.execute(
+                    "SELECT order_id FROM trade_decisions WHERE order_posted_at >= ? AND order_id IS NOT NULL AND order_id != ''",
+                    (cutoff,),
+                ).fetchall()
+                recent_order_ids = {str(r[0]) for r in rows}
+        except Exception as exc:
+            deps.logger.warning("Could not query trade_decisions for orphan guard: %s", exc)
+
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = extract_order_id(order)
         if not order_id or order_id in tracked_order_ids:
+            continue
+        # Quarantine guard: if order appears in recent trade_decisions, do NOT cancel
+        if order_id in recent_order_ids:
+            deps.logger.warning(
+                "Orphan order %s found in recent execution_fact — quarantining instead of cancelling",
+                order_id,
+            )
             continue
         try:
             result = clob.cancel_order(order_id)

@@ -61,7 +61,6 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
-import requests
 
 from src.calibration.manager import season_from_date
 from src.config import cities_by_name
@@ -217,7 +216,7 @@ def _fetch_wu_icao_daily_highs_lows(
     unit_code = "m" if unit == "C" else "e"
 
     try:
-        resp = requests.get(
+        resp = httpx.get(
             url,
             params={
                 "apiKey": WU_API_KEY,
@@ -225,7 +224,7 @@ def _fetch_wu_icao_daily_highs_lows(
                 "startDate": start_date.strftime("%Y%m%d"),
                 "endDate": end_date.strftime("%Y%m%d"),
             },
-            timeout=30,
+            timeout=30.0,
             headers=WU_HEADERS,
         )
         if resp.status_code in (401, 403):

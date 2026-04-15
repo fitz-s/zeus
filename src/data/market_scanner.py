@@ -25,6 +25,8 @@ TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "cel
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
+_ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
+_ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
 
 
 def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, retries: int = 3) -> httpx.Response:
@@ -108,15 +110,18 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
 
 
 def _get_active_events() -> list[dict]:
-    global _ACTIVE_EVENTS_CACHE
-    if _ACTIVE_EVENTS_CACHE is None:
+    global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
+    now = time.monotonic()
+    if _ACTIVE_EVENTS_CACHE is None or (now - _ACTIVE_EVENTS_CACHE_AT) > _ACTIVE_EVENTS_TTL:
         _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
+        _ACTIVE_EVENTS_CACHE_AT = now
     return list(_ACTIVE_EVENTS_CACHE)
 
 
 def _clear_active_events_cache() -> None:
-    global _ACTIVE_EVENTS_CACHE
+    global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
     _ACTIVE_EVENTS_CACHE = None
+    _ACTIVE_EVENTS_CACHE_AT = 0.0
 
 
 def _fetch_events_by_tags() -> list[dict]:

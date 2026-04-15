@@ -87,8 +87,8 @@ def _run_chain_sync(portfolio: PortfolioState, clob, conn):
     return _runtime.run_chain_sync(portfolio, clob, conn=conn, deps=sys.modules[__name__])
 
 
-def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob) -> int:
-    return _runtime.cleanup_orphan_open_orders(portfolio, clob, deps=sys.modules[__name__])
+def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob, conn=None) -> int:
+    return _runtime.cleanup_orphan_open_orders(portfolio, clob, deps=sys.modules[__name__], conn=conn)
 
 
 def _entry_bankroll_for_cycle(portfolio: PortfolioState, clob):
@@ -204,7 +204,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         portfolio_dirty = True
 
     try:
-        stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob)
+        stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob, conn=conn)
     except Exception as exc:
         logger.warning("Orphan open-order cleanup failed — continuing cycle: %s", exc)
         stale_cancelled = 0
