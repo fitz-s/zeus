@@ -21,7 +21,7 @@ Build a machine-checkable topology layer so a zero-context agent can determine:
 | Packet 0 | closed | read-only topology inventory baseline |
 | Packet 1 | closed | WMO half-up executable rounding law and recurrence gates |
 | Packet 2 | closed | topology compiler MVP and digest command |
-| Packet 3 | active | docs mesh repair and authority normalization |
+| Packet 3 | closed | docs mesh repair and authority normalization |
 | Packet 4 | pending | source file rationale map |
 
 ## Packet 3 Acceptance
