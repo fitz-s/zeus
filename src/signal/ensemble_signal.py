@@ -27,12 +27,72 @@ from src.config import (
     ensemble_unimodal_range_epsilon,
 )
 from src.types import Bin
+from src.types.market import bin_counts_from_array
 from src.types.temperature import TemperatureDelta, Unit
 
 
 def sigma_instrument(unit: Unit) -> TemperatureDelta:
-    """ASOS sensor precision. °C value independently calibrated, not °F/1.8."""
+    """ASOS sensor precision (unit-default).
+
+    Returns the unit-keyed σ from ``settings.json`` (0.5°F / 0.28°C as of
+    2026-04-14). These are calibrated against ASOS / AWOS automated airport
+    weather stations, which is what 44 of Zeus's 51 cities use as their
+    Polymarket settlement source (WU ICAO history endpoint or NOAA
+    weather.gov METAR re-distribution — both pull from the same
+    ICAO/AWOS stream).
+
+    For the 4 cities whose settlement source is NOT an ASOS-class
+    station, prefer ``sigma_instrument_for_city(city)`` which honours the
+    per-city override.
+    """
     return TemperatureDelta(ensemble_instrument_noise(unit), unit)
+
+
+def sigma_instrument_for_city(city) -> TemperatureDelta:
+    """Per-city sensor precision, honouring optional cities.json override.
+
+    Why this exists (2026-04-14)
+    ----------------------------
+    The default ``sigma_instrument(unit)`` is calibrated to ASOS/AWOS
+    airport weather stations (NWS spec: ±0.5°F / ±0.28°C). 44 of Zeus's
+    51 cities settle off ASOS-class stations and the default σ is
+    correct for them. The 4 exceptions are:
+
+    - **Hong Kong (HKO)**: institutional research-grade station at HKO
+      Headquarters (Tsim Sha Tsui). Published precision is 0.1°C raw,
+      reported as integer °C. The effective post-quantization uncertainty
+      is dominated by the 0.5°C rounding bin width, but the underlying
+      sensor is materially tighter than ASOS.
+
+    - **Istanbul (NOAA LTFM)** + **Moscow (NOAA UUWW)**: foreign aviation
+      AWOS read via NOAA / Ogimet METAR stream. Sensor specs are
+      similar to ASOS (international ICAO standard requires ±0.5°C
+      class precision). σ = ASOS default is correct.
+
+    - **Taipei (CWA station 46692)**: Taiwan Central Weather Administration
+      professional station at Zhongzheng. Published precision is 0.1°C,
+      similar quality to HKO.
+
+    For HKO and Taipei, the override should be **tighter** than ASOS to
+    reflect the underlying sensor accuracy. The chosen value (0.18°F /
+    0.10°C) is roughly half the ASOS default — a conservative first
+    estimate that should be empirically refit against historical residuals
+    once the recalibration pipeline produces enough decision-group rows
+    to support per-city σ optimization.
+
+    For Istanbul and Moscow no override is set: the underlying station
+    class is ASOS-equivalent (international airport AWOS). Reading
+    METARs through NOAA/Ogimet does not change the physical sensor.
+
+    Returns
+    -------
+    TemperatureDelta in the city's settlement_unit. Caller can extract
+    ``.value`` for use in numpy noise sampling.
+    """
+    override = getattr(city, "instrument_noise_override", None)
+    if override is not None:
+        return TemperatureDelta(float(override), city.settlement_unit)
+    return sigma_instrument(city.settlement_unit)
 
 
 # Compatibility aliases for tests and assumption audits.
@@ -132,19 +192,13 @@ def p_raw_vector_from_maxes(
     n_bins = len(bins)
     n_members = len(member_maxes)
     p = np.zeros(n_bins)
-    sig = sigma_instrument(city.settlement_unit)
+    sig = sigma_instrument_for_city(city)
 
     for _ in range(n_mc):
         noised = member_maxes + rng.normal(0, sig.value, n_members)
         measured = settlement_semantics.round_values(noised)
 
-        for i, b in enumerate(bins):
-            if b.is_open_low:
-                p[i] += np.sum(measured <= b.high)
-            elif b.is_open_high:
-                p[i] += np.sum(measured >= b.low)
-            else:
-                p[i] += np.sum((measured >= b.low) & (measured <= b.high))
+        p += bin_counts_from_array(measured, bins)
 
     p = p / (float(n_members) * n_mc)
 
@@ -204,7 +258,7 @@ class EnsembleSignal:
         self.bias_corrected = False
         try:
             from src.config import settings
-            if settings._data.get("bias_correction_enabled", False):
+            if settings.bias_correction_enabled:
                 self.member_maxes = self._apply_bias_correction(
                     self.member_maxes, city, target_date
                 )
@@ -333,8 +387,8 @@ class EnsembleSignal:
         maxes = self.member_maxes
         rng = float(maxes.max() - maxes.min())
 
-        # Unit-aware: if spread < 1 instrument noise, members are in consensus
-        if rng < sigma_instrument(self.city.settlement_unit).value:
+        # Per-city: if spread < 1 instrument noise, members are in consensus
+        if rng < sigma_instrument_for_city(self.city).value:
             return False  # All members agree — definitely unimodal
 
         try:
@@ -352,10 +406,12 @@ class EnsembleSignal:
     def boundary_sensitivity(self, boundary: float) -> float:
         """Fraction of 51 members within ±σ_instrument of a bin boundary.
 
-        Window is unit-aware: 0.5°F for US cities, 0.28°C for metric cities.
+        Window is per-city: ASOS 0.5°F / 0.28°C for the 49 airport-station
+        cities, with optional override for HKO and Taiwan CWA stations whose
+        sensors are tighter than ASOS. See ``sigma_instrument_for_city``.
         High sensitivity → probability estimate is fragile at this boundary.
         """
-        window = sigma_instrument(self.city.settlement_unit).value
+        window = sigma_instrument_for_city(self.city).value
         return float(
             np.sum(np.abs(self.member_maxes - boundary) < window)
         ) / len(self.member_maxes)

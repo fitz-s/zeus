@@ -776,6 +776,45 @@ def test_R14_filter_allowed_partitions_rows():
 
 
 # ---------------------------------------------------------------------------
+# R15 — per-city instrument noise override
+# ---------------------------------------------------------------------------
+
+
+def test_R15_sigma_default_for_asos_class_city():
+    """Cities without an override use the unit-keyed ASOS spec."""
+    from src.signal.ensemble_signal import sigma_instrument_for_city, sigma_instrument
+    asos_f = _FakeCity("NYC", "F", wu_station="KLGA")  # no override
+    asos_c = _FakeCity("Paris", "C", wu_station="LFPG")
+    # _FakeCity does not set instrument_noise_override, so sigma_instrument_for_city
+    # falls back to sigma_instrument(unit).
+    assert getattr(asos_f, "instrument_noise_override", None) is None
+    assert sigma_instrument_for_city(asos_f).value == sigma_instrument("F").value
+    assert sigma_instrument_for_city(asos_c).value == sigma_instrument("C").value
+
+
+def test_R15_sigma_override_used_when_present():
+    """Override on the city object is honoured exactly."""
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+    hko_like = _FakeCity("Hong Kong", "C", wu_station="HKO")
+    hko_like.instrument_noise_override = 0.10
+    sig = sigma_instrument_for_city(hko_like)
+    assert sig.value == 0.10
+    assert sig.unit == "C"
+
+
+def test_R15_real_cities_json_overrides_present():
+    """HKO and Taipei must have the tighter override; other 49 must not."""
+    from src.config import load_cities
+    cs = {c.name: c for c in load_cities()}
+    assert "Hong Kong" in cs and cs["Hong Kong"].instrument_noise_override == 0.10
+    assert "Taipei" in cs and cs["Taipei"].instrument_noise_override == 0.10
+    # Spot-check that ASOS-class cities have no override
+    for name in ("NYC", "Paris", "Istanbul", "Moscow"):
+        assert name in cs, name
+        assert cs[name].instrument_noise_override is None, name
+
+
+# ---------------------------------------------------------------------------
 # R13 — end-to-end integration
 # ---------------------------------------------------------------------------
 

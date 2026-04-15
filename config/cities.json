@@ -437,7 +437,8 @@
       "cluster": "Hong Kong",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 6.2
+      "diurnal_amplitude_c": 6.2,
+      "instrument_noise_override": 0.1
     },
     {
       "name": "Houston",
@@ -1155,7 +1156,8 @@
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 6.5,
-      "settlement_source_type": "cwa_station"
+      "settlement_source_type": "cwa_station",
+      "instrument_noise_override": 0.1
     },
     {
       "name": "Tel Aviv",
