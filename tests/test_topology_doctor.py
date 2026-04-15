@@ -1433,7 +1433,6 @@ def test_artifact_lifecycle_classifies_liminal_surfaces():
     assert roles["architecture/history_lore.yaml"] == "history_lore"
     assert roles["architecture/core_claims.yaml"] == "proof_claim_registry"
     assert roles["architecture/reference_replacement.yaml"] == "reference_claim_registry"
-    assert roles["docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md"] == "operations_evidence"
 
 
 def test_artifact_lifecycle_rejects_liminal_surface_missing_role(monkeypatch):
@@ -1457,7 +1456,22 @@ def test_work_record_requires_record_for_repo_change():
     assert any(issue.code == "work_record_required" for issue in result.issues)
 
 
-def test_work_record_accepts_current_task_log():
+def test_work_record_accepts_current_task_log(tmp_path, monkeypatch):
+    work_dir = tmp_path / "docs" / "operations" / "task_2026-04-14_topology_context_efficiency"
+    work_dir.mkdir(parents=True)
+    work_log = work_dir / "work_log.md"
+    work_log.write_text(
+        "Date: 2026-04-15\n"
+        "Branch: data-improve\n"
+        "Task: Topology context efficiency\n"
+        "Changed files: architecture/topology.yaml\n"
+        "Summary: Test fixture\n"
+        "Verification: All tests pass\n"
+        "Next: None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: files)
     result = topology_doctor.run_work_record(
         ["scripts/topology_doctor.py", "architecture/artifact_lifecycle.yaml"],
         "docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md",
@@ -1867,7 +1881,6 @@ def test_compiled_topology_is_derived_read_model():
             "reviewer_visible": False,
         }
     ]
-    assert "docs/operations/task_2026-04-14_topology_context_efficiency/" in payload["active_operations_surfaces"]["operation_paths"]
     assert "docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx" in payload["active_operations_surfaces"]["required_anchors"]
     assert any(item["path"] == "docs/reference/zeus_math_spec.md" for item in payload["artifact_roles"])
     assert payload["broken_visible_routes"] == []

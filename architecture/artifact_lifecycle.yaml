@@ -158,9 +158,3 @@ liminal_artifacts:
     authority_behavior: "Records replacement/deletion eligibility and claim proofs for reference docs; it does not delete or promote docs by itself."
     canonical_owner: architecture/reference_replacement.yaml
     guardrail: "Deletion or demotion requires replacement status, proof targets, and safe allowed_action."
-  - path: docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md
-    artifact_role: operations_evidence
-    route_class: operations_evidence
-    authority_behavior: "Work logs are factual evidence of changes and verification, not architecture law."
-    canonical_owner: architecture/artifact_lifecycle.yaml
-    guardrail: "Use work logs for closeout evidence; extract durable lessons into manifests, tests, or lore."
