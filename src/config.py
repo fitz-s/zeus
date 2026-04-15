@@ -6,6 +6,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -40,8 +41,11 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
 
 
 def get_mode() -> str:
-    """Mode accessor. Zeus is live-only — always returns 'live'."""
-    return "live"
+    """Mode accessor. Reads from ZEUS_MODE env var (validated at startup)."""
+    mode = os.environ.get("ZEUS_MODE", "live")
+    if mode not in ("live",):
+        raise ValueError(f"ZEUS_MODE={mode!r} is not valid — Zeus is live-only")
+    return mode
 
 
 def state_path(filename: str) -> Path:
@@ -321,14 +325,18 @@ def ensemble_unimodal_range_epsilon() -> float:
 
 def sizing_defaults() -> dict[str, float]:
     sizing = settings["sizing"]
-    return {
+    result = {
         "max_single_position_pct": float(sizing["max_single_position_pct"]),
         "max_portfolio_heat_pct": float(sizing["max_portfolio_heat_pct"]),
         "max_correlated_pct": float(sizing["max_correlated_pct"]),
         "max_city_pct": float(sizing["max_city_pct"]),
-        "max_region_pct": float(sizing["max_region_pct"]),
         "min_order_usd": float(sizing["min_order_usd"]),
     }
+    # K3 cluster collapse: max_region_pct removed from settings.json and
+    # RiskLimits dataclass. Tolerate its absence for forward compatibility.
+    if "max_region_pct" in sizing:
+        result["max_region_pct"] = float(sizing["max_region_pct"])
+    return result
 
 
 def correlation_default_cross_cluster() -> float:

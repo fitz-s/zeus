@@ -101,40 +101,32 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
     policy = choose_portfolio_truth_source(loader_view.get("status"))
-    if policy.source == "canonical_db":
-        metadata_state, capital_source = _load_riskguard_capital_metadata()
-        positions = [
-            _portfolio_position_from_loader_row(row)
-            for row in loader_view.get("positions", [])
-        ]
-        bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
-        portfolio = PortfolioState(
-            positions=positions,
-            bankroll=bankroll,
-            updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
-            audit_logging_enabled=True,
-            daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
-            weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
-            recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
-            ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
+    if policy.source != "canonical_db":
+        raise RuntimeError(
+            f"riskguard requires canonical truth source, got {policy.source!r}: {policy.reason}"
         )
-        return portfolio, {
-            "source": "position_current",
-            "loader_status": str(loader_view.get("status") or "unknown"),
-            "fallback_active": False,
-            "fallback_reason": "",
-            "position_count": len(positions),
-            "capital_source": capital_source,
-        }
-
-    portfolio, capital_source = _load_riskguard_capital_metadata()
+    metadata_state, capital_source = _load_riskguard_capital_metadata()
+    positions = [
+        _portfolio_position_from_loader_row(row)
+        for row in loader_view.get("positions", [])
+    ]
+    bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
+    portfolio = PortfolioState(
+        positions=positions,
+        bankroll=bankroll,
+        updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
+        audit_logging_enabled=True,
+        daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
+        weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
+        recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
+        ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
+    )
     return portfolio, {
-        "source": "working_state_fallback",
+        "source": "position_current",
         "loader_status": str(loader_view.get("status") or "unknown"),
-        "fallback_active": True,
-        "fallback_reason": policy.reason,
-        "fallback_escalate": policy.escalate,
-        "position_count": len(portfolio.positions),
+        "fallback_active": False,
+        "fallback_reason": "",
+        "position_count": len(positions),
         "capital_source": capital_source,
     }
 
@@ -292,9 +284,11 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
-def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str]:
+def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str, bool]:
+    """Returns (exits, source_name, degraded)."""
     if conn is None:
-        return [], "none"
+        return [], "none", False
+    outcome_fact_available = True
     try:
         rows = conn.execute(
             """
@@ -305,6 +299,7 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
             """
         ).fetchall()
     except sqlite3.OperationalError:
+        outcome_fact_available = False
         rows = []
     if rows:
         return (
@@ -324,8 +319,14 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
                 for row in rows
             ],
             "outcome_fact",
+            False,
         )
+    if outcome_fact_available:
+        # Table exists but is empty — valid empty result, not degradation
+        return [], "outcome_fact", False
 
+    # Degradation: outcome_fact unavailable, falling back to chronicle
+    logger.warning("outcome_fact unavailable — degrading realized exits to chronicle")
     try:
         rows = conn.execute(
             """
@@ -372,9 +373,10 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
                 if row["pnl"] is not None
             ],
             "chronicle_dedup",
+            True,
         )
 
-    return [], "none"
+    return [], "none", False
 
 
 def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
@@ -643,7 +645,7 @@ def tick() -> RiskLevel:
         if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
             metric_ready_rows.append(row)
 
-    realized_exits, realized_truth_source = _current_mode_realized_exits(zeus_conn, env=current_env)
+    realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(zeus_conn, env=current_env)
     if realized_exits:
         portfolio = replace(portfolio, recent_exits=realized_exits)
     else:
@@ -651,6 +653,7 @@ def tick() -> RiskLevel:
         if canonical_recent_exits:
             portfolio = replace(portfolio, recent_exits=canonical_recent_exits)
             realized_truth_source = "authoritative_settlement_rows"
+            realized_degraded = False
 
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
@@ -812,6 +815,7 @@ def tick() -> RiskLevel:
             "portfolio_position_count": portfolio_truth["position_count"],
             "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
             "realized_truth_source": realized_truth_source,
+            "realized_degraded": realized_degraded,
             "settlement_sample_size": len(p_forecasts),
             "settlement_storage_source": settlement_storage_source,
             "settlement_row_storage_sources": settlement_row_storage_sources,

@@ -34,6 +34,7 @@ class ChainState(str, Enum):
     EXIT_PENDING_MISSING = "exit_pending_missing"
     QUARANTINED = "quarantined"
     QUARANTINE_EXPIRED = "quarantine_expired"
+    SIZE_MISMATCH_UNRESOLVED = "size_mismatch_unresolved"
 
 class ExitState(str, Enum):
     """Live sell-order state machine for exit lifecycle."""

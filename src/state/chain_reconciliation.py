@@ -436,11 +436,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     corrected,
                     local_shares_before=local_shares,
                 ):
+                    logger.warning(
+                        "SIZE MISMATCH UNRESOLVED: %s — no canonical baseline for correction "
+                        "(local=%.4f, chain=%.4f); tagging and continuing",
+                        pos.trade_id, local_shares, chain.size,
+                    )
+                    corrected.chain_state = "size_mismatch_unresolved"
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )
-                    continue
-                stats["updated"] += 1
+                else:
+                    stats["updated"] += 1
             pos.chain_state = corrected.chain_state
             pos.chain_shares = corrected.chain_shares
             pos.chain_verified_at = corrected.chain_verified_at
@@ -517,6 +523,13 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         if pos.chain_state != "quarantined":
             continue
         if not pos.quarantined_at:
+            # No timestamp at all — treat as maximally stale, force expiry
+            logger.warning(
+                "QUARANTINE MISSING TIMESTAMP: %s — forcing exit evaluation",
+                pos.trade_id,
+            )
+            pos.chain_state = "quarantine_expired"
+            expired += 1
             continue
 
         try:
@@ -524,6 +537,12 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
                 pos.quarantined_at.replace("Z", "+00:00")
             )
         except ValueError:
+            logger.warning(
+                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing exit evaluation",
+                pos.trade_id, pos.quarantined_at,
+            )
+            pos.chain_state = "quarantine_expired"
+            expired += 1
             continue
 
         hours_quarantined = (now - quarantined_dt).total_seconds() / 3600

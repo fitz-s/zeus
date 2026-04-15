@@ -1065,8 +1065,10 @@ def add_position(state: PortfolioState, pos: Position) -> None:
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
             # Merge: accumulate shares and cost
-            logger.warning("DEDUP: merging duplicate %s %s into existing %s",
-                           pos.direction, pos.bin_label, existing.trade_id)
+            logger.warning("DEDUP: merging duplicate %s %s into existing %s — "
+                           "entry context from new position (entered_at=%s, entry_price=%.4f) is being dropped",
+                           pos.direction, pos.bin_label, existing.trade_id,
+                           getattr(pos, "entered_at", ""), pos.entry_price)
             existing.size_usd += pos.size_usd
             existing.shares += pos.effective_shares
             existing.cost_basis_usd += pos.effective_cost_basis_usd
