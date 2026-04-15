@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import lat_for_city, season_from_date
 from src.config import cities_by_name
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection, init_schema
 
 SOURCE_MAP = {
@@ -126,7 +127,7 @@ def run_etl(*, dry_run: bool = False) -> dict:
         source = _source(str(row["source"]))
         unit = str(row["temp_unit"] or city.settlement_unit)
         forecast = float(row["forecast_high"])
-        actual = round(float(row["settlement_value"]))
+        actual = round_wmo_half_up_value(float(row["settlement_value"]))
         if unit != city.settlement_unit:
             rejected["unit_mismatch"] += 1
             continue

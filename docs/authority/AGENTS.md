@@ -35,5 +35,8 @@ This directory defines how Zeus is architected, changed, delivered, verified, an
 | `zeus_packet_discipline.md` | Packet discipline — program/packet/slice, closure, pre/post-closeout, waivers, market-math requirements, micro-event logging |
 | `zeus_autonomy_gates.md` | Autonomy gates — destructive-ops human gate, team mode entry/restrictions, one-packet-at-a-time rule |
 | `zeus_openclaw_venus_delivery_boundary.md` | Boundary law between Zeus, Venus, and OpenClaw |
+| `zeus_live_backtest_shadow_boundary.md` | Live/backtest/shadow boundary law — live may act, backtest may evaluate, shadow may observe |
+| `zeus_data_rebuild_adr.md` | Data rebuild ADR for K1-K4 structural decisions and authority-gate rebuild sequencing |
+| `zeus_k4_fix_pack_adr.md` | K4.5 fix-pack ADR recording authority-gate defect repairs |
 
 Historical architecture/design files live in `docs/archives/governance_doc_restructuring/` and are not part of the default authority read path.

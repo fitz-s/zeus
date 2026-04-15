@@ -18,6 +18,7 @@ from src.contracts import (
     recompute_native_probability,
     SettlementSemantics,
 )
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
@@ -168,7 +169,8 @@ def _refresh_ens_member_counting(
         model_agreement="AGREE",
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
-    ).value
+        authority_verified=True,
+    ).value_for_consumer("ev")
 
     # Persistence anomaly check: if ENS predicts a historically rare
     # day-to-day temperature change, discount model trust
@@ -328,7 +330,8 @@ def _refresh_day0_observation(
         model_agreement="AGREE",
         lead_days=0.0,
         hours_since_open=hours_since_open,
-    ).value
+        authority_verified=True,
+    ).value_for_consumer("ev")
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
 
@@ -398,7 +401,9 @@ def _check_persistence_anomaly(
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
-                deltas.append(predicted_high - round(float(row["settlement_value"])))
+                deltas.append(
+                    predicted_high - round_wmo_half_up_value(float(row["settlement_value"]))
+                )
 
         if not deltas:
             logger.warning(

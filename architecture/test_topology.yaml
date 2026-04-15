@@ -1,0 +1,363 @@
+schema_version: 1
+metadata:
+  created: "2026-04-13"
+  owner_packet: "Packet 5 test suite law gate and debt quarantine"
+  note: >
+    Test topology classifies the active pytest suite as law antibodies,
+    regressions, transitional/advisory checks, diagnostics, stale/obsolete
+    tests, or reverse-antibodies. It does not delete tests.
+
+categories:
+  core_law_antibody:
+    - tests/test_architecture_contracts.py
+    - tests/test_assumptions_validation.py
+    - tests/test_authority_gate.py
+    - tests/test_backtest_outcome_comparison.py
+    - tests/test_backtest_settlement_value_outcome.py
+    - tests/test_backtest_trade_subject_identity.py
+    - tests/test_calibration_bins_canonical.py
+    - tests/test_cities_config_authoritative.py
+    - tests/test_config.py
+    - tests/test_cross_module_invariants.py
+    - tests/test_cross_module_relationships.py
+    - tests/test_data_rebuild_relationships.py
+    - tests/test_db.py
+    - tests/test_ensemble_signal.py
+    - tests/test_execution_price.py
+    - tests/test_expiring_assumption.py
+    - tests/test_fdr.py
+    - tests/test_gate_decision.py
+    - tests/test_ingestion_guard.py
+    - tests/test_k2_live_ingestion_relationships.py
+    - tests/test_instrument_invariants.py
+    - tests/test_kelly_cascade_bounds.py
+    - tests/test_kelly_live_safety_cap.py
+    - tests/test_lifecycle.py
+    - tests/test_live_safety_invariants.py
+    - tests/test_no_bare_float_seams.py
+    - tests/test_observation_atom.py
+    - tests/test_pnl_flow_and_audit.py
+    - tests/test_polymarket_error_matrix.py
+    - tests/test_provenance_enforcement.py
+    - tests/test_reality_contracts.py
+    - tests/test_rebuild_validators.py
+    - tests/test_replay_time_provenance.py
+    - tests/test_run_replay_cli.py
+    - tests/test_runtime_guards.py
+    - tests/test_semantic_linter.py
+    - tests/test_structural_linter.py
+    - tests/test_temperature.py
+    - tests/test_topology_doctor.py
+    - tests/test_truth_surface_health.py
+    - tests/test_tigge_snapshot_p_raw_backfill.py
+    - tests/test_wallet_source.py
+
+  useful_regression:
+    - tests/test_alpha_target_coherence.py
+    - tests/test_auto_pause_entries.py
+    - tests/test_backfill_openmeteo_previous_runs.py
+    - tests/test_bootstrap_symmetry.py
+    - tests/test_calibration_manager.py
+    - tests/test_calibration_unification.py
+    - tests/test_chronicle_dedup.py
+    - tests/test_churn_defense.py
+    - tests/test_cluster_collapse.py
+    - tests/test_cluster_taxonomy_backfill.py
+    - tests/test_correlation.py
+    - tests/test_day0_exit_gate.py
+    - tests/test_day0_runtime_observation_context.py
+    - tests/test_day0_signal.py
+    - tests/test_day0_window.py
+    - tests/test_diurnal.py
+    - tests/test_drift.py
+    - tests/test_ensemble_client.py
+    - tests/test_entry_exit_symmetry.py
+    - tests/test_etl_market_price_history.py
+    - tests/test_etl_recalibrate_chain.py
+    - tests/test_executor.py
+    - tests/test_exit_authority.py
+    - tests/test_force_exit_review.py
+    - tests/test_forecast_uncertainty.py
+    - tests/test_healthcheck.py
+    - tests/test_kelly.py
+    - tests/test_market_analysis.py
+    - tests/test_model_agreement.py
+    - tests/test_observation_contract.py
+    - tests/test_observation_instants_etl.py
+    - tests/test_platt.py
+    - tests/test_k3_5_fix_pack.py
+    - tests/test_rebuild_pipeline.py
+    - tests/test_riskguard.py
+    - tests/test_semantic_snapshot_backfill.py
+    - tests/test_solar_etl.py
+    - tests/test_tracker_integrity.py
+    - tests/test_wu_scheduler.py
+
+  transitional_advisory:
+    - tests/test_calibration_quality.py
+    - tests/test_live_execution.py
+    - tests/test_pre_live_integration.py
+    - tests/test_runtime_artifact_refresh.py
+    - tests/test_strategy_tracker_regime.py
+    - tests/test_truth_layer.py
+
+  diagnostic:
+    - tests/test_audit_city_data_readiness.py
+    - tests/test_automation_analysis.py
+    - tests/test_bayesian_sigma_evaluation.py
+    - tests/test_center_buy_diagnosis.py
+    - tests/test_center_buy_repair.py
+    - tests/test_divergence_exit_counterfactual.py
+    - tests/test_lead_sigma_evaluation.py
+    - tests/test_sigma_floor_evaluation.py
+    - tests/test_temporal_closure_evaluation.py
+
+  stale_obsolete: []
+  reverse_antibody_dangerous: []
+
+law_gate:
+  WMO_ROUNDING:
+    tests:
+      - tests/test_instrument_invariants.py
+      - tests/test_assumptions_validation.py
+    protects:
+      - src/contracts/settlement_semantics.py
+      - src/signal/ensemble_signal.py
+      - src/signal/day0_signal.py
+      - src/strategy/market_analysis.py
+      - src/engine/replay.py
+      - src/engine/monitor_refresh.py
+      - src/execution/harvester.py
+      - src/calibration/store.py
+      - scripts/backfill_wu_daily_all.py
+      - scripts/onboard_cities.py
+      - scripts/validate_dynamic_alpha.py
+      - scripts/etl_tigge_direct_calibration.py
+      - scripts/generate_calibration_pairs.py
+      - scripts/audit_divergence_exit_counterfactual.py
+      - scripts/etl_forecast_skill_from_forecasts.py
+  LIFECYCLE:
+    tests:
+      - tests/test_lifecycle.py
+      - tests/test_architecture_contracts.py
+      - tests/test_live_safety_invariants.py
+    protects:
+      - src/state/lifecycle_manager.py
+      - src/execution/exit_lifecycle.py
+  CANONICAL_DB_TRUTH:
+    tests:
+      - tests/test_architecture_contracts.py
+      - tests/test_truth_surface_health.py
+      - tests/test_db.py
+    protects:
+      - src/state/ledger.py
+      - src/state/projection.py
+      - src/state/db.py
+  LIVE_BACKTEST_SHADOW:
+    tests:
+      - tests/test_backtest_outcome_comparison.py
+      - tests/test_backtest_settlement_value_outcome.py
+      - tests/test_replay_time_provenance.py
+    protects:
+      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - src/engine/replay.py
+  STRATEGY_KEY:
+    tests:
+      - tests/test_provenance_enforcement.py
+      - tests/test_architecture_contracts.py
+      - tests/test_gate_decision.py
+    protects:
+      - src/contracts/semantic_types.py
+      - src/control/gate_decision.py
+  UNIT_BIN_TOPOLOGY:
+    tests:
+      - tests/test_temperature.py
+      - tests/test_instrument_invariants.py
+      - tests/test_no_bare_float_seams.py
+    protects:
+      - src/types/temperature.py
+      - src/types/market.py
+  P_RAW_PROVENANCE:
+    tests:
+      - tests/test_ensemble_signal.py
+      - tests/test_structural_linter.py
+      - tests/test_tigge_snapshot_p_raw_backfill.py
+    protects:
+      - src/signal/ensemble_signal.py
+      - src/engine/evaluator.py
+  FDR_FAMILY:
+    tests:
+      - tests/test_fdr.py
+      - tests/test_architecture_contracts.py
+    protects:
+      - src/strategy/fdr_filter.py
+      - src/strategy/selection_family.py
+  NO_DIAGNOSTIC_PROMOTION:
+    tests:
+      - tests/test_backtest_outcome_comparison.py
+      - tests/test_backtest_trade_subject_identity.py
+      - tests/test_run_replay_cli.py
+    protects:
+      - src/engine/replay.py
+      - state/zeus_backtest.db
+
+high_sensitivity_skips:
+  tests/test_config.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Config loading is a live-mode boundary; remaining paper-mode skip must stay explicit until removed or replaced.
+    skip_count: 1
+    reason_patterns:
+      - "Phase2: paper mode removed"
+    sunset: Resolve in live-only config cleanup packet.
+  tests/test_cross_module_invariants.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Bias/calibration cross-module invariants are skipped only when runtime data/config makes them inapplicable.
+    skip_count: 4
+    reason_patterns:
+      - "bias_correction_enabled = false"
+      - "No calibration pairs in database"
+    sunset: Replace DB-dependent skips with fixtures or explicit advisory status.
+  tests/test_instrument_invariants.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Unit/bin/settlement law tests skip Celsius-only checks if no Celsius cities are configured.
+    skip_count: 2
+    reason_patterns:
+      - "No °C cities configured"
+    sunset: Keep until city fixture guarantees Celsius coverage independent of runtime config.
+  tests/test_no_bare_float_seams.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Structural seam tests skip when target symbols/files are absent; these protect INV-12.
+    skip_count: 2
+    reason_patterns:
+      - "portfolio.py not found"
+      - "kelly_size not found in kelly.py"
+    sunset: Convert to static assertions tied to current source topology.
+  tests/test_provenance_enforcement.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Provenance registry law skips only when registry YAML or PyYAML is unavailable.
+    skip_count: 8
+    reason_patterns:
+      - "Registry YAML not yet created"
+      - "PyYAML not installed"
+    sunset: Remove once provenance registry dependency is always present in test env.
+  tests/test_runtime_guards.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Runtime guard law still has paper-mode-removal skips in a live-only repo.
+    skip_count: 3
+    reason_patterns:
+      - "Phase2: paper_mode removed"
+    sunset: Resolve in live-only runtime guard cleanup packet.
+  tests/test_wu_scheduler.py:
+    owner: topology-program
+    packet: Packet 6
+    reason: WU scheduler test skips only when source entrypoint is absent in the current worktree.
+    skip_count: 1
+    reason_patterns:
+      - "src/main.py not present in this worktree"
+    sunset: Remove once scheduler dispatch fixture no longer depends on optional entrypoint presence.
+  tests/test_architecture_contracts.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Legacy P9/Phase2 position_events vocabulary and backfill tests are skipped while canonical event/projection law is represented elsewhere.
+    skip_count: 22
+    reason_patterns:
+      - "P9: legacy position_events vocabulary eliminated"
+      - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
+    sunset: Replace, reactivate, or archive in test cleanup packet after canonical coverage is mapped.
+  tests/test_db.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Legacy position_events write-path tests skipped after write path elimination; DB truth coverage remains high sensitivity.
+    skip_count: 19
+    reason_patterns:
+      - "P9: legacy position_events write path eliminated"
+    sunset: Reconcile with canonical ledger/projection tests in test cleanup packet.
+  tests/test_live_safety_invariants.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Canonical write path and contamination-guard relocation skips remain safety-sensitive.
+    skip_count: 8
+    reason_patterns:
+      - "P9: requires canonical write path setup"
+      - "Phase2: paper mode removed"
+      - "P4: contamination guard"
+    sunset: Must have replacement live-safety antibodies before deletion.
+  tests/test_truth_surface_health.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Legacy truth-surface skips indicate topology drift, not safe deletion.
+    skip_count: 6
+    reason_patterns:
+      - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
+    sunset: Resolve with truth-surface cleanup packet.
+  tests/test_reality_contracts.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: p10-infra verifier/loader skips cover INV-11 external assumption law.
+    skip_count: 10
+    reason_patterns:
+      - "RealityContractVerifier not yet delivered by p10-infra"
+      - "Reality contract YAML loader not yet delivered by p10-infra"
+    sunset: Reactivate after reality verifier/loader delivery or explicitly archive with replacement.
+  tests/test_cross_module_relationships.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Data-dependent relationship skips include settlement, canonical position, and risk-state topology checks.
+    skip_count: 18
+    reason_patterns:
+      - "Canonical position tables not present"
+      - "No SETTLEMENT events in chronicle"
+      - "position_current"
+      - "risk_state"
+    sunset: Replace data-dependent skips with fixture-backed relationship tests.
+  tests/test_pnl_flow_and_audit.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: BI-05 and paper-mode skips touch PnL/audit truth boundaries.
+    skip_count: 5
+    reason_patterns:
+      - "BI-05"
+      - "Phase2: paper_mode removed"
+    sunset: Resolve after runtime no longer imports forbidden portfolio surfaces.
+  tests/test_truth_layer.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: K1 no-op tracker/paper elimination tests are transitional but truth-layer sensitive.
+    skip_count: 5
+    reason_patterns:
+      - "K1: save_tracker is no-op"
+    sunset: Archive only after durable truth-layer replacement coverage exists.
+  tests/test_strategy_tracker_regime.py:
+    owner: topology-program
+    packet: Packet 5
+    reason: Strategy tracker migrated to no-op; keep explicit until tracker authority is deleted or replaced.
+    skip_count: 6
+    reason_patterns:
+      - "K1: strategy_tracker migrated to no-op"
+    sunset: Archive in tracker cleanup packet after replacement evidence.
+
+reverse_antibody_status:
+  active: []
+  resolved:
+    - id: WMO_BANKER_ROUNDING
+      former_surface: tests/test_instrument_invariants.py::test_settlement_semantics_round_single
+      status: rewritten_to_wmo_half_up
+
+relationship_test_manifests:
+  - path: tests/contracts/spec_validation_manifest.py
+    role: cross_module_validation_manifest
+    required_symbols:
+      - SPEC_ENTRY_VALIDATIONS
+      - SPEC_EXIT_VALIDATIONS
+      - SYMMETRY_PAIRS
+      - EXIT_REQUIRED_STEPS
+    protects:
+      - tests/test_cross_module_relationships.py
+      - tests/test_entry_exit_symmetry.py
+      - tests/test_runtime_guards.py

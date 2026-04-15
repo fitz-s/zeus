@@ -7,6 +7,7 @@ Parses bin structure, token IDs, and prices from market data.
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +25,29 @@ TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "cel
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
+
+
+def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, retries: int = 3) -> httpx.Response:
+    """GET a Gamma API path with retries on transient connection errors.
+
+    The proxy path to gamma-api.polymarket.com periodically returns
+    'Connection reset by peer' (errno 54). Retrying with a short backoff
+    recovers reliably without masking real failures — after `retries`
+    attempts the last exception propagates.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = httpx.get(f"{GAMMA_BASE}{path}", params=params, timeout=timeout)
+            return resp
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def find_weather_markets(
@@ -100,7 +124,7 @@ def _fetch_events_by_tags() -> list[dict]:
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
-            resp = httpx.get(f"{GAMMA_BASE}/tags/slug/{tag_slug}", timeout=15.0)
+            resp = _gamma_get(f"/tags/slug/{tag_slug}")
             if resp.status_code != 200:
                 continue
             tag_data = resp.json()
@@ -112,9 +136,9 @@ def _fetch_events_by_tags() -> list[dict]:
             events = []
             offset = 0
             while True:
-                resp = httpx.get(f"{GAMMA_BASE}/events", params={
+                resp = _gamma_get("/events", params={
                     "tag_id": tag_id, "closed": "false", "limit": 50, "offset": offset
-                }, timeout=15.0)
+                })
                 resp.raise_for_status()
                 batch = resp.json()
                 if not batch:
@@ -136,9 +160,9 @@ def _fetch_events_by_tags() -> list[dict]:
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:
     """Fallback: fetch events by keyword search."""
     try:
-        resp = httpx.get(f"{GAMMA_BASE}/events", params={
+        resp = _gamma_get("/events", params={
             "closed": "false", "limit": 100, "title": keyword
-        }, timeout=15.0)
+        })
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
@@ -161,6 +185,15 @@ def _parse_event(
     # Match city
     city = _match_city(title, event.get("slug", ""))
     if city is None:
+        return None
+    sanity_rejection = _market_city_sanity_rejection(event, city)
+    if sanity_rejection is not None:
+        logger.warning(
+            "Rejecting Gamma market city mismatch: city=%s reason=%s event=%s",
+            city.name,
+            sanity_rejection,
+            event.get("id") or event.get("slug"),
+        )
         return None
 
     # Parse target date from slug or end date
@@ -228,6 +261,69 @@ def _match_city(title: str, slug: str) -> Optional[City]:
         if re.search(pattern, haystack):
             return city
 
+    return None
+
+
+def _city_match_tokens(city: City) -> set[str]:
+    tokens = {
+        city.name,
+        city.wu_station,
+        city.airport_name,
+        city.settlement_source,
+        *city.aliases,
+        *city.slug_names,
+    }
+    return {str(token).strip().lower() for token in tokens if str(token).strip()}
+
+
+def _token_in_text(token: str, text: str) -> bool:
+    if not token:
+        return False
+    normalized = token.lower()
+    if "/" in normalized or "." in normalized:
+        return normalized in text
+    if "-" in normalized:
+        return normalized in text or normalized.replace("-", " ") in text
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None:
+    """Reject Gamma events that explicitly identify a different configured city."""
+    from src.config import cities
+
+    text_fields = [
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("description", ""),
+        event.get("resolutionSource", ""),
+        event.get("resolution_source", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        text_fields.extend([
+            market.get("question", ""),
+            market.get("slug", ""),
+            market.get("description", ""),
+            market.get("resolutionSource", ""),
+            market.get("resolution_source", ""),
+            market.get("groupItemTitle", ""),
+            market.get("group_item_title", ""),
+        ])
+    combined = " ".join(str(field) for field in text_fields if field).lower()
+    if not combined:
+        return None
+
+    matched_tokens = _city_match_tokens(matched_city)
+    for city in cities:
+        if city.name == matched_city.name:
+            continue
+        for token in sorted(_city_match_tokens(city), key=len, reverse=True):
+            if token in matched_tokens:
+                continue
+            if _token_in_text(token, combined):
+                return f"matched {matched_city.name} but text references {city.name} via {token!r}"
     return None
 
 

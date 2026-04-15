@@ -5,29 +5,27 @@ on:
     paths:
       - "AGENTS.md"
       - "architecture/**"
+      - "src/**"
+      - "scripts/**"
+      - "tests/**"
       - "docs/authority/**"
       - "docs/operations/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
-      - "scripts/check_*"
-      - "scripts/replay_parity.py"
-      - "tests/test_architecture_contracts.py"
-      - "tests/test_cross_module_invariants.py"
       - "docs/work_packets/**"
   push:
     paths:
       - "AGENTS.md"
       - "architecture/**"
+      - "src/**"
+      - "scripts/**"
+      - "tests/**"
       - "docs/authority/**"
       - "docs/operations/**"
       - ".github/workflows/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
-      - "scripts/check_*"
-      - "scripts/replay_parity.py"
-      - "tests/test_architecture_contracts.py"
-      - "tests/test_cross_module_invariants.py"
       - "docs/work_packets/**"
   workflow_dispatch:
 
@@ -158,6 +156,160 @@ jobs:
           echo "review_condition=${GATE_REVIEW_CONDITION}"
       - name: Run architecture contract tests
         run: pytest -q tests/test_architecture_contracts.py tests/test_cross_module_invariants.py
+
+  topology-doctor-modes:
+    name: topology-doctor-modes (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "Packet 7 topology lane owner"
+      GATE_RATIONALE: "Stable topology lanes must stay green: docs mesh, source rationale, test topology, and scripts manifest. Full strict remains advisory until root/state/script registry debt is closed."
+      GATE_REVIEW_CONDITION: "Keep blocking while these four modes are low-noise. Promote full strict only after current residual root/state/registry blockers are resolved."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install topology dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run topology doctor blocking modes
+        run: |
+          python scripts/topology_doctor.py --docs
+          python scripts/topology_doctor.py --source
+          python scripts/topology_doctor.py --tests
+          python scripts/topology_doctor.py --scripts
+
+  semantic-linter:
+    name: semantic-linter (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "Packet 7 topology lane owner"
+      GATE_RATIONALE: "Semantic linter blocks known recurrence classes including probability, contract, and source-topology hazards."
+      GATE_REVIEW_CONDITION: "Keep blocking while linter remains low-noise; add new rules only with tests and ownership."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run semantic linter
+        run: python scripts/semantic_linter.py
+
+  assumptions-validation:
+    name: assumptions-validation (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "Packet 7 topology lane owner"
+      GATE_RATIONALE: "Runtime assumption manifest must match executable contracts, including WMO rounding."
+      GATE_REVIEW_CONDITION: "Keep blocking while assumptions.json remains a live reality contract checked by code."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Validate assumptions
+        run: python scripts/validate_assumptions.py
+
+  law-gate-tests:
+    name: law-gate-tests (blocking)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "Packet 7 topology lane owner"
+      GATE_RATIONALE: "Curated law tests prove WMO, lifecycle, DB truth, live/backtest/shadow, strategy_key, unit/bin, p_raw, FDR, and diagnostic non-promotion laws."
+      GATE_REVIEW_CONDITION: "Keep blocking while architecture/test_topology.yaml law gate remains curated and low-noise."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run law gate tests
+        run: >
+          pytest -q
+          tests/test_instrument_invariants.py
+          tests/test_assumptions_validation.py
+          tests/test_lifecycle.py
+          tests/test_architecture_contracts.py
+          tests/test_live_safety_invariants.py
+          tests/test_truth_surface_health.py
+          tests/test_db.py
+          tests/test_backtest_outcome_comparison.py
+          tests/test_backtest_settlement_value_outcome.py
+          tests/test_backtest_trade_subject_identity.py
+          tests/test_replay_time_provenance.py
+          tests/test_provenance_enforcement.py
+          tests/test_gate_decision.py
+          tests/test_temperature.py
+          tests/test_no_bare_float_seams.py
+          tests/test_ensemble_signal.py
+          tests/test_structural_linter.py
+          tests/test_tigge_snapshot_p_raw_backfill.py
+          tests/test_fdr.py
+          tests/test_run_replay_cli.py
+
+  topology-full-strict:
+    name: topology-full-strict (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "Packet 7 topology lane owner"
+      GATE_RATIONALE: "Full strict topology remains visible but still reports known root/state/script-registry residuals. It must not block until those packets land."
+      GATE_REVIEW_CONDITION: "Promote only after unregistered tracked files, root artifact classification, and state artifact classification are resolved."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install topology dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run full strict topology in advisory mode
+        run: python scripts/topology_doctor.py --strict
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## topology-full-strict advisory lane"
+            echo "- continue-on-error is intentional until residual topology debt closes"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   semgrep-zeus:
     name: semgrep-zeus (advisory)

@@ -1,7 +1,10 @@
-"""Benjamini-Hochberg FDR filter for edge selection.
+"""Legacy Benjamini-Hochberg FDR helper for caller-supplied families.
 
-Spec §4.4: Controls false discovery rate. Applied per-market (not cross-city).
-Typical family size: ~22 hypotheses per market (11 bins × 2 directions).
+Active evaluator selection prefers the full-family scan plus
+``selection_family.apply_familywise_fdr`` so the denominator includes every
+tested bin/direction hypothesis for the candidate market snapshot. This helper
+keeps the same BH math for compatibility with older call sites that already
+provide a complete family.
 
 p-values are computed via np.mean(bootstrap_edges <= 0) in MarketAnalysis,
 NEVER via approximation formula.

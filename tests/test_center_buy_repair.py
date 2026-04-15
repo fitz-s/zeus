@@ -73,6 +73,9 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
         def get_best_bid_ask(self, token_id):
             return (entry_price, entry_price + 0.01, 20.0, 20.0)
 
+        def get_fee_rate(self, token_id):
+            return 0.05
+
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
@@ -90,6 +93,7 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)

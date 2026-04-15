@@ -180,6 +180,31 @@ class TestExecutor:
             "side": "SELL",
         }
 
+    def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
+        class DummyClient:
+            def __init__(self):
+                pass
+
+            def place_limit_order(self, *, token_id, price, size, side):
+                return {"status": "OPEN"}
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-1",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+            )
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "missing_order_id"
+        assert result.order_id in (None, "")
+        assert result.order_id != "trade-1"
+
     def test_execute_exit_order_rejects_missing_token(self):
         result = execute_exit_order(
             create_exit_order_intent(

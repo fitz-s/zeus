@@ -2,7 +2,7 @@
 
 ## WHY this zone matters
 
-Execution translates sized trading decisions into actual orders on Polymarket's CLOB. This is where paper meets reality — every dollar of P&L flows through this layer.
+Execution translates sized trading decisions into actual orders on Polymarket's CLOB. This is the live-money boundary — every dollar of P&L flows through this layer.
 
 Critical invariant: **exit is not local close** (INV-01). A monitor decision produces `EXIT_INTENT` as a lifecycle event. The execution layer then handles the mechanics of selling. Settlement is yet another separate lifecycle event (INV-02).
 
@@ -10,7 +10,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 
 | File | What it does | Danger level |
 |------|-------------|--------------|
-| `executor.py` | Limit-order execution engine (paper + live) | CRITICAL — real money flows here |
+| `executor.py` | Limit-order execution engine (live) | CRITICAL — real money flows here |
 | `exit_triggers.py` | 8-layer churn defense for exit decisions | HIGH — prevents false exits |
 | `exit_lifecycle.py` | Exit lifecycle management | HIGH — state transitions |
 | `fill_tracker.py` | Order fill tracking and timeout | MEDIUM |
@@ -24,7 +24,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 - Share quantization: BUY rounds UP, SELL rounds DOWN (0.01 increments)
 - Whale toxicity: cancel on adjacent bin sweeps (rainstorm lesson)
 - Dynamic limit: if within 5% of best ask, jump to ask for guaranteed fill
-- Paper/live parity via `env` field, not separate code paths (INV-05 equivalent for execution)
+- Live/backtest/shadow separation is explicit; execution code must not reintroduce paper/live split paths
 - All probabilities in exit triggers are in NATIVE space of position direction (buy_yes→P(YES), buy_no→P(NO))
 
 ## Common mistakes

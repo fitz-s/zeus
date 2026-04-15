@@ -208,12 +208,13 @@ cycle_runner._execute_monitoring_phase()
 **Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 
-### [STALE-UNVERIFIED] Exit authority still runs with incomplete monitor context on some day0 positions
+### [FIXED] Day0 stale probability no longer blocks exit authority (2026-04-13)
 **Location:** `src/engine/cycle_runner.py`, `src/engine/monitor_refresh.py`, `src/execution/exit_triggers.py`
 **Problem:** Current cycle logs show `INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh)` for several day0 positions. The cycle continues, but exit authority is evaluating with partially missing freshness context.
 **Live evidence (2026-04-06):** 4 positions (`dab0ddb6-e7f`, `e6f0d01d-2a3`, `19a7116d-36c`, `511c16a6-27d`) repeatedly triggered this warning in the 14:30 and 15:00 cycles.
-**Live evidence (2026-04-09):** 3 positions (`52280711-260`, `b33ff595-3cb`, `c25e2bfe-769`) still triggering `INCOMPLETE_EXIT_CONTEXT` in day0_capture cycle. Still not confirmed fixed.
-**Proposed antibody:** Make `fresh_prob_is_fresh` a required field for exit evaluation; if it is missing, mark the position as `exit_context_incomplete` and skip exit authority until the next full monitor refresh.
+**Live evidence (2026-04-09):** 3 positions (`52280711-260`, `b33ff595-3cb`, `c25e2bfe-769`) still triggered `INCOMPLETE_EXIT_CONTEXT` in day0_capture cycle.
+**Antibody deployed:** `ExitContext.missing_authority_fields()` now waives stale `fresh_prob_is_fresh` only for `day0_active=True`; `evaluate_exit()` keeps audit markers (`day0_stale_prob_authority_waived`, `stale_prob_substitution`) instead of pretending stale probability is fresh. Non-day0 stale probability still fails closed. Covered by `tests/test_day0_exit_gate.py` and `tests/test_live_safety_invariants.py`.
+**Residual:** If fresh live logs still show this exact missing field for day0 positions, the likely defect is upstream state classification not reaching `day0_window`, not the freshness waiver itself.
 
 ### [OPEN] strategy_tracker can report profit that is not reconstructible from durable DB truth
 **Location:** `src/state/strategy_tracker.py`, `zeus/state/strategy_tracker-paper.json`, `zeus/state/positions-paper.json`, `zeus/state/zeus.db`
@@ -232,23 +233,26 @@ cycle_runner._execute_monitoring_phase()
 **Impact:** Zero new trades for 3 days. Polymarket has 47 active April 11 markets with prices, but system cannot enter due to RED block.
 **Proposed antibody:** Add a canonical projection preflight in `load_portfolio()` that explicitly checks position chain state — if > N positions have `chain_state=unknown`, mark projection as `degraded` instead of `ok`, and require explicit handling rather than silent fallback.
 
-### [OPEN] Entry sizing is too permissive on reconstructed day0 windows with weak CI
-**Location:** `src/engine/evaluator.py`, `src/engine/monitor_refresh.py`, `src/state/portfolio.py`
+### [FIXED] Settlement-sensitive entries fail closed on degenerate CI (2026-04-13)
+**Location:** `src/engine/evaluator.py`
 **Problem:** Day0 / `update_reaction` entries can still be sized aggressively even when `ci_lower == ci_upper == 0`, `fill_quality = 0`, and the decision is reconstructed rather than directly observed.
 **Impact:** The system can allocate oversized capital to weakly-supported extreme bins, producing large settlement losses before any runtime reversal has a chance to intervene.
-**Proposed antibody:** Add a hard size cap or rejection gate for reconstructed day0 entries with missing / degenerate CI, and require a nonzero confidence band before allowing full-size execution.
+**Antibody deployed:** `evaluate_candidate()` rejects settlement-sensitive entry modes (`day0_capture`, `update_reaction`) before Kelly when the confidence band is missing, non-finite, has `ci_lower <= 0`, or has `ci_upper <= ci_lower`. The rejection is recorded as `EDGE_INSUFFICIENT` with `confidence_band_guard`; `opening_hunt` is unchanged in this narrow packet.
+**Residual:** This does not rebuild historical reconstructed decisions or add provenance for deterministic/high-quality zero-width CI. Supporting such a case safely would need a larger provenance/schema packet.
 
-### [OPEN] Some positions never develop a usable monitor-to-exit chain before settlement
+### [MITIGATED] Missing monitor-to-exit chain escalates before settlement (2026-04-13)
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`
 **Problem:** A subset of positions reach settlement with only lifecycle + settlement events and no intermediate monitor/reversal chain, so `EDGE_REVERSAL` never has a chance to fire.
 **Impact:** The system cannot protect itself from fast-moving divergence if the monitor phase does not create an actual executable exit path.
-**Proposed antibody:** Require at least one post-entry monitor scan before settlement-sensitive positions are allowed to age out; if monitoring does not occur, flag the position as `monitor_chain_missing` and escalate.
+**Antibody deployed:** `execute_monitoring_phase()` now records `monitor_chain_missing` when a settlement-sensitive position cannot form a usable monitor-to-exit chain because refresh failed or exit authority returned `INCOMPLETE_EXIT_CONTEXT`. Refresh failures now produce a `MonitorResult` instead of disappearing from the cycle artifact, and `status_summary` projects `cycle_monitor_chain_missing:<count>` as infrastructure RED.
+**Residual:** This is operator-visible cycle escalation, not durable lifetime proof. DB projection/schema support for monitor counts or a durable monitor evidence spine remains a separate package.
 
-### [OPEN] Exit evaluation hard-fails when best_bid / exit context is missing
-**Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
+### [FIXED] Buy-yes exit uses degraded proxy when best_bid is missing (2026-04-13)
+**Location:** `src/state/portfolio.py`
 **Problem:** `best_bid is None` currently yields `INCOMPLETE_EXIT_CONTEXT` rather than a conservative fallback.
 **Impact:** Thin books or incomplete market snapshots can suppress exits entirely, even when the live edge has clearly reversed.
-**Proposed antibody:** Add a degraded fallback exit path (mid / last-trade / conservative proxy) and only hard-fail when all market evidence sources are unavailable.
+**Antibody deployed:** `Position.evaluate_exit()` keeps `ExitContext.best_bid=None` for audit truth, but buy-yes exit evaluation now uses a degraded EV-gate proxy from fresh `current_market_price - 0.01` when `best_bid` is unavailable. It records `best_bid_unavailable`, `best_bid_proxy_from_current_market_price`, and `best_bid_proxy_tick_discount`; if current market price is missing or stale, exit authority still fails closed.
+**Residual:** The proxy is not chain-proven sell-side liquidity. Use the audit markers to separate degraded exits from exits based on a real best bid.
 
 ### [PARTIALLY FIXED] EDGE_REVERSAL — hard divergence kill-switch at 0.30 added (2026-04-06, math audit)
 **Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
@@ -274,18 +278,20 @@ cycle_runner._execute_monitoring_phase()
 **Resolution:** The current paper snapshot no longer shows that split-brain state. `status_summary-paper.json` no longer presents the old stale `strategy_summary.gated` conflict in the latest snapshot, and the canonical gate authority remains the control plane.
 **Follow-up:** Keep the renderer deriving any future gate projections from the control plane only, and add a regression test if the duplicate field returns.
 
-### [OPEN] Harvester Stage-2 bootstrap path is not runtime-ready against canonically bootstrapped databases
+### [MITIGATED] Harvester Stage-2 DB shape preflight prevents noisy canonical-bootstrap failures (2026-04-13)
 **Location:** `src/execution/harvester.py` / runtime `position_events` helpers
 **Problem:** Recent log tails show repeated harvester errors stating that legacy runtime `position_events` helpers do not support canonically bootstrapped databases. The Stage-2 bootstrap path is still being exercised at runtime even though the helper contract cannot handle the current DB shape.
 **Live evidence (2026-04-06):** Harvester ran at 12:47–12:55 CDT and produced `settlements_found=141, pairs_created=0, positions_settled=0`. It found settlements but generated zero calibration pairs — consistent with Stage-2 helpers failing on canonically bootstrapped DB. Gamma API fetch also timed out during this run (`WARNING: Gamma API fetch failed: The read operation timed out`).
 **Impact:** Harvester cycles can fail noisily and skip settlement/pair creation work, leaving the runtime path partially broken even when the daemon and RiskGuard are alive.
-**Proposed antibody:** Add an explicit runtime-DB shape gate before Stage-2 harvester work starts, and route canonically bootstrapped databases through the migrated helper path only. Add a regression test that the legacy helper is rejected with a structured preflight error instead of spamming runtime logs.
+**Antibody deployed:** `run_harvester()` now runs a Stage-2 DB-shape preflight after settled events are fetched and before per-event learning work starts. If runtime support tables are missing, it returns `stage2_status='skipped_db_shape_preflight'` with missing trade/shared table lists and skips only Stage-2 snapshot/calibration/refit work; event parsing and settlement handling still run. Legacy `decision_log` settlement-record storage degrades when that table is absent instead of crashing the cycle.
+**Residual:** This is a structured skip, not a migration. It does not create calibration pairs on canonical-only bootstrap DBs, rebuild `p_raw_json`, or replace legacy Stage-2 helpers with a fully canonical learning path.
 
-### [OPEN] Los Angeles Gamma markets can be mislabeled / sourced from Milan
+### [FIXED] Los Angeles Gamma discovery rejects explicit Milan conflicts (2026-04-13)
 **Location:** Gamma API market discovery / `market_scanner` LA path
 **Problem:** Current audit evidence shows the Los Angeles market title / data source can resolve to Milan temperature data instead of LA weather truth.
 **Impact:** LA bin construction can be anchored to the wrong city, which contaminates signal, entry sizing, and any downstream settlement comparison.
-**Proposed antibody:** Add an explicit city-to-market sanity check in discovery so LA cannot bind to non-LA titles or station metadata; fail closed and record the anomaly when title/location mismatch is detected.
+**Antibody deployed:** `market_scanner._parse_event()` now rejects Gamma events when event or market text/station metadata explicitly references a different configured city than the matched event city. LA events with Milan/Milano/LIMC/Milan Malpensa evidence fail closed before outcomes are returned; valid LA/KLAX metadata still parses.
+**Residual:** This only catches explicit text/station conflicts on the `find_weather_markets()` discovery path. Existing monitor helpers (`get_current_yes_price`, `get_sibling_outcomes`) and harvester closed-event polling still need their own source-attestation package if they must defend against the same class of malformed Gamma payload. If Gamma omits metadata or supplies self-consistent but false LA metadata, external source attestation is still required.
 
 ### [OPEN] ACP router fallback chain is recovering after failure, not stabilizing before dispatch
 **Source:** `evolution/router-audit/2026-04-08-router-audit.md`
@@ -305,23 +311,26 @@ cycle_runner._execute_monitoring_phase()
 
 Six design gaps identified at the signal→strategy→execution boundary. The signal layer's high hit rate does not compose into profit because each cross-layer handoff loses the semantic that makes the upstream number meaningful. These are architecture-level gaps requiring typed contracts at module boundaries (INV-12 territory).
 
-### [OPEN] D1 — Alpha blending optimization target misalignment (CRITICAL)
+### [MITIGATED] D1 — Alpha consumers declare EV compatibility (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — `compute_alpha()`
 **Problem:** α adjustments (spread, lead time, freshness, model agreement) are validated against Brier score. But profit requires EV > cost. Brier-optimization converges Zeus toward market consensus, which drives edge → 0. The optimization target (accuracy) conflicts with the business objective (profit).
 **Impact:** Systematic edge compression. Alpha tuning that improves calibration accuracy simultaneously destroys the trading edge.
-**Proposed antibody:** α outputs become a typed `AlphaDecision(value, optimization_target, evidence_basis, ci_bound)` so downstream consumers know whether the number was optimized for accuracy or EV. INV-12 enforcement.
+**Antibody deployed:** `compute_alpha()` returns `AlphaDecision(optimization_target='risk_cap')`; active entry and monitor consumers call `value_for_consumer('ev')` before using α. Invalid alpha targets now fail construction, and a Brier-target alpha fails closed before Kelly sizing instead of silently flowing into EV decisions.
+**Residual:** α is still a conservative risk-cap blend, not an EV-optimized sweep. Closing D1 fully requires deriving and validating an EV-target alpha policy, not just preventing target mismatch.
 
-### [OPEN] D2 — TAIL_ALPHA_SCALE breaks buy_no primary edge source (CRITICAL)
+### [MITIGATED] D2 — Tail alpha scale is explicit calibration treatment (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — tail alpha scaling
 **Problem:** `TAIL_ALPHA_SCALE=0.5` scales α toward market on tail bins, directly halving the edge that buy_no depends on (retail lottery-effect overpricing of shoulder bins). The scaling serves calibration accuracy (Brier) but destroys the structural edge that Strategy B (Shoulder Bin Sell) exploits.
 **Impact:** Strategy B's primary edge source is systematically attenuated by a calibration-serving parameter.
-**Proposed antibody:** `TailTreatment` contract that declares whether it serves calibration OR profit. Cannot serve both without explicit tradeoff documentation.
+**Antibody deployed:** `alpha_for_bin()` now routes tail scaling through `DEFAULT_TAIL_TREATMENT = TailTreatment(scale_factor=TAIL_ALPHA_SCALE, serves='calibration_accuracy', ...)` instead of applying a naked constant. Provenance also states this is calibration-serving, not buy_no P&L validated.
+**Residual:** Behavior is unchanged and still may attenuate buy_no structural edge. Closing D2 requires a profit-validated tail policy, likely direction/objective-aware, with buy_no P&L evidence.
 
-### [OPEN] D3 — Entry price uses implied probability, not VWMP+fee (SEVERE)
+### [OPEN] D3 — Entry price must remain typed through execution economics
 **Location:** `src/strategy/market_analysis.py` — `BinEdge.entry_price`
 **Problem:** `BinEdge.entry_price = p_market[i]` (implied probability from mid-price), but actual execution price = ask + taker fee (5%) + slippage. Kelly sizing uses the implied probability as the cost basis, systematically oversizing positions because the real cost is higher.
 **Impact:** Every Kelly-sized position is larger than it should be. The magnitude depends on spread width and fee structure.
-**Proposed antibody:** `ExecutionPrice(vwmp_or_ask, fee_deducted=True/False, currency)` wrapper at the Kelly boundary. Kelly must receive fee-adjusted cost, not implied probability.
+**Mitigation deployed (2026-04-13):** `evaluator.py` wraps entry price as `ExecutionPrice`, queries token-specific CLOB fee rate when available, and computes `polymarket_fee(p) = fee_rate × p × (1-p)` before Kelly. The default settings now make the fee-adjusted path authoritative (`EXECUTION_PRICE_SHADOW=true`) instead of leaving the old bare-price path in control.
+**Remaining antibody:** Remove or harden the rollback seam, carry typed execution cost beyond evaluator, and connect market-specific tick size, neg-risk, and realized fill/slippage reconciliation.
 
 ### [OPEN] D4 — Entry-exit epistemic asymmetry (CRITICAL)
 **Location:** `src/engine/evaluator.py` (entry), `src/execution/exit_triggers.py` (exit)
@@ -329,12 +338,14 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Cross-reference:** Several specific manifestations of this asymmetry are tracked in the "Exit/Entry Epistemic Asymmetry" section above (MC count mismatch [FIXED], CI-aware exit [FIXED], hours_since_open [FIXED], divergence threshold [FIXED]). This gap tracks the *structural* asymmetry: entry and exit should share a symmetric `DecisionEvidence` contract with comparable statistical burden.
 **Proposed antibody:** Entry and exit share the same `DecisionEvidence` contract type with symmetric statistical burden. Exit reversal requires bootstrap-grade evidence, not just 2 consecutive point-estimate checks.
 
-### [OPEN] D5 — Vig smearing distorts edge signal (MEDIUM)
+### [MITIGATED] D5 — Complete market-family vig is removed before posterior blend (2026-04-13)
 **Location:** `src/strategy/market_fusion.py` — probability blending
 **Problem:** `p_market` includes vig (~0.95–1.05 total probability across bins). Blending model probability with vig-contaminated market probability, then normalizing, smears the vig bias into the posterior. The posterior systematically inherits a vig-driven bias that is not a real probability signal.
-**Proposed antibody:** Vig normalization before blend, under a declared `VigTreatment` contract that makes the vig handling explicit.
+**Antibody deployed:** `compute_posterior()` now constructs `VigTreatment.from_raw(p_market)` and blends against `clean_prices` before final posterior normalization when `p_market` looks like a complete market-family vector: plausible vig sum and at least two positive components. `MarketAnalysis.p_market` remains the raw tradable market vector for edge/entry-price semantics; only posterior fusion uses the de-vigged probability vector.
+**Residual:** Sparse monitor vectors and complete-family vectors outside the plausible vig window stay in raw observed-price space until monitor refresh can provide complete market-family vectors with explicit provenance. This does not address execution-side spread, fees, slippage, or historical replay metric drift from prior post-blend normalization.
 
-### [OPEN] D6 — EV hold calculation ignores funding/correlation cost (MEDIUM)
-**Location:** `src/strategy/kelly.py` — hold value calculation
+### [MITIGATED] D6 — Exit EV gate declares zero-cost HoldValue seam (2026-04-13)
+**Location:** `src/state/portfolio.py`, `src/execution/exit_triggers.py`
 **Problem:** `net_hold = shares × p_posterior` assumes free carry. Ignores opportunity cost of locked capital and correlation crowding across simultaneous positions. When holding multiple positions, capital is not fungible, but the sizing treats it as if each position is independent.
-**Proposed antibody:** `HoldValue` contract declaring included costs; minimum = fee + time-cost-to-settlement. Correlation-adjusted portfolio heat already partially addresses this through the Kelly cascade drawdown factor, but the hold value itself remains naïve.
+**Antibody deployed:** Active and legacy exit EV gates now route hold EV through `HoldValue.compute(...)`, explicitly declaring `fee` and `time` costs as zero and recording hold-value audit markers on active `Position.evaluate_exit()` paths. This makes free-carry arithmetic explicit and auditable without inventing unverified funding/correlation parameters.
+**Residual:** Real nonzero funding, redemption/fee, and correlation-crowding costs are still not priced. Closing D6 fully requires a cost policy, portfolio context at exit authority, and replay/live validation.

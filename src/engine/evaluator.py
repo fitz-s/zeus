@@ -19,7 +19,7 @@ import numpy as np
 from src.calibration.manager import get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.config import City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
+from src.config import CONFIG_DIR, City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -46,12 +46,13 @@ from src.state.portfolio import (
     is_token_on_cooldown,
     portfolio_heat_for_bankroll,
 )
-from src.strategy.fdr_filter import fdr_filter
+from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import apply_familywise_fdr, make_family_id
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
+from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
@@ -60,6 +61,10 @@ from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
+
+
+class FeeRateUnavailableError(RuntimeError):
+    """Raised when token-specific execution fee cannot be established."""
 
 
 @dataclass
@@ -145,6 +150,85 @@ def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -
     if entry_price <= CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:
         return f"CENTER_BUY_ULTRA_LOW_PRICE({entry_price:.4f}<={CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:.2f})"
     return None
+
+
+def _size_at_execution_price_boundary(
+    *,
+    p_posterior: float,
+    entry_price: float,
+    fee_rate: float,
+    sizing_bankroll: float,
+    kelly_multiplier: float,
+    safety_cap_usd: float | None,
+    feature_flags: dict | None,
+) -> float:
+    """Size a trade at the evaluator→Kelly boundary using typed entry cost."""
+    raw_entry_price = float(entry_price)
+    ep = ExecutionPrice(
+        value=raw_entry_price,
+        price_type="implied_probability",
+        fee_deducted=False,
+        currency="probability_units",
+    )
+    ep_fee_adjusted = ep.with_taker_fee(fee_rate)
+    ep_fee_adjusted.assert_kelly_safe()
+
+    fee_adjusted_size = kelly_size(
+        p_posterior,
+        ep_fee_adjusted.value,
+        sizing_bankroll,
+        kelly_multiplier,
+        safety_cap_usd=safety_cap_usd,
+    )
+
+    use_fee_adjusted = (feature_flags or {}).get("EXECUTION_PRICE_SHADOW", True)
+    if use_fee_adjusted:
+        return fee_adjusted_size
+
+    raw_size = kelly_size(
+        p_posterior,
+        raw_entry_price,
+        sizing_bankroll,
+        kelly_multiplier,
+        safety_cap_usd=safety_cap_usd,
+    )
+    if raw_size > 0:
+        _ep_logger = logging.getLogger("zeus.execution_price_shadow")
+        _ep_logger.info(
+            "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
+            raw_size,
+            fee_adjusted_size,
+            raw_size - fee_adjusted_size,
+            raw_entry_price,
+            ep_fee_adjusted.value,
+        )
+    return raw_size
+
+
+def _default_weather_fee_rate() -> float:
+    try:
+        from src.contracts.reality_contract import load_contracts_from_yaml
+
+        contracts = load_contracts_from_yaml(CONFIG_DIR / "reality_contracts" / "economic.yaml")
+        fee_contract = next(
+            (contract for contract in contracts if contract.contract_id == "FEE_RATE_WEATHER"),
+            None,
+        )
+        if fee_contract is not None:
+            return float(fee_contract.current_value)
+    except Exception as exc:
+        logger.warning("FEE_RATE_WEATHER contract unavailable; falling back to 0.05: %s", exc)
+    return 0.05
+
+
+def _fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
+    getter = getattr(clob, "get_fee_rate", None)
+    if callable(getter):
+        try:
+            return float(getter(token_id))
+        except Exception as exc:
+            raise FeeRateUnavailableError(f"fee-rate lookup failed for {token_id}: {exc}") from exc
+    return _default_weather_fee_rate()
 
 
 def _to_jsonable(value):
@@ -235,6 +319,24 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if hypothesis.direction == "buy_yes":
         return "center_buy"
     return "opening_inertia"
+
+
+def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
+    if candidate.discovery_mode not in {
+        DiscoveryMode.DAY0_CAPTURE.value,
+        DiscoveryMode.UPDATE_REACTION.value,
+    }:
+        return None
+    try:
+        ci_lower = float(edge.ci_lower)
+        ci_upper = float(edge.ci_upper)
+    except (TypeError, ValueError):
+        return "MISSING_CONFIDENCE_BAND"
+    if not np.isfinite(ci_lower) or not np.isfinite(ci_upper):
+        return "MISSING_CONFIDENCE_BAND"
+    if ci_lower <= 0.0 or ci_upper <= ci_lower:
+        return f"DEGENERATE_CONFIDENCE_BAND(ci_lower={ci_lower:.4f},ci_upper={ci_upper:.4f})"
+    return None
 
 
 def _selection_hypothesis_id(
@@ -478,7 +580,7 @@ def _selected_edge_keys_from_full_family(
                 "direction": hypothesis.direction,
             }
         )
-    selected_rows = apply_familywise_fdr(rows)
+    selected_rows = apply_familywise_fdr(rows, q=DEFAULT_FDR_ALPHA)
     return {
         (str(row["range_label"]), str(row["direction"]))
         for row in selected_rows
@@ -689,6 +791,33 @@ def evaluate_candidate(
     _store_snapshot_p_raw(conn, snapshot_id, p_raw)
 
     # Calibration
+    # K4 authority gate: verify no UNVERIFIED pairs are present for this bucket.
+    # get_pairs_for_bucket defaults to authority='VERIFIED', so this check catches
+    # any situation where UNVERIFIED rows are present (belt-and-suspenders).
+    # Guard: skip if conn is None/unavailable (test stubs that don't provide a real DB).
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_date, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="AUTHORITY_GATE",
+                rejection_reasons=[
+                    f"insufficient_verified_calibration: "
+                    f"{len(_unverified_pairs)} UNVERIFIED calibration rows present "
+                    f"for {city.name}/{_cal_season}"
+                ],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
     cal, cal_level = get_calibrator(conn, city, target_date)
     if cal is not None:
         p_cal = calibrate_and_normalize(
@@ -697,7 +826,7 @@ def evaluate_candidate(
             lead_days_for_calibration,
             bin_widths=[b.width for b in bins],
         )
-        entry_validations.extend(["platt_calibration", "normalization"])
+        entry_validations.extend(["platt_calibration", "normalization", "authority_verified"])
     else:
         p_cal = p_raw.copy()
 
@@ -853,14 +982,32 @@ def evaluate_candidate(
             agreement=agreement,
         )]
 
-    # Compute alpha
-    alpha = compute_alpha(
-        calibration_level=cal_level,
-        ensemble_spread=ensemble_spread,
-        model_agreement=agreement,
-        lead_days=lead_days_for_calibration,
-        hours_since_open=candidate.hours_since_open,
-    ).value
+    # Compute alpha — UNION resolution: K4.5 authority_verified gate (worktree)
+    # + consumer-target gating with AlphaTargetMismatchError handling (data-improve).
+    try:
+        alpha = compute_alpha(
+            calibration_level=cal_level,
+            ensemble_spread=ensemble_spread,
+            model_agreement=agreement,
+            lead_days=lead_days_for_calibration,
+            hours_since_open=candidate.hours_since_open,
+            authority_verified=True,
+        ).value_for_consumer("ev")
+    except AlphaTargetMismatchError as exc:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[f"ALPHA_TARGET_MISMATCH:{exc}"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "alpha_target_contract"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            p_market=p_market,
+            agreement=agreement,
+        )]
     if not is_day0_mode:
         entry_validations.append("model_agreement")
     entry_validations.append("alpha_posterior")
@@ -906,7 +1053,7 @@ def evaluate_candidate(
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
-        logger.error("Full-family hypothesis scan unavailable; using legacy FDR surface: %s", exc)
+        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc)
         _fdr_fallback = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)
@@ -914,7 +1061,9 @@ def evaluate_candidate(
 
     # FDR filter
     legacy_filtered = fdr_filter(edges)
-    if full_family_hypotheses:
+    if _fdr_fallback:
+        filtered = []
+    elif full_family_hypotheses:
         selected_edge_keys = _selected_edge_keys_from_full_family(
             candidate,
             full_family_hypotheses,
@@ -942,12 +1091,17 @@ def evaluate_candidate(
         logger.warning("Failed to record selection family facts: %s", exc)
 
     if not filtered:
-        stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
+        if _fdr_fallback:
+            stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
+            rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
+        else:
+            stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
+            rejection_reasons = [f"{len(edges)} edges found, {len(filtered)} passed FDR"]
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage=stage,
-            rejection_reasons=[f"{len(edges)} edges found, {len(filtered)} passed FDR"],
+            rejection_reasons=rejection_reasons,
             selected_method=selected_method,
             applied_validations=list(entry_validations),
             decision_snapshot_id=snapshot_id,
@@ -977,6 +1131,21 @@ def evaluate_candidate(
         decision_validations = list(entry_validations)
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
+        ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
+        if ci_rejection_reason is not None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="EDGE_INSUFFICIENT",
+                rejection_reasons=[ci_rejection_reason],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "confidence_band_guard"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
         policy_now = decision_time or datetime.now(timezone.utc)
         policy = (
             resolve_strategy_policy(conn, strategy_key, policy_now)
@@ -1054,8 +1223,8 @@ def evaluate_candidate(
             else 0.0
         )
         
-        # Phase 3: RiskGraph Regime Throttling
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+        # Phase 3: RiskGraph Regime Throttling (K3: cluster == city.name)
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5
@@ -1091,34 +1260,33 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
         
-        # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost
-        ep = ExecutionPrice(
-            value=edge.entry_price,
-            price_type="implied_probability",
-            fee_deducted=False,
-            currency="probability_units",
+        # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
+        try:
+            fee_rate = _fee_rate_for_token(clob, check_token)
+        except FeeRateUnavailableError as exc:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="EXECUTION_PRICE_UNAVAILABLE",
+                rejection_reasons=[str(exc)],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=list(decision_validations),
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
+        size = _size_at_execution_price_boundary(
+            p_posterior=edge.p_posterior,
+            entry_price=edge.entry_price,
+            fee_rate=fee_rate,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=km * risk_throttle,
+            safety_cap_usd=settings["live_safety_cap_usd"],
+            feature_flags=settings._data.get("feature_flags", {}),
         )
-        ep_fee_adjusted = ep.with_taker_fee()
-        ep_fee_adjusted.assert_kelly_safe()
-
-        _shadow_flag = settings._data.get("feature_flags", {}).get("EXECUTION_PRICE_SHADOW", False)
-        if _shadow_flag:
-            # New path authoritative — fee-adjusted entry price
-            size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
-                              safety_cap_usd=settings["live_safety_cap_usd"])
-        else:
-            # Shadow mode: old path authoritative, log delta for monitoring
-            size = kelly_size(edge.p_posterior, edge.entry_price, sizing_bankroll, km * risk_throttle,
-                              safety_cap_usd=settings["live_safety_cap_usd"])
-            shadow_size = kelly_size(edge.p_posterior, ep_fee_adjusted.value, sizing_bankroll, km * risk_throttle,
-                                     safety_cap_usd=settings["live_safety_cap_usd"])
-            if size > 0:
-                _ep_logger = logging.getLogger("zeus.execution_price_shadow")
-                _ep_logger.info(
-                    "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
-                    size, shadow_size, size - shadow_size,
-                    edge.entry_price, ep_fee_adjusted.value,
-                )
         if policy.allocation_multiplier != 1.0:
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")
@@ -1144,14 +1312,9 @@ def evaluate_candidate(
             size_usd=size,
             bankroll=sizing_bankroll,
             city=city.name,
-            cluster=city.cluster,
             current_city_exposure=(
                 city_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
                 + (projected_city_exposure_usd[city.name] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
-            ),
-            current_cluster_exposure=(
-                cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
-                + (projected_cluster_exposure_usd[city.cluster] / sizing_bankroll if sizing_bankroll > 0 else 0.0)
             ),
             current_portfolio_heat=current_heat,
             limits=limits,
@@ -1215,7 +1378,7 @@ def evaluate_candidate(
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size
-        projected_cluster_exposure_usd[city.cluster] += size
+        projected_cluster_exposure_usd[city.name] += size
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace

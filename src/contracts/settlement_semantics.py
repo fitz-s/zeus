@@ -8,6 +8,27 @@ from src.contracts.exceptions import SettlementPrecisionError
 
 logger = logging.getLogger(__name__)
 
+RoundingRule = Literal["wmo_half_up", "floor", "ceil"]
+
+
+def round_wmo_half_up_values(values, precision: float = 1.0) -> np.ndarray:
+    """Round values using WMO asymmetric half-up semantics.
+
+    WU/NWS integer temperature displays follow WMO half-up on the number line:
+    floor(x + 0.5). This differs from Python/NumPy banker's rounding and from
+    half-away-from-zero for negative values.
+    """
+    arr = np.asarray(values, dtype=float)
+    inv = 1.0 / precision if precision > 0 else 1.0
+    scaled = arr * inv
+    return np.floor(scaled + 0.5) / inv
+
+
+def round_wmo_half_up_value(value: float, precision: float = 1.0) -> float:
+    """Round one value using WMO asymmetric half-up semantics."""
+    return float(round_wmo_half_up_values([value], precision)[0])
+
+
 @dataclass(frozen=True)
 class SettlementSemantics:
     """Every market's unique resolution rules. Drifts in rounding/precision are fatal errors.
@@ -18,7 +39,7 @@ class SettlementSemantics:
     resolution_source: str  # e.g., "WU_LaGuardia", "CWA_Taipei"
     measurement_unit: Literal["F", "C"]
     precision: float        # 1.0 = whole degrees, 0.1 = one decimal
-    rounding_rule: Literal["round_half_to_even", "floor", "ceil"]
+    rounding_rule: RoundingRule
     finalization_time: str  # "12:00:00Z"
 
     def round_values(self, values):
@@ -27,14 +48,14 @@ class SettlementSemantics:
         inv = 1.0 / self.precision if self.precision > 0 else 1.0
         scaled = arr * inv
 
-        if self.rounding_rule == "round_half_to_even":
-            rounded = np.round(scaled)
+        if self.rounding_rule == "wmo_half_up":
+            rounded = np.floor(scaled + 0.5)
         elif self.rounding_rule == "floor":
             rounded = np.floor(scaled)
         elif self.rounding_rule == "ceil":
             rounded = np.ceil(scaled)
         else:
-            rounded = np.round(scaled)
+            raise ValueError(f"Unsupported settlement rounding rule: {self.rounding_rule}")
 
         return rounded / inv
 
@@ -73,12 +94,12 @@ class SettlementSemantics:
     
     @classmethod
     def default_wu_fahrenheit(cls, city_code: str) -> "SettlementSemantics":
-        """Polymarket USA city contracts: WU integer °F."""
+        """Polymarket USA city contracts: WU integer °F with WMO half-up rounding."""
         return cls(
             resolution_source=f"WU_{city_code}",
             measurement_unit="F",
             precision=1.0,
-            rounding_rule="round_half_to_even",
+            rounding_rule="wmo_half_up",
             finalization_time="12:00:00Z"
         )
 
@@ -87,13 +108,13 @@ class SettlementSemantics:
         """Polymarket international city contracts: WU integer °C.
 
         Polymarket °C markets use 1°C point bins (e.g., "4°C", "5°C").
-        Settlement rounds to integer °C, same rounding rule as °F.
+        Settlement rounds to integer °C, same WMO half-up rounding rule as °F.
         """
         return cls(
             resolution_source=f"WU_{city_code}",
             measurement_unit="C",
             precision=1.0,
-            rounding_rule="round_half_to_even",
+            rounding_rule="wmo_half_up",
             finalization_time="12:00:00Z"
         )
 
@@ -117,6 +138,6 @@ class SettlementSemantics:
             resolution_source=city.wu_station,
             measurement_unit=city.settlement_unit,
             precision=1.0,
-            rounding_rule="round_half_to_even",
+            rounding_rule="wmo_half_up",
             finalization_time="12:00:00Z",
         )

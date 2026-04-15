@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 import pytest
 
 
@@ -121,7 +123,7 @@ def parse_winning_bin_index(winning_bin: str, p_vector: list[float], settlement_
     if is_celsius:
         # Celsius bins are 1-degree wide
         # Defensive: round to integer per settlement precision contract
-        value = round(float(settlement_value))
+        value = round_wmo_half_up_value(float(settlement_value))
         
         # Heuristic for C cities with 11 bins:
         # Assume bins are: <=5, 6, 7, 8, 9, 10, 11, 12, 13, 14, >=15 (example)
@@ -143,7 +145,7 @@ def parse_winning_bin_index(winning_bin: str, p_vector: list[float], settlement_
     else:
         # Fahrenheit bins are 2-degree wide
         # Defensive: round to integer per settlement precision contract
-        value = round(float(settlement_value))
+        value = round_wmo_half_up_value(float(settlement_value))
         
         if n_bins == 11:
             # Standard 11-bin F structure

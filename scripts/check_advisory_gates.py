@@ -15,23 +15,26 @@ REQUIRED_BLOCKING_JOBS = {
     "module-boundaries",
     "packet-grammar",
     "kernel-invariants",
+    "topology-doctor-modes",
+    "semantic-linter",
+    "assumptions-validation",
+    "law-gate-tests",
 }
 
 REQUIRED_ADVISORY_JOBS = {
     "semgrep-zeus",
     "replay-parity",
+    "topology-full-strict",
 }
 
 REQUIRED_TRIGGER_PATHS = {
     "AGENTS.md",
     ".github/workflows/**",
+    "src/**",
+    "scripts/**",
+    "tests/**",
     "docs/authority/**",
     "docs/operations/**",
-    "scripts/_yaml_bootstrap.py",
-    "scripts/check_*",
-    "scripts/replay_parity.py",
-    "tests/test_architecture_contracts.py",
-    "tests/test_cross_module_invariants.py",
     "docs/work_packets/**",
 }
 
@@ -127,6 +130,68 @@ def ensure_semgrep_and_replay_are_advisory(data: dict, errors: list[str]) -> Non
     if "Promote only after" not in replay_review:
         errors.append("replay-parity: promotion condition must stay explicit")
 
+    strict_steps = "\n".join(
+        step.get("run", "")
+        for step in jobs.get("topology-full-strict", {}).get("steps", [])
+        if isinstance(step, dict)
+    )
+    if "python scripts/topology_doctor.py --strict" not in strict_steps:
+        errors.append("topology-full-strict: expected strict topology command missing")
+    strict_review = (
+        jobs.get("topology-full-strict", {}).get("env", {}).get("GATE_REVIEW_CONDITION", "")
+    )
+    if "Promote only after" not in strict_review:
+        errors.append("topology-full-strict: promotion condition must stay explicit")
+
+
+def ensure_blocking_topology_jobs(data: dict, errors: list[str]) -> None:
+    jobs = data.get("jobs", {})
+
+    topology_steps = "\n".join(
+        step.get("run", "")
+        for step in jobs.get("topology-doctor-modes", {}).get("steps", [])
+        if isinstance(step, dict)
+    )
+    for command in (
+        "python scripts/topology_doctor.py --docs",
+        "python scripts/topology_doctor.py --source",
+        "python scripts/topology_doctor.py --tests",
+        "python scripts/topology_doctor.py --scripts",
+    ):
+        if command not in topology_steps:
+            errors.append(f"topology-doctor-modes: missing command {command}")
+
+    semantic_steps = "\n".join(
+        step.get("run", "")
+        for step in jobs.get("semantic-linter", {}).get("steps", [])
+        if isinstance(step, dict)
+    )
+    if "python scripts/semantic_linter.py" not in semantic_steps:
+        errors.append("semantic-linter: expected semantic linter command missing")
+
+    assumption_steps = "\n".join(
+        step.get("run", "")
+        for step in jobs.get("assumptions-validation", {}).get("steps", [])
+        if isinstance(step, dict)
+    )
+    if "python scripts/validate_assumptions.py" not in assumption_steps:
+        errors.append("assumptions-validation: expected assumptions validation command missing")
+
+    law_steps = "\n".join(
+        step.get("run", "")
+        for step in jobs.get("law-gate-tests", {}).get("steps", [])
+        if isinstance(step, dict)
+    )
+    for test_file in (
+        "tests/test_instrument_invariants.py",
+        "tests/test_lifecycle.py",
+        "tests/test_backtest_outcome_comparison.py",
+        "tests/test_fdr.py",
+        "tests/test_run_replay_cli.py",
+    ):
+        if test_file not in law_steps:
+            errors.append(f"law-gate-tests: missing {test_file}")
+
 
 def ensure_no_external_blocking_references(data: dict, errors: list[str]) -> None:
     rendered = WORKFLOW_PATH.read_text()
@@ -147,6 +212,7 @@ def main() -> int:
 
     ensure_paths(data, errors)
     ensure_jobs(data, errors)
+    ensure_blocking_topology_jobs(data, errors)
     ensure_semgrep_and_replay_are_advisory(data, errors)
     ensure_no_external_blocking_references(data, errors)
 

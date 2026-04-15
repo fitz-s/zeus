@@ -84,10 +84,11 @@ Every task must be completable independently and must end with a verifiable pass
   - Live-only: naturally. Nothing has "paper and live share X" anymore because paper is gone.
   - Verify: `grep -r "shared" src/` returns zero matches except in legitimate English prose; `sqlite3 state/zeus-world.db ".tables"` shows only world-data tables (~20 tables); boot live daemon, cycle runs clean.
 
-- [ ] **1.4 Exception → auto-pause entries hook**
+- [x] **1.4 Exception → auto-pause entries hook**
   - Files: `src/engine/cycle_runner.py`, `src/control/control_plane.py`
   - What: wrap entry discovery + sizing + execution loop in a try/except. Any unhandled exception in the entry path → `control.entries_paused = True` with `reason_code = "auto_pause:<exception_class>"`, emit Discord alert, continue running (monitoring/exit/settlement paths unaffected). Operator must explicitly `resume` to re-enable entries.
-  - Verify: unit test injects a raised `ValueError` mid-sizing; assert entries_paused true, alert invoked, exit/monitor still runs.
+  - Status: implemented on `data-improve`; latest hardening in `f5025bc` makes pause source/reason current-state visible and clears stale cycle pause fields after resume.
+  - Verify: `tests/test_auto_pause_entries.py`, `tests/test_runtime_guards.py::test_entries_paused_reports_block_reason`, `tests/test_pnl_flow_and_audit.py::test_inv_pause_entries_survives_control_state_refresh`, and pause-source status/healthcheck regressions.
 
 ### Tier 2 — Structural fixes (replace the defensive workarounds)
 

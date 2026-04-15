@@ -1,2 +1,0 @@
-opportunity_fact_rows,opp_p_raw_nonnull,opp_p_cal_nonnull,opp_p_market_nonnull,opp_alpha_nonnull,trade_decisions_rows,trade_p_calibrated_nonnull,trade_p_raw_nonnull,trade_p_posterior_nonnull,shadow_signals_rows
-43,0,35,35,43,145,0,145,145,136

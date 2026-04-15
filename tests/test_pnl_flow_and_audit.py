@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -50,12 +51,18 @@ from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge
 
 
+def _ensure_auth_verified(conn) -> None:
+    """Mark all calibration_pairs rows VERIFIED (init_schema now creates the column)."""
+    conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
+    conn.commit()
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,
     lon=-73.8726,
     timezone="America/New_York",
-    cluster="US-Northeast",
+    cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
 )
@@ -63,12 +70,16 @@ NYC = City(
 MISSING = object()
 
 
+def _stub_full_family_scan(monkeypatch) -> None:
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+
+
 def _position(**kwargs) -> Position:
     defaults = dict(
         trade_id="t1",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -539,6 +550,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: "auto_exception")
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: "auto_pause:ValueError")
     monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 2.0)
     monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {"opening_inertia": GateDecision(enabled=False, reason_code=ReasonCode.UNSPECIFIED, reason_snapshot={}, gated_at="", gated_by="unknown")})
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
@@ -557,6 +570,8 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     assert status["portfolio"]["positions"][0]["entry_fill_verified"] == open_pos.entry_fill_verified
     assert status["portfolio"]["positions"][0]["admin_exit_reason"] == open_pos.admin_exit_reason
     assert status["control"]["entries_paused"] is True
+    assert status["control"]["entries_pause_source"] == "auto_exception"
+    assert status["control"]["entries_pause_reason"] == "auto_pause:ValueError"
     assert status["control"]["edge_threshold_multiplier"] == 2.0
     assert status["control"]["strategy_gates"]["opening_inertia"]["enabled"] is False
     assert status["control"]["recommended_controls"] == ["tighten_risk"]
@@ -686,6 +701,52 @@ def test_inv_status_escalates_risk_when_cycle_failed_or_query_errors(monkeypatch
         "position_current": "missing_table",
         "strategy_health": "stale",
     }
+
+
+def test_status_summary_projects_monitor_chain_missing_as_infrastructure_red(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_position_current_status_view",
+        lambda conn: {
+            "status": "ok",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        },
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_strategy_health_snapshot",
+        lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+    )
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+
+    status_summary_module.write_status({"mode": "test", "monitor_chain_missing": 2})
+    status = json.loads(status_path.read_text())
+
+    assert status["risk"]["infrastructure_level"] == "RED"
+    assert "cycle_monitor_chain_missing:2" in status["risk"]["infrastructure_issues"]
 
 
 def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
@@ -948,6 +1009,9 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
 
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
     monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
     monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
     monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
@@ -957,6 +1021,94 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
     refreshed = json.loads(status_path.read_text())
 
     assert refreshed["cycle"]["entries_blocked_reason"] == "risk_level=ORANGE"
+
+
+def test_inv_write_status_drops_stale_pause_cycle_when_refreshing_after_resume(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00Z",
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
+                "risk": {"level": "GREEN"},
+                "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
+                "cycle": {
+                    "entries_paused": True,
+                    "entries_pause_reason": "auto_pause:ValueError",
+                    "entries_blocked_reason": "entries_paused",
+                    "failed": False,
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+
+    status_summary_module.write_status()
+    refreshed = json.loads(status_path.read_text())
+
+    assert "entries_paused" not in refreshed["cycle"]
+    assert "entries_pause_reason" not in refreshed["cycle"]
+    assert "entries_blocked_reason" not in refreshed["cycle"]
+    assert refreshed["control"]["entries_paused"] is False
+    assert refreshed["control"]["entries_pause_source"] is None
+    assert refreshed["control"]["entries_pause_reason"] is None
+
+
+def test_inv_write_status_overrides_stale_blocker_when_refreshing_during_pause(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    _insert_position_current_row(conn, position_id="t1", strategy_key="center_buy", size_usd=5.0)
+    _insert_strategy_health_row(conn, strategy_key="center_buy", as_of="2026-04-04T00:00:00+00:00", open_exposure_usd=5.0)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00Z",
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
+                "risk": {"level": "GREEN"},
+                "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
+                "cycle": {
+                    "entries_blocked_reason": "risk_level=ORANGE",
+                    "failed": False,
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+    monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: "manual_command")
+    monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {})
+    monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+    monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+
+    status_summary_module.write_status()
+    refreshed = json.loads(status_path.read_text())
+
+    assert refreshed["cycle"]["entries_paused"] is True
+    assert refreshed["cycle"]["entries_blocked_reason"] == "entries_paused"
+    assert "entries_pause_reason" not in refreshed["cycle"]
+    assert refreshed["control"]["entries_pause_source"] == "manual_command"
 
 
 def test_inv_status_surfaces_db_substrate_degradation(monkeypatch, tmp_path):
@@ -1087,16 +1239,87 @@ def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path)
 
     assert processed == ["pause_entries"]
     assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
 
     control_plane_module.clear_control_state()
 
     assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
     row = get_connection(db_path).execute(
-        "SELECT value, issued_by, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+        "SELECT value, issued_by, reason, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
     ).fetchone()
     assert row["value"] == "true"
     assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "control_plane:pause_entries"
     assert row["precedence"] == 100
+
+
+def test_inv_pause_entries_source_is_manual_for_custom_issuer(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_world_connection", lambda: get_connection(db_path))
+    control_plane_module.clear_control_state()
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {"command": "pause_entries", "issued_by": "ui", "note": "operator requested pause"}
+                ],
+                "acks": [],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["pause_entries"]
+    assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
+    row = get_connection(db_path).execute(
+        "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+    ).fetchone()
+    assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "operator requested pause"
+
+
+def test_inv_pause_entries_source_ignores_manual_note_that_looks_auto(monkeypatch, tmp_path):
+    control_path = tmp_path / "control_plane.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.close()
+    monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
+    monkeypatch.setattr(control_plane_module, "get_world_connection", lambda: get_connection(db_path))
+    control_plane_module.clear_control_state()
+    control_path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {"command": "pause_entries", "issued_by": "ui", "note": "auto_pause:manual-note"}
+                ],
+                "acks": [],
+            }
+        )
+    )
+
+    processed = control_plane_module.process_commands()
+
+    assert processed == ["pause_entries"]
+    assert control_plane_module.is_entries_paused() is True
+    assert control_plane_module.get_entries_pause_source() == "manual_command"
+    assert control_plane_module.get_entries_pause_reason() is None
+    row = get_connection(db_path).execute(
+        "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
+    ).fetchone()
+    assert row["issued_by"] == "control_plane"
+    assert row["reason"] == "auto_pause:manual-note"
 
 
 def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatch, tmp_path):
@@ -1541,6 +1764,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
 
@@ -1561,7 +1785,6 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -1679,6 +1902,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -1711,7 +1935,6 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -1799,6 +2022,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -1824,7 +2048,6 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -1915,6 +2138,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(
@@ -1947,7 +2171,6 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2039,6 +2262,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "is_reentry_blocked", lambda *args, **kwargs: True)
@@ -2068,7 +2292,6 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
     )
@@ -2178,6 +2401,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2193,7 +2417,6 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
         decision_time=now,
@@ -2305,6 +2528,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2320,7 +2544,6 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
             max_portfolio_heat_pct=0.50,
             max_correlated_pct=0.25,
             max_city_pct=0.20,
-            max_region_pct=0.35,
             min_order_usd=1.0,
         ),
         decision_time=now,
@@ -2420,6 +2643,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2641,7 +2865,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
         trade_id="rt-settle-auth",
         market_id="m6",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -2843,7 +3067,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     init_schema(conn)
 
     season = season_from_date("2026-04-01")
-    for i in range(13):
+    for i in range(15):
         add_calibration_pair(
             conn,
             city="NYC",
@@ -2888,6 +3112,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         settled_at="2026-04-01T23:00:00Z",
     )])
     conn.commit()
+    _ensure_auth_verified(conn)
     conn.close()
 
     event = {
@@ -2930,8 +3155,103 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     conn.close()
 
     assert result["pairs_created"] == 2
+    assert result["stage2_status"] == "ready"
     assert row is not None
     assert row["n_samples"] >= 15
+
+
+def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "canonical_bootstrap.db"
+    conn = get_connection(db_path)
+    apply_architecture_kernel_schema(conn)
+    conn.commit()
+    conn.close()
+
+    event = {
+        "title": "Highest temperature in New York City on April 1 2026",
+        "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
+        "markets": [
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps([1.0, 0.0]),
+                "conditionId": "m1",
+            }
+        ],
+    }
+
+    hconn = get_connection(db_path)
+    monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: hconn)
+    monkeypatch.setattr(harvester_module, "get_world_connection", lambda: hconn)
+    monkeypatch.setattr(
+        harvester_module,
+        "load_portfolio",
+        lambda: PortfolioState(
+            bankroll=150.0,
+            positions=[
+                _position(
+                    trade_id="stage2-skip-settles",
+                    city="NYC",
+                    target_date="2026-04-01",
+                    bin_label="39-40°F",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    monkeypatch.setattr(
+        harvester_module,
+        "_snapshot_contexts_for_market",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("preflight should skip Stage-2")),
+    )
+    settled_calls = []
+
+    def _settle_positions(*args, **kwargs):
+        settled_calls.append(args[2:5])
+        kwargs["settlement_records"].append(SettlementRecord(
+            trade_id="stage2-skip-settles",
+            city="NYC",
+            target_date="2026-04-01",
+            range_label="39-40°F",
+            direction="buy_yes",
+            p_posterior=0.61,
+            outcome=1,
+            pnl=1.0,
+            decision_snapshot_id="snap-missing",
+            strategy="center_buy",
+            edge_source="center_buy",
+            settled_at="2026-04-01T23:00:00Z",
+        ))
+        return 1
+
+    monkeypatch.setattr(harvester_module, "_settle_positions", _settle_positions)
+    monkeypatch.setattr(
+        harvester_module,
+        "store_settlement_records",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("decision_log writer must be skipped")),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = harvester_module.run_harvester()
+
+    assert result["settlements_found"] == 1
+    assert result["pairs_created"] == 0
+    assert result["positions_settled"] == 1
+    assert result["legacy_settlement_records_skipped"] == 1
+    assert result["stage2_status"] == "skipped_db_shape_preflight"
+    assert "decision_log" in result["stage2_missing_trade_tables"]
+    assert "chronicle" in result["stage2_missing_trade_tables"]
+    assert "ensemble_snapshots" in result["stage2_missing_shared_tables"]
+    assert settled_calls == [("NYC", "2026-04-01", "39-40°F")]
+    assert not any("Harvester error" in record.getMessage() for record in caplog.records)
 
 
 def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_settlement_exists(monkeypatch, tmp_path):

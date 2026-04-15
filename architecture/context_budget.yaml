@@ -1,0 +1,110 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "S0 Context Budget Gate"
+  purpose: >
+    Keep the topology map, root instructions, and lore system useful as routing
+    surfaces instead of allowing them to become default-read encyclopedias.
+  enforcement_phase: advisory
+  rationale: >
+    S0 measures context bloat first. Later slimming packets should reduce the
+    advisory overages, then promote selected budgets to blocking.
+
+maintenance_cadence:
+  run_after_completed_packets: 5
+  trigger_if:
+    agents_md_added_lines: 20
+    workspace_map_added_lines: 15
+    history_lore_added_cards: 10
+    new_reference_doc_lines: 250
+    digest_lore_cards_returned: 6
+
+file_budgets:
+  - path: AGENTS.md
+    role: boot_context_and_contract
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      Keep root AGENTS as a first-read Zeus mental model plus boot contract.
+      Move detailed examples, historical timelines, and specialized workflows
+      into digest-routed lore or scoped references.
+  - path: workspace_map.md
+    role: directory_router_only
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep the workspace map as directory-level routing. Avoid duplicating
+      machine manifests such as source_rationale, test_topology, and
+      script_manifest.
+  - path: architecture/history_lore.yaml
+    role: lore_registry_not_default_context
+    max_lines: 1600
+    enforcement: advisory
+    diet_target: >
+      Lore may grow, but digest routing must stay selective. If this registry
+      keeps growing, split cards by domain only after routing stays precise.
+  - path: docs/reference/statistical_methodology.md
+    role: conditional_deep_reference
+    max_lines: 800
+    enforcement: advisory
+    diet_target: >
+      Keep as conditional math methodology. Do not make it a default read path.
+  - path: docs/reference/zeus_math_spec.md
+    role: conditional_fact_spec
+    max_lines: 800
+    enforcement: advisory
+    diet_target: >
+      Keep as high-confidence fact spec, not top-level authority. Facts should
+      be reflected in executable contracts and lore cards.
+  - path: tests/AGENTS.md
+    role: manifest_backed_scoped_registry
+    max_lines: 80
+    enforcement: advisory
+    diet_target: >
+      Keep as test-zone route and rules. Do not duplicate the full active test
+      catalog from architecture/test_topology.yaml.
+  - path: scripts/AGENTS.md
+    role: manifest_backed_scoped_registry
+    max_lines: 80
+    enforcement: advisory
+    diet_target: >
+      Keep as script-zone route and rules. Do not duplicate the full active
+      script catalog from architecture/script_manifest.yaml.
+
+digest_budgets:
+  history_lore:
+    max_cards_per_digest: 6
+    max_zero_context_digest_chars: 240
+    enforcement: advisory
+    sample_tasks:
+      - "fix settlement rounding in replay"
+      - "certify data rebuild for live math"
+      - "fix DST diurnal rebuild"
+      - "retune alpha tail treatment for buy_no EV"
+      - "fix daily_loss in risk_state reporting"
+
+default_read_path:
+  max_pre_code_reads: 6
+  route_budgets:
+    script_edit:
+      soft_limit: 6
+      expected_reads: [AGENTS.md, workspace_map.md, scripts/AGENTS.md, architecture/script_manifest.yaml, target_script, targeted_test_or_topology_doctor_scripts]
+    source_edit:
+      soft_limit: 6
+      expected_reads: [AGENTS.md, workspace_map.md, scoped_src_AGENTS.md, architecture/zones.yaml_or_source_rationale.yaml, target_file, targeted_test]
+    architecture_or_governance:
+      soft_limit: 8
+      expected_reads: [AGENTS.md, workspace_map.md, architecture/AGENTS.md, relevant_manifest, docs_authority_entrypoint, digest, targeted_test, reviewer_evidence]
+    broad_discovery:
+      soft_limit: 8
+      expected_reads: [AGENTS.md, workspace_map.md, digest, relevant_scoped_AGENTS, relevant_manifest, sampled_code, targeted_tests, notes]
+  required_order:
+    - AGENTS.md
+    - workspace_map.md
+    - scoped AGENTS.md for touched directory
+    - relevant machine manifest, such as zones.yaml/script_manifest.yaml/test_topology.yaml
+    - topology_doctor digest for task
+  rule: >
+    The budget is a soft ceiling for the pre-code navigation set, not a ban on
+    necessary authority reads. If a task needs more than the relevant ceiling,
+    use a digest or plan packet to justify and narrow the extra reads.

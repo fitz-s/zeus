@@ -2,6 +2,8 @@
   "capital_base_usd": 150,
   "live_safety_cap_usd": 5.0,
   "_live_safety_cap_usd_note": "Phase 1 maturity rail. Kelly output hard-clipped to this ceiling for canary window. Lifted only after Tier 6 canary passes.",
+  "smoke_test_portfolio_cap_usd": 5.0,
+  "_smoke_test_portfolio_cap_usd_note": "ONE-TIME smoke test guard: portfolio-wide filled+pending exposure cap. Blocks new entries once total cost-basis across all non-terminal positions exceeds this. Not a permanent feature \u2014 remove after the first full entry\u2192fill\u2192settlement lifecycle has been observed. Added 2026-04-12 after first live cycle placed 12 orders (2 matched) intending $60 exposure when operator expected a single $5 test trade.",
   "mode": "live",
   "discovery": {
     "opening_hunt_interval_min": 30,
@@ -83,156 +85,10 @@
     "max_portfolio_heat_pct": 0.5,
     "max_correlated_pct": 0.25,
     "max_city_pct": 0.2,
-    "max_region_pct": 0.35,
     "min_order_usd": 1.0
   },
   "correlation": {
-    "default_cross_cluster": 0.1,
-    "matrix": {
-      "US-Northeast": {
-        "US-GreatLakes": 0.6,
-        "US-Southeast-Inland": 0.4,
-        "US-Florida": 0.25,
-        "US-Texas-Triangle": 0.25,
-        "US-California-Coast": 0.1,
-        "US-Pacific-Northwest": 0.1,
-        "US-Rockies": 0.2,
-        "Europe-Maritime": 0.15,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-GreatLakes": {
-        "US-Southeast-Inland": 0.35,
-        "US-Florida": 0.15,
-        "US-Texas-Triangle": 0.45,
-        "US-California-Coast": 0.15,
-        "US-Pacific-Northwest": 0.15,
-        "US-Rockies": 0.4,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-Pacific-Northwest": {
-        "US-California-Coast": 0.45,
-        "US-Rockies": 0.35,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-Southeast-Inland": {
-        "US-Florida": 0.6,
-        "US-Texas-Triangle": 0.45,
-        "US-California-Coast": 0.1,
-        "US-Rockies": 0.15,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-Florida": {
-        "US-Texas-Triangle": 0.25,
-        "US-California-Coast": 0.1,
-        "US-Rockies": 0.1,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-Texas-Triangle": {
-        "US-California-Coast": 0.15,
-        "US-Rockies": 0.35,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "US-California-Coast": {
-        "US-Rockies": 0.25,
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.15,
-        "Asia-East-China": 0.1
-      },
-      "US-Rockies": {
-        "Europe-Maritime": 0.1,
-        "Europe-Continental": 0.1,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "Europe-Maritime": {
-        "Europe-Continental": 0.45,
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "Europe-Continental": {
-        "Asia-Northeast": 0.1,
-        "Asia-East-China": 0.1
-      },
-      "Asia-Northeast": {
-        "Asia-East-China": 0.45,
-        "China-North": 0.45,
-        "China-Central": 0.30
-      },
-      "Asia-East-China": {
-        "China-Central": 0.50,
-        "China-North": 0.50,
-        "Asia-Subtropical": 0.45
-      },
-      "Africa-South-Maritime": {
-        "Africa-West-Tropical": 0.25
-      },
-      "Africa-West-Tropical": {},
-      "Asia-Subtropical": {
-        "Southeast-Asia-Equatorial": 0.35,
-        "China-Central": 0.35
-      },
-      "China-Central": {
-        "China-North": 0.55
-      },
-      "China-North": {},
-      "Europe-Eastern": {
-        "Europe-Continental": 0.55,
-        "Europe-Maritime": 0.30,
-        "Europe-Mediterranean": 0.40,
-        "Turkey": 0.35
-      },
-      "Europe-Mediterranean": {
-        "Turkey": 0.55,
-        "Middle-East-Levant": 0.35
-      },
-      "India-North": {
-        "Asia-Subtropical": 0.20
-      },
-      "Latin-America-Highland": {
-        "Latin-America-Tropical": 0.40
-      },
-      "Latin-America-Tropical": {
-        "South-America-Tropical": 0.55
-      },
-      "Middle-East-Arabian": {
-        "Middle-East-Levant": 0.55,
-        "Turkey": 0.30
-      },
-      "Middle-East-Levant": {
-        "Turkey": 0.40
-      },
-      "North-America-Great-Lakes": {
-        "US-GreatLakes": 0.70,
-        "US-Northeast": 0.55
-      },
-      "Oceania-Maritime": {
-        "Southeast-Asia-Equatorial": 0.20
-      },
-      "South-America-Pampas": {
-        "South-America-Tropical": 0.35
-      },
-      "South-America-Tropical": {},
-      "Southeast-Asia-Equatorial": {},
-      "Turkey": {}
-    }
+    "default_cross_cluster": 0.1
   },
   "exit": {
     "reversal_confirmations": 2,
@@ -282,7 +138,7 @@
   },
   "bias_correction_enabled": false,
   "feature_flags": {
-    "EXECUTION_PRICE_SHADOW": false,
+    "EXECUTION_PRICE_SHADOW": true,
     "CANONICAL_EXIT_PATH": false
   }
 }

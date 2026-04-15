@@ -14,6 +14,7 @@ import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
 from src.config import edge_n_bootstrap
+from src.contracts.settlement_semantics import round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,
@@ -94,6 +95,17 @@ class MarketAnalysis:
             lead_days=lead_days,
             ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
+        self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
+
+    def _posterior_with_bootstrapped_bin(self, bin_idx: int, p_cal_boot: float) -> np.ndarray:
+        p_cal_boot_vector = np.array(self.p_cal, dtype=float)
+        p_cal_boot_vector[bin_idx] = p_cal_boot
+        return compute_posterior(
+            p_cal_boot_vector,
+            self.p_market,
+            self._alpha,
+            bins=self.bins,
+        )
 
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
@@ -175,11 +187,10 @@ class MarketAnalysis:
 
         Mirrors EnsembleSignal._simulate_settlement() logic.
         precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses numpy's default round_half_to_even (banker's rounding).
+        Uses WMO asymmetric half-up rounding: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
         """
-        inv = 1.0 / self._precision if self._precision > 0 else 1.0
-        return np.round(values * inv) / inv
+        return round_wmo_half_up_values(values, self._precision)
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int
@@ -194,6 +205,9 @@ class MarketAnalysis:
         Returns: (ci_lower, ci_upper, p_value)
         p_value = np.mean(edges <= 0) — exact, NOT approximated.
         """
+        cache_key = ("yes", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -231,7 +245,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot = p_raw_boot
 
-            p_post = self._alpha * p_cal_boot + (1.0 - self._alpha) * self.p_market[bin_idx]
+            p_post = self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
             bootstrap_edges[i] = p_post - self.p_market[bin_idx]
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
@@ -239,12 +253,17 @@ class MarketAnalysis:
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("yes", bin_idx, n)] = result
+        return result
 
     def _bootstrap_bin_no(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
         """Double bootstrap CI for buy_no direction. Same procedure, inverted."""
+        cache_key = ("no", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -279,8 +298,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot = p_raw_boot
 
-            p_post_no = 1.0 - (self._alpha * p_cal_boot +
-                                (1.0 - self._alpha) * self.p_market[bin_idx])
+            p_post_no = 1.0 - self._posterior_with_bootstrapped_bin(bin_idx, p_cal_boot)[bin_idx]
             p_market_no = 1.0 - self.p_market[bin_idx]
             bootstrap_edges[i] = p_post_no - p_market_no
 
@@ -288,7 +306,9 @@ class MarketAnalysis:
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("no", bin_idx, n)] = result
+        return result
 
     @staticmethod
     def _bin_probability(measured: np.ndarray, b: Bin) -> float:

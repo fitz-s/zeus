@@ -553,8 +553,12 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
     forbidden_hits: list[str] = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        if rel in {"src/state/db.py", "src/state/ledger.py"} or rel.startswith(
-            "tests/"
+        if (
+            rel in {"src/state/db.py", "src/state/ledger.py"}
+            or rel.startswith("tests/")
+            or rel.startswith(".claude/")
+            or rel.startswith(".omx/")
+            or rel.startswith("docs/archives/")
         ):
             continue
         if "apply_architecture_kernel_schema(" in path.read_text(errors="ignore"):
@@ -1302,6 +1306,74 @@ def test_kernel_schema_adds_token_identity_columns_to_existing_position_current(
     }
 
     assert {"token_id", "no_token_id", "condition_id"}.issubset(columns)
+    conn.close()
+
+
+def test_kernel_schema_migrates_existing_token_suppression_reason_check():
+    from src.state.ledger import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE token_suppression (
+            token_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear',
+                'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "resolved-token",
+            "cond-resolved",
+            "operator_quarantine_clear",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            "{}",
+        ),
+    )
+
+    apply_architecture_kernel_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chain-only-token",
+            "cond-chain",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            "{}",
+        ),
+    )
+    rows = conn.execute(
+        "SELECT token_id, suppression_reason FROM token_suppression ORDER BY token_id"
+    ).fetchall()
+
+    assert [dict(row) for row in rows] == [
+        {"token_id": "chain-only-token", "suppression_reason": "chain_only_quarantined"},
+        {"token_id": "resolved-token", "suppression_reason": "operator_quarantine_clear"},
+    ]
     conn.close()
 
 

@@ -1,0 +1,1263 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "Historical Lore Compiler"
+  purpose: >
+    Dense registry of hard-won system lessons. This file extracts only
+    high-signal failure modes, wrong moves, durable rules, antibodies, and
+    routing terms from historical docs, ADRs, closeouts, and commit lore.
+  density_policy: >
+    Work packets, progress logs, and philosophy files are evidence sources, not
+    default reading material. Promote only lessons that prevent repeat failures
+    or materially route zero-context agents.
+
+required_card_fields:
+  - id
+  - status
+  - severity
+  - sources
+  - failure_mode
+  - trigger_context
+  - wrong_moves
+  - correct_rule
+  - antibodies
+  - residual_risk
+  - invalidation_condition
+  - routing
+  - downstream_blast_radius
+  - zero_context_digest
+
+allowed_statuses:
+  - active_law
+  - mitigated
+  - open_gap
+  - candidate
+  - historical
+
+allowed_severities:
+  - critical
+  - high
+  - medium
+  - low
+
+cards:
+  - id: DISCOVERY_MODES_SHAPE_RUNTIME_CYCLE
+    status: active_law
+    severity: high
+    sources:
+      - architecture/runtime_modes.yaml
+      - src/engine/discovery_mode.py
+      - src/main.py
+      - src/engine/cycle_runner.py
+    failure_mode: >
+      Agents treat Zeus as a single undifferentiated cycle and miss that
+      opening_hunt, update_reaction, and day0_capture activate different timing
+      and signal behavior inside the shared CycleRunner path.
+    trigger_context:
+      - discovery mode changes
+      - evaluator strategy classification
+      - update reaction logic
+      - day0 capture logic
+      - runtime scheduling
+    wrong_moves:
+      - optimize update_reaction without checking DiscoveryMode
+      - treat day0_capture as the same signal regime as opening_hunt
+      - create separate runtime paths instead of parameterizing CycleRunner
+    correct_rule: >
+      Discovery modes are explicit CycleRunner parameters. Check
+      architecture/runtime_modes.yaml and src/engine/discovery_mode.py before
+      changing mode-sensitive behavior.
+    antibodies:
+      code:
+        - src/engine/discovery_mode.py
+        - src/engine/cycle_runner.py
+        - src/engine/evaluator.py
+      tests:
+        - tests/test_runtime_guards.py
+        - tests/test_fdr.py
+        - tests/test_day0_runtime_observation_context.py
+      gates:
+        - python scripts/topology_doctor.py --runtime-modes
+    residual_risk: >
+      Mode-specific behavior is spread through evaluator, cycle_runner,
+      executor, and tests; digest routing must keep the mode concept visible.
+    invalidation_condition: >
+      Only a runtime architecture packet may add/remove discovery modes or split
+      them into separate code paths.
+    routing:
+      task_terms: [discovery mode, opening_hunt, update_reaction, day0_capture, mode-sensitive, runtime scheduling]
+      file_patterns:
+        - src/engine/discovery_mode.py
+        - src/engine/cycle_runner.py
+        - src/engine/evaluator.py
+        - src/main.py
+    downstream_blast_radius:
+      - src/execution/executor.py
+      - src/engine/monitor_refresh.py
+      - tests/test_runtime_guards.py
+      - tests/test_fdr.py
+    zero_context_digest: >
+      Zeus has three discovery modes on one CycleRunner path; mode-sensitive
+      work starts at architecture/runtime_modes.yaml.
+
+  - id: BIN_CONTRACT_KIND_DISCRETE_SETTLEMENT_SUPPORT
+    status: active_law
+    severity: high
+    sources:
+      - docs/reference/zeus_domain_model.md
+      - src/types/market.py
+      - tests/test_instrument_invariants.py
+    failure_mode: >
+      Agents reason about bins as continuous ranges and miss point,
+      finite_range, and open_shoulder settlement support semantics.
+    trigger_context:
+      - position calculation
+      - uncertainty math
+      - calibration
+      - edge math
+      - bin parsing
+    wrong_moves:
+      - treat open_shoulder bins as symmetric finite ranges
+      - compare p_raw across different bin support cardinalities without normalization
+      - do interval math without checking discrete settlement support
+    correct_rule: >
+      Every uncertainty/calibration/edge change must preserve bin contract kind:
+      point, finite_range, or open_shoulder.
+    antibodies:
+      code:
+        - src/types/market.py
+        - src/contracts/settlement_semantics.py
+      tests:
+        - tests/test_instrument_invariants.py
+      gates:
+        - pytest -q tests/test_instrument_invariants.py
+    residual_risk: >
+      This concept is easy to miss outside explicit math tasks, so root AGENTS
+      keeps one index sentence and digest routes position/bin work here.
+    invalidation_condition: >
+      Only a Polymarket market-contract change plus authority update may alter
+      bin support semantics.
+    routing:
+      task_terms: [bin_contract_kind, open_shoulder, finite_range, point bin, bin support, position calculation, edge math]
+      file_patterns:
+        - src/types/market.py
+        - src/data/market_scanner.py
+        - src/strategy/market_analysis.py
+        - src/engine/evaluator.py
+    downstream_blast_radius:
+      - src/signal/ensemble_signal.py
+      - src/calibration/platt.py
+      - src/engine/replay.py
+    zero_context_digest: >
+      Bin support is discrete: point, finite_range, or open_shoulder. Do not
+      reason about settlement bins as generic continuous intervals.
+
+  - id: HISTORICAL_LORE_DENSITY_POLICY
+    status: active_law
+    severity: high
+    sources:
+      - architecture/history_lore.yaml
+      - docs/archives/**
+      - .omx/context/**
+      - git commit trailers
+    failure_mode: >
+      Agents treat low-density work packets, progress logs, and philosophy
+      files as default reading material, exhausting context while still missing
+      the few failure modes that actually prevent repeat incidents.
+    trigger_context:
+      - historical analysis
+      - lore extraction
+      - archive cleanup
+      - topology expansion
+      - zero-context onboarding
+    wrong_moves:
+      - summarize work packets chronologically
+      - load whole archive folders by default
+      - promote philosophical narrative into active law without an antibody
+      - preserve progress files as if they were high-density operational memory
+    correct_rule: >
+      Extract only dense cards: failure mode, wrong move, correct rule,
+      antibody, residual risk, invalidation condition, and task routing.
+    antibodies:
+      code:
+        - scripts/topology_doctor.py
+      tests:
+        - tests/test_topology_doctor.py
+      gates:
+        - python scripts/topology_doctor.py --history-lore
+    residual_risk: >
+      The first lore registry is hand-curated. A later pruning package should
+      remove or archive low-density historical surfaces after their useful lore
+      has been extracted.
+    invalidation_condition: >
+      Only a better compressed memory substrate can replace this density policy;
+      raw progress logs should still not become default context.
+    routing:
+      task_terms: [history, lore, archive, work packet, progress, philosophy, context]
+      file_patterns:
+        - architecture/history_lore.yaml
+        - docs/archives/**
+        - .omx/context/**
+    downstream_blast_radius:
+      - workspace_map.md
+      - AGENTS.md
+      - scripts/topology_doctor.py
+    zero_context_digest: >
+      Do not summarize history wholesale. Promote only dense, actionable lessons
+      that route future agents and have antibodies or explicit residual risk.
+
+  - id: WMO_ROUNDING_BANKER_FAILURE
+    status: active_law
+    severity: critical
+    sources:
+      - AGENTS.md
+      - docs/reference/statistical_methodology.md
+      - docs/reference/zeus_math_spec.md
+      - docs/known_gaps.md
+    failure_mode: >
+      Settlement, probability, or calibration code uses banker rounding or
+      integer coercion while WU/Polymarket settlement truth uses WMO asymmetric
+      half-up integer rounding.
+    trigger_context:
+      - settlement writes
+      - p_raw generation
+      - day0 signal rounding
+      - replay settlement scoring
+      - calibration target construction
+    wrong_moves:
+      - use Python round() for settlement values
+      - use numpy round/around for settlement values
+      - use int(x + 0.5), which truncates negatives toward zero
+      - treat Celsius and Fahrenheit bins as interchangeable continuous ranges
+    correct_rule: "Use SettlementSemantics; WMO rounding is floor(x + 0.5)."
+    antibodies:
+      code:
+        - src/contracts/settlement_semantics.py
+      tests:
+        - tests/test_instrument_invariants.py
+      gates:
+        - python scripts/semantic_linter.py
+        - python scripts/topology_doctor.py --strict
+    residual_risk: >
+      New scripts or data rebuild code can still bypass SettlementSemantics
+      unless script and semantic gates are run.
+    invalidation_condition: >
+      Only an explicit Polymarket/WU settlement-source rule change can overturn
+      this lore; otherwise code that disagrees is wrong.
+    routing:
+      task_terms: [rounding, WMO, settlement, p_raw, calibration, replay, day0]
+      file_patterns:
+        - src/contracts/settlement_semantics.py
+        - src/signal/**
+        - src/strategy/market_analysis.py
+        - src/engine/replay.py
+        - scripts/rebuild_*.py
+    downstream_blast_radius:
+      - src/signal/ensemble_signal.py
+      - src/signal/day0_signal.py
+      - src/engine/replay.py
+      - src/calibration/store.py
+      - scripts/rebuild_calibration.py
+      - scripts/rebuild_settlements.py
+    zero_context_digest: >
+      Before touching settlement/probability/calibration, verify WMO half-up
+      through SettlementSemantics and never use banker rounding.
+
+  - id: DIAGNOSTIC_BACKTEST_NON_PROMOTION
+    status: active_law
+    severity: critical
+    sources:
+      - AGENTS.md
+      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - architecture/data_rebuild_topology.yaml
+      - .omx/context/packet8_data_rebuild_topology_closeout_2026-04-13.md
+    failure_mode: >
+      Backtest, replay, JSON, or CSV diagnostics are treated as authorization
+      for live strategy, calibration, or DB truth changes.
+    trigger_context:
+      - replay PnL interpretation
+      - wu_settlement_sweep interpretation
+      - trade_history_audit interpretation
+      - derived report generation
+      - data rebuild certification
+    wrong_moves:
+      - promote state/zeus_backtest.db into zeus-world.db or zeus_trades.db
+      - coerce missing replay PnL to zero
+      - tune Kelly/FDR/alpha from contaminated backtest metrics
+      - treat WU settlement coverage as strategy replay coverage
+    correct_rule: >
+      Backtest may evaluate only. Live strategy changes require certified data,
+      point-in-time forecast references, market-price linkage, and packet
+      evidence.
+    antibodies:
+      code:
+        - scripts/run_replay.py
+        - scripts/audit_replay_fidelity.py
+      tests:
+        - tests/test_topology_doctor.py
+        - tests/test_replay_time_provenance.py
+        - tests/test_backtest_settlement_value_outcome.py
+      gates:
+        - python scripts/topology_doctor.py --data-rebuild
+        - python scripts/audit_replay_fidelity.py
+    residual_risk: >
+      Diagnostics can still influence human/agent reasoning unless digest
+      routing reminds agents that reports are non-promotion.
+    invalidation_condition: >
+      Only a future authority packet may promote a diagnostic lane, and it must
+      update live/backtest/shadow boundary law and machine gates.
+    routing:
+      task_terms: [backtest, replay, audit, PnL, wu_settlement_sweep, trade_history_audit]
+      file_patterns:
+        - src/engine/replay.py
+        - scripts/run_replay.py
+        - scripts/audit_replay_fidelity.py
+        - state/zeus_backtest.db
+    downstream_blast_radius:
+      - src/strategy/market_fusion.py
+      - src/strategy/kelly.py
+      - src/engine/evaluator.py
+      - state/zeus-world.db
+      - state/zeus_trades.db
+    zero_context_digest: >
+      Treat replay/backtest output as diagnostic evidence only; never promote it
+      into live DB truth or strategy authority.
+
+  - id: VERIFIED_AUTHORITY_IS_CONTRACT_NOT_STAMP
+    status: active_law
+    severity: critical
+    sources:
+      - docs/authority/zeus_k4_fix_pack_adr.md
+      - git log K4.5 commits
+    failure_mode: >
+      Data rebuild scripts stamp rows authority='VERIFIED' after shallow checks,
+      letting wrong-unit, Kelvin, NaN, or wrong-member-count rows pass through
+      the live calibration gate.
+    trigger_context:
+      - rebuild_settlements
+      - rebuild_calibration
+      - refit_platt
+      - calibration pair reads
+      - ensemble snapshot ingestion
+    wrong_moves:
+      - set authority='VERIFIED' without per-row validation
+      - read calibration_pairs without authority='VERIFIED'
+      - swallow DB errors while reporting successful row counts
+      - assert only len(rows) > 0 in rebuild tests
+    correct_rule: >
+      VERIFIED is a contract. Validate row content before constructing atoms,
+      filter SELECTs at the perimeter, and test exact semantics.
+    antibodies:
+      code:
+        - src/data/rebuild_validators.py
+        - src/calibration/store.py
+        - src/calibration/blocked_oos.py
+        - src/calibration/effective_sample_size.py
+        - scripts/rebuild_calibration.py
+        - scripts/rebuild_settlements.py
+      tests:
+        - tests/test_rebuild_validators.py
+        - tests/test_rebuild_pipeline.py
+        - tests/test_authority_gate.py
+        - tests/test_semantic_linter.py
+      gates:
+        - python scripts/semantic_linter.py
+        - python scripts/topology_doctor.py --data-rebuild
+    residual_risk: >
+      Operator scripts are still a named perimeter gap unless script manifest
+      and review gates classify their write targets.
+    invalidation_condition: >
+      Only a new data authority architecture can change the VERIFIED contract;
+      convenience or missing columns cannot.
+    routing:
+      task_terms: [VERIFIED, authority, calibration_pairs, refit, data rebuild, calibration rebuild, settlement rebuild]
+      file_patterns:
+        - src/data/rebuild_validators.py
+        - src/calibration/**
+        - scripts/rebuild_*.py
+        - scripts/refit_platt.py
+    downstream_blast_radius:
+      - src/engine/evaluator.py
+      - src/strategy/market_fusion.py
+      - src/calibration/manager.py
+      - state/zeus-world.db
+    zero_context_digest: >
+      Do not stamp authority. Validate content first, default reads to VERIFIED,
+      and use exact-count/exact-format tests.
+
+  - id: CANONICAL_DB_TRUTH_OUTRANKS_JSON_FALLBACK
+    status: active_law
+    severity: critical
+    sources:
+      - AGENTS.md
+      - docs/archives/work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md
+      - docs/known_gaps.md
+      - git log live-only cleanup commits
+    failure_mode: >
+      Derived JSON caches, status summaries, or legacy paper files outrank
+      canonical DB/event truth, causing risk, bankroll, and operator surfaces to
+      diverge.
+    trigger_context:
+      - load_portfolio fallback behavior
+      - RiskGuard realized PnL
+      - status_summary generation
+      - strategy_tracker reporting
+      - paper/live cleanup
+    wrong_moves:
+      - promote positions.json or status_summary.json into canonical truth
+      - let fallback JSON hide projection failure
+      - compute realized PnL from stale tracker/report artifacts
+      - treat paper artifacts as active live-only runtime state
+    correct_rule: >
+      Chain and canonical DB/event truth outrank derived caches. Fallbacks must
+      be explicit, degraded, and operator-visible.
+    antibodies:
+      code:
+        - src/state/projection.py
+        - src/state/ledger.py
+        - src/riskguard/riskguard.py
+        - src/observability/status_summary.py
+      tests:
+        - tests/test_pnl_flow_and_audit.py
+        - tests/test_riskguard.py
+        - tests/test_cross_module_relationships.py
+      gates:
+        - python scripts/topology_doctor.py --source
+        - python scripts/verify_truth_surfaces.py
+    residual_risk: >
+      Legacy files still exist as historical artifacts; agents can misread them
+      unless topology/state classifications are checked.
+    invalidation_condition: >
+      Only a future canonical truth redesign can change precedence; derived
+      exports remain non-authority.
+    routing:
+      task_terms: [portfolio, JSON fallback, riskguard, status_summary, bankroll, realized PnL, canonical]
+      file_patterns:
+        - src/state/**
+        - src/riskguard/**
+        - src/observability/status_summary.py
+        - state/*.json
+    downstream_blast_radius:
+      - src/engine/cycle_runtime.py
+      - src/control/control_plane.py
+      - src/state/strategy_tracker.py
+      - state/zeus_trades.db
+    zero_context_digest: >
+      Never let JSON/status/report artifacts outrank canonical DB/event truth;
+      degraded fallback must be labeled.
+
+  - id: UNCOMMITTED_AGENT_EDIT_LOSS
+    status: active_law
+    severity: critical
+    sources:
+      - AGENTS.md
+      - docs/archives/investigations/agent_edit_loss_investigation.md
+    failure_mode: >
+      Large uncommitted multi-agent work is lost through checkout/restore/reset,
+      stash application, or concurrent last-writer-wins edits.
+    trigger_context:
+      - long-running packet implementation
+      - multi-agent edits
+      - dirty worktree cleanup
+      - shared file ownership
+    wrong_moves:
+      - run git checkout/restore/reset/clean on a dirty worktree
+      - apply an old stash without inspection and human approval
+      - let two agents write the same file concurrently
+      - leave more than one verified batch uncommitted when commits are authorized
+    correct_rule: >
+      Protect uncommitted work, assign file ownership, avoid destructive git
+      commands, and commit verified batches when commit authority exists.
+    antibodies:
+      code: []
+      tests: []
+      gates:
+        - git status --short
+        - git diff --check
+      docs:
+        - AGENTS.md
+    residual_risk: >
+      This remains partly procedural because Codex cannot enforce git behavior
+      outside explicit commands.
+    invalidation_condition: >
+      Only a transactional multi-agent editing substrate would reduce this law;
+      until then, dirty worktree protection remains mandatory.
+    routing:
+      task_terms: [multi-agent, commit, stash, restore, reset, dirty worktree, lost edits]
+      file_patterns: []
+    downstream_blast_radius:
+      - all source files touched in shared sessions
+    zero_context_digest: >
+      In a dirty worktree, never reset/restore/stash-pop; protect user and
+      agent edits and serialize overlapping writes.
+
+  - id: FDR_CANDIDATE_FAMILY_NOT_WHOLE_CYCLE
+    status: active_law
+    severity: high
+    sources:
+      - AGENTS.md
+      - git commit "Align FDR authority with candidate families"
+      - tests/test_fdr.py
+    failure_mode: >
+      Docs or strategy code claim whole-cycle BH/FDR control while the
+      implemented control unit is the active tested candidate family.
+    trigger_context:
+      - strategy selection
+      - FDR filtering
+      - replay interpretation
+      - statistical methodology docs
+    wrong_moves:
+      - claim whole-cycle BH control without cycle-level aggregation
+      - exclude hypotheses that failed positive-edge prefilter from the family
+      - change FDR narrative without tests
+    correct_rule: >
+      Zeus currently applies BH over the active tested candidate/market/snapshot
+      family, including hypotheses that fail positive-edge prefilter.
+    antibodies:
+      code:
+        - src/strategy/fdr_filter.py
+        - src/strategy/selection_family.py
+      tests:
+        - tests/test_fdr.py
+        - tests/test_runtime_guards.py
+      gates:
+        - pytest -q tests/test_fdr.py
+    residual_risk: >
+      Whole-cycle BH would be a future strategy-math redesign, not a wording
+      change.
+    invalidation_condition: >
+      A future packet may implement cycle-level aggregation and update this lore
+      with replay parity evidence.
+    routing:
+      task_terms: [FDR, BH, selection family, hypothesis, candidate family]
+      file_patterns:
+        - src/strategy/fdr_filter.py
+        - src/strategy/selection_family.py
+        - src/engine/evaluator.py
+    downstream_blast_radius:
+      - src/strategy/market_analysis.py
+      - src/engine/replay.py
+    zero_context_digest: >
+      Do not claim whole-cycle BH control; current FDR law is active tested
+      candidate-family control.
+
+  - id: ENTRY_EXIT_EPISTEMIC_ASYMMETRY
+    status: mitigated
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - docs/archives/audits/math_audit_2026_04_06.md
+      - git commits around monitor_chain_missing, CI-aware exit, divergence thresholds
+    failure_mode: >
+      Entry requires bootstrap/FDR evidence while exit acts on weaker point
+      estimates or missing monitor chains, causing false exits or missed
+      protective actions.
+    trigger_context:
+      - monitor refresh
+      - exit_triggers
+      - settlement-sensitive positions
+      - day0 exit authority
+    wrong_moves:
+      - exit on raw forward_edge without coherent CI/audit context
+      - force exit solely because monitor evidence is missing
+      - treat monitor_chain_missing as a trade signal
+      - ignore missing best_bid/current price provenance
+    correct_rule: >
+      Exit evidence must be explicit and auditable. Missing monitor chains are
+      infrastructure RED, not an exit trigger by themselves.
+    antibodies:
+      code:
+        - src/engine/cycle_runtime.py
+        - src/engine/monitor_refresh.py
+        - src/execution/exit_triggers.py
+        - src/state/portfolio.py
+      tests:
+        - tests/test_runtime_guards.py
+        - tests/test_live_safety_invariants.py
+        - tests/test_day0_exit_gate.py
+      gates:
+        - pytest -q tests/test_runtime_guards.py tests/test_live_safety_invariants.py
+    residual_risk: >
+      Full symmetry remains open; entry and exit still do not share one durable
+      DecisionEvidence contract.
+    invalidation_condition: >
+      Close only after a shared entry/exit evidence contract lands with replay
+      and live safety proof.
+    routing:
+      task_terms: [exit, monitor, edge reversal, incomplete context, DecisionEvidence, day0]
+      file_patterns:
+        - src/execution/exit_triggers.py
+        - src/engine/monitor_refresh.py
+        - src/engine/cycle_runtime.py
+        - src/state/portfolio.py
+    downstream_blast_radius:
+      - src/execution/executor.py
+      - src/observability/status_summary.py
+    zero_context_digest: >
+      Do not weaken exit evidence or trade on missing monitor context; missing
+      monitor chains are infrastructure failures.
+
+  - id: GAMMA_CROSS_CITY_BINDING_REJECTION
+    status: mitigated
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - git commit "Reject cross-city Gamma market bindings"
+    failure_mode: >
+      Polymarket/Gamma market discovery binds an event for one configured city
+      to metadata or source text for another city, contaminating bins, signal,
+      and settlement comparison.
+    trigger_context:
+      - Gamma weather market discovery
+      - city/event parsing
+      - LA/Milan style station conflicts
+      - outcome binding
+    wrong_moves:
+      - bind outcomes by event city alone
+      - ignore station/source metadata contradictions
+      - assume monitor/harvester helpers are protected by scanner-only checks
+    correct_rule: >
+      Discovery must reject explicit cross-city text/station conflicts before
+      outcomes are returned; monitor/harvester source attestation is a separate
+      surface.
+    antibodies:
+      code:
+        - src/data/market_scanner.py
+      tests:
+        - tests/test_config.py
+      gates:
+        - pytest -q tests/test_config.py -k market_scanner
+    residual_risk: >
+      This catches explicit discovery conflicts only. Gamma payloads with absent
+      or self-consistent false metadata still need source attestation.
+    invalidation_condition: >
+      Only a stronger source-attestation package can promote this from mitigated
+      to active_law for all Gamma paths.
+    routing:
+      task_terms: [Gamma, market scanner, city binding, source attestation, market discovery]
+      file_patterns:
+        - src/data/market_scanner.py
+        - scripts/audit_city_data_readiness.py
+    downstream_blast_radius:
+      - src/engine/evaluator.py
+      - src/execution/harvester.py
+      - src/engine/monitor_refresh.py
+    zero_context_digest: >
+      Do not trust city text alone in Gamma discovery; reject explicit
+      cross-city/station conflicts and keep monitor/harvester attestation
+      separate.
+
+  - id: SCRIPT_LIFECYCLE_REUSE_BEFORE_NEW_TOOL
+    status: active_law
+    severity: high
+    sources:
+      - scripts/AGENTS.md
+      - architecture/script_manifest.yaml
+      - docs/authority/zeus_packet_discipline.md
+    failure_mode: >
+      Agents leave one-off scripts in scripts/ or create parallel tools instead
+      of reusing/promoting existing long-lived scripts.
+    trigger_context:
+      - adding diagnostics
+      - adding audit scripts
+      - creating probes
+      - packet closeout
+    wrong_moves:
+      - add anonymous diagnose/audit/probe scripts
+      - let packet_ephemeral scripts persist without delete_by
+      - keep deprecated scripts runnable
+      - create a new script without checking script_manifest first
+    correct_rule: >
+      Check the script manifest first. Long-lived scripts need stable names and
+      reuse metadata; ephemeral scripts need task-date naming and delete_by.
+    antibodies:
+      code:
+        - scripts/topology_doctor.py
+      tests:
+        - tests/test_topology_doctor.py
+      gates:
+        - python scripts/topology_doctor.py --scripts
+        - pytest -q tests/test_topology_doctor.py -k scripts
+    residual_risk: >
+      Per-script reuse metadata is still incomplete for many legacy long-lived
+      scripts and needs a follow-up compaction/refinement package.
+    invalidation_condition: >
+      A future script registry replacement may supersede this law if it keeps
+      equivalent lifecycle and reuse enforcement.
+    routing:
+      task_terms: [script, diagnostic script, audit script, probe, one-off, tooling]
+      file_patterns:
+        - scripts/**
+        - architecture/script_manifest.yaml
+    downstream_blast_radius:
+      - scripts/AGENTS.md
+      - docs/authority/zeus_packet_discipline.md
+    zero_context_digest: >
+      Before creating a script, search manifest for an existing tool; delete or
+      promote one-off scripts instead of leaving them behind.
+
+  - id: LIVE_BACKTEST_SHADOW_BOUNDARY
+    status: active_law
+    severity: critical
+    sources:
+      - AGENTS.md
+      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - docs/authority/zeus_current_delivery.md
+    failure_mode: >
+      Live execution, backtest evaluation, and shadow observation semantics are
+      mixed, allowing diagnostic or observation surfaces to gate or mutate live
+      runtime behavior.
+    trigger_context:
+      - live-only cleanup
+      - replay/backtest changes
+      - shadow instrumentation
+      - paper-era artifact removal
+    wrong_moves:
+      - let backtest authorize live changes
+      - let shadow observation gate live execution
+      - preserve paper as a peer runtime mode
+      - mutate repo truth from external workspace tools
+    correct_rule: >
+      Live may act, backtest may evaluate, shadow may observe. Zeus is
+      live-only; paper-era peer mode is historical.
+    antibodies:
+      code:
+        - src/main.py
+        - src/engine/cycle_runner.py
+        - src/supervisor_api/contracts.py
+      tests:
+        - tests/test_architecture_contracts.py
+        - tests/test_live_execution.py
+      gates:
+        - python scripts/topology_doctor.py --strict
+        - python scripts/check_kernel_manifests.py
+    residual_risk: >
+      Historical paper artifacts and tests still exist, so agents must check
+      current live-only law before using them.
+    invalidation_condition: >
+      Only an explicit authority packet can add a new execution context or make
+      paper a peer mode again.
+    routing:
+      task_terms: [live, backtest, shadow, paper, execution mode, supervisor, Venus]
+      file_patterns:
+        - src/main.py
+        - src/engine/**
+        - src/supervisor_api/**
+        - docs/authority/zeus_live_backtest_shadow_boundary.md
+    downstream_blast_radius:
+      - src/control/control_plane.py
+      - src/execution/executor.py
+      - scripts/run_replay.py
+    zero_context_digest: >
+      Keep live/backtest/shadow separated: live acts, backtest evaluates, shadow
+      observes; paper is historical.
+
+  - id: EXACT_SEMANTIC_TESTS_OVER_EXISTENCE_TESTS
+    status: active_law
+    severity: high
+    sources:
+      - docs/authority/zeus_k4_fix_pack_adr.md
+      - git log K4.5 exact semantics commits
+    failure_mode: >
+      Tests assert only that rows or outputs exist, allowing wrong counts,
+      wrong labels, wrong schemas, and swallowed errors to pass.
+    trigger_context:
+      - rebuild tests
+      - migration tests
+      - calibration tests
+      - authority gate tests
+    wrong_moves:
+      - assert len(rows) > 0 where exact count is knowable
+      - ignore rowcount for INSERT OR IGNORE
+      - test only happy path and skip fallback path
+      - accept byte-different labels such as literal u00b0
+    correct_rule: >
+      High-sensitivity tests assert exact counts, byte-exact labels, schema
+      shape, branch behavior, and error reporting.
+    antibodies:
+      code:
+        - scripts/rebuild_calibration.py
+        - scripts/rebuild_settlements.py
+      tests:
+        - tests/test_rebuild_pipeline.py
+        - tests/test_rebuild_validators.py
+        - tests/test_authority_gate.py
+      gates:
+        - pytest -q tests/test_rebuild_pipeline.py tests/test_rebuild_validators.py
+    residual_risk: >
+      Legacy tests outside high-sensitivity paths may still be low-value
+      existence checks until the later test cleanup package.
+    invalidation_condition: >
+      None for high-sensitivity truth paths; exact semantic coverage is a
+      standing quality rule.
+    routing:
+      task_terms: [test, exact count, data rebuild, calibration rebuild, settlement rebuild, migration, authority gate, fixture]
+      file_patterns:
+        - tests/**
+        - scripts/rebuild_*.py
+        - src/data/rebuild_validators.py
+    downstream_blast_radius:
+      - architecture/test_topology.yaml
+      - scripts/topology_doctor.py
+    zero_context_digest: >
+      For high-sensitivity paths, existence tests are insufficient; assert exact
+      semantics and failure branches.
+
+  - id: DATA_REBUILD_LIVE_MATH_CERTIFICATION_BLOCKED
+    status: active_law
+    severity: critical
+    sources:
+      - architecture/data_rebuild_topology.yaml
+      - docs/operations/data_rebuild_plan.md
+      - docs/reference/zeus_math_spec.md
+      - .omx/context/packet8_data_rebuild_topology_closeout_2026-04-13.md
+    failure_mode: >
+      Agents interpret data collection, rebuild scripts, or WU settlement
+      coverage as sufficient proof to activate calibration/live strategy math.
+    trigger_context:
+      - data rebuild
+      - calibration refit
+      - Platt activation
+      - replay coverage claims
+      - live math certification
+    wrong_moves:
+      - certify live math while live_math_certification.allowed is false
+      - use WU settlement sample as strategy replay coverage
+      - ignore decision_group sample independence
+      - estimate Platt lead-days coefficient from an unsquared lead matrix
+      - activate calibration models from diagnostic backtest output
+    correct_rule: >
+      Data rebuild is not live math certification. All declared certification
+      criteria must be proven before calibration or strategy math may rely on
+      rebuilt data.
+    antibodies:
+      code:
+        - scripts/topology_doctor.py
+        - architecture/data_rebuild_topology.yaml
+      tests:
+        - tests/test_topology_doctor.py
+        - tests/test_data_rebuild_relationships.py
+      gates:
+        - python scripts/topology_doctor.py --data-rebuild
+    residual_risk: >
+      Some certification criteria are intentionally target_not_certified or
+      deferred, so agents must keep live math blocked until future packets prove
+      them.
+    invalidation_condition: >
+      Only a data/rebuild certification packet can change
+      live_math_certification.allowed, with criteria evidence and tests.
+    routing:
+      task_terms: [data rebuild, live math, certification, Platt, decision group, lead matrix, replay coverage]
+      file_patterns:
+        - architecture/data_rebuild_topology.yaml
+        - scripts/rebuild_*.py
+        - scripts/refit_platt.py
+        - src/calibration/**
+    downstream_blast_radius:
+      - src/engine/evaluator.py
+      - src/strategy/market_fusion.py
+      - state/zeus-world.db
+      - state/zeus_backtest.db
+    zero_context_digest: >
+      Rebuilt data is not permission to trade on new math; live math remains
+      uncertified until every data_rebuild_topology blocker is closed.
+
+  - id: DST_DIURNAL_HISTORY_REBUILD_RISK
+    status: open_gap
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - docs/reference/statistical_methodology.md
+      - src/data/wu_scheduler.py
+      - src/data/ingestion_guard.py
+    failure_mode: >
+      Runtime clocks are DST-aware, but historical hourly/diurnal materialized
+      tables may still contain pre-fix local-hour aggregates that distort Day0
+      diurnal peak confidence.
+    trigger_context:
+      - hourly observation ETL
+      - diurnal curve rebuild
+      - Day0 signal
+      - WU collection timing
+      - DST city validation
+    wrong_moves:
+      - treat current ZoneInfo runtime code as proof historical tables are clean
+      - rebuild local-hour tables from naive local timestamps
+      - generalize Tokyo/Seoul/Shanghai no-DST safety to DST cities
+      - tune Day0 thresholds to compensate for stale diurnal aggregates
+    correct_rule: >
+      For DST cities, rebuild/validate historical hourly and diurnal surfaces
+      from UTC plus zone-aware local timestamps before trusting Day0 diurnal
+      features.
+    antibodies:
+      code:
+        - src/signal/diurnal.py
+        - src/data/wu_scheduler.py
+        - src/data/ingestion_guard.py
+      tests:
+        - tests/test_ingestion_guard.py
+      gates:
+        - rg DST tests before closing the rebuild packet
+    residual_risk: >
+      This remains open until historical hourly_observations/diurnal_curves are
+      rebuilt or proven clean for NYC, Chicago, London, and Paris.
+    invalidation_condition: >
+      Close only with rebuild evidence over DST transition dates and a regression
+      test for spring-forward/fall-back local-hour behavior.
+    routing:
+      task_terms: [DST, timezone, diurnal, day0, hourly observations, WU scheduler, local hour]
+      file_patterns:
+        - src/signal/diurnal.py
+        - scripts/etl_hourly_observations.py
+        - scripts/etl_diurnal_curves.py
+        - src/data/wu_scheduler.py
+        - src/data/ingestion_guard.py
+    downstream_blast_radius:
+      - src/signal/day0_signal.py
+      - src/engine/monitor_refresh.py
+      - state/zeus-world.db
+    zero_context_digest: >
+      DST-aware runtime code does not prove old diurnal tables are clean; DST
+      cities need zone-aware historical rebuild proof before Day0 trust.
+
+  - id: EXECUTION_PRICE_TYPED_COST_NOT_BARE_FLOAT
+    status: mitigated
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - docs/archives/reports/zeus_logic_verification_2026-04-09.md
+      - git commit "Price live entries with token fees"
+    failure_mode: >
+      Kelly sizing uses bare implied market probability as entry cost, omitting
+      ask, Polymarket fee, tick size, spread, and slippage semantics.
+    trigger_context:
+      - Kelly sizing
+      - evaluator edge consumption
+      - execution price changes
+      - Polymarket fee schedule
+    wrong_moves:
+      - pass edge.entry_price directly to Kelly as a float
+      - assume fee defaults when token fee lookup fails
+      - remove typed cost telemetry before canary evidence
+      - conflate posterior probability with executable cost
+    correct_rule: >
+      Entry economics must flow through typed ExecutionPrice/cost semantics; do
+      not move sizing back to bare edge.entry_price unless explicitly reverted.
+    antibodies:
+      code:
+        - src/contracts/execution_price.py
+        - src/engine/evaluator.py
+        - src/data/polymarket_client.py
+      tests:
+        - tests/test_execution_price.py
+        - tests/test_reality_contracts.py
+        - tests/test_kelly.py
+      gates:
+        - pytest -q tests/test_execution_price.py tests/test_reality_contracts.py tests/test_kelly.py
+    residual_risk: >
+      Tick size, neg-risk, realized fill/slippage reconciliation, and rollback
+      seam hardening remain follow-up work.
+    invalidation_condition: >
+      Only explicit removal of the typed execution cost contract with equivalent
+      fee/slippage proof can supersede this lore.
+    routing:
+      task_terms: [ExecutionPrice, entry price, Kelly, fee, slippage, polymarket_fee, sizing]
+      file_patterns:
+        - src/contracts/execution_price.py
+        - src/engine/evaluator.py
+        - src/strategy/kelly.py
+        - src/data/polymarket_client.py
+    downstream_blast_radius:
+      - src/execution/executor.py
+      - src/strategy/market_analysis.py
+      - tests/test_kelly_live_safety_cap.py
+    zero_context_digest: >
+      Kelly cost is not a bare probability. Preserve typed execution cost,
+      token fee lookup, and explicit failure when fee truth is unavailable.
+
+  - id: ALPHA_TARGET_AND_TAIL_TREATMENT_NOT_PROFIT_SAFE
+    status: mitigated
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - git commits "Gate alpha by consumer target" and "Expose tail alpha as calibration treatment"
+    failure_mode: >
+      Calibration-serving alpha or tail scaling is treated as profit-safe EV
+      policy, compressing edges toward market consensus and weakening buy_no
+      structural tail opportunities.
+    trigger_context:
+      - compute_alpha
+      - posterior fusion
+      - tail bins
+      - buy_no strategy
+      - calibration tuning
+    wrong_moves:
+      - consume AlphaDecision.value without value_for_consumer('ev')
+      - mark D1/D2 fixed because provenance exists
+      - treat DEFAULT_TAIL_TREATMENT as buy_no PnL validated
+      - retune alpha from Brier gains without EV validation
+    correct_rule: >
+      Alpha target compatibility is enforced, but current alpha/tail behavior is
+      risk-cap/calibration-serving, not proven profit-optimal.
+    antibodies:
+      code:
+        - src/contracts/alpha_decision.py
+        - src/contracts/tail_treatment.py
+        - src/strategy/market_fusion.py
+        - src/engine/evaluator.py
+        - src/engine/monitor_refresh.py
+      tests:
+        - tests/test_alpha_target_coherence.py
+        - tests/test_market_analysis.py
+        - tests/test_no_bare_float_seams.py
+        - tests/test_provenance_enforcement.py
+      gates:
+        - pytest -q tests/test_alpha_target_coherence.py tests/test_market_analysis.py tests/test_provenance_enforcement.py
+    residual_risk: >
+      Behavior may still attenuate profitable tail buy_no edges. EV-target alpha
+      and direction-aware tail policy require replay/live PnL validation.
+    invalidation_condition: >
+      Close only after an EV-target alpha policy and tail treatment are validated
+      against buy_no PnL, not merely Brier/calibration metrics.
+    routing:
+      task_terms: [alpha, tail, Brier, EV, buy_no, calibration accuracy, market fusion]
+      file_patterns:
+        - src/strategy/market_fusion.py
+        - src/contracts/alpha_decision.py
+        - src/contracts/tail_treatment.py
+        - src/engine/evaluator.py
+    downstream_blast_radius:
+      - src/strategy/kelly.py
+      - src/engine/replay.py
+      - src/engine/monitor_refresh.py
+    zero_context_digest: >
+      Alpha/tail provenance is not profit proof. Keep EV consumer gates and do
+      not claim buy_no tail safety without PnL validation.
+
+  - id: VIG_TREATMENT_RAW_PRICE_VS_CLEAN_PROBABILITY
+    status: mitigated
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - git commit "Remove vig before posterior fusion"
+    failure_mode: >
+      Market prices with vig are blended as probability truth, or de-vigged
+      clean probabilities are reused as executable/tradable prices.
+    trigger_context:
+      - posterior fusion
+      - market family probability vectors
+      - sparse monitor vectors
+      - edge and entry price semantics
+    wrong_moves:
+      - de-vig every p_market vector unconditionally
+      - treat sparse monitor observations as complete market families
+      - use clean_prices as entry cost
+      - change MarketAnalysis.p_market away from raw tradable observed prices
+    correct_rule: >
+      Use clean probabilities only for complete-family posterior fusion. Keep
+      raw market prices for edge/entry cost/execution semantics.
+    antibodies:
+      code:
+        - src/contracts/vig_treatment.py
+        - src/strategy/market_fusion.py
+        - src/strategy/market_analysis.py
+      tests:
+        - tests/test_market_analysis.py
+        - tests/test_reality_contracts.py
+        - tests/test_no_bare_float_seams.py
+      gates:
+        - pytest -q tests/test_market_analysis.py tests/test_reality_contracts.py
+    residual_risk: >
+      Sparse monitor vectors still remain in raw observed-price space until
+      monitor refresh can provide complete market-family provenance.
+    invalidation_condition: >
+      A future monitor-family provenance packet can extend de-vigging safely to
+      additional vectors.
+    routing:
+      task_terms: [vig, de-vig, posterior, p_market, market family, sparse vector, clean price]
+      file_patterns:
+        - src/strategy/market_fusion.py
+        - src/contracts/vig_treatment.py
+        - src/strategy/market_analysis.py
+    downstream_blast_radius:
+      - src/engine/monitor_refresh.py
+      - src/engine/replay.py
+      - src/strategy/kelly.py
+    zero_context_digest: >
+      Clean de-vigged probabilities are for posterior fusion only; raw observed
+      prices remain the tradable/execution cost surface.
+
+  - id: STRATEGY_TRACKER_AND_ROLLING_LOSS_ARE_DERIVED_NOT_WALLET_TRUTH
+    status: open_gap
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - .omx/context/daily-loss-24h-truth-20260409T134500Z.md
+      - docs/archives/work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md
+    failure_mode: >
+      Strategy tracker, risk rows, or rolling loss summaries report PnL/loss
+      that is not reconstructible from durable current-mode DB truth, causing
+      false risk and operator decisions.
+    trigger_context:
+      - strategy_tracker reporting
+      - RiskGuard daily_loss/weekly_loss
+      - status_summary realized_pnl
+      - current regime PnL
+      - paper artifact cleanup
+    wrong_moves:
+      - compute daily_loss from all-time total_pnl or static baseline
+      - let strategy_tracker JSON outrank durable settlement/exit events
+      - hide portfolio_truth_source=working_state_fallback
+      - report effective_bankroll inconsistent with initial_bankroll + total_pnl
+    correct_rule: >
+      Derived financial surfaces must reconcile to durable current-mode truth.
+      Rolling loss is trailing-window semantics, not all-time loss relabeled.
+    antibodies:
+      code:
+        - src/riskguard/riskguard.py
+        - src/observability/status_summary.py
+        - src/state/strategy_tracker.py
+      tests:
+        - tests/test_riskguard.py
+        - tests/test_pnl_flow_and_audit.py
+        - tests/test_cross_module_relationships.py
+      gates:
+        - pytest -q tests/test_riskguard.py tests/test_pnl_flow_and_audit.py
+    residual_risk: >
+      Daily/weekly trailing loss semantics and strategy_tracker reconstructible
+      provenance still need a bounded repair packet.
+    invalidation_condition: >
+      Close after rolling loss derives from a trustworthy time-window equity
+      history and tracker PnL is DB-reconstructible or explicitly archival.
+    routing:
+      task_terms: [strategy_tracker, daily_loss, weekly_loss, rolling loss, realized PnL, bankroll, risk_state]
+      file_patterns:
+        - src/riskguard/riskguard.py
+        - src/observability/status_summary.py
+        - src/state/strategy_tracker.py
+        - state/strategy_tracker*.json
+        - state/risk_state*.db
+    downstream_blast_radius:
+      - src/engine/cycle_runtime.py
+      - src/control/control_plane.py
+      - state/status_summary.json
+    zero_context_digest: >
+      Strategy tracker and rolling loss are derived risk surfaces; reconcile them
+      to durable current-mode truth before trusting operator PnL/loss.
+
+  - id: DEGRADED_EXIT_EVIDENCE_MUST_STAY_AUDITABLE
+    status: active_law
+    severity: high
+    sources:
+      - docs/known_gaps.md
+      - git commits "Use degraded bid proxy for buy-yes exits" and "Declare zero-cost hold value in exit gates"
+    failure_mode: >
+      Exit logic silently replaces missing liquidity/cost evidence with proxies,
+      or treats explicitly zero-cost hold arithmetic as full economic truth.
+    trigger_context:
+      - buy_yes exit
+      - missing best_bid
+      - hold EV gate
+      - exit market context
+      - thin books
+    wrong_moves:
+      - overwrite ExitContext.best_bid with proxy values
+      - treat best_bid_proxy_* markers as proof of executable sell liquidity
+      - add nonzero funding/correlation costs without policy/provenance
+      - forget that HoldValue currently declares fee/time costs as zero
+    correct_rule: >
+      Degraded exit proxies are allowed only when audit markers preserve the
+      missing evidence. HoldValue zero-cost assumptions are explicit seams, not
+      full cost closure.
+    antibodies:
+      code:
+        - src/state/portfolio.py
+        - src/execution/exit_triggers.py
+        - src/contracts/hold_value.py
+      tests:
+        - tests/test_live_safety_invariants.py
+        - tests/test_no_bare_float_seams.py
+        - tests/test_polymarket_error_matrix.py
+        - tests/test_executor.py
+      gates:
+        - pytest -q tests/test_live_safety_invariants.py tests/test_no_bare_float_seams.py
+    residual_risk: >
+      Real nonzero funding, redemption fee, and correlation-crowding costs are
+      still unpriced and need policy plus replay/live validation.
+    invalidation_condition: >
+      Close only when exit authority has a validated cost policy and executable
+      liquidity evidence model.
+    routing:
+      task_terms: [exit, best_bid, proxy, HoldValue, hold EV, funding cost, liquidity]
+      file_patterns:
+        - src/state/portfolio.py
+        - src/execution/exit_triggers.py
+        - src/contracts/hold_value.py
+    downstream_blast_radius:
+      - src/execution/executor.py
+      - src/observability/status_summary.py
+    zero_context_digest: >
+      Do not launder degraded exit evidence. Preserve audit markers for proxies
+      and keep zero-cost HoldValue assumptions explicit.
+
+  - id: SEMANTIC_PROVENANCE_GUARD_STATIC_HOOK
+    status: active_law
+    severity: high
+    sources:
+      - scripts/semantic_linter.py
+      - src/strategy/market_analysis.py
+      - src/engine/evaluator.py
+      - src/engine/monitor_refresh.py
+      - src/engine/replay.py
+      - docs/authority/zeus_current_architecture.md
+    failure_mode: >
+      Semantic provenance fields disappear from the static-analysis scope around
+      probability/edge values, so provenance-aware lint checks stop working.
+    trigger_context:
+      - cleanup/refactor
+      - dead-code removal
+      - semantic linter failures
+      - probability or edge context changes
+      - entry_method/selected_method/bias_correction provenance
+    wrong_moves:
+      - remove static provenance hooks without an equivalent linter-visible replacement
+      - read p_posterior or p_raw without keeping entry/calibration provenance in scope
+    correct_rule: >
+      Semantic Provenance Guards exist to expose provenance fields to
+      semantic_linter at probability/edge seams.
+    antibodies:
+      code:
+        - scripts/semantic_linter.py
+        - src/contracts/edge_context.py
+        - src/contracts/semantic_types.py
+      tests:
+        - tests/test_structural_linter.py
+        - tests/test_no_bare_float_seams.py
+      gates:
+        - python scripts/semantic_linter.py
+        - pytest -q tests/test_structural_linter.py
+    residual_risk: >
+      The hook syntax is non-obvious when read locally without topology/lore.
+    invalidation_condition: >
+      Only a replacement linter/type system that no longer needs unreachable
+      guard branches can retire this pattern.
+    routing:
+      task_terms: [Semantic Provenance Guard, if False, dead code, provenance guard, semantic linter, p_posterior, p_raw, selected_method, entry_method]
+      file_patterns:
+        - scripts/semantic_linter.py
+        - src/strategy/market_analysis.py
+        - src/strategy/market_analysis_family_scan.py
+        - src/engine/evaluator.py
+        - src/engine/monitor_refresh.py
+        - src/engine/replay.py
+        - src/execution/harvester.py
+        - src/execution/exit_triggers.py
+        - src/state/db.py
+    downstream_blast_radius:
+      - src/contracts/edge_context.py
+      - src/contracts/semantic_types.py
+      - tests/test_structural_linter.py
+      - tests/test_no_bare_float_seams.py
+    zero_context_digest: >
+      Semantic Provenance Guards are static-analysis hooks that keep
+      probability/edge provenance visible.

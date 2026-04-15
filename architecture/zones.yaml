@@ -1,4 +1,12 @@
 schema_version: 1
+file_level_role_map:
+  source: architecture/source_rationale.yaml
+  applies_to: src/**
+  rule: >
+    This file defines zone grammar and package-level boundaries.
+    File-level authority role, hazards, and write routes for src/** live in
+    architecture/source_rationale.yaml. In mixed directories such as src/state,
+    the file-level map is the navigation source for concrete files.
 zones:
   K0_frozen_kernel:
     description: Semantic atoms, lifecycle law, canonical truth model.

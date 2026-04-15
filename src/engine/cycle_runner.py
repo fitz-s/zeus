@@ -215,7 +215,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     force_exit = get_force_exit_review()
     if force_exit:
         summary["force_exit_review"] = True
-        logger.warning("B5: force_exit_review active — daily loss RED. Blocking new entries.")
+        summary["force_exit_review_scope"] = "entry_block_only"
+        logger.warning("B5: force_exit_review active — daily loss RED. Scope: entry-block only.")
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
@@ -226,18 +227,38 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         pos.chain_state in {"quarantined", "quarantine_expired"}
         for pos in portfolio.positions
     )
+    # ONE-TIME smoke test portfolio cap — see settings.json note.
+    # Blocks new entries once the sum of cost_basis_usd across all non-terminal
+    # positions reaches the configured ceiling. Remove this branch together
+    # with the setting after the first full lifecycle has been observed.
+    try:
+        smoke_test_cap = settings["smoke_test_portfolio_cap_usd"]
+    except KeyError:
+        smoke_test_cap = None
+    open_cost_basis_usd = 0.0
+    if smoke_test_cap is not None:
+        terminal_phases = {"settled", "voided", "admin_closed"}
+        open_cost_basis_usd = sum(
+            float(getattr(pos, "cost_basis_usd", 0.0) or 0.0)
+            for pos in portfolio.positions
+            if str(getattr(pos, "phase", "") or "") not in terminal_phases
+        )
+        summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
+        summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
-    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
+    elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED):
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
     elif entry_bankroll <= 0:
         entries_blocked_reason = "entry_bankroll_non_positive"
+    elif smoke_test_cap is not None and open_cost_basis_usd >= float(smoke_test_cap):
+        entries_blocked_reason = f"smoke_test_portfolio_cap_reached({open_cost_basis_usd:.2f}>={float(smoke_test_cap):.2f})"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
     elif getattr(portfolio, 'portfolio_loader_degraded', False):
@@ -247,6 +268,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
+    if entries_paused and entries_blocked_reason is None:
+        entries_blocked_reason = "entries_paused"
     if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)

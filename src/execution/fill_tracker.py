@@ -135,6 +135,42 @@ def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> None:
                 pass
 
 
+def _maybe_emit_canonical_entry_fill(pos: Position, deps=None) -> None:
+    """Append the ENTRY_ORDER_FILLED canonical event so position_current
+    advances from pending_entry to active. Events 1 and 2 (OPEN_INTENT,
+    ORDER_POSTED) were written at order placement; here we only add the
+    fill event at the next available sequence_no.
+    """
+    if deps is None or not hasattr(deps, "get_connection"):
+        return
+    fill_conn = None
+    try:
+        from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
+        from src.state.db import append_many_and_project
+
+        fill_conn = deps.get_connection()
+        row = fill_conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (getattr(pos, "trade_id", ""),),
+        ).fetchone()
+        next_seq = int((row[0] if row else 0) or 0) + 1
+        events, projection = build_entry_fill_only_canonical_write(
+            pos,
+            sequence_no=next_seq,
+            source_module="src.execution.fill_tracker",
+        )
+        append_many_and_project(fill_conn, events, projection)
+        fill_conn.commit()
+    except Exception as exc:
+        logger.warning("Canonical entry-fill emit failed for %s: %s", pos.trade_id, exc)
+    finally:
+        if fill_conn is not None:
+            try:
+                fill_conn.close()
+            except Exception:
+                pass
+
+
 def _maybe_log_execution_fill(
     pos: Position,
     *,
@@ -214,6 +250,7 @@ def _mark_entry_filled(
     pos.entered_at = now.isoformat()
 
     _maybe_update_trade_lifecycle(pos, deps=deps)
+    _maybe_emit_canonical_entry_fill(pos, deps=deps)
     _maybe_log_execution_fill(
         pos,
         submitted_price=submitted_price,

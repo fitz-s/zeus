@@ -42,28 +42,34 @@ from src.config import City
 from src.state.db import get_connection, init_schema
 
 
+def _ensure_auth_verified(conn) -> None:
+    """Mark all calibration_pairs rows VERIFIED (init_schema now creates the column)."""
+    conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
+    conn.commit()
+
+
 NYC = City(
     name="NYC", lat=40.7772, lon=-73.8726,
-    timezone="America/New_York", cluster="US-Northeast",
+    timezone="America/New_York", cluster="NYC",
     settlement_unit="F", wu_station="KLGA",
 )
 
 LONDON = City(
     name="London", lat=51.4775, lon=-0.4614,
-    timezone="Europe/London", cluster="Europe-Maritime",
+    timezone="Europe/London", cluster="London",
     settlement_unit="C", wu_station="EGLL",
 )
 
 
 class TestBucketRouting:
     def test_nyc_winter(self):
-        assert route_to_bucket(NYC, "2026-01-15") == "US-Northeast_DJF"
+        assert route_to_bucket(NYC, "2026-01-15") == "NYC_DJF"
 
     def test_nyc_summer(self):
-        assert route_to_bucket(NYC, "2026-07-15") == "US-Northeast_JJA"
+        assert route_to_bucket(NYC, "2026-07-15") == "NYC_JJA"
 
     def test_london_spring(self):
-        assert route_to_bucket(LONDON, "2026-04-10") == "Europe-Maritime_MAM"
+        assert route_to_bucket(LONDON, "2026-04-10") == "London_MAM"
 
     def test_december_is_winter(self):
         assert season_from_date("2026-12-01") == "DJF"
@@ -149,6 +155,7 @@ class TestStoreRoundTrip:
                 forecast_available_at="2026-01-01T00:00:00Z",
             )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         pairs = get_pairs_for_bucket(conn, "US-Northeast", "DJF")
         assert len(pairs) == 20
@@ -182,6 +189,7 @@ class TestDecisionGroupAccounting:
                     settlement_value=41.0,
                 )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         groups = build_decision_groups(conn)
         health = summarize_bucket_health(groups)
@@ -233,6 +241,7 @@ class TestDecisionGroupAccounting:
             forecast_available_at="2025-12-30T00:00:00Z",
             settlement_value=40.0,
         )
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
 
         assert write_decision_groups(conn, groups, recorded_at="t1") == 1
@@ -267,6 +276,7 @@ class TestDecisionGroupAccounting:
             settlement_value=40.0,
             bias_corrected=True,
         )
+        _ensure_auth_verified(conn)
 
         group = build_decision_group_for_key(
             conn,
@@ -300,6 +310,7 @@ class TestDecisionGroupAccounting:
                     settlement_value=41.0,
                 )
 
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
         written = write_decision_groups(conn, groups, recorded_at="t1")
         mixed = conn.execute(
@@ -340,6 +351,7 @@ class TestDecisionGroupAccounting:
                     forecast_available_at=f"2025-12-{group_idx + 20:02d}T00:00:00Z",
                     settlement_value=41.0,
                 )
+        _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
         shadow = summarize_maturity_shadow(groups)
         conn.close()
@@ -404,6 +416,7 @@ class TestBlockedOOSCalibration:
                 winning_idx=winning_idx,
             )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         report = evaluate_blocked_oos_calibration(
             conn,
@@ -444,6 +457,7 @@ class TestBlockedOOSCalibration:
             winning_idx=4,
         )
         conn.commit()
+        _ensure_auth_verified(conn)
 
         report = evaluate_blocked_oos_calibration(
             conn,
@@ -511,10 +525,10 @@ class TestGetCalibrator:
         conn = get_connection(db_path)
         init_schema(conn)
 
-        # Store a pre-fitted model
+        # Store a pre-fitted model under K3 bucket key (city.name_season)
         bootstrap = [(1.0, 0.1, -0.5)] * 50
         save_platt_model(
-            conn, "US-Northeast_DJF",
+            conn, "NYC_DJF",
             A=1.0, B=0.1, C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
