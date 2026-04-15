@@ -99,3 +99,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_cli.py`, `
 Summary: Moved CLI parser/dispatch/rendering into `topology_doctor_cli.py`; `topology_doctor.py` remains the checker/build kernel and delegates `main()` to the CLI facade. Added/kept CLI JSON parity tests before deeper splits.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'cli_json_parity or compiled_topology or docs_mode'`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_cli.py`.
 Next: Future modularization should split one checker family at a time behind the same CLI and parity tests.
+
+## 2026-04-15 — Docs Checker Family Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the first checker family from `topology_doctor.py` behind parity tests.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_docs_checks.py`, `architecture/script_manifest.yaml`, `tests/test_topology_doctor.py`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved docs-specific checker implementations into `topology_doctor_docs_checks.py` while preserving wrapper functions in `topology_doctor.py` for existing tests and callers.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'docs_mode or current_state or hidden_docs or broken_internal or compiled_topology or cli_json_parity'`; `python scripts/topology_doctor.py --docs --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_docs_checks.py scripts/topology_doctor_cli.py`.
+Next: Future splits should move one checker family at a time with the same wrapper/parity pattern.

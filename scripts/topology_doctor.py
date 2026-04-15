@@ -351,258 +351,54 @@ def _check_reference_authority(topology: dict[str, Any]) -> list[TopologyIssue]:
     return issues
 
 
+
+def _docs_checks():
+    try:
+        from scripts import topology_doctor_docs_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_docs_checks
+
+    return topology_doctor_docs_checks
+
+
 def _docs_mode_excluded_roots(topology: dict[str, Any]) -> list[Path]:
-    roots = []
-    for item in topology.get("docs_mode_excluded_roots", []):
-        rel = item.get("path")
-        if rel:
-            roots.append(ROOT / rel)
-    return roots
+    return _docs_checks().docs_mode_excluded_roots(sys.modules[__name__], topology)
 
 
 def _docs_subroot_specs(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    specs = {
-        str(item.get("path", "")).strip("/"): item
-        for item in topology.get("docs_subroots") or []
-        if item.get("path")
-    }
-    if specs:
-        return specs
-    return {
-        "docs/authority": {"allow_non_markdown": False, "requires_agents": True},
-        "docs/reference": {"allow_non_markdown": False, "requires_agents": True},
-        "docs/operations": {"allow_non_markdown": False, "requires_agents": True},
-        "docs/runbooks": {"allow_non_markdown": False, "requires_agents": True},
-        "docs/archives": {"allow_non_markdown": True, "requires_agents": True},
-    }
+    return _docs_checks().docs_subroot_specs(topology)
 
 
 def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return _docs_checks().is_under(path, root)
 
 
 def _check_hidden_docs(topology: dict[str, Any]) -> list[TopologyIssue]:
-    issues = []
-    excluded_roots = _docs_mode_excluded_roots(topology)
-    subroots = _docs_subroot_specs(topology)
-    visible_docs_files = [
-        ROOT / rel
-        for rel in _git_visible_files()
-        if rel.startswith("docs/") and (ROOT / rel).is_file()
-    ]
-    allowed_root_files = {"docs/AGENTS.md", "docs/README.md", "docs/known_gaps.md"}
-    for path in sorted(visible_docs_files):
-        rel = path.relative_to(ROOT).as_posix()
-        if any(_is_under(path, root) for root in excluded_roots):
-            continue
-        parts = Path(rel).parts
-        subroot = "/".join(parts[:2]) if len(parts) > 1 else ""
-        if len(parts) > 1 and subroot not in subroots and rel not in allowed_root_files:
-            issues.append(
-                _issue(
-                    "docs_unregistered_subtree",
-                    subroot,
-                    "docs subtree has visible files but is not declared in topology docs_subroots",
-                )
-            )
-        spec = subroots.get(subroot, {})
-        suffix = path.suffix.lower()
-        if suffix != ".md":
-            allowed = set(str(item).lower() for item in spec.get("allowed_extensions") or [])
-            if not spec.get("allow_non_markdown") or suffix not in allowed:
-                issues.append(
-                    _issue(
-                        "docs_non_markdown_artifact",
-                        rel,
-                        "non-markdown docs artifact must live in a declared artifact/evidence subroot",
-                    )
-                )
-        if path.name in {"plan.md", "progress.md"} and not rel.startswith("docs/operations/task_"):
-            issues.append(
-                _issue(
-                    "docs_generic_name",
-                    rel,
-                    "generic docs names are only allowed inside active task folders",
-                )
-            )
-        if " " in rel:
-            issues.append(
-                _issue("hidden_active_doc", rel, "active docs path contains spaces")
-            )
-    return issues
+    return _docs_checks().check_hidden_docs(sys.modules[__name__], topology)
 
 
 def _check_docs_subtree_agents(topology: dict[str, Any]) -> list[TopologyIssue]:
-    issues = []
-    for rel, spec in sorted(_docs_subroot_specs(topology).items()):
-        if not spec.get("requires_agents", True):
-            continue
-        path = ROOT / rel / "AGENTS.md"
-        if not path.exists():
-            issues.append(
-                _issue("missing_docs_agents", f"{rel}/AGENTS.md", "active docs subtree lacks AGENTS.md")
-            )
-    return issues
-
-
-INTERNAL_PATH_PATTERN = re.compile(
-    r"\b(?:docs|architecture|src|scripts|tests|config)/[A-Za-z0-9_./-]+(?:\.[A-Za-z0-9_]+)?"
-)
+    return _docs_checks().check_docs_subtree_agents(sys.modules[__name__], topology)
 
 
 def _internal_path_candidates(text: str) -> set[str]:
-    candidates: set[str] = set()
-    for match in INTERNAL_PATH_PATTERN.findall(text):
-        value = match.strip().strip(".,);:")
-        if any(char in value for char in "*?[]<>"):
-            continue
-        if not Path(value.rstrip("/")).suffix and not value.endswith("/"):
-            continue
-        candidates.add(value.rstrip("/"))
-    return candidates
+    return _docs_checks().internal_path_candidates(text)
 
 
 def _check_broken_internal_paths() -> list[TopologyIssue]:
-    issues: list[TopologyIssue] = []
-    checked_files = [
-        ROOT / "AGENTS.md",
-        ROOT / "workspace_map.md",
-        ROOT / "docs" / "AGENTS.md",
-        ROOT / "docs" / "operations" / "AGENTS.md",
-        ROOT / "docs" / "operations" / "current_state.md",
-        ROOT / "docs" / "authority" / "AGENTS.md",
-        ROOT / "architecture" / "kernel_manifest.yaml",
-    ]
-    for file_path in checked_files:
-        if not file_path.exists():
-            continue
-        source_rel = file_path.relative_to(ROOT).as_posix()
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-        for candidate in sorted(_internal_path_candidates(text)):
-            if candidate.startswith("docs/archives/") and any(
-                char in candidate for char in ("*", "?")
-            ):
-                continue
-            if not (ROOT / candidate).exists():
-                issues.append(
-                    _issue(
-                        "docs_broken_internal_path",
-                        source_rel,
-                        f"internal path is not visible in this tree: {candidate}",
-                    )
-                )
-    return issues
-
-
-CONFIG_AGENTS_VOLATILE_FACT_PATTERNS = (
-    re.compile(r"\bverified\s+\d{4}-\d{2}-\d{2}\b", re.IGNORECASE),
-    re.compile(r"\bnon[-_]wu_icao cities\s*\(\d{4}-\d{2}-\d{2}\)", re.IGNORECASE),
-)
+    return _docs_checks().check_broken_internal_paths(sys.modules[__name__])
 
 
 def _check_config_agents_volatile_facts() -> list[TopologyIssue]:
-    path = ROOT / "config" / "AGENTS.md"
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    issues: list[TopologyIssue] = []
-    for pattern in CONFIG_AGENTS_VOLATILE_FACT_PATTERNS:
-        if pattern.search(text):
-            issues.append(
-                _issue(
-                    "config_agents_volatile_fact",
-                    "config/AGENTS.md",
-                    "config AGENTS should route to audit artifacts instead of embedding dated external market facts",
-                )
-            )
-            break
-    return issues
+    return _docs_checks().check_config_agents_volatile_facts(sys.modules[__name__])
 
 
 def _current_state_operation_paths(text: str, surface_prefix: str) -> set[str]:
-    paths = _markdown_path_tokens(text)
-    return {path for path in paths if path.startswith(surface_prefix)}
+    return _docs_checks().current_state_operation_paths(sys.modules[__name__], text, surface_prefix)
 
 
 def _check_active_operations_registry(topology: dict[str, Any]) -> list[TopologyIssue]:
-    registry = topology.get("active_operations_registry") or {}
-    rel = str(registry.get("current_state") or "docs/operations/current_state.md")
-    path = ROOT / rel
-    if not path.exists():
-        return [_issue("missing_active_pointer", rel, "active operations current_state missing")]
-
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    issues: list[TopologyIssue] = []
-    for label in registry.get("required_labels") or []:
-        if str(label) not in text:
-            issues.append(
-                _issue(
-                    "operations_current_state_missing_label",
-                    rel,
-                    f"current_state missing required operations label: {label}",
-                )
-            )
-    for anchor in registry.get("required_anchors") or []:
-        anchor = str(anchor)
-        if anchor not in text:
-            issues.append(
-                _issue(
-                    "operations_current_state_missing_anchor",
-                    rel,
-                    f"current_state missing required active anchor: {anchor}",
-                )
-            )
-        elif not (ROOT / anchor.rstrip("/")).exists():
-            issues.append(
-                _issue(
-                    "operations_current_state_path_missing",
-                    rel,
-                    f"current_state required anchor does not exist: {anchor}",
-                )
-            )
-
-    surface_prefix = str(registry.get("surface_prefix") or "docs/operations/")
-    surfaces = _current_state_operation_paths(text, surface_prefix)
-    registered = _registry_entries(
-        ROOT / "docs" / "operations" / "AGENTS.md",
-        include_directory_tokens=True,
-    )
-    for surface in sorted(surfaces):
-        normalized = surface.rstrip("/")
-        if not (ROOT / normalized).exists():
-            issues.append(
-                _issue(
-                    "operations_current_state_path_missing",
-                    rel,
-                    f"current_state references missing operations surface: {surface}",
-                )
-            )
-            continue
-        local_name = Path(normalized).name
-        if normalized == "docs/operations/current_state.md":
-            continue
-        if (
-            local_name not in registered
-            and f"{local_name}/" not in registered
-            and surface not in registered
-            and normalized not in registered
-            and not any(
-                item.endswith("/") and normalized.startswith(f"docs/operations/{item}")
-                for item in registered
-            )
-        ):
-            issues.append(
-                _issue(
-                    "operations_current_state_unregistered_surface",
-                    rel,
-                    f"operations surface is in current_state but not docs/operations/AGENTS.md registry: {surface}",
-                )
-            )
-    return issues
+    return _docs_checks().check_active_operations_registry(sys.modules[__name__], topology)
 
 
 def _check_root_and_state_classification(topology: dict[str, Any]) -> list[TopologyIssue]:

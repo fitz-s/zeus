@@ -106,6 +106,7 @@ long_lived_naming:
     replay_parity.py: established diagnostic command
     semantic_linter.py: established enforcement tool
     topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
+    topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
     topology_doctor.py: established topology compiler/checker
     venus_autonomy_gate.py: established Venus boundary gate
     venus_sensing_report.py: established Venus boundary report
@@ -416,6 +417,7 @@ scripts:
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
   semantic_linter.py: {class: enforcement}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}
+  topology_doctor_docs_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for docs checker family}
   topology_doctor.py: {class: enforcement}
   validate_assumptions.py: {class: enforcement}
   validate_dynamic_alpha.py: {class: diagnostic}
