@@ -59,6 +59,15 @@ strict_issue_codes:
   - unregistered_tracked_file
   - reference_authority_without_enforcement
   - hidden_active_doc
+  - docs_unregistered_subtree
+  - docs_non_markdown_artifact
+  - docs_generic_name
+  - docs_broken_internal_path
+  - operations_current_state_missing_label
+  - operations_current_state_missing_anchor
+  - operations_current_state_path_missing
+  - operations_current_state_unregistered_surface
+  - config_agents_volatile_fact
   - unclassified_root_artifact
   - unclassified_state_surface
   - shadow_runtime_authority_reference
@@ -88,6 +97,10 @@ strict_issue_codes:
   - artifact_lifecycle_required_field_missing
   - artifact_lifecycle_unknown_class
   - artifact_lifecycle_rule_invalid
+  - artifact_lifecycle_liminal_field_missing
+  - artifact_lifecycle_liminal_role_invalid
+  - artifact_lifecycle_liminal_route_invalid
+  - artifact_lifecycle_liminal_path_missing
   - work_record_required
   - work_record_missing
   - work_record_invalid_path

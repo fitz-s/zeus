@@ -31,6 +31,8 @@ plan.
 | `docs/reference/` | Conditional domain/math/data references | `docs/reference/AGENTS.md` |
 | `docs/operations/` | Active packet/control pointers | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
+| `docs/to-do-list/` | Active checklist workbooks, not authority | `docs/to-do-list/AGENTS.md` |
+| `docs/artifacts/` | Active evidence artifacts, not authority | `docs/artifacts/AGENTS.md` |
 | `docs/archives/` | Historical evidence only | `docs/archives/AGENTS.md`; work packets group by git lineage |
 | `architecture/` | Machine-checkable authority and topology | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
@@ -96,11 +98,9 @@ Prefer these over hand-maintained prose when they exist:
 | Core map | `python scripts/topology_doctor.py core-map --profile probability-chain --json` |
 | Invariant slice | `python scripts/topology_doctor.py --invariants --zone K3_extension --json` |
 | Context budget | `python scripts/topology_doctor.py --context-budget --json` |
-| Lore cards | `python scripts/topology_doctor.py --history-lore --json` |
 | Source rationale | `python scripts/topology_doctor.py --source --json` |
 | Test topology | `python scripts/topology_doctor.py --tests --json` |
 | Script safety | `python scripts/topology_doctor.py --scripts --json` |
-| Data rebuild gates | `python scripts/topology_doctor.py --data-rebuild --json` |
 
 ## Do Not Default-Read
 

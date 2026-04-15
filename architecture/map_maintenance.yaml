@@ -25,6 +25,22 @@ modes:
     use: "At packet closeout; unresolved map delta must be handled or explicitly deferred."
 
 rules:
+  - id: docs_top_level_registry
+    path_globs: ["docs/*.md", "docs/*.xlsx", "docs/*.csv", "docs/*.json"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/AGENTS.md
+      - docs/README.md
+      - architecture/topology.yaml
+    rationale: top-level docs files and artifacts must be routed by the docs mesh.
+  - id: docs_subtree_registry
+    path_globs: ["docs/*/AGENTS.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/AGENTS.md
+      - docs/README.md
+      - architecture/topology.yaml
+    rationale: new or removed docs subtrees change docs-level routing and topology docs_subroots.
   - id: src_file_registry
     path_globs: ["src/**/*.py"]
     on_change: [added, deleted]
@@ -68,6 +84,33 @@ rules:
     required_companions:
       - docs/authority/AGENTS.md
     rationale: authority docs remain explicitly enumerated for active law routing.
+  - id: operations_doc_registry
+    path_globs: ["docs/operations/task_*.md", "docs/operations/task_*/**"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/operations/AGENTS.md
+      - docs/operations/current_state.md
+    rationale: active packets and sidecar evidence must remain visible from the live control surface.
+  - id: runbook_doc_registry
+    path_globs: ["docs/runbooks/*.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/runbooks/AGENTS.md
+    rationale: runbooks are operator routing surfaces and need local registry updates.
+  - id: docs_artifact_registry
+    path_globs: ["docs/artifacts/*"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/artifacts/AGENTS.md
+      - architecture/artifact_lifecycle.yaml
+    rationale: binary/non-md docs artifacts must be classified explicitly as evidence, not authority.
+  - id: todo_list_registry
+    path_globs: ["docs/to-do-list/*"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/to-do-list/AGENTS.md
+      - architecture/artifact_lifecycle.yaml
+    rationale: active checklist workbooks are evidence/task inventory and must remain explicit.
   - id: architecture_manifest_registry
     path_globs: ["architecture/*.yaml", "architecture/*.md", "architecture/*.sql"]
     on_change: [added, deleted]

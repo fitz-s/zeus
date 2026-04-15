@@ -1,6 +1,6 @@
 # docs AGENTS
 
-Documentation root. Four active subdirectories plus archives.
+Documentation root. Active subdirectories plus archives.
 
 ## Design principle
 
@@ -20,11 +20,12 @@ Read `README.md` in this directory for the docs index with full folder descripti
 | `reference/` | Domain model, repo orientation, data inventory, quantitative research → `reference/AGENTS.md` |
 | `operations/` | Live control-entry pointer + active work packets → `operations/AGENTS.md` |
 | `runbooks/` | Operator runbooks → `runbooks/AGENTS.md` |
+| `to-do-list/` | Active checklist workbooks and audit queues; not authority → `to-do-list/AGENTS.md` |
+| `artifacts/` | Active evidence artifacts and workbooks; not authority → `artifacts/AGENTS.md` |
 | `archives/` | Historical only — never active authority → `archives/AGENTS.md` |
 
 ## Rules
 
-- New active docs go in `authority/`, `reference/`, `operations/`, or `runbooks/` — never directly in `docs/`
+- New active docs go in `authority/`, `reference/`, `operations/`, `runbooks/`, `to-do-list/`, or `artifacts/` — never directly in `docs/`
 - `known_gaps.md` is the exception (top-level because it spans all zones)
 - Everything that is no longer active law → `archives/`
-- See root `AGENTS.md` §8 for naming conventions
