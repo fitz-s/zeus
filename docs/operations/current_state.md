@@ -21,6 +21,9 @@ Role: single live control-entry surface for the repo.
 - Active backlog:
   - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
   - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
+  - `docs/operations/data_rebuild_plan.md` — upstream data rebuild plan (v2.2, scope: collect+store code prep while TIGGE completes)
+- Stale/deferred:
+  - `docs/operations/phase1live_2026-04-11_plan.md` — Phase 1 Live Daemon Maturity plan (IN PROGRESS since 2026-04-11, no updates since creation; conceptual authority only)
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
   - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record (20 entries, current as of 2026-04-15)
