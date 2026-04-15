@@ -35,8 +35,50 @@ coverage_roots:
     status: active
     scope: scoped
     zone: docs
+    authority_role: registry
+    forbidden_misread: Docs root is a router; subroot roles define authority.
+  - path: "docs/authority"
+    status: active
+    scope: scoped
+    zone: docs_authority
+    authority_role: schema_law
+    forbidden_misread: Authority docs route current law; machine manifests and code/tests still win conflicts.
+  - path: "docs/reference"
+    status: active
+    scope: scoped
+    zone: docs_reference
     authority_role: reference_only
-    forbidden_misread: Docs cannot create executable law without enforcement.
+    forbidden_misread: Reference docs are fact/evidence surfaces, not authority by themselves.
+  - path: "docs/operations"
+    status: active
+    scope: scoped
+    zone: docs_operations
+    authority_role: operations_pointer
+    forbidden_misread: Operations docs point to active work; they do not rewrite architecture law.
+  - path: "docs/runbooks"
+    status: active
+    scope: scoped
+    zone: docs_runbooks
+    authority_role: runtime_support
+    forbidden_misread: Runbooks guide operators; they do not outrank code or manifests.
+  - path: "docs/to-do-list"
+    status: active
+    scope: scoped
+    zone: docs_todo
+    authority_role: derived_diagnostic
+    forbidden_misread: Checklist workbooks are task inventories/evidence, not authority.
+  - path: "docs/artifacts"
+    status: active
+    scope: scoped
+    zone: docs_artifacts
+    authority_role: derived_diagnostic
+    forbidden_misread: Workbooks and artifacts are evidence only; extract durable law elsewhere.
+  - path: "docs/archives"
+    status: archived
+    scope: historical
+    zone: docs_archives
+    authority_role: legacy_artifact
+    forbidden_misread: Archives are provenance/evidence, not active authority.
   - path: "config"
     status: active
     scope: scoped
@@ -111,12 +153,6 @@ root_governed_files:
     zone: root
     authority_role: runtime_support
     forbidden_misread: Ignore rules do not classify authority.
-  - path: "zeus_data_inventory.xlsx"
-    status: conditional
-    scope: historical
-    zone: root
-    authority_role: reference_only
-    forbidden_misread: Spreadsheet inventory is not canonical DB truth.
   - path: "zeus-world.db"
     status: scratch
     scope: runtime
@@ -343,11 +379,60 @@ registry_directories:
   - path: "docs/reference"
   - path: "docs/operations"
   - path: "docs/runbooks"
+  - path: "docs/to-do-list"
+  - path: "docs/artifacts"
+  - path: "docs/archives"
   - path: "config"
   - path: "config/reality_contracts"
   - path: ".github/workflows"
 
 docs_mode_excluded_roots: []
+
+active_operations_registry:
+  current_state: docs/operations/current_state.md
+  required_labels:
+    - Primary packet file
+    - Active sidecars
+    - Active backlog
+    - Active checklist/evidence
+    - Next packet
+  surface_prefix: docs/operations/
+  required_anchors:
+    - docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx
+    - docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md
+
+docs_subroots:
+  - path: "docs/authority"
+    role: authority
+    requires_agents: true
+    allow_non_markdown: false
+  - path: "docs/reference"
+    role: reference
+    requires_agents: true
+    allow_non_markdown: false
+  - path: "docs/operations"
+    role: operations
+    requires_agents: true
+    allow_non_markdown: false
+  - path: "docs/runbooks"
+    role: runbook
+    requires_agents: true
+    allow_non_markdown: false
+  - path: "docs/to-do-list"
+    role: checklist_evidence
+    requires_agents: true
+    allow_non_markdown: true
+    allowed_extensions: [".xlsx", ".csv", ".json"]
+  - path: "docs/artifacts"
+    role: evidence_artifact
+    requires_agents: true
+    allow_non_markdown: true
+    allowed_extensions: [".xlsx", ".csv", ".json"]
+  - path: "docs/archives"
+    role: historical_archive
+    requires_agents: true
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".sql", ".csv", ".json", ".yaml", ".yml", ".py", ".sh", ".txt", ".xlsx", ".patch"]
 
 reference_fact_specs:
   - path: "docs/reference/zeus_math_spec.md"

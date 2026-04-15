@@ -4,7 +4,10 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Design principle
 
-**Flat mesh architecture.** Four active subdirectories plus archives. Each directory contains only files that are actively referenced by the mesh network (rooted at `AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent context loading fast — agents follow links, not directories.
+**Flat mesh architecture.** Active subdirectories plus archives. Each directory
+contains only files that are actively referenced by the mesh network (rooted at
+`AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent
+context loading fast — agents follow links, not directories.
 
 ## Folders
 
@@ -14,6 +17,8 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 | `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, math specification notes | 8 |
 | `operations/` | Live control-entry pointer + current work packets | 4 |
 | `runbooks/` | Operator runbooks | 2 |
+| `to-do-list/` | Active checklist workbooks and audit queues, never authority | 1 |
+| `artifacts/` | Active evidence artifacts and inventories, never authority | 1 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
 
 ## Active top-level docs
@@ -29,14 +34,19 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Archives
 
-`archives/**` — historical only; never principal authority. Subdirectories include: `architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`, `governance/`, `handoffs/`, `investigations/`, `math/`, `memory/`, `migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`, `reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`, `traces/`, `work_packets/`.
+`archives/**` — historical only; never principal authority. Subdirectories include:
+`architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`,
+`governance/`, `handoffs/`, `investigations/`, `math`, `memory/`,
+`migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`,
+`reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`,
+`traces/`, `work_packets/`.
 
 ## Naming Rules (Mandatory)
 
 - All `.md` files: `lower_snake_case.md` (exceptions: `AGENTS.md`, `README.md`)
 - **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date
 - No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
-- No generic names: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
+- No generic names outside active task folders: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
 - No spaces in filenames or directory names
 - Existing files keep current names (no retroactive renames)
 - Date prefixes only for time-bound reports

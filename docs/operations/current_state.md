@@ -15,7 +15,16 @@ Role: single live control-entry surface for the repo.
 - Branch: `data-improve`
 - Program: Zeus Topology Compiler and Recurrence-Proof Program
 - Active packet: Packet 3 — Mesh Repair and Authority Normalization
-- Active packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`
+- Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`
+- Active sidecars:
+  - `docs/operations/task_2026-04-14_topology_context_efficiency/` — topology context-pack, artifact lifecycle, and work-record evidence
+- Active backlog:
+  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — remaining repair backlog after non-DB small-package loop
+  - `docs/operations/task_2026-04-14_session_backlog.md` — calibration-refactor session backlog snapshot
+- Active checklist/evidence:
+  - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — active data-improvement audit checklist used by agents
+  - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record
+- Next packet: Packet 4 — source file rationale mapping, unless Packet 3 leaves a blocking mesh issue
 
 ## Recent Packet State
 
@@ -33,4 +42,4 @@ Role: single live control-entry surface for the repo.
 
 ## Next Expected Packet
 
-After Packet 3 closes, Packet 4 should begin source file rationale mapping unless Packet 3 leaves a blocking mesh issue.
+Packet 4 should begin source file rationale mapping unless Packet 3 leaves a blocking mesh issue.

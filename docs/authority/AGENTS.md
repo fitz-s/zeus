@@ -1,7 +1,7 @@
 File: docs/authority/AGENTS.md
 Disposition: NEW
 Authority basis: docs/authority/zeus_current_architecture.md; docs/authority/zeus_current_delivery.md; current repo/operator reality.
-Supersedes / harmonizes: scattered workflow guidance; dossier-only delivery rules; former docs/governance/AGENTS.md.
+Supersedes / harmonizes: scattered workflow guidance; dossier-only delivery rules; former governance-directory instructions.
 Why this file exists now: authority docs drift fastest under agentic work unless their scope is explicit.
 Current-phase or long-lived: Long-lived.
 

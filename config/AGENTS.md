@@ -25,20 +25,18 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 
 ## cities.json — routine check discipline (ROUTINE CHECK NEEDED)
 
-Every `cities.json` row must match the **current** Polymarket market description text for that city. Polymarket can change a city's settlement source, station, or unit at any time — and they do (verified 2026-04-14: Istanbul and Moscow are NOAA, London moved EGLL→EGLC, Jakarta moved WIII→WIHH, Panama City moved MPTO→MPMG, Taipei moved WU→Taiwan CWA station 46692, London unit transitioned °F→°C).
+Every `cities.json` row must match the **current** Polymarket market description text for that city. Polymarket can change a city's settlement source, station, or unit at any time.
+
+Volatile external city/station evidence lives under `docs/artifacts/polymarket_city_settlement_audit_*.md`. These artifacts explain why the audit cadence exists; they are not current authority.
 
 **Audit cadence**: monthly, plus before any recalibration run or new-city onboarding.
 
 **Single source of truth**: the `description` field of the most recent active Polymarket market for each city. The market wins when any mirror (cities.json, Wunderground page, code constants) disagrees.
 
-**`settlement_source_type` values**:
-- `wu_icao` (default) — WU ICAO history endpoint; `wu_station` is a 4-letter ICAO
-- `hko` — Hong Kong Observatory API (`weather.gov.hk/.../cis/climat.htm`); `wu_station` is `null`, `hko_station` holds the station id
-- `noaa` — NOAA weather.gov timeseries (`weather.gov/wrh/timeseries?site=<ICAO>`); `wu_station` holds the ICAO that NOAA serves
-- `cwa_station` — Taiwan Central Weather Administration (`cwa.gov.tw/V8/C/W/OBS_Station.html?ID=<id>`); `wu_station` holds the numeric CWA station id
+**`settlement_source_type` values**: `wu_icao`, `hko`, `noaa`, `cwa_station`. Field semantics live in config/schema code and `cities.json`; do not update this routing file from a dated market snapshot.
 
 **Downstream consequence**: any station-ICAO change invalidates prior `observations` rows for that city (wrong station = wrong temperatures). Delete the stale rows and re-backfill before running calibration.
 
 **Coordinate invariant**: `lat`/`lon` MUST correspond to the same physical station as `wu_station` / `hko_station` / CWA id. Do not use city-center or approximate coordinates — this drives ENS grid-point selection.
 
-**The 4 non-wu_icao cities (2026-04-14)**: Hong Kong (HKO), Istanbul (NOAA LTFM), Moscow (NOAA UUWW), Taipei (CWA 46692). Fetchers for NOAA and CWA are not yet implemented; `scripts/backfill_wu_daily_all.py::CITY_STATIONS` intentionally excludes these four cities.
+Use generated/audit evidence for dated city exception lists. Do not encode volatile city/station snapshots directly in this routing file.

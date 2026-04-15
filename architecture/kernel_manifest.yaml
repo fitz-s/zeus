@@ -6,9 +6,7 @@ principal_authority:
   change_control_constitution: docs/authority/zeus_change_control_constitution.md
   operator_brief: .claude/CLAUDE.md
   historical_references:
-    - docs/architecture/zeus_blueprint_v2.md
-    - docs/KEY_REFERENCE/zeus_first_principles_rethink.md
-    - docs/progress/zeus_progress.md
+    - architecture/history_lore.yaml
 
 semantic_atoms:
   unit:

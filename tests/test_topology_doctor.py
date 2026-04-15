@@ -39,6 +39,177 @@ def test_topology_docs_mode_passes_with_active_data_package_excluded():
     assert_topology_ok(result)
 
 
+def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):
+    topology = topology_doctor.load_topology()
+    topology["docs_subroots"] = [
+        item for item in topology["docs_subroots"]
+        if item["path"] != "docs/to-do-list"
+    ]
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx"],
+    )
+
+    issues = topology_doctor._check_hidden_docs(topology)
+
+    assert any(issue.code == "docs_unregistered_subtree" for issue in issues)
+
+
+def test_docs_mode_rejects_non_md_artifact_outside_artifact_subroot(monkeypatch):
+    topology = topology_doctor.load_topology()
+    artifact = next(item for item in topology["docs_subroots"] if item["path"] == "docs/to-do-list")
+    artifact["allow_non_markdown"] = False
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx"],
+    )
+
+    issues = topology_doctor._check_hidden_docs(topology)
+
+    assert any(issue.code == "docs_non_markdown_artifact" for issue in issues)
+
+
+def test_docs_mode_excluded_roots_drive_space_path_exemption(monkeypatch):
+    topology = topology_doctor.load_topology()
+    topology["docs_mode_excluded_roots"] = [{"path": "docs/local archive"}]
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/local archive/old note.md"],
+    )
+
+    issues = topology_doctor._check_hidden_docs(topology)
+
+    assert issues == []
+
+
+def test_docs_mode_rejects_broken_internal_paths(monkeypatch):
+    def fake_read_text(path, *args, **kwargs):
+        if str(path).endswith("architecture/kernel_manifest.yaml"):
+            return "historical_references:\n  - docs/nope/missing.md\n"
+        return ""
+
+    monkeypatch.setattr(topology_doctor.Path, "read_text", fake_read_text)
+    issues = topology_doctor._check_broken_internal_paths()
+
+    assert any(issue.code == "docs_broken_internal_path" for issue in issues)
+
+
+def test_docs_mode_rejects_current_state_missing_operations_label(monkeypatch, tmp_path):
+    topology = topology_doctor.load_topology()
+    current = tmp_path / "current_state.md"
+    current.write_text(
+        "- Branch: `data-improve`\n"
+        "- Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`\n",
+        encoding="utf-8",
+    )
+    topology["active_operations_registry"] = {
+        "current_state": str(current.relative_to(topology_doctor.ROOT)) if current.is_relative_to(topology_doctor.ROOT) else str(current),
+        "required_labels": ["Primary packet file", "Active sidecars"],
+        "surface_prefix": "docs/operations/",
+    }
+
+    issues = topology_doctor._check_active_operations_registry(topology)
+
+    assert any(issue.code == "operations_current_state_missing_label" for issue in issues)
+
+
+def test_docs_mode_rejects_current_state_unregistered_surface(monkeypatch, tmp_path):
+    topology = topology_doctor.load_topology()
+    current = tmp_path / "current_state.md"
+    current.write_text(
+        "- Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`\n"
+        "- Active sidecars:\n"
+        "  - `docs/operations/task_2099-01-01_unregistered.md`\n"
+        "- Active backlog:\n"
+        "  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md`\n"
+        "- Next packet: Packet 4\n",
+        encoding="utf-8",
+    )
+    missing_surface = topology_doctor.ROOT / "docs/operations/task_2099-01-01_unregistered.md"
+    missing_surface.write_text("# temporary test surface\n", encoding="utf-8")
+    topology["active_operations_registry"] = {
+        "current_state": str(current.relative_to(topology_doctor.ROOT)) if current.is_relative_to(topology_doctor.ROOT) else str(current),
+        "required_labels": ["Primary packet file", "Active sidecars", "Active backlog", "Next packet"],
+        "surface_prefix": "docs/operations/",
+    }
+
+    try:
+        issues = topology_doctor._check_active_operations_registry(topology)
+    finally:
+        missing_surface.unlink()
+
+    assert any(issue.code == "operations_current_state_unregistered_surface" for issue in issues)
+
+
+def test_current_state_operation_paths_accept_markdown_and_bare_paths():
+    text = (
+        "- Primary packet file: [packet](docs/operations/task_2026-04-13_topology_compiler_program.md)\n"
+        "- Active sidecars:\n"
+        "  - docs/operations/task_2026-04-14_topology_context_efficiency/\n"
+        "- Active backlog:\n"
+        "  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md`\n"
+    )
+
+    paths = topology_doctor._current_state_operation_paths(text, "docs/operations/")
+
+    assert "docs/operations/task_2026-04-13_topology_compiler_program.md" in paths
+    assert "docs/operations/task_2026-04-14_topology_context_efficiency/" in paths
+    assert "docs/operations/task_2026-04-13_remaining_repair_backlog.md" in paths
+
+
+def test_docs_mode_rejects_current_state_missing_required_anchor(tmp_path):
+    topology = topology_doctor.load_topology()
+    current = tmp_path / "current_state.md"
+    current.write_text(
+        "- Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`\n"
+        "- Active sidecars:\n"
+        "  - `docs/operations/task_2026-04-14_topology_context_efficiency/`\n"
+        "- Active backlog:\n"
+        "  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md`\n"
+        "- Active checklist/evidence:\n"
+        "  - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx`\n"
+        "- Next packet: Packet 4\n",
+        encoding="utf-8",
+    )
+    topology["active_operations_registry"] = {
+        "current_state": str(current.relative_to(topology_doctor.ROOT)) if current.is_relative_to(topology_doctor.ROOT) else str(current),
+        "required_labels": ["Primary packet file", "Active sidecars", "Active backlog", "Active checklist/evidence", "Next packet"],
+        "surface_prefix": "docs/operations/",
+        "required_anchors": ["docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md"],
+    }
+
+    issues = topology_doctor._check_active_operations_registry(topology)
+
+    assert any(issue.code == "operations_current_state_missing_anchor" for issue in issues)
+
+
+def test_docs_mode_rejects_dated_market_fact_in_config_agents(monkeypatch):
+    def fake_read_text(path, *args, **kwargs):
+        if str(path).endswith("config/AGENTS.md"):
+            return "Polymarket changes do happen (verified 2026-04-14: London moved stations)."
+        return ""
+
+    monkeypatch.setattr(topology_doctor.Path, "read_text", fake_read_text)
+    issues = topology_doctor._check_config_agents_volatile_facts()
+
+    assert any(issue.code == "config_agents_volatile_fact" for issue in issues)
+
+
+def test_config_agents_allows_artifact_pointer_without_dated_snapshot(monkeypatch):
+    def fake_read_text(path, *args, **kwargs):
+        if str(path).endswith("config/AGENTS.md"):
+            return "Volatile external city/station evidence lives under docs/artifacts/polymarket_city_settlement_audit_*.md."
+        return ""
+
+    monkeypatch.setattr(topology_doctor.Path, "read_text", fake_read_text)
+    issues = topology_doctor._check_config_agents_volatile_facts()
+
+    assert issues == []
+
+
 def test_topology_source_mode_covers_all_tracked_src_files():
     result = topology_doctor.run_source()
 
@@ -249,6 +420,44 @@ def test_map_maintenance_allows_new_test_file_when_companion_present(monkeypatch
     )
 
     assert_topology_ok(result)
+
+
+def test_map_maintenance_requires_docs_mesh_for_new_docs_subtree(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/AGENTS.md"])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "docs/new_surface/AGENTS.md":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(
+        ["docs/new_surface/AGENTS.md"],
+        mode="closeout",
+    )
+
+    assert not result.ok
+    assert any("architecture/topology.yaml" in issue.message for issue in result.issues)
+
+
+def test_map_maintenance_requires_docs_mesh_for_top_level_artifact(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/AGENTS.md"])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "docs/surprise.xlsx":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(
+        ["docs/surprise.xlsx"],
+        mode="closeout",
+    )
+
+    assert not result.ok
+    assert any("docs/README.md" in issue.message for issue in result.issues)
 
 
 def test_map_maintenance_does_not_require_registry_for_plain_modification(monkeypatch):
@@ -1098,6 +1307,34 @@ def test_artifact_lifecycle_mode_validates_manifest():
     assert_topology_ok(result)
 
 
+def test_artifact_lifecycle_classifies_liminal_surfaces():
+    manifest = topology_doctor.load_artifact_lifecycle()
+    roles = {
+        item["path"]: item["artifact_role"]
+        for item in manifest["liminal_artifacts"]
+    }
+
+    assert roles["docs/reference/zeus_math_spec.md"] == "reference_fact_spec"
+    assert roles["architecture/history_lore.yaml"] == "history_lore"
+    assert roles["architecture/core_claims.yaml"] == "proof_claim_registry"
+    assert roles["architecture/reference_replacement.yaml"] == "reference_claim_registry"
+    assert roles["docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md"] == "operations_evidence"
+
+
+def test_artifact_lifecycle_rejects_liminal_surface_missing_role(monkeypatch):
+    manifest = topology_doctor.load_artifact_lifecycle()
+    manifest["liminal_artifacts"][0] = {
+        **manifest["liminal_artifacts"][0],
+        "artifact_role": "authority_shadow",
+    }
+
+    monkeypatch.setattr(topology_doctor, "load_artifact_lifecycle", lambda: manifest)
+    result = topology_doctor.run_artifact_lifecycle()
+
+    assert not result.ok
+    assert any(issue.code == "artifact_lifecycle_liminal_role_invalid" for issue in result.issues)
+
+
 def test_work_record_requires_record_for_repo_change():
     result = topology_doctor.run_work_record(["scripts/topology_doctor.py"], None)
 
@@ -1496,6 +1733,30 @@ def test_core_map_probability_chain_is_proof_backed_and_bounded():
     assert "Python round" not in text
     assert all(edge["confidence"] == "proof_backed_edge" for edge in payload["edges"])
     assert not payload["invalid"]
+
+
+def test_compiled_topology_is_derived_read_model():
+    payload = topology_doctor.build_compiled_topology()
+
+    assert payload["authority_status"] == "derived_not_authority"
+    assert payload["freshness_status"] == "ok"
+    assert "generated_at" in payload
+    assert any(item["path"] == "architecture/topology.yaml" for item in payload["source_manifests"])
+    assert any(item["path"] == "docs/to-do-list" for item in payload["docs_subroots"])
+    assert any(item["path"] == "docs/to-do-list" for item in payload["reviewer_visible_routes"])
+    assert payload["local_only_routes"] == [
+        {
+            "path": "docs/archives",
+            "role": "historical_archive",
+            "route_status": "ignored_archive",
+            "reviewer_visible": False,
+        }
+    ]
+    assert "docs/operations/task_2026-04-14_topology_context_efficiency/" in payload["active_operations_surfaces"]["operation_paths"]
+    assert "docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx" in payload["active_operations_surfaces"]["required_anchors"]
+    assert any(item["path"] == "docs/reference/zeus_math_spec.md" for item in payload["artifact_roles"])
+    assert payload["broken_visible_routes"] == []
+    assert payload["unclassified_docs_artifacts"] == []
 
 
 def test_core_claims_mode_validates_first_wave_claims():
