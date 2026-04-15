@@ -25,6 +25,7 @@ import inspect
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -746,17 +747,18 @@ def test_R11_hko_url_matches_backfill() -> None:
 
 def test_R11_openmeteo_archive_url_matches_backfill() -> None:
     import importlib.util
-    for backfill_name, live_mod in [
-        ("backfill_hourly_openmeteo.py", hourly_instants_append),
-        ("backfill_solar_openmeteo.py", solar_append),
+    from src.data.openmeteo_client import ARCHIVE_URL
+    for backfill_name in [
+        "backfill_hourly_openmeteo.py",
+        "backfill_solar_openmeteo.py",
     ]:
         spec = importlib.util.spec_from_file_location(
             f"_{backfill_name}", PROJECT_ROOT / "scripts" / backfill_name,
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        assert live_mod.OPENMETEO_ARCHIVE_URL == mod.OPENMETEO_ARCHIVE_URL, (
-            f"{live_mod.__name__} and {backfill_name} disagree on "
+        assert ARCHIVE_URL == mod.OPENMETEO_ARCHIVE_URL, (
+            f"openmeteo_client.ARCHIVE_URL and {backfill_name} disagree on "
             f"OPENMETEO_ARCHIVE_URL"
         )
 
@@ -831,3 +833,153 @@ def test_R12_main_py_references_k2_job_ids() -> None:
         assert f'id="{job_id}"' in main_py, (
             f'main.py missing scheduler job id="{job_id}"'
         )
+
+
+# ── R13 — guard→appender→coverage atomicity ──────────────────────────────
+
+
+def _make_atom(
+    city: str = "Chicago",
+    target_d: date = date(2026, 4, 10),
+    value_type: str = "high",
+    value: float = 75.0,
+) -> "ObservationAtom":
+    """Build a minimal valid ObservationAtom for testing."""
+    from src.types.observation_atom import ObservationAtom
+
+    fetch_utc = datetime(target_d.year, target_d.month, target_d.day, 22, 0, 0, tzinfo=timezone.utc)
+    local_time = datetime(target_d.year, target_d.month, target_d.day, 17, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
+    return ObservationAtom(
+        city=city,
+        target_date=target_d,
+        value_type=value_type,
+        value=value,
+        target_unit="F",
+        raw_value=value,
+        raw_unit="F",
+        source="wu_icao_history",
+        station_id="KORD",
+        api_endpoint="https://api.weather.com/test",
+        fetch_utc=fetch_utc,
+        local_time=local_time,
+        collection_window_start_utc=datetime(target_d.year, target_d.month, target_d.day, 6, 0, 0, tzinfo=timezone.utc),
+        collection_window_end_utc=datetime(target_d.year, target_d.month, target_d.day, 22, 0, 0, tzinfo=timezone.utc),
+        timezone="America/Chicago",
+        utc_offset_minutes=-300,
+        dst_active=True,
+        is_ambiguous_local_hour=False,
+        is_missing_local_hour=False,
+        hemisphere="N",
+        season="MAM",
+        month=4,
+        rebuild_run_id="test_r13",
+        data_source_version="test_v1",
+        authority="VERIFIED",
+        validation_pass=True,
+    )
+
+
+def test_R13_write_atom_coverage_atomicity_happy_path() -> None:
+    """When _write_atom_with_coverage succeeds, both a physical observations
+    row AND a WRITTEN coverage ledger row must exist.  Neither may land
+    without the other — the savepoint contract of S1.
+    """
+    from src.data.daily_obs_append import _write_atom_with_coverage
+
+    conn = _memdb()
+    target_d = date(2026, 4, 10)
+    atom_high = _make_atom(value_type="high", value=75.0, target_d=target_d)
+    atom_low = _make_atom(value_type="low", value=55.0, target_d=target_d)
+
+    _write_atom_with_coverage(conn, atom_high, atom_low, data_source="wu_icao_history")
+    conn.commit()
+
+    # Physical row landed
+    obs_rows = conn.execute(
+        "SELECT * FROM observations WHERE city = ? AND target_date = ?",
+        ("Chicago", target_d.isoformat()),
+    ).fetchall()
+    assert len(obs_rows) == 1, f"expected 1 obs row, got {len(obs_rows)}"
+
+    # Coverage row landed with WRITTEN status
+    cov_rows = conn.execute(
+        "SELECT status FROM data_coverage WHERE city = ? AND target_date = ? AND data_table = ?",
+        ("Chicago", target_d.isoformat(), DataTable.OBSERVATIONS.value),
+    ).fetchall()
+    assert len(cov_rows) == 1, f"expected 1 coverage row, got {len(cov_rows)}"
+    assert cov_rows[0]["status"] == CoverageStatus.WRITTEN.value, (
+        f"expected WRITTEN, got {cov_rows[0]['status']}"
+    )
+
+
+def test_R13_guard_rejection_records_legitimate_gap_no_obs_row() -> None:
+    """When the guard rejects a datum and record_legitimate_gap is called,
+    the coverage row must be LEGITIMATE_GAP and the observations table
+    must have zero rows for that (city, date).  This is the second arm of
+    the guard→appender→coverage contract.
+    """
+    conn = _memdb()
+    target_d = date(2026, 4, 10)
+
+    # Simulate guard rejection — record the gap directly (the real flow
+    # catches IngestionRejected and calls this).
+    record_legitimate_gap(
+        conn,
+        data_table=DataTable.OBSERVATIONS,
+        city="Chicago",
+        data_source="wu_icao_history",
+        target_date=target_d,
+        reason=CoverageReason.GUARD_REJECTED,
+    )
+    conn.commit()
+
+    # No physical row
+    obs_count = conn.execute(
+        "SELECT count(*) FROM observations WHERE city = ? AND target_date = ?",
+        ("Chicago", target_d.isoformat()),
+    ).fetchone()[0]
+    assert obs_count == 0, f"guard-rejected path should not write obs, got {obs_count}"
+
+    # Coverage row exists as LEGITIMATE_GAP
+    cov_rows = conn.execute(
+        "SELECT status, reason FROM data_coverage WHERE city = ? AND target_date = ? AND data_table = ?",
+        ("Chicago", target_d.isoformat(), DataTable.OBSERVATIONS.value),
+    ).fetchall()
+    assert len(cov_rows) == 1, f"expected 1 coverage row, got {len(cov_rows)}"
+    assert cov_rows[0]["status"] == CoverageStatus.LEGITIMATE_GAP.value
+
+
+def test_R13_obs_count_equals_written_count() -> None:
+    """Cross-table invariant: every observations row must have a WRITTEN
+    coverage partner and vice-versa.  This is the no-orphan guarantee.
+    """
+    from src.data.daily_obs_append import _write_atom_with_coverage
+
+    conn = _memdb()
+    dates = [date(2026, 4, d) for d in (10, 11, 12)]
+
+    for d in dates:
+        atom_high = _make_atom(value_type="high", value=75.0, target_d=d)
+        atom_low = _make_atom(value_type="low", value=55.0, target_d=d)
+        _write_atom_with_coverage(conn, atom_high, atom_low, data_source="wu_icao_history")
+
+    # Also add a guard rejection (should NOT inflate obs count)
+    record_legitimate_gap(
+        conn,
+        data_table=DataTable.OBSERVATIONS,
+        city="Chicago",
+        data_source="wu_icao_history",
+        target_date=date(2026, 4, 13),
+        reason=CoverageReason.GUARD_REJECTED,
+    )
+    conn.commit()
+
+    obs_count = conn.execute("SELECT count(*) FROM observations WHERE city = 'Chicago'").fetchone()[0]
+    written_count = conn.execute(
+        "SELECT count(*) FROM data_coverage WHERE city = 'Chicago' AND data_table = ? AND status = ?",
+        (DataTable.OBSERVATIONS.value, CoverageStatus.WRITTEN.value),
+    ).fetchone()[0]
+
+    assert obs_count == written_count == len(dates), (
+        f"obs_count={obs_count}, written_count={written_count}, expected={len(dates)}"
+    )

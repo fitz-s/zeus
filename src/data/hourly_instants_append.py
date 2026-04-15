@@ -56,14 +56,13 @@ from src.state.data_coverage import (
     record_written,
 )
 
+from src.data.openmeteo_client import ARCHIVE_URL, fetch as openmeteo_fetch
+
 logger = logging.getLogger(__name__)
 
-OPENMETEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 SOURCE = "openmeteo_archive_hourly"
 CHUNK_DAYS = 90
 SLEEP_BETWEEN_REQUESTS = 1.0
-FETCH_RETRY_COUNT = 2
-FETCH_RETRY_BACKOFF_SEC = 2.0
 
 #: Minimum hours a local_date must have to be marked WRITTEN. DST
 #: spring-forward days have 23 hours; the scanner accepts any day with
@@ -109,9 +108,9 @@ def _fetch_hourly_chunk(
     offsets for every DST day.
     """
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
-    resp = httpx.get(
-        OPENMETEO_ARCHIVE_URL,
-        params={
+    data = openmeteo_fetch(
+        ARCHIVE_URL,
+        {
             "latitude": city.lat,
             "longitude": city.lon,
             "start_date": start_date.isoformat(),
@@ -120,10 +119,8 @@ def _fetch_hourly_chunk(
             "temperature_unit": temp_unit,
             "timezone": city.timezone,
         },
-        timeout=30.0,
+        endpoint_label="archive_hourly",
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
@@ -131,6 +128,7 @@ def _fetch_hourly_chunk(
 
     tz = ZoneInfo(city.timezone)
     out: list[dict] = []
+    quarantine_count = 0
     for raw_time, temp in zip(times, temps):
         if temp is None:
             continue
@@ -162,24 +160,23 @@ def _fetch_hourly_chunk(
             })
         except (ValueError, AttributeError) as e:
             logger.debug("parse failed %s %s: %s", city.name, raw_time, e)
+            quarantine_count += 1
             continue
+
+    if len(temps) > 0 and quarantine_count > len(temps) * 0.1:
+        raise ValueError(f"Quarantine threshold exceeded for {city.name}: {quarantine_count} failures")
     return out
 
 
 def _fetch_with_retry(
     city: City, start_date: date, end_date: date,
 ) -> tuple[list[dict], str | None]:
-    for attempt in range(FETCH_RETRY_COUNT + 1):
-        try:
-            return _fetch_hourly_chunk(city, start_date, end_date), None
-        except httpx.HTTPError as e:
-            if attempt < FETCH_RETRY_COUNT:
-                time.sleep(FETCH_RETRY_BACKOFF_SEC * (attempt + 1))
-                continue
-            return [], f"http error after {FETCH_RETRY_COUNT + 1} tries: {e}"
-        except Exception as e:
-            return [], f"unexpected error: {type(e).__name__}: {e}"
-    return [], "exhausted retries"
+    try:
+        return _fetch_hourly_chunk(city, start_date, end_date), None
+    except httpx.HTTPError as e:
+        return [], f"network error: {type(e).__name__}: {e}"
+    except Exception as e:
+        raise RuntimeError(f"Unexpected non-network infrastructure error: {e}") from e
 
 
 # ---------------------------------------------------------------------------

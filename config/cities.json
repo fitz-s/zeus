@@ -5,8 +5,7 @@
     {
       "name": "Amsterdam",
       "aliases": [
-        "Amsterdam",
-        "amsterdam"
+        "Amsterdam"
       ],
       "slug_names": [
         "amsterdam"
@@ -29,8 +28,7 @@
     {
       "name": "Ankara",
       "aliases": [
-        "Ankara",
-        "ankara"
+        "Ankara"
       ],
       "slug_names": [
         "ankara"
@@ -53,8 +51,7 @@
     {
       "name": "Atlanta",
       "aliases": [
-        "Atlanta",
-        "atlanta"
+        "Atlanta"
       ],
       "slug_names": [
         "atlanta"
@@ -81,8 +78,7 @@
     {
       "name": "Auckland",
       "aliases": [
-        "Auckland",
-        "auckland"
+        "Auckland"
       ],
       "slug_names": [
         "auckland"
@@ -105,8 +101,7 @@
     {
       "name": "Austin",
       "aliases": [
-        "Austin",
-        "austin"
+        "Austin"
       ],
       "slug_names": [
         "austin"
@@ -134,7 +129,6 @@
       "name": "Beijing",
       "aliases": [
         "Beijing",
-        "beijing",
         "Peking"
       ],
       "slug_names": [
@@ -159,7 +153,6 @@
       "name": "Buenos Aires",
       "aliases": [
         "Buenos Aires",
-        "buenos aires",
         "BA"
       ],
       "slug_names": [
@@ -185,7 +178,6 @@
       "name": "Busan",
       "aliases": [
         "Busan",
-        "busan",
         "Pusan"
       ],
       "slug_names": [
@@ -209,8 +201,7 @@
     {
       "name": "Cape Town",
       "aliases": [
-        "Cape Town",
-        "cape town"
+        "Cape Town"
       ],
       "slug_names": [
         "cape-town"
@@ -233,8 +224,7 @@
     {
       "name": "Chengdu",
       "aliases": [
-        "Chengdu",
-        "chengdu"
+        "Chengdu"
       ],
       "slug_names": [
         "chengdu"
@@ -257,8 +247,7 @@
     {
       "name": "Chicago",
       "aliases": [
-        "Chicago",
-        "chicago"
+        "Chicago"
       ],
       "slug_names": [
         "chicago"
@@ -285,8 +274,7 @@
     {
       "name": "Chongqing",
       "aliases": [
-        "Chongqing",
-        "chongqing"
+        "Chongqing"
       ],
       "slug_names": [
         "chongqing"
@@ -309,8 +297,7 @@
     {
       "name": "Dallas",
       "aliases": [
-        "Dallas",
-        "dallas"
+        "Dallas"
       ],
       "slug_names": [
         "dallas"
@@ -337,8 +324,7 @@
     {
       "name": "Denver",
       "aliases": [
-        "Denver",
-        "denver"
+        "Denver"
       ],
       "slug_names": [
         "denver"
@@ -366,7 +352,6 @@
       "name": "Guangzhou",
       "aliases": [
         "Guangzhou",
-        "guangzhou",
         "广州"
       ],
       "slug_names": [
@@ -390,8 +375,7 @@
     {
       "name": "Helsinki",
       "aliases": [
-        "Helsinki",
-        "helsinki"
+        "Helsinki"
       ],
       "slug_names": [
         "helsinki"
@@ -415,7 +399,6 @@
       "name": "Hong Kong",
       "aliases": [
         "Hong Kong",
-        "hong kong",
         "HK"
       ],
       "slug_names": [
@@ -443,8 +426,7 @@
     {
       "name": "Houston",
       "aliases": [
-        "Houston",
-        "houston"
+        "Houston"
       ],
       "slug_names": [
         "houston"
@@ -471,8 +453,7 @@
     {
       "name": "Istanbul",
       "aliases": [
-        "Istanbul",
-        "istanbul"
+        "Istanbul"
       ],
       "slug_names": [
         "istanbul"
@@ -496,8 +477,7 @@
     {
       "name": "Jakarta",
       "aliases": [
-        "Jakarta",
-        "jakarta"
+        "Jakarta"
       ],
       "slug_names": [
         "jakarta"
@@ -521,7 +501,6 @@
       "name": "Jeddah",
       "aliases": [
         "Jeddah",
-        "jeddah",
         "Jiddah"
       ],
       "slug_names": [
@@ -545,8 +524,7 @@
     {
       "name": "Karachi",
       "aliases": [
-        "Karachi",
-        "karachi"
+        "Karachi"
       ],
       "slug_names": [
         "karachi"
@@ -570,7 +548,6 @@
       "name": "Kuala Lumpur",
       "aliases": [
         "Kuala Lumpur",
-        "kuala lumpur",
         "KL"
       ],
       "slug_names": [
@@ -594,8 +571,7 @@
     {
       "name": "Lagos",
       "aliases": [
-        "Lagos",
-        "lagos"
+        "Lagos"
       ],
       "slug_names": [
         "lagos"
@@ -618,8 +594,7 @@
     {
       "name": "London",
       "aliases": [
-        "London",
-        "london"
+        "London"
       ],
       "slug_names": [
         "london"
@@ -643,8 +618,7 @@
       "name": "Los Angeles",
       "aliases": [
         "Los Angeles",
-        "LA",
-        "los angeles"
+        "LA"
       ],
       "slug_names": [
         "los-angeles",
@@ -672,8 +646,7 @@
     {
       "name": "Lucknow",
       "aliases": [
-        "Lucknow",
-        "lucknow"
+        "Lucknow"
       ],
       "slug_names": [
         "lucknow"
@@ -696,8 +669,7 @@
     {
       "name": "Madrid",
       "aliases": [
-        "Madrid",
-        "madrid"
+        "Madrid"
       ],
       "slug_names": [
         "madrid"
@@ -720,8 +692,7 @@
     {
       "name": "Manila",
       "aliases": [
-        "Manila",
-        "manila"
+        "Manila"
       ],
       "slug_names": [
         "manila"
@@ -745,7 +716,6 @@
       "name": "Mexico City",
       "aliases": [
         "Mexico City",
-        "mexico city",
         "CDMX"
       ],
       "slug_names": [
@@ -770,8 +740,7 @@
     {
       "name": "Miami",
       "aliases": [
-        "Miami",
-        "miami"
+        "Miami"
       ],
       "slug_names": [
         "miami"
@@ -799,7 +768,6 @@
       "name": "Milan",
       "aliases": [
         "Milan",
-        "milan",
         "Milano"
       ],
       "slug_names": [
@@ -823,8 +791,7 @@
     {
       "name": "Moscow",
       "aliases": [
-        "Moscow",
-        "moscow"
+        "Moscow"
       ],
       "slug_names": [
         "moscow"
@@ -849,7 +816,6 @@
       "name": "Munich",
       "aliases": [
         "Munich",
-        "munich",
         "München"
       ],
       "slug_names": [
@@ -875,8 +841,7 @@
       "aliases": [
         "NYC",
         "New York",
-        "New York City",
-        "nyc"
+        "New York City"
       ],
       "slug_names": [
         "nyc",
@@ -906,7 +871,6 @@
       "name": "Panama City",
       "aliases": [
         "Panama City",
-        "panama city",
         "Panama"
       ],
       "slug_names": [
@@ -930,8 +894,7 @@
     {
       "name": "Paris",
       "aliases": [
-        "Paris",
-        "paris"
+        "Paris"
       ],
       "slug_names": [
         "paris"
@@ -955,8 +918,7 @@
       "name": "San Francisco",
       "aliases": [
         "San Francisco",
-        "SF",
-        "san francisco"
+        "SF"
       ],
       "slug_names": [
         "san-francisco",
@@ -985,7 +947,6 @@
       "name": "Sao Paulo",
       "aliases": [
         "Sao Paulo",
-        "sao paulo",
         "SP"
       ],
       "slug_names": [
@@ -1010,8 +971,7 @@
     {
       "name": "Seattle",
       "aliases": [
-        "Seattle",
-        "seattle"
+        "Seattle"
       ],
       "slug_names": [
         "seattle"
@@ -1038,8 +998,7 @@
     {
       "name": "Seoul",
       "aliases": [
-        "Seoul",
-        "seoul"
+        "Seoul"
       ],
       "slug_names": [
         "seoul"
@@ -1062,8 +1021,7 @@
     {
       "name": "Shanghai",
       "aliases": [
-        "Shanghai",
-        "shanghai"
+        "Shanghai"
       ],
       "slug_names": [
         "shanghai"
@@ -1087,7 +1045,6 @@
       "name": "Shenzhen",
       "aliases": [
         "Shenzhen",
-        "shenzhen",
         "深圳"
       ],
       "slug_names": [
@@ -1112,7 +1069,6 @@
       "name": "Singapore",
       "aliases": [
         "Singapore",
-        "singapore",
         "SG"
       ],
       "slug_names": [
@@ -1136,8 +1092,7 @@
     {
       "name": "Taipei",
       "aliases": [
-        "Taipei",
-        "taipei"
+        "Taipei"
       ],
       "slug_names": [
         "taipei"
@@ -1163,7 +1118,6 @@
       "name": "Tel Aviv",
       "aliases": [
         "Tel Aviv",
-        "tel aviv",
         "TLV"
       ],
       "slug_names": [
@@ -1189,8 +1143,7 @@
     {
       "name": "Tokyo",
       "aliases": [
-        "Tokyo",
-        "tokyo"
+        "Tokyo"
       ],
       "slug_names": [
         "tokyo"
@@ -1214,7 +1167,6 @@
       "name": "Toronto",
       "aliases": [
         "Toronto",
-        "toronto",
         "YYZ"
       ],
       "slug_names": [
@@ -1239,7 +1191,6 @@
       "name": "Warsaw",
       "aliases": [
         "Warsaw",
-        "warsaw",
         "Warszawa"
       ],
       "slug_names": [
@@ -1263,8 +1214,7 @@
     {
       "name": "Wellington",
       "aliases": [
-        "Wellington",
-        "wellington"
+        "Wellington"
       ],
       "slug_names": [
         "wellington"
@@ -1287,8 +1237,7 @@
     {
       "name": "Wuhan",
       "aliases": [
-        "Wuhan",
-        "wuhan"
+        "Wuhan"
       ],
       "slug_names": [
         "wuhan"
@@ -1307,6 +1256,42 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.0
+    }
+  ],
+  "_changelog": [
+    {
+      "timestamp": "2026-04-15T10:05:56.725814+00:00",
+      "city": "Tel Aviv",
+      "field": "settlement_source / settlement_source_type",
+      "old": {
+        "settlement_source": "https://www.wunderground.com/history/daily/il/tel-aviv/LLBG",
+        "settlement_source_type": "wu_icao"
+      },
+      "new": {
+        "settlement_source": "https://www.weather.gov/wrh/timeseries?site=LLBG",
+        "settlement_source_type": "noaa"
+      },
+      "discovered_via": "Polymarket market description — 6 markets confirmed: Apr 1/7/8/10/13/14 2026",
+      "confirmed_by": "web_search Polymarket snippets + audit 2026-04-15"
+    },
+    {
+      "timestamp": "2026-04-15T10:05:56.725814+00:00",
+      "city": "Taipei",
+      "field": "settlement_source / wu_station / airport_name / settlement_source_type",
+      "old": {
+        "wu_station": "46692",
+        "airport_name": "Taipei CWA Station 46692 (Zhongzheng)",
+        "settlement_source": "https://www.cwa.gov.tw/V8/C/W/OBS_Station.html?ID=46692",
+        "settlement_source_type": "cwa_station"
+      },
+      "new": {
+        "wu_station": "RCSS",
+        "airport_name": "Taipei Songshan Airport",
+        "settlement_source": "https://www.wunderground.com/history/daily/tw/taipei/RCSS",
+        "settlement_source_type": "wu_icao"
+      },
+      "discovered_via": "Polymarket market description — 5 markets confirmed: Apr 8/9/11/12/15 2026",
+      "confirmed_by": "web_search Polymarket snippets + audit 2026-04-15"
     }
   ]
 }
