@@ -5271,12 +5271,13 @@ def test_lifecycle_kernel_rejects_portfolio_terminal_transition_from_wrong_phase
 
     with pytest.raises(ValueError, match="admin close requires pending_exit runtime phase"):
         enter_admin_closed_runtime_state("entered")
-    with pytest.raises(ValueError, match="pending_exit with backoff_exhausted"):
-        enter_settled_runtime_state(
-            "pending_exit",
-            exit_state="sell_pending",
-            chain_state="exit_pending_missing",
-        )
+    # Bug #53b: pending_exit → settled is now allowed without backoff_exhausted
+    result = enter_settled_runtime_state(
+        "pending_exit",
+        exit_state="sell_pending",
+        chain_state="exit_pending_missing",
+    )
+    assert result == "settled"
 
 
 def test_compute_economic_close_routes_pending_exit_through_kernel():
@@ -5318,7 +5319,7 @@ def test_lifecycle_kernel_maps_entry_runtime_states_for_order_status():
 
     assert initial_entry_runtime_state_for_order_status("filled") == "entered"
     assert initial_entry_runtime_state_for_order_status("pending") == "pending_tracked"
-    assert initial_entry_runtime_state_for_order_status("rejected") == "pending_tracked"
+    assert initial_entry_runtime_state_for_order_status("rejected") == "voided"
 
 
 def test_lifecycle_kernel_allows_touched_entry_runtime_transitions():

@@ -123,7 +123,6 @@ class Day0Signal:
         p = np.zeros(n_bins)
 
         rng = np.random.default_rng()
-        obs_settled = self._settle(self.obs_high)
         obs_weight = self.observation_weight()
 
         for _ in range(n_mc):

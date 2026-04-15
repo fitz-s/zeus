@@ -500,25 +500,36 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 if (hours_to_settlement <= 6.0
                         and pos.state in {"entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
-                    pos.state = enter_day0_window_runtime_state(
+                    new_state = enter_day0_window_runtime_state(
                         pos.state,
                         exit_state=getattr(pos, "exit_state", ""),
                         chain_state=getattr(pos, "chain_state", ""),
                     )
-                    if not pos.day0_entered_at:
-                        pos.day0_entered_at = deps._utcnow().isoformat()
-                    portfolio_dirty = True
+                    new_day0_entered_at = pos.day0_entered_at or deps._utcnow().isoformat()
+                    # Persist FIRST, then update memory (avoid split-brain)
                     if conn is not None:
                         try:
                             from src.state.db import update_trade_lifecycle
-
+                            # Temporarily set fields for persistence
+                            old_state = pos.state
+                            old_day0 = pos.day0_entered_at
+                            pos.state = new_state
+                            pos.day0_entered_at = new_day0_entered_at
                             update_trade_lifecycle(conn=conn, pos=pos)
                         except Exception as exc:
+                            # Revert memory to pre-transition state
+                            pos.state = old_state
+                            pos.day0_entered_at = old_day0
                             deps.logger.warning(
-                                "Failed to persist day0_window lifecycle for %s: %s",
+                                "Day0 transition ABORTED for %s: persist failed: %s",
                                 pos.trade_id,
                                 exc,
                             )
+                            continue
+                    else:
+                        pos.state = new_state
+                        pos.day0_entered_at = new_day0_entered_at
+                    portfolio_dirty = True
 
             edge_ctx = refresh_position(conn, clob, pos)
             exit_context = _build_exit_context(

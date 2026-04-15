@@ -98,6 +98,7 @@ OPEN_EXPOSURE_PHASES = (
     "active",
     "day0_window",
     "pending_exit",
+    "unknown",
 )
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
@@ -3403,7 +3404,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "entry_method": str(row["entry_method"] or ""),
                 "strategy_key": str(row["strategy_key"] or ""),
                 "strategy": str(row["strategy_key"] or ""),
-                "edge_source": str(row["edge_source"] or row["strategy_key"] or ""),
+                "edge_source": str(row["edge_source"] or ""),
                 "discovery_mode": str(row["discovery_mode"] or ""),
                 "chain_state": str(row["chain_state"] or "unknown"),
                 "token_id": str(row["token_id"] or ""),
@@ -3412,8 +3413,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
-                "env": "live",
-                "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
+                "env": get_mode(),
+                "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": str(hints.get("exit_state") or ""),
                 "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
