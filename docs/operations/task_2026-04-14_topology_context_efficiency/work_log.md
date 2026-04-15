@@ -89,3 +89,13 @@ Changed files: `architecture/map_maintenance.yaml`, `tests/test_topology_doctor.
 Summary: Added map-maintenance companion rules for top-level docs files/artifacts and new docs subtrees, requiring docs registry and topology updates before closeout.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'map_maintenance and docs'`; `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files ... --summary-only`.
 Next: Phase 7 modularization should wait until golden-output parity fixtures are defined.
+
+## 2026-04-15 — Topology Doctor CLI Facade Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Create the first safe topology_doctor modularization seam without moving checker logic.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_cli.py`, `architecture/script_manifest.yaml`, `tests/test_topology_doctor.py`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved CLI parser/dispatch/rendering into `topology_doctor_cli.py`; `topology_doctor.py` remains the checker/build kernel and delegates `main()` to the CLI facade. Added/kept CLI JSON parity tests before deeper splits.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'cli_json_parity or compiled_topology or docs_mode'`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_cli.py`.
+Next: Future modularization should split one checker family at a time behind the same CLI and parity tests.
