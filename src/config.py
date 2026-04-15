@@ -5,9 +5,12 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -20,11 +23,19 @@ def legacy_state_path(filename: str) -> Path:
 
 
 def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
-    """State path — mode prefix eliminated (live-only, Phase 2).
+    """State path — Zeus is live-only.
 
-    Mode parameter accepted for call-site compatibility but ignored.
-    All per-process state files live directly in STATE_DIR.
+    The mode parameter is accepted for call-site compatibility but MUST be
+    None or 'live'. Any other value logs a warning — there is no multi-mode
+    state isolation. All state files live directly in STATE_DIR.
     """
+    if mode is not None and mode != "live":
+        logger.warning(
+            "mode_state_path called with mode=%r — Zeus is live-only. "
+            "Ignoring mode; returning STATE_DIR / %r. "
+            "Remove the mode argument or pass mode=None.",
+            mode, filename,
+        )
     return STATE_DIR / filename
 
 
@@ -43,8 +54,7 @@ def _load_json(path: Path) -> dict:
 
 
 _DEFAULT_CITY_DATA = _load_json(CONFIG_DIR / "cities.json")["cities"]
-# K3: cluster identity collapsed to city name — ALL_CLUSTERS is now the set of city names
-ALL_CLUSTERS = tuple(sorted(city["name"] for city in _DEFAULT_CITY_DATA))
+ALL_CLUSTERS = tuple(dict.fromkeys(city["cluster"] for city in _DEFAULT_CITY_DATA))
 CALIBRATION_SEASONS = ("DJF", "MAM", "JJA", "SON")
 
 
@@ -68,11 +78,16 @@ class City:
     wu_pws: Optional[str] = None
     meteostat_station: Optional[str] = None
     airport_name: str = ""
-    country_code: str = ""          # ISO-2 code, e.g. "US", "GB", "JP"
     settlement_source: str = ""
-    settlement_source_type: str = "wu_icao"  # "wu_icao" default; "hko" for Hong Kong
-    historical_peak_hour: float = 14.0       # local hour of average daily max (fallback for diurnal DB when empty)
+    settlement_source_type: str = "wu_icao"  # "wu_icao" | "hko" | "noaa" | "cwa_station"
     diurnal_amplitude: float = 12.0
+    # Optional per-city instrument noise override (in city.settlement_unit).
+    # See src/signal/ensemble_signal.py::sigma_instrument_for_city for the
+    # rationale. Default None means use the unit-keyed ASOS spec from
+    # settings.json. Set tighter values for institutional stations like
+    # HKO and Taiwan CWA where the underlying sensor is materially more
+    # precise than airport AWOS.
+    instrument_noise_override: Optional[float] = None
     noaa_office: Optional[str] = None
     noaa_gridX: Optional[int] = None
     noaa_gridY: Optional[int] = None
@@ -112,6 +127,16 @@ class Settings:
     @property
     def capital_base_usd(self) -> float:
         return float(self._data["capital_base_usd"])
+
+    @property
+    def bias_correction_enabled(self) -> bool:
+        """Whether bias correction is enabled. Replaces settings._data.get() bypass."""
+        return bool(self._data.get("bias_correction_enabled", False))
+
+    @property
+    def feature_flags(self) -> dict:
+        """Feature flags dict. Replaces settings._data.get('feature_flags', {}) bypass."""
+        return dict(self._data.get("feature_flags", {}))
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
@@ -174,11 +199,14 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 wu_pws=c.get("wu_pws"),
                 meteostat_station=c.get("meteostat_station"),
                 airport_name=c.get("airport_name", ""),
-                country_code=c["country_code"],
                 settlement_source=c.get("settlement_source", ""),
-                settlement_source_type=c.get("settlement_source_type", "wu_icao"),
-                historical_peak_hour=float(c["historical_peak_hour"]),
+                settlement_source_type=c.get("settlement_source_type") or "wu_icao",
                 diurnal_amplitude=amp,
+                instrument_noise_override=(
+                    float(c["instrument_noise_override"])
+                    if c.get("instrument_noise_override") is not None
+                    else None
+                ),
                 noaa_office=noaa_office,
                 noaa_gridX=noaa_gx,
                 noaa_gridY=noaa_gy,
@@ -197,6 +225,32 @@ cities_by_alias: dict[str, City] = {}
 for c in cities:
     for alias in c.aliases:
         cities_by_alias[alias.lower()] = c
+
+
+def validate_cities_config(city_list: list[City] | None = None) -> list[str]:
+    """Validate city configs — returns list of warning strings.
+
+    Checks fields that should be populated for production but are allowed
+    to be empty/default during development. Does not raise — caller decides
+    whether warnings are fatal.
+    """
+    warnings = []
+    for c in (city_list or cities):
+        if not c.settlement_source:
+            warnings.append(f"{c.name}: settlement_source is empty")
+        if c.settlement_source_type == "wu_icao" and not c.wu_station:
+            warnings.append(f"{c.name}: wu_station is empty")
+        if not c.timezone:
+            warnings.append(f"{c.name}: timezone is empty")
+        if c.settlement_source_type not in ("wu_icao", "hko", "noaa", "cwa_station"):
+            warnings.append(
+                f"{c.name}: settlement_source_type={c.settlement_source_type!r} "
+                "is not a known type"
+            )
+    if warnings:
+        for w in warnings:
+            logger.warning("City config validation: %s", w)
+    return warnings
 
 
 def calibration_clusters() -> tuple[str, ...]:
@@ -264,15 +318,36 @@ def ensemble_unimodal_range_epsilon() -> float:
 
 def sizing_defaults() -> dict[str, float]:
     sizing = settings["sizing"]
-    # K3: max_region_pct removed u2014 no regional tier after cluster collapse
     return {
         "max_single_position_pct": float(sizing["max_single_position_pct"]),
         "max_portfolio_heat_pct": float(sizing["max_portfolio_heat_pct"]),
         "max_correlated_pct": float(sizing["max_correlated_pct"]),
         "max_city_pct": float(sizing["max_city_pct"]),
+        "max_region_pct": float(sizing["max_region_pct"]),
         "min_order_usd": float(sizing["min_order_usd"]),
     }
 
 
 def correlation_default_cross_cluster() -> float:
     return float(settings["correlation"]["default_cross_cluster"])
+
+
+def correlation_matrix() -> dict[str, dict[str, float]]:
+    matrix = {
+        cluster: {other: float(value) for other, value in mapping.items()}
+        for cluster, mapping in settings["correlation"]["matrix"].items()
+    }
+    missing = set(ALL_CLUSTERS) - set(matrix)
+    unknown = set(matrix) - set(ALL_CLUSTERS)
+    if missing or unknown:
+        raise KeyError(
+            "correlation.matrix must match canonical cluster taxonomy. "
+            f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    for cluster, mapping in matrix.items():
+        bad_targets = set(mapping) - set(ALL_CLUSTERS)
+        if bad_targets:
+            raise KeyError(
+                f"correlation.matrix[{cluster!r}] has unknown cluster targets: {sorted(bad_targets)}"
+            )
+    return matrix
