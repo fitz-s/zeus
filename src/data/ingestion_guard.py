@@ -144,7 +144,7 @@ class IngestionGuard:
         except Exception as exc:
             # Bug #31: log instead of silently swallowing
             import logging as _logging
-            _logging.getLogger(__name__).debug(
+            _logging.getLogger(__name__).warning(
                 "availability fact write failed for %s/%s: %s",
                 city, target_date, exc,
             )

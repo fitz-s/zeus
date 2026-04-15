@@ -351,7 +351,7 @@ class EnsembleSignal:
         return select_hours_for_target_date(target_date, tz, times=times)
 
     def p_raw_vector(
-        self, bins: list[Bin], n_mc: int | None = None
+        self, bins: list[Bin], n_mc: int | None = None, rng=None
     ) -> np.ndarray:
         """Probability vector over all bins with instrument noise.
 
@@ -372,6 +372,7 @@ class EnsembleSignal:
             self.settlement_semantics,
             bins,
             n_mc=n_mc,
+            rng=rng,
         )
 
     def spread(self) -> TemperatureDelta:
