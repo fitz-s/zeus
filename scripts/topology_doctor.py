@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -2415,64 +2415,34 @@ def build_context_pack(pack_type: str, *, task: str, files: list[str]) -> dict[s
     return _context_pack_checks().build_context_pack(sys.modules[__name__], pack_type, task=task, files=files)
 
 
+
+def _core_map_checks():
+    try:
+        from scripts import topology_doctor_core_map
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_core_map
+
+    return topology_doctor_core_map
+
+
 def _core_map_profiles() -> dict[str, dict[str, Any]]:
-    return {
-        str(profile.get("id")): profile
-        for profile in load_topology().get("core_map_profiles") or []
-        if profile.get("id")
-    }
+    return _core_map_checks().core_map_profiles(sys.modules[__name__])
 
 
 def _source_entry_by_path() -> dict[str, dict[str, Any]]:
-    rationale = load_source_rationale()
-    entries: dict[str, dict[str, Any]] = {}
-    for item in _source_rationale_for(list((rationale.get("files") or {}).keys())):
-        entries[item["path"]] = item
-    return entries
+    return _core_map_checks().source_entry_by_path(sys.modules[__name__])
 
 
 def _validate_proof_target_exists(target: dict[str, Any]) -> bool:
-    target_path = str(target.get("path") or "")
-    if not target_path:
-        return False
-    return (ROOT / target_path).exists()
+    return _core_map_checks().validate_proof_target_exists(sys.modules[__name__], target)
 
 
 def _locator_exists(path: str, locator: str | None) -> bool:
-    if not locator:
-        return False
-    target = ROOT / path
-    if not target.exists() or not target.is_file():
-        return False
-    text = target.read_text(encoding="utf-8", errors="ignore")
-    if locator in text:
-        return True
-    if target.suffix == ".py":
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return False
-        if "." in locator:
-            class_name, member_name = locator.split(".", 1)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef) and node.name == class_name:
-                    for item in node.body:
-                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name == member_name:
-                            return True
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == locator:
-                return True
-            if isinstance(node, ast.Attribute) and node.attr == locator:
-                return True
-            if isinstance(node, ast.Name) and node.id == locator:
-                return True
-    return False
+    return _core_map_checks().locator_exists(sys.modules[__name__], path, locator)
 
 
 def _proof_contains(path: str, needle: str) -> bool:
-    if not needle:
-        return False
-    return needle in (ROOT / path).read_text(encoding="utf-8", errors="ignore")
+    return _core_map_checks().proof_contains(sys.modules[__name__], path, needle)
 
 
 def _edge_proof_status(
@@ -2482,219 +2452,25 @@ def _edge_proof_status(
     node_files: dict[str, str],
     source_entries: dict[str, dict[str, Any]],
 ) -> tuple[str, str | None]:
-    from_id = str(edge.get("from") or "")
-    to_id = str(edge.get("to") or "")
-    if from_id not in node_ids or to_id not in node_ids:
-        return ("invalid", f"unknown edge endpoint: {from_id}->{to_id}")
-
-    proof = edge.get("proof") or {}
-    kind = proof.get("kind")
-    path = str(proof.get("path") or "")
-    if kind == "profile_declared_provisional":
-        return ("profile_declared_provisional", None)
-    if not path or not (ROOT / path).exists():
-        return ("invalid", f"proof path missing: {path}")
-    if kind == "import_or_call":
-        module = str(proof.get("module") or "")
-        symbol = str(proof.get("symbol") or proof.get("contains") or "")
-        if path != node_files.get(to_id):
-            return ("invalid", f"import_or_call proof path must equal target node file {node_files.get(to_id)}")
-        if not module or not symbol:
-            return ("invalid", "import_or_call proof requires module and symbol")
-        text = (ROOT / path).read_text(encoding="utf-8", errors="ignore")
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return ("invalid", f"cannot parse proof path: {path}")
-        imported = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == module:
-                imported = any(alias.name == symbol for alias in node.names)
-                if imported:
-                    break
-            if isinstance(node, ast.Import):
-                imported = any(alias.name == module for alias in node.names)
-                if imported:
-                    break
-        if not imported:
-            return ("invalid", f"import proof not found in {path}: {module}.{symbol}")
-        if symbol not in text:
-            return ("invalid", f"proof symbol not used in {path}: {symbol}")
-        return ("proof_backed_edge", None)
-    if kind == "relationship_test":
-        needle = str(proof.get("contains") or proof.get("locator") or "")
-        if not _proof_contains(path, needle):
-            return ("invalid", f"relationship_test proof text not found in {path}: {needle}")
-        return ("proof_backed_edge", None)
-    if kind == "source_rationale_downstream":
-        from_file = node_files.get(from_id, "")
-        to_file = node_files.get(to_id, "")
-        downstream = set((source_entries.get(from_file) or {}).get("downstream") or [])
-        if to_file not in downstream:
-            return ("invalid", f"source_rationale downstream does not link {from_file} -> {to_file}")
-        return ("proof_backed_edge", None)
-    return ("invalid", f"invalid edge proof kind: {kind!r}")
-
-
-CORE_MAP_FORBIDDEN_PATTERNS = (
-    re.compile(r"round\s*\(\s*(?:value|x)\s*\+\s*0\.5\s*\)", re.IGNORECASE),
-    re.compile(r"\bpython\s*(?:/numpy\s*)?(?:built-?in\s*)?round\b", re.IGNORECASE),
-    re.compile(r"\bnumpy\s+(?:round|around)\b", re.IGNORECASE),
-    re.compile(r"(?<!not )\bbanker(?:'s)?\s+round", re.IGNORECASE),
-)
+    return _core_map_checks().edge_proof_status(
+        sys.modules[__name__],
+        edge,
+        node_ids=node_ids,
+        node_files=node_files,
+        source_entries=source_entries,
+    )
 
 
 def _core_map_forbidden_hits(payload: dict[str, Any], phrases: list[Any]) -> list[str]:
-    serialized = json.dumps(payload)
-    hits = [str(phrase) for phrase in phrases if str(phrase) in serialized]
-    normalized = " ".join(serialized.split())
-    hits.extend(pattern.pattern for pattern in CORE_MAP_FORBIDDEN_PATTERNS if pattern.search(normalized))
-    return sorted(dict.fromkeys(hits))
+    return _core_map_checks().core_map_forbidden_hits(payload, phrases)
 
 
 def build_core_map(profile_id: str) -> dict[str, Any]:
-    profiles = _core_map_profiles()
-    profile = profiles.get(profile_id)
-    if not profile:
-        raise ValueError(f"unknown core map profile {profile_id!r}")
-
-    node_specs = profile.get("nodes") or []
-    edge_specs = profile.get("edges") or []
-    max_nodes = int(profile.get("max_nodes") or len(node_specs))
-    max_edges = int(profile.get("max_edges") or len(edge_specs))
-    if len(node_specs) > max_nodes:
-        raise ValueError(f"core map profile {profile_id} exceeds max_nodes={max_nodes}")
-    if len(edge_specs) > max_edges:
-        raise ValueError(f"core map profile {profile_id} exceeds max_edges={max_edges}")
-
-    source_entries = _source_entry_by_path()
-    node_ids = {str(node.get("id") or "") for node in node_specs}
-    node_files = {
-        str(node.get("id") or ""): str(node.get("file") or "")
-        for node in node_specs
-    }
-    claim_index = _claim_proof_index()
-    nodes: list[dict[str, Any]] = []
-    invalid: list[str] = []
-
-    for node in node_specs:
-        node_id = str(node.get("id") or "")
-        node_file = str(node.get("file") or "")
-        source_entry = source_entries.get(node_file)
-        if not node_id or not node_file or not (ROOT / node_file).exists():
-            invalid.append(f"node {node_id or '<missing>'} missing file {node_file!r}")
-            continue
-        if not source_entry:
-            invalid.append(f"node {node_id} missing source_rationale entry for {node_file}")
-            continue
-
-        facts: list[dict[str, Any]] = []
-        for claim_id in node.get("required_claims") or []:
-            proof = claim_index.get(str(claim_id))
-            if not proof:
-                invalid.append(f"node {node_id} missing required claim {claim_id}")
-                continue
-            if proof.get("claim_status") != "replaced":
-                invalid.append(f"node {node_id} required claim {claim_id} is not replaced")
-                continue
-            bad_targets = [
-                target for target in proof.get("proof_targets") or []
-                if not _validate_proof_target_exists(target)
-            ]
-            if bad_targets:
-                invalid.append(f"claim {claim_id} has missing proof target")
-                continue
-            facts.append(
-                {
-                    "claim_id": claim_id,
-                    "text": proof.get("assertion", ""),
-                    "confidence": "verified_claim",
-                    "source": proof.get("source", {}),
-                    "proof_targets": proof.get("proof_targets", []),
-                    "gates": proof.get("gates", []),
-                }
-            )
-
-        nodes.append(
-            {
-                "id": node_id,
-                "file": node_file,
-                "zone": source_entry.get("zone", "unknown"),
-                "authority_role": source_entry.get("authority_role", ""),
-                "confidence": "manifest_grounded",
-                "why": source_entry.get("why", ""),
-                "hazards": source_entry.get("hazards", []),
-                "write_routes": source_entry.get("write_routes", []),
-                "facts": facts,
-            }
-        )
-
-    edges: list[dict[str, Any]] = []
-    for edge in edge_specs:
-        confidence, reason = _edge_proof_status(
-            edge,
-            node_ids=node_ids,
-            node_files=node_files,
-            source_entries=source_entries,
-        )
-        if edge.get("required", True) and confidence != "proof_backed_edge":
-            invalid.append(f"edge {edge.get('from')}->{edge.get('to')} invalid: {reason}")
-        edges.append(
-            {
-                "from": edge.get("from"),
-                "to": edge.get("to"),
-                "confidence": confidence,
-                "proof": edge.get("proof", {}),
-                "invalid_reason": reason,
-            }
-        )
-
-    payload = {
-        "profile": profile_id,
-        "purpose": profile.get("purpose", ""),
-        "authority_status": "generated_view_not_authority",
-        "nodes": nodes,
-        "edges": edges,
-        "invalid": invalid,
-        "context_assumption": build_context_assumption(
-            profile=profile_id,
-            profile_kind="core_map_profile",
-            source_entries=[
-                {"path": node["file"], "upstream": [], "downstream": []}
-                for node in nodes
-            ],
-            confidence_basis=["topology_manifest", "source_rationale"],
-        ),
-    }
-    for hit in _core_map_forbidden_hits(payload, profile.get("forbidden_phrases") or []):
-        invalid.append(f"forbidden phrase emitted: {hit}")
-    return payload
+    return _core_map_checks().build_core_map(sys.modules[__name__], profile_id)
 
 
 def run_core_maps() -> StrictResult:
-    issues: list[TopologyIssue] = []
-    profiles = _core_map_profiles()
-    for profile_id in sorted(profiles):
-        profile = profiles[profile_id]
-        for node in profile.get("nodes") or []:
-            node_file = str(node.get("file") or "")
-            if node_file.startswith("docs/reference/"):
-                issues.append(
-                    _issue(
-                        "core_map_reference_authority_leak",
-                        profile_id,
-                        f"reference doc cannot be a core-map authority node: {node_file}",
-                    )
-                )
-        try:
-            payload = build_core_map(profile_id)
-        except ValueError as exc:
-            issues.append(_issue("core_map_profile_invalid", profile_id, str(exc)))
-            continue
-        for item in payload.get("invalid") or []:
-            issues.append(_issue("core_map_profile_invalid", profile_id, str(item)))
-    return StrictResult(ok=not issues, issues=issues)
-
+    return _core_map_checks().run_core_maps(sys.modules[__name__])
 
 
 def _digest_checks():
@@ -2768,94 +2544,9 @@ def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-COMPILED_TOPOLOGY_SOURCE_MANIFESTS = [
-    "architecture/topology.yaml",
-    "architecture/artifact_lifecycle.yaml",
-    "architecture/source_rationale.yaml",
-    "architecture/test_topology.yaml",
-    "architecture/script_manifest.yaml",
-    "architecture/reference_replacement.yaml",
-    "architecture/core_claims.yaml",
-    "architecture/history_lore.yaml",
-    "architecture/context_pack_profiles.yaml",
-    "architecture/map_maintenance.yaml",
-]
-
 
 def build_compiled_topology() -> dict[str, Any]:
-    topology = load_topology()
-    lifecycle = load_artifact_lifecycle()
-    source_manifests = [
-        {"path": path, "exists": (ROOT / path).exists()}
-        for path in COMPILED_TOPOLOGY_SOURCE_MANIFESTS
-    ]
-    docs_subroots = topology.get("docs_subroots") or []
-    reviewer_visible = [
-        {
-            "path": item.get("path"),
-            "role": item.get("role"),
-            "route_status": "reviewer_visible",
-        }
-        for item in docs_subroots
-        if item.get("path") != "docs/archives"
-    ]
-    local_only = [
-        {
-            "path": "docs/archives",
-            "role": "historical_archive",
-            "route_status": "ignored_archive",
-            "reviewer_visible": False,
-        }
-    ]
-    current_state = ROOT / "docs/operations/current_state.md"
-    current_text = current_state.read_text(encoding="utf-8", errors="ignore") if current_state.exists() else ""
-    active_surfaces = sorted(
-        _current_state_operation_paths(
-            current_text,
-            str((topology.get("active_operations_registry") or {}).get("surface_prefix") or "docs/operations/"),
-        )
-    )
-    active_anchors = sorted(
-        str(anchor)
-        for anchor in (topology.get("active_operations_registry") or {}).get("required_anchors") or []
-        if str(anchor) in current_text
-    )
-    artifact_roles = [
-        {
-            "path": item.get("path"),
-            "artifact_role": item.get("artifact_role"),
-            "route_class": item.get("route_class"),
-            "authority_behavior": item.get("authority_behavior"),
-        }
-        for item in lifecycle.get("liminal_artifacts") or []
-    ]
-    broken_visible = [
-        asdict(issue)
-        for issue in _check_broken_internal_paths()
-        if issue.code == "docs_broken_internal_path"
-    ]
-    unclassified_docs_artifacts = [
-        asdict(issue)
-        for issue in _check_hidden_docs(topology)
-        if issue.code in {"docs_unregistered_subtree", "docs_non_markdown_artifact"}
-    ]
-    return {
-        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "authority_status": "derived_not_authority",
-        "source_manifests": source_manifests,
-        "freshness_status": "ok" if all(item["exists"] for item in source_manifests) else "missing_source_manifest",
-        "docs_subroots": docs_subroots,
-        "reviewer_visible_routes": reviewer_visible,
-        "local_only_routes": local_only,
-        "active_operations_surfaces": {
-            "current_state": "docs/operations/current_state.md",
-            "operation_paths": active_surfaces,
-            "required_anchors": active_anchors,
-        },
-        "artifact_roles": artifact_roles,
-        "broken_visible_routes": broken_visible,
-        "unclassified_docs_artifacts": unclassified_docs_artifacts,
-    }
+    return _core_map_checks().build_compiled_topology(sys.modules[__name__])
 
 
 def format_issues(issues: list[TopologyIssue]) -> str:

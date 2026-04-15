@@ -149,3 +149,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_digest.py`
 Summary: Moved data-rebuild digest, script-lifecycle digest, compact lore cards, matched history lore, and `build_digest` into `topology_doctor_digest.py`; `topology_doctor.py` keeps wrapper functions and navigation behavior.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'digest or navigation or context_budget or cli_json_parity'`; `python scripts/topology_doctor.py digest --task ... --json`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_digest.py`.
 Next: Avoid splitting map-maintenance until dirty script state is isolated; remaining safe split candidate is compiled-topology/core-map only if additional parity is needed.
+
+## 2026-04-15 — Core Map And Compiled Topology Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the core-map and compiled-topology builder family behind existing wrappers.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_core_map.py`, `architecture/script_manifest.yaml`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved core-map profile lookup, proof validation, core-map building, core-map validation, locator lookup, and compiled topology read-model generation into `topology_doctor_core_map.py`; `topology_doctor.py` keeps wrappers and existing CLI/API behavior.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'core_map or compiled_topology or cli_json_parity'`; `python scripts/topology_doctor.py core-map --profile probability-chain --json`; `python scripts/topology_doctor.py compiled-topology --json`.
+Next: Map-maintenance remains excluded from Phase 7 until dirty script state is isolated.
