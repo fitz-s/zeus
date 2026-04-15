@@ -340,7 +340,7 @@ scripts:
   backfill_hourly_openmeteo.py: {class: etl_writer}
   backfill_ogimet_metar.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics], external_inputs: [Ogimet METAR/SYNOP], target_db: state/zeus-world.db}
   backfill_observations_from_settlements.py: {class: etl_writer}
-  backfill_open_positions_canonical.py: {class: stale_deprecated, reason: stale helper target deleted}
+  # backfill_open_positions_canonical.py: REMOVED — dead script calling deleted function
   backfill_openmeteo_previous_runs.py: {class: etl_writer}
   backfill_outcome_fact.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_probability_traces_from_opportunities.py: {class: etl_writer}

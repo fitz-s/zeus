@@ -24,8 +24,12 @@ def remaining_member_maxes_for_day0(
     target_d: date,
     *,
     now: datetime | None = None,
+    temperature_metric: str = "high",
 ) -> tuple[np.ndarray, float]:
-    """Select remaining target-date local hours for Day0 observation logic."""
+    """Select remaining target-date local hours for Day0 observation logic.
+
+    For low-temperature markets, returns per-member daily mins.
+    """
 
     tz = ZoneInfo(timezone_name)
     now_local = (now or datetime.now(tz)).astimezone(tz)
@@ -46,4 +50,7 @@ def remaining_member_maxes_for_day0(
     if not remaining_idxs:
         return np.array([]), 0.0
 
-    return members_hourly[:, remaining_idxs].max(axis=1), float(len(remaining_idxs))
+    slice_data = members_hourly[:, remaining_idxs]
+    if temperature_metric == "low":
+        return slice_data.min(axis=1), float(len(remaining_idxs))
+    return slice_data.max(axis=1), float(len(remaining_idxs))

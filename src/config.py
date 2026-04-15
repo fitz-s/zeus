@@ -189,6 +189,16 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 f"City {name!r} missing from city metadata cluster field. "
                 "Cluster taxonomy must be explicit and single-sourced."
             )
+        for required_field in ("unit", "timezone", "wu_station", "country_code"):
+            if required_field not in c:
+                raise KeyError(
+                    f"City {name!r} missing required field {required_field!r}"
+                )
+        if lat is None or lon is None:
+            raise KeyError(
+                f"City {name!r} missing lat/lon "
+                "(expected top-level or under noaa.lat/noaa.lon)"
+            )
         cluster = c["cluster"]
         unit = c["unit"]
         amp = _unit_diurnal_amplitude(c, unit)
