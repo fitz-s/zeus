@@ -157,14 +157,20 @@ CITY_STATIONS = {
     "Sao Paulo":     ("SBGR", "BR", "C"),
     "Toronto":       ("CYYZ", "CA", "C"),
     # Europe
-    "London":        ("EGLL", "GB", "C"),
+    "London":        ("EGLC", "GB", "C"),  # 2026-04-14: corrected from EGLL (Heathrow) to EGLC (City Airport) per Polymarket market text
     "Paris":         ("LFPG", "FR", "C"),
     "Munich":        ("EDDM", "DE", "C"),
     "Madrid":        ("LEMD", "ES", "C"),
     "Milan":         ("LIMC", "IT", "C"),
     "Warsaw":        ("EPWA", "PL", "C"),
-    "Moscow":        ("UUEE", "RU", "C"),
-    "Istanbul":      ("LTFM", "TR", "C"),
+    "Amsterdam":     ("EHAM", "NL", "C"),  # 2026-04-14: added per Polymarket market text (Schiphol)
+    "Helsinki":      ("EFHK", "FI", "C"),  # 2026-04-14: added per Polymarket market text (Vantaa)
+    # Moscow is handled by NOAA weather.gov (UUWW/Vnukovo), not WU.
+    # Do not re-add under WU — intentionally excluded per settlement_source_type="noaa".
+    # "Moscow":        ("UUEE", "RU", "C"),
+    # Istanbul is handled by NOAA weather.gov (LTFM), not WU (WU API rejects LTFM).
+    # Do not re-add under WU — intentionally excluded per settlement_source_type="noaa".
+    # "Istanbul":      ("LTFM", "TR", "C"),
     "Ankara":        ("LTAC", "TR", "C"),
     "Tel Aviv":      ("LLBG", "IL", "C"),
     # Asia
@@ -174,6 +180,10 @@ CITY_STATIONS = {
     "Chengdu":       ("ZUUU", "CN", "C"),
     "Chongqing":     ("ZUCK", "CN", "C"),
     "Wuhan":         ("ZHHH", "CN", "C"),
+    "Guangzhou":     ("ZGGG", "CN", "C"),  # 2026-04-14: added per Polymarket market text (Baiyun)
+    # Taipei is handled by Taiwan CWA (station 46692), not WU.
+    # Do not re-add under WU — intentionally excluded per settlement_source_type="cwa_station".
+    # "Taipei":        ("RCTP", "TW", "C"),
     # Hong Kong is handled by a separate HKO fetcher
     # (scripts/backfill_hko_daily.py). HKO is the authoritative Polymarket
     # settlement source for HK, not WU/VHHH. The VHHH airport (Chek Lap Kok)
@@ -184,9 +194,10 @@ CITY_STATIONS = {
     # "Hong Kong":     ("VHHH", "HK", "C"),  # intentionally commented out
     "Tokyo":         ("RJTT", "JP", "C"),
     "Seoul":         ("RKSI", "KR", "C"),
-    "Taipei":        ("RCTP", "TW", "C"),
     "Singapore":     ("WSSS", "SG", "C"),
     "Lucknow":       ("VILK", "IN", "C"),
+    "Karachi":       ("OPKC", "PK", "C"),  # 2026-04-14: added per Polymarket market text (Jinnah Intl)
+    "Manila":        ("RPLL", "PH", "C"),  # 2026-04-14: added per Polymarket market text (Ninoy Aquino Intl)
     # Oceania
     "Wellington":    ("NZWN", "NZ", "C"),
     "Auckland":      ("NZAA", "NZ", "C"),
@@ -197,11 +208,11 @@ CITY_STATIONS = {
     "Jeddah":        ("OEJN", "SA", "C"),
     # Southeast Asia
     "Kuala Lumpur":  ("WMKK", "MY", "C"),
-    "Jakarta":       ("WIII", "ID", "C"),
+    "Jakarta":       ("WIHH", "ID", "C"),  # 2026-04-14: corrected from WIII (Soekarno-Hatta) to WIHH (Halim Perdanakusuma) per Polymarket market text
     # Asia-Northeast
     "Busan":         ("RKPK", "KR", "C"),
     # Latin America
-    "Panama City":   ("MPTO", "PA", "C"),
+    "Panama City":   ("MPMG", "PA", "C"),  # 2026-04-14: corrected from MPTO (Tocumen) to MPMG (Marcos A. Gelabert) per Polymarket market text
 }
 
 
@@ -475,12 +486,14 @@ def backfill_city(
                     raw_value=high,
                     raw_unit=unit,
                     declared_unit=(city_cfg.settlement_unit if city_cfg else unit),
+                    target_date=target_d,
                 )
                 _GUARD.check_unit_consistency(
                     city=city_name,
                     raw_value=low,
                     raw_unit=unit,
                     declared_unit=(city_cfg.settlement_unit if city_cfg else unit),
+                    target_date=target_d,
                 )
                 if low > high:
                     raise IngestionRejected(

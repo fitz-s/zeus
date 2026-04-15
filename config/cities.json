@@ -1,6 +1,874 @@
 {
-  "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly \u2014 do not use downtown or approximate coordinates.",
+  "_coord_note": "All lat/lon coordinates correspond to the airport weather station used by Weather Underground for Polymarket settlement. These MUST match the WU station exactly — do not use downtown or approximate coordinates.",
+  "_settlement_source_discipline": "ROUTINE CHECK NEEDED. Polymarket can change a city's settlement source / station / unit at any time (verified via 2026-04-14 cross-validation: Istanbul and Moscow are NOAA, London moved to EGLC, Jakarta to WIHH, Panama City to MPMG, Taipei to CWA station 46692, London unit transitioned F->C). Audit all active markets' description fields at least monthly and whenever a recalibration or new city onboarding is planned. Single source of truth: the market description text of the most recent active market for each city. settlement_source_type values: 'wu_icao' (default), 'hko' (Hong Kong Observatory), 'noaa' (weather.gov timeseries), 'cwa_station' (Taiwan Central Weather Administration).",
   "cities": [
+    {
+      "name": "Amsterdam",
+      "aliases": [
+        "Amsterdam",
+        "amsterdam"
+      ],
+      "slug_names": [
+        "amsterdam"
+      ],
+      "noaa": null,
+      "lat": 52.3086,
+      "lon": 4.7639,
+      "wu_station": "EHAM",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Amsterdam Airport Schiphol",
+      "country_code": "NL",
+      "settlement_source": "https://www.wunderground.com/history/daily/nl/schiphol/EHAM",
+      "timezone": "Europe/Amsterdam",
+      "cluster": "Amsterdam",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.5
+    },
+    {
+      "name": "Ankara",
+      "aliases": [
+        "Ankara",
+        "ankara"
+      ],
+      "slug_names": [
+        "ankara"
+      ],
+      "noaa": null,
+      "lat": 40.1269,
+      "lon": 32.9965,
+      "wu_station": "LTAC",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Esenboga International Airport",
+      "country_code": "TR",
+      "settlement_source": "https://www.wunderground.com/history/daily/tr/ankara/LTAC",
+      "timezone": "Europe/Istanbul",
+      "cluster": "Ankara",
+      "unit": "C",
+      "historical_peak_hour": 15.2,
+      "diurnal_amplitude_c": 11.5
+    },
+    {
+      "name": "Atlanta",
+      "aliases": [
+        "Atlanta",
+        "atlanta"
+      ],
+      "slug_names": [
+        "atlanta"
+      ],
+      "noaa": {
+        "lat": 33.6407,
+        "lon": -84.4277,
+        "office": "FFC",
+        "gridX": 50,
+        "gridY": 82
+      },
+      "wu_station": "KATL",
+      "wu_pws": "KGAHAPEV1",
+      "meteostat_station": "72219",
+      "airport_name": "Hartsfield-Jackson Atlanta International Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
+      "timezone": "America/New_York",
+      "cluster": "Atlanta",
+      "unit": "F",
+      "historical_peak_hour": 17.6,
+      "diurnal_amplitude_f": 17.3
+    },
+    {
+      "name": "Auckland",
+      "aliases": [
+        "Auckland",
+        "auckland"
+      ],
+      "slug_names": [
+        "auckland"
+      ],
+      "noaa": null,
+      "lat": -36.8509,
+      "lon": 174.7645,
+      "wu_station": "NZAA",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Auckland Airport",
+      "country_code": "NZ",
+      "settlement_source": "https://www.wunderground.com/history/daily/nz/auckland/NZAA",
+      "timezone": "Pacific/Auckland",
+      "cluster": "Auckland",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 6.5
+    },
+    {
+      "name": "Austin",
+      "aliases": [
+        "Austin",
+        "austin"
+      ],
+      "slug_names": [
+        "austin"
+      ],
+      "noaa": {
+        "lat": 30.168399,
+        "lon": -97.69712,
+        "office": "EWX",
+        "gridX": 157,
+        "gridY": 86
+      },
+      "wu_station": "KAUS",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Austin-Bergstrom International Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
+      "timezone": "America/Chicago",
+      "cluster": "Austin",
+      "unit": "F",
+      "historical_peak_hour": 17.7,
+      "diurnal_amplitude_f": 18.0
+    },
+    {
+      "name": "Beijing",
+      "aliases": [
+        "Beijing",
+        "beijing",
+        "Peking"
+      ],
+      "slug_names": [
+        "beijing"
+      ],
+      "noaa": null,
+      "lat": 40.0801,
+      "lon": 116.5847,
+      "wu_station": "ZBAA",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Beijing Capital International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/beijing/ZBAA",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Beijing",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 10.5
+    },
+    {
+      "name": "Buenos Aires",
+      "aliases": [
+        "Buenos Aires",
+        "buenos aires",
+        "BA"
+      ],
+      "slug_names": [
+        "buenos-aires",
+        "ba"
+      ],
+      "noaa": null,
+      "lat": -34.82693,
+      "lon": -58.57507,
+      "wu_station": "SAEZ",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Minister Pistarini International Airport",
+      "country_code": "AR",
+      "settlement_source": "https://www.wunderground.com/history/daily/ar/ezeiza/SAEZ",
+      "timezone": "America/Argentina/Buenos_Aires",
+      "cluster": "Buenos Aires",
+      "unit": "C",
+      "historical_peak_hour": 15.5,
+      "diurnal_amplitude_c": 9.0
+    },
+    {
+      "name": "Busan",
+      "aliases": [
+        "Busan",
+        "busan",
+        "Pusan"
+      ],
+      "slug_names": [
+        "busan"
+      ],
+      "noaa": null,
+      "lat": 35.1796,
+      "lon": 128.9382,
+      "wu_station": "RKPK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Gimhae Intl Airport",
+      "country_code": "KR",
+      "settlement_source": "https://www.wunderground.com/history/daily/kr/busan/RKPK",
+      "timezone": "Asia/Seoul",
+      "cluster": "Busan",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.5
+    },
+    {
+      "name": "Cape Town",
+      "aliases": [
+        "Cape Town",
+        "cape town"
+      ],
+      "slug_names": [
+        "cape-town"
+      ],
+      "noaa": null,
+      "lat": -33.9649,
+      "lon": 18.6017,
+      "wu_station": "FACT",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Cape Town Intl Airport",
+      "country_code": "ZA",
+      "settlement_source": "https://www.wunderground.com/history/daily/za/cape-town/FACT",
+      "timezone": "Africa/Johannesburg",
+      "cluster": "Cape Town",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 8.0
+    },
+    {
+      "name": "Chengdu",
+      "aliases": [
+        "Chengdu",
+        "chengdu"
+      ],
+      "slug_names": [
+        "chengdu"
+      ],
+      "noaa": null,
+      "lat": 30.4084,
+      "lon": 104.0673,
+      "wu_station": "ZUUU",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Chengdu Shuangliu International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/chengdu/ZUUU",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Chengdu",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "Chicago",
+      "aliases": [
+        "Chicago",
+        "chicago"
+      ],
+      "slug_names": [
+        "chicago"
+      ],
+      "noaa": {
+        "lat": 41.9742,
+        "lon": -87.9073,
+        "office": "LOT",
+        "gridX": 66,
+        "gridY": 77
+      },
+      "wu_station": "KORD",
+      "wu_pws": "KILROSEM4",
+      "meteostat_station": "72530",
+      "airport_name": "O'Hare International Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
+      "timezone": "America/Chicago",
+      "cluster": "Chicago",
+      "unit": "F",
+      "historical_peak_hour": 16.4,
+      "diurnal_amplitude_f": 15.0
+    },
+    {
+      "name": "Chongqing",
+      "aliases": [
+        "Chongqing",
+        "chongqing"
+      ],
+      "slug_names": [
+        "chongqing"
+      ],
+      "noaa": null,
+      "lat": 29.3621,
+      "lon": 106.652,
+      "wu_station": "ZUCK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Chongqing Jiangbei International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/chongqing/ZUCK",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Chongqing",
+      "unit": "C",
+      "historical_peak_hour": 15.2,
+      "diurnal_amplitude_c": 6.8
+    },
+    {
+      "name": "Dallas",
+      "aliases": [
+        "Dallas",
+        "dallas"
+      ],
+      "slug_names": [
+        "dallas"
+      ],
+      "noaa": {
+        "lat": 32.8471,
+        "lon": -96.8518,
+        "office": "FWD",
+        "gridX": 87,
+        "gridY": 107
+      },
+      "wu_station": "KDAL",
+      "wu_pws": "KTXDALLA1276",
+      "meteostat_station": "72258",
+      "airport_name": "Dallas Love Field",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
+      "timezone": "America/Chicago",
+      "cluster": "Dallas",
+      "unit": "F",
+      "historical_peak_hour": 17.7,
+      "diurnal_amplitude_f": 18.6
+    },
+    {
+      "name": "Denver",
+      "aliases": [
+        "Denver",
+        "denver"
+      ],
+      "slug_names": [
+        "denver"
+      ],
+      "noaa": {
+        "lat": 39.698,
+        "lon": -104.777,
+        "office": "BOU",
+        "gridX": 70,
+        "gridY": 59
+      },
+      "wu_station": "KBKF",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Buckley Space Force Base Station",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
+      "timezone": "America/Denver",
+      "cluster": "Denver",
+      "unit": "F",
+      "historical_peak_hour": 16.1,
+      "diurnal_amplitude_f": 18.4
+    },
+    {
+      "name": "Guangzhou",
+      "aliases": [
+        "Guangzhou",
+        "guangzhou",
+        "广州"
+      ],
+      "slug_names": [
+        "guangzhou"
+      ],
+      "noaa": null,
+      "lat": 23.3924,
+      "lon": 113.2988,
+      "wu_station": "ZGGG",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Guangzhou Baiyun International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/guangzhou/ZGGG",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Guangzhou",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "Helsinki",
+      "aliases": [
+        "Helsinki",
+        "helsinki"
+      ],
+      "slug_names": [
+        "helsinki"
+      ],
+      "noaa": null,
+      "lat": 60.3172,
+      "lon": 24.9633,
+      "wu_station": "EFHK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Helsinki-Vantaa Airport",
+      "country_code": "FI",
+      "settlement_source": "https://www.wunderground.com/history/daily/fi/vantaa/EFHK",
+      "timezone": "Europe/Helsinki",
+      "cluster": "Helsinki",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 8.0
+    },
+    {
+      "name": "Hong Kong",
+      "aliases": [
+        "Hong Kong",
+        "hong kong",
+        "HK"
+      ],
+      "slug_names": [
+        "hong-kong",
+        "hk"
+      ],
+      "noaa": null,
+      "lat": 22.303611,
+      "lon": 114.171944,
+      "wu_station": null,
+      "hko_station": "HKO",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Hong Kong Observatory Headquarters",
+      "country_code": "HK",
+      "settlement_source": "https://www.weather.gov.hk/en/cis/climat.htm",
+      "settlement_source_type": "hko",
+      "timezone": "Asia/Hong_Kong",
+      "cluster": "Hong Kong",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 6.2
+    },
+    {
+      "name": "Houston",
+      "aliases": [
+        "Houston",
+        "houston"
+      ],
+      "slug_names": [
+        "houston"
+      ],
+      "noaa": {
+        "lat": 29.640176,
+        "lon": -95.232926,
+        "office": "HGX",
+        "gridX": 68,
+        "gridY": 89
+      },
+      "wu_station": "KHOU",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "William P. Hobby Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
+      "timezone": "America/Chicago",
+      "cluster": "Houston",
+      "unit": "F",
+      "historical_peak_hour": 17.4,
+      "diurnal_amplitude_f": 15.2
+    },
+    {
+      "name": "Istanbul",
+      "aliases": [
+        "Istanbul",
+        "istanbul"
+      ],
+      "slug_names": [
+        "istanbul"
+      ],
+      "noaa": null,
+      "lat": 41.2619,
+      "lon": 28.7417,
+      "wu_station": "LTFM",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Istanbul Airport (LTFM)",
+      "country_code": "TR",
+      "settlement_source": "https://www.weather.gov/wrh/timeseries?site=LTFM",
+      "timezone": "Europe/Istanbul",
+      "cluster": "Istanbul",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 8.5,
+      "settlement_source_type": "noaa"
+    },
+    {
+      "name": "Jakarta",
+      "aliases": [
+        "Jakarta",
+        "jakarta"
+      ],
+      "slug_names": [
+        "jakarta"
+      ],
+      "noaa": null,
+      "lat": -6.2664,
+      "lon": 106.8908,
+      "wu_station": "WIHH",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Halim Perdanakusuma International Airport",
+      "country_code": "ID",
+      "settlement_source": "https://www.wunderground.com/history/daily/id/jakarta/WIHH",
+      "timezone": "Asia/Jakarta",
+      "cluster": "Jakarta",
+      "unit": "C",
+      "historical_peak_hour": 13.5,
+      "diurnal_amplitude_c": 5.0
+    },
+    {
+      "name": "Jeddah",
+      "aliases": [
+        "Jeddah",
+        "jeddah",
+        "Jiddah"
+      ],
+      "slug_names": [
+        "jeddah"
+      ],
+      "noaa": null,
+      "lat": 21.6796,
+      "lon": 39.1565,
+      "wu_station": "OEJN",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "King Abdulaziz Intl Airport",
+      "country_code": "SA",
+      "settlement_source": "https://www.wunderground.com/history/daily/sa/jeddah/OEJN",
+      "timezone": "Asia/Riyadh",
+      "cluster": "Jeddah",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "Karachi",
+      "aliases": [
+        "Karachi",
+        "karachi"
+      ],
+      "slug_names": [
+        "karachi"
+      ],
+      "noaa": null,
+      "lat": 24.9065,
+      "lon": 67.1608,
+      "wu_station": "OPKC",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Jinnah International Airport",
+      "country_code": "PK",
+      "settlement_source": "https://www.wunderground.com/history/daily/pk/karachi/OPKC",
+      "timezone": "Asia/Karachi",
+      "cluster": "Karachi",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 9.0
+    },
+    {
+      "name": "Kuala Lumpur",
+      "aliases": [
+        "Kuala Lumpur",
+        "kuala lumpur",
+        "KL"
+      ],
+      "slug_names": [
+        "kuala-lumpur"
+      ],
+      "noaa": null,
+      "lat": 2.7456,
+      "lon": 101.7072,
+      "wu_station": "WMKK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Kuala Lumpur Intl Airport",
+      "country_code": "MY",
+      "settlement_source": "https://www.wunderground.com/history/daily/my/sepang/WMKK",
+      "timezone": "Asia/Kuala_Lumpur",
+      "cluster": "Kuala Lumpur",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 5.0
+    },
+    {
+      "name": "Lagos",
+      "aliases": [
+        "Lagos",
+        "lagos"
+      ],
+      "slug_names": [
+        "lagos"
+      ],
+      "noaa": null,
+      "lat": 6.5774,
+      "lon": 3.3213,
+      "wu_station": "DNMM",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Murtala Muhammed Intl Airport",
+      "country_code": "NG",
+      "settlement_source": "https://www.wunderground.com/history/daily/ng/lagos/DNMM",
+      "timezone": "Africa/Lagos",
+      "cluster": "Lagos",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 5.5
+    },
+    {
+      "name": "London",
+      "aliases": [
+        "London",
+        "london"
+      ],
+      "slug_names": [
+        "london"
+      ],
+      "noaa": null,
+      "lat": 51.5053,
+      "lon": 0.0553,
+      "wu_station": "EGLC",
+      "wu_pws": "ILONDON513",
+      "meteostat_station": null,
+      "airport_name": "London City Airport",
+      "country_code": "GB",
+      "settlement_source": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+      "timezone": "Europe/London",
+      "cluster": "London",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 7.4
+    },
+    {
+      "name": "Los Angeles",
+      "aliases": [
+        "Los Angeles",
+        "LA",
+        "los angeles"
+      ],
+      "slug_names": [
+        "los-angeles",
+        "la"
+      ],
+      "noaa": {
+        "lat": 33.9416,
+        "lon": -118.4085,
+        "office": "LOX",
+        "gridX": 148,
+        "gridY": 41
+      },
+      "wu_station": "KLAX",
+      "wu_pws": "KCALOSAN958",
+      "meteostat_station": "72295",
+      "airport_name": "Los Angeles International Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
+      "timezone": "America/Los_Angeles",
+      "cluster": "Los Angeles",
+      "unit": "F",
+      "historical_peak_hour": 18.1,
+      "diurnal_amplitude_f": 11.1
+    },
+    {
+      "name": "Lucknow",
+      "aliases": [
+        "Lucknow",
+        "lucknow"
+      ],
+      "slug_names": [
+        "lucknow"
+      ],
+      "noaa": null,
+      "lat": 26.7606,
+      "lon": 80.8894,
+      "wu_station": "VILK",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Chaudhary Charan Singh International Airport",
+      "country_code": "IN",
+      "settlement_source": "https://www.wunderground.com/history/daily/in/lucknow/VILK",
+      "timezone": "Asia/Kolkata",
+      "cluster": "Lucknow",
+      "unit": "C",
+      "historical_peak_hour": 14.8,
+      "diurnal_amplitude_c": 12.0
+    },
+    {
+      "name": "Madrid",
+      "aliases": [
+        "Madrid",
+        "madrid"
+      ],
+      "slug_names": [
+        "madrid"
+      ],
+      "noaa": null,
+      "lat": 40.4719,
+      "lon": -3.5626,
+      "wu_station": "LEMD",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Adolfo Suarez Madrid-Barajas Airport",
+      "country_code": "ES",
+      "settlement_source": "https://www.wunderground.com/history/daily/es/madrid/LEMD",
+      "timezone": "Europe/Madrid",
+      "cluster": "Madrid",
+      "unit": "C",
+      "historical_peak_hour": 16.0,
+      "diurnal_amplitude_c": 12.0
+    },
+    {
+      "name": "Manila",
+      "aliases": [
+        "Manila",
+        "manila"
+      ],
+      "slug_names": [
+        "manila"
+      ],
+      "noaa": null,
+      "lat": 14.5086,
+      "lon": 121.0197,
+      "wu_station": "RPLL",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Ninoy Aquino International Airport",
+      "country_code": "PH",
+      "settlement_source": "https://www.wunderground.com/history/daily/ph/manila/RPLL",
+      "timezone": "Asia/Manila",
+      "cluster": "Manila",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 6.5
+    },
+    {
+      "name": "Mexico City",
+      "aliases": [
+        "Mexico City",
+        "mexico city",
+        "CDMX"
+      ],
+      "slug_names": [
+        "mexico-city",
+        "cdmx"
+      ],
+      "noaa": null,
+      "lat": 19.4326,
+      "lon": -99.1332,
+      "wu_station": "MMMX",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Mexico City International Airport",
+      "country_code": "MX",
+      "settlement_source": "https://www.wunderground.com/history/daily/mx/mexico-city/MMMX",
+      "timezone": "America/Mexico_City",
+      "cluster": "Mexico City",
+      "unit": "C",
+      "historical_peak_hour": 15.5,
+      "diurnal_amplitude_c": 11.0
+    },
+    {
+      "name": "Miami",
+      "aliases": [
+        "Miami",
+        "miami"
+      ],
+      "slug_names": [
+        "miami"
+      ],
+      "noaa": {
+        "lat": 25.7959,
+        "lon": -80.287,
+        "office": "MFL",
+        "gridX": 106,
+        "gridY": 51
+      },
+      "wu_station": "KMIA",
+      "wu_pws": "KFLMIAMI932",
+      "meteostat_station": "72202",
+      "airport_name": "Miami International Airport",
+      "country_code": "US",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
+      "timezone": "America/New_York",
+      "cluster": "Miami",
+      "unit": "F",
+      "historical_peak_hour": 17.3,
+      "diurnal_amplitude_f": 12.1
+    },
+    {
+      "name": "Milan",
+      "aliases": [
+        "Milan",
+        "milan",
+        "Milano"
+      ],
+      "slug_names": [
+        "milan"
+      ],
+      "noaa": null,
+      "lat": 45.6306,
+      "lon": 8.7281,
+      "wu_station": "LIMC",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Milan Malpensa Airport",
+      "country_code": "IT",
+      "settlement_source": "https://www.wunderground.com/history/daily/it/milan/LIMC",
+      "timezone": "Europe/Rome",
+      "cluster": "Milan",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 9.0
+    },
+    {
+      "name": "Moscow",
+      "aliases": [
+        "Moscow",
+        "moscow"
+      ],
+      "slug_names": [
+        "moscow"
+      ],
+      "noaa": null,
+      "lat": 55.5914,
+      "lon": 37.2615,
+      "wu_station": "UUWW",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Moscow Vnukovo International Airport",
+      "country_code": "RU",
+      "settlement_source": "https://www.weather.gov/wrh/timeseries?site=UUWW",
+      "timezone": "Europe/Moscow",
+      "cluster": "Moscow",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 9.5,
+      "settlement_source_type": "noaa"
+    },
+    {
+      "name": "Munich",
+      "aliases": [
+        "Munich",
+        "munich",
+        "München"
+      ],
+      "slug_names": [
+        "munich"
+      ],
+      "noaa": null,
+      "lat": 48.346,
+      "lon": 11.83,
+      "wu_station": "EDDM",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Munich Airport",
+      "country_code": "DE",
+      "settlement_source": "https://www.wunderground.com/history/daily/de/munich/EDDM",
+      "timezone": "Europe/Berlin",
+      "cluster": "Munich",
+      "unit": "C",
+      "historical_peak_hour": 14.8,
+      "diurnal_amplitude_c": 8.5
+    },
     {
       "name": "NYC",
       "aliases": [
@@ -34,32 +902,109 @@
       "diurnal_amplitude_f": 11.0
     },
     {
-      "name": "Chicago",
+      "name": "Panama City",
       "aliases": [
-        "Chicago",
-        "chicago"
+        "Panama City",
+        "panama city",
+        "Panama"
       ],
       "slug_names": [
-        "chicago"
+        "panama-city"
+      ],
+      "noaa": null,
+      "lat": 8.9734,
+      "lon": -79.5553,
+      "wu_station": "MPMG",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Marcos A. Gelabert International Airport",
+      "country_code": "PA",
+      "settlement_source": "https://www.wunderground.com/history/daily/pa/panama-city/MPMG",
+      "timezone": "America/Panama",
+      "cluster": "Panama City",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 4.5
+    },
+    {
+      "name": "Paris",
+      "aliases": [
+        "Paris",
+        "paris"
+      ],
+      "slug_names": [
+        "paris"
+      ],
+      "noaa": null,
+      "lat": 49.0097,
+      "lon": 2.5479,
+      "wu_station": "LFPG",
+      "wu_pws": "IMITRY1",
+      "meteostat_station": "07157",
+      "airport_name": "Paris-Charles de Gaulle Airport",
+      "country_code": "FR",
+      "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
+      "timezone": "Europe/Paris",
+      "cluster": "Paris",
+      "unit": "C",
+      "historical_peak_hour": 14.5,
+      "diurnal_amplitude_c": 7.0
+    },
+    {
+      "name": "San Francisco",
+      "aliases": [
+        "San Francisco",
+        "SF",
+        "san francisco"
+      ],
+      "slug_names": [
+        "san-francisco",
+        "sf"
       ],
       "noaa": {
-        "lat": 41.9742,
-        "lon": -87.9073,
-        "office": "LOT",
-        "gridX": 66,
-        "gridY": 77
+        "lat": 37.6213,
+        "lon": -122.379,
+        "office": "MTR",
+        "gridX": 85,
+        "gridY": 98
       },
-      "wu_station": "KORD",
-      "wu_pws": "KILROSEM4",
-      "meteostat_station": "72530",
-      "airport_name": "O'Hare International Airport",
+      "wu_station": "KSFO",
+      "wu_pws": "KCASANBR92",
+      "meteostat_station": "72494",
+      "airport_name": "San Francisco International Airport",
       "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
-      "timezone": "America/Chicago",
-      "cluster": "Chicago",
+      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
+      "timezone": "America/Los_Angeles",
+      "cluster": "San Francisco",
       "unit": "F",
-      "historical_peak_hour": 16.4,
-      "diurnal_amplitude_f": 15.0
+      "historical_peak_hour": 16.7,
+      "diurnal_amplitude_f": 11.9
+    },
+    {
+      "name": "Sao Paulo",
+      "aliases": [
+        "Sao Paulo",
+        "sao paulo",
+        "SP"
+      ],
+      "slug_names": [
+        "sao-paulo",
+        "sp"
+      ],
+      "noaa": null,
+      "lat": -23.5505,
+      "lon": -46.6333,
+      "wu_station": "SBGR",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Sao Paulo/Guarulhos International Airport",
+      "country_code": "BR",
+      "settlement_source": "https://www.wunderground.com/history/daily/br/sao-paulo/SBGR",
+      "timezone": "America/Sao_Paulo",
+      "cluster": "Sao Paulo",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 8.5
     },
     {
       "name": "Seattle",
@@ -138,389 +1083,11 @@
       "diurnal_amplitude_c": 7.8
     },
     {
-      "name": "Tokyo",
-      "aliases": [
-        "Tokyo",
-        "tokyo"
-      ],
-      "slug_names": [
-        "tokyo"
-      ],
-      "noaa": null,
-      "lat": 35.601766,
-      "lon": 139.775175,
-      "wu_station": "RJTT",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Tokyo Haneda Airport Station",
-      "country_code": "JP",
-      "settlement_source": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
-      "timezone": "Asia/Tokyo",
-      "cluster": "Tokyo",
-      "unit": "C",
-      "historical_peak_hour": 14.7,
-      "diurnal_amplitude_c": 7.6
-    },
-    {
-      "name": "Atlanta",
-      "aliases": [
-        "Atlanta",
-        "atlanta"
-      ],
-      "slug_names": [
-        "atlanta"
-      ],
-      "noaa": {
-        "lat": 33.6407,
-        "lon": -84.4277,
-        "office": "FFC",
-        "gridX": 50,
-        "gridY": 82
-      },
-      "wu_station": "KATL",
-      "wu_pws": "KGAHAPEV1",
-      "meteostat_station": "72219",
-      "airport_name": "Hartsfield-Jackson Atlanta International Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
-      "timezone": "America/New_York",
-      "cluster": "Atlanta",
-      "unit": "F",
-      "historical_peak_hour": 17.6,
-      "diurnal_amplitude_f": 17.3
-    },
-    {
-      "name": "Austin",
-      "aliases": [
-        "Austin",
-        "austin"
-      ],
-      "slug_names": [
-        "austin"
-      ],
-      "noaa": {
-        "lat": 30.168399,
-        "lon": -97.69712,
-        "office": "EWX",
-        "gridX": 157,
-        "gridY": 86
-      },
-      "wu_station": "KAUS",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Austin-Bergstrom International Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
-      "timezone": "America/Chicago",
-      "cluster": "Austin",
-      "unit": "F",
-      "historical_peak_hour": 17.7,
-      "diurnal_amplitude_f": 18.0
-    },
-    {
-      "name": "Dallas",
-      "aliases": [
-        "Dallas",
-        "dallas"
-      ],
-      "slug_names": [
-        "dallas"
-      ],
-      "noaa": {
-        "lat": 32.8471,
-        "lon": -96.8518,
-        "office": "FWD",
-        "gridX": 87,
-        "gridY": 107
-      },
-      "wu_station": "KDAL",
-      "wu_pws": "KTXDALLA1276",
-      "meteostat_station": "72258",
-      "airport_name": "Dallas Love Field",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
-      "timezone": "America/Chicago",
-      "cluster": "Dallas",
-      "unit": "F",
-      "historical_peak_hour": 17.7,
-      "diurnal_amplitude_f": 18.6
-    },
-    {
-      "name": "Denver",
-      "aliases": [
-        "Denver",
-        "denver"
-      ],
-      "slug_names": [
-        "denver"
-      ],
-      "noaa": {
-        "lat": 39.698,
-        "lon": -104.777,
-        "office": "BOU",
-        "gridX": 70,
-        "gridY": 59
-      },
-      "wu_station": "KBKF",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Buckley Space Force Base Station",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
-      "timezone": "America/Denver",
-      "cluster": "Denver",
-      "unit": "F",
-      "historical_peak_hour": 16.1,
-      "diurnal_amplitude_f": 18.4
-    },
-    {
-      "name": "Houston",
-      "aliases": [
-        "Houston",
-        "houston"
-      ],
-      "slug_names": [
-        "houston"
-      ],
-      "noaa": {
-        "lat": 29.640176,
-        "lon": -95.232926,
-        "office": "HGX",
-        "gridX": 68,
-        "gridY": 89
-      },
-      "wu_station": "KHOU",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "William P. Hobby Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
-      "timezone": "America/Chicago",
-      "cluster": "Houston",
-      "unit": "F",
-      "historical_peak_hour": 17.4,
-      "diurnal_amplitude_f": 15.2
-    },
-    {
-      "name": "Miami",
-      "aliases": [
-        "Miami",
-        "miami"
-      ],
-      "slug_names": [
-        "miami"
-      ],
-      "noaa": {
-        "lat": 25.7959,
-        "lon": -80.287,
-        "office": "MFL",
-        "gridX": 106,
-        "gridY": 51
-      },
-      "wu_station": "KMIA",
-      "wu_pws": "KFLMIAMI932",
-      "meteostat_station": "72202",
-      "airport_name": "Miami International Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
-      "timezone": "America/New_York",
-      "cluster": "Miami",
-      "unit": "F",
-      "historical_peak_hour": 17.3,
-      "diurnal_amplitude_f": 12.1
-    },
-    {
-      "name": "Los Angeles",
-      "aliases": [
-        "Los Angeles",
-        "LA",
-        "los angeles"
-      ],
-      "slug_names": [
-        "los-angeles",
-        "la"
-      ],
-      "noaa": {
-        "lat": 33.9416,
-        "lon": -118.4085,
-        "office": "LOX",
-        "gridX": 148,
-        "gridY": 41
-      },
-      "wu_station": "KLAX",
-      "wu_pws": "KCALOSAN958",
-      "meteostat_station": "72295",
-      "airport_name": "Los Angeles International Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
-      "timezone": "America/Los_Angeles",
-      "cluster": "Los Angeles",
-      "unit": "F",
-      "historical_peak_hour": 18.1,
-      "diurnal_amplitude_f": 11.1
-    },
-    {
-      "name": "San Francisco",
-      "aliases": [
-        "San Francisco",
-        "SF",
-        "san francisco"
-      ],
-      "slug_names": [
-        "san-francisco",
-        "sf"
-      ],
-      "noaa": {
-        "lat": 37.6213,
-        "lon": -122.379,
-        "office": "MTR",
-        "gridX": 85,
-        "gridY": 98
-      },
-      "wu_station": "KSFO",
-      "wu_pws": "KCASANBR92",
-      "meteostat_station": "72494",
-      "airport_name": "San Francisco International Airport",
-      "country_code": "US",
-      "settlement_source": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
-      "timezone": "America/Los_Angeles",
-      "cluster": "San Francisco",
-      "unit": "F",
-      "historical_peak_hour": 16.7,
-      "diurnal_amplitude_f": 11.9
-    },
-    {
-      "name": "Paris",
-      "aliases": [
-        "Paris",
-        "paris"
-      ],
-      "slug_names": [
-        "paris"
-      ],
-      "noaa": null,
-      "lat": 49.0097,
-      "lon": 2.5479,
-      "wu_station": "LFPG",
-      "wu_pws": "IMITRY1",
-      "meteostat_station": "07157",
-      "airport_name": "Paris-Charles de Gaulle Airport",
-      "country_code": "FR",
-      "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
-      "timezone": "Europe/Paris",
-      "cluster": "Paris",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.0
-    },
-    {
-      "name": "London",
-      "aliases": [
-        "London",
-        "london"
-      ],
-      "slug_names": [
-        "london"
-      ],
-      "noaa": null,
-      "lat": 51.4775,
-      "lon": -0.4614,
-      "wu_station": "EGLL",
-      "wu_pws": "ILONDON513",
-      "meteostat_station": "03772",
-      "airport_name": "London Heathrow Airport",
-      "country_code": "GB",
-      "settlement_source": "https://www.wunderground.com/history/daily/gb/london/EGLL",
-      "timezone": "Europe/London",
-      "cluster": "London",
-      "unit": "C",
-      "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 7.4
-    },
-    {
-      "name": "Hong Kong",
-      "aliases": [
-        "Hong Kong",
-        "hong kong",
-        "HK"
-      ],
-      "slug_names": [
-        "hong-kong",
-        "hk"
-      ],
-      "noaa": null,
-      "lat": 22.308,
-      "lon": 113.9185,
-      "wu_station": "VHHH",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Hong Kong International Airport",
-      "country_code": "HK",
-      "settlement_source": "https://www.weather.gov.hk/en/cis/climat.htm",
-      "settlement_source_type": "hko",
-      "timezone": "Asia/Hong_Kong",
-      "cluster": "Hong Kong",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 6.2
-    },
-    {
-      "name": "Buenos Aires",
-      "aliases": [
-        "Buenos Aires",
-        "buenos aires",
-        "BA"
-      ],
-      "slug_names": [
-        "buenos-aires",
-        "ba"
-      ],
-      "noaa": null,
-      "lat": -34.82693,
-      "lon": -58.57507,
-      "wu_station": "SAEZ",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Minister Pistarini International Airport",
-      "country_code": "AR",
-      "settlement_source": "https://www.wunderground.com/history/daily/ar/ezeiza/SAEZ",
-      "timezone": "America/Argentina/Buenos_Aires",
-      "cluster": "Buenos Aires",
-      "unit": "C",
-      "historical_peak_hour": 15.5,
-      "diurnal_amplitude_c": 9.0
-    },
-    {
-      "name": "Munich",
-      "aliases": [
-        "Munich",
-        "munich",
-        "M\u00fcnchen"
-      ],
-      "slug_names": [
-        "munich"
-      ],
-      "noaa": null,
-      "lat": 48.346,
-      "lon": 11.83,
-      "wu_station": "EDDM",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Munich Airport",
-      "country_code": "DE",
-      "settlement_source": "https://www.wunderground.com/history/daily/de/munich/EDDM",
-      "timezone": "Europe/Berlin",
-      "cluster": "Munich",
-      "unit": "C",
-      "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 8.5
-    },
-    {
       "name": "Shenzhen",
       "aliases": [
         "Shenzhen",
         "shenzhen",
-        "\u6df1\u5733"
+        "深圳"
       ],
       "slug_names": [
         "shenzhen"
@@ -539,300 +1106,6 @@
       "unit": "C",
       "historical_peak_hour": 14.3,
       "diurnal_amplitude_c": 6.8
-    },
-    {
-      "name": "Wellington",
-      "aliases": [
-        "Wellington",
-        "wellington"
-      ],
-      "slug_names": [
-        "wellington"
-      ],
-      "noaa": null,
-      "lat": -41.32512,
-      "lon": 174.7921,
-      "wu_station": "NZWN",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Wellington International Airport",
-      "country_code": "NZ",
-      "settlement_source": "https://www.wunderground.com/history/daily/nz/wellington/NZWN",
-      "timezone": "Pacific/Auckland",
-      "cluster": "Wellington",
-      "unit": "C",
-      "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 5.5
-    },
-    {
-      "name": "Ankara",
-      "aliases": [
-        "Ankara",
-        "ankara"
-      ],
-      "slug_names": [
-        "ankara"
-      ],
-      "noaa": null,
-      "lat": 40.1269,
-      "lon": 32.9965,
-      "wu_station": "LTAC",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Esenboga International Airport",
-      "country_code": "TR",
-      "settlement_source": "https://www.wunderground.com/history/daily/tr/ankara/LTAC",
-      "timezone": "Europe/Istanbul",
-      "cluster": "Ankara",
-      "unit": "C",
-      "historical_peak_hour": 15.2,
-      "diurnal_amplitude_c": 11.5
-    },
-    {
-      "name": "Beijing",
-      "aliases": [
-        "Beijing",
-        "beijing",
-        "Peking"
-      ],
-      "slug_names": [
-        "beijing"
-      ],
-      "noaa": null,
-      "lat": 40.0801,
-      "lon": 116.5847,
-      "wu_station": "ZBAA",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Beijing Capital International Airport",
-      "country_code": "CN",
-      "settlement_source": "https://www.wunderground.com/history/daily/cn/beijing/ZBAA",
-      "timezone": "Asia/Shanghai",
-      "cluster": "Beijing",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 10.5
-    },
-    {
-      "name": "Chengdu",
-      "aliases": [
-        "Chengdu",
-        "chengdu"
-      ],
-      "slug_names": [
-        "chengdu"
-      ],
-      "noaa": null,
-      "lat": 30.4084,
-      "lon": 104.0673,
-      "wu_station": "ZUUU",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Chengdu Shuangliu International Airport",
-      "country_code": "CN",
-      "settlement_source": "https://www.wunderground.com/history/daily/cn/chengdu/ZUUU",
-      "timezone": "Asia/Shanghai",
-      "cluster": "Chengdu",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 7.0
-    },
-    {
-      "name": "Chongqing",
-      "aliases": [
-        "Chongqing",
-        "chongqing"
-      ],
-      "slug_names": [
-        "chongqing"
-      ],
-      "noaa": null,
-      "lat": 29.3621,
-      "lon": 106.652,
-      "wu_station": "ZUCK",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Chongqing Jiangbei International Airport",
-      "country_code": "CN",
-      "settlement_source": "https://www.wunderground.com/history/daily/cn/chongqing/ZUCK",
-      "timezone": "Asia/Shanghai",
-      "cluster": "Chongqing",
-      "unit": "C",
-      "historical_peak_hour": 15.2,
-      "diurnal_amplitude_c": 6.8
-    },
-    {
-      "name": "Istanbul",
-      "aliases": [
-        "Istanbul",
-        "istanbul"
-      ],
-      "slug_names": [
-        "istanbul"
-      ],
-      "noaa": null,
-      "lat": 40.9769,
-      "lon": 28.8146,
-      "wu_station": "LTFM",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Istanbul Airport",
-      "country_code": "TR",
-      "settlement_source": "https://www.wunderground.com/history/daily/tr/istanbul/LTFM",
-      "timezone": "Europe/Istanbul",
-      "cluster": "Istanbul",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 8.5
-    },
-    {
-      "name": "Lucknow",
-      "aliases": [
-        "Lucknow",
-        "lucknow"
-      ],
-      "slug_names": [
-        "lucknow"
-      ],
-      "noaa": null,
-      "lat": 26.7606,
-      "lon": 80.8894,
-      "wu_station": "VILK",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Chaudhary Charan Singh International Airport",
-      "country_code": "IN",
-      "settlement_source": "https://www.wunderground.com/history/daily/in/lucknow/VILK",
-      "timezone": "Asia/Kolkata",
-      "cluster": "Lucknow",
-      "unit": "C",
-      "historical_peak_hour": 14.8,
-      "diurnal_amplitude_c": 12.0
-    },
-    {
-      "name": "Madrid",
-      "aliases": [
-        "Madrid",
-        "madrid"
-      ],
-      "slug_names": [
-        "madrid"
-      ],
-      "noaa": null,
-      "lat": 40.4719,
-      "lon": -3.5626,
-      "wu_station": "LEMD",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Adolfo Suarez Madrid-Barajas Airport",
-      "country_code": "ES",
-      "settlement_source": "https://www.wunderground.com/history/daily/es/madrid/LEMD",
-      "timezone": "Europe/Madrid",
-      "cluster": "Madrid",
-      "unit": "C",
-      "historical_peak_hour": 16.0,
-      "diurnal_amplitude_c": 12.0
-    },
-    {
-      "name": "Mexico City",
-      "aliases": [
-        "Mexico City",
-        "mexico city",
-        "CDMX"
-      ],
-      "slug_names": [
-        "mexico-city",
-        "cdmx"
-      ],
-      "noaa": null,
-      "lat": 19.4326,
-      "lon": -99.1332,
-      "wu_station": "MMMX",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Mexico City International Airport",
-      "country_code": "MX",
-      "settlement_source": "https://www.wunderground.com/history/daily/mx/mexico-city/MMMX",
-      "timezone": "America/Mexico_City",
-      "cluster": "Mexico City",
-      "unit": "C",
-      "historical_peak_hour": 15.5,
-      "diurnal_amplitude_c": 11.0
-    },
-    {
-      "name": "Milan",
-      "aliases": [
-        "Milan",
-        "milan",
-        "Milano"
-      ],
-      "slug_names": [
-        "milan"
-      ],
-      "noaa": null,
-      "lat": 45.6306,
-      "lon": 8.7281,
-      "wu_station": "LIMC",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Milan Malpensa Airport",
-      "country_code": "IT",
-      "settlement_source": "https://www.wunderground.com/history/daily/it/milan/LIMC",
-      "timezone": "Europe/Rome",
-      "cluster": "Milan",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 9.0
-    },
-    {
-      "name": "Moscow",
-      "aliases": [
-        "Moscow",
-        "moscow"
-      ],
-      "slug_names": [
-        "moscow"
-      ],
-      "noaa": null,
-      "lat": 55.9726,
-      "lon": 37.4146,
-      "wu_station": "UUEE",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Sheremetyevo International Airport",
-      "country_code": "RU",
-      "settlement_source": "https://www.wunderground.com/history/daily/ru/moscow/UUEE",
-      "timezone": "Europe/Moscow",
-      "cluster": "Moscow",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 9.5
-    },
-    {
-      "name": "Sao Paulo",
-      "aliases": [
-        "Sao Paulo",
-        "sao paulo",
-        "SP"
-      ],
-      "slug_names": [
-        "sao-paulo",
-        "sp"
-      ],
-      "noaa": null,
-      "lat": -23.5505,
-      "lon": -46.6333,
-      "wu_station": "SBGR",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Sao Paulo/Guarulhos International Airport",
-      "country_code": "BR",
-      "settlement_source": "https://www.wunderground.com/history/daily/br/sao-paulo/SBGR",
-      "timezone": "America/Sao_Paulo",
-      "cluster": "Sao Paulo",
-      "unit": "C",
-      "historical_peak_hour": 15.0,
-      "diurnal_amplitude_c": 8.5
     },
     {
       "name": "Singapore",
@@ -869,19 +1142,20 @@
         "taipei"
       ],
       "noaa": null,
-      "lat": 25.033,
-      "lon": 121.5654,
-      "wu_station": "RCTP",
+      "lat": 25.0374,
+      "lon": 121.5056,
+      "wu_station": "46692",
       "wu_pws": null,
       "meteostat_station": null,
-      "airport_name": "Taiwan Taoyuan International Airport",
+      "airport_name": "Taipei CWA Station 46692 (Zhongzheng)",
       "country_code": "TW",
-      "settlement_source": "https://www.wunderground.com/history/daily/tw/taipei/RCTP",
+      "settlement_source": "https://www.cwa.gov.tw/V8/C/W/OBS_Station.html?ID=46692",
       "timezone": "Asia/Taipei",
       "cluster": "Taipei",
       "unit": "C",
       "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 6.5
+      "diurnal_amplitude_c": 6.5,
+      "settlement_source_type": "cwa_station"
     },
     {
       "name": "Tel Aviv",
@@ -908,6 +1182,30 @@
       "unit": "C",
       "historical_peak_hour": 14.5,
       "diurnal_amplitude_c": 7.5
+    },
+    {
+      "name": "Tokyo",
+      "aliases": [
+        "Tokyo",
+        "tokyo"
+      ],
+      "slug_names": [
+        "tokyo"
+      ],
+      "noaa": null,
+      "lat": 35.601766,
+      "lon": 139.775175,
+      "wu_station": "RJTT",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Tokyo Haneda Airport Station",
+      "country_code": "JP",
+      "settlement_source": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
+      "timezone": "Asia/Tokyo",
+      "cluster": "Tokyo",
+      "unit": "C",
+      "historical_peak_hour": 14.7,
+      "diurnal_amplitude_c": 7.6
     },
     {
       "name": "Toronto",
@@ -960,6 +1258,30 @@
       "diurnal_amplitude_c": 8.8
     },
     {
+      "name": "Wellington",
+      "aliases": [
+        "Wellington",
+        "wellington"
+      ],
+      "slug_names": [
+        "wellington"
+      ],
+      "noaa": null,
+      "lat": -41.32512,
+      "lon": 174.7921,
+      "wu_station": "NZWN",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Wellington International Airport",
+      "country_code": "NZ",
+      "settlement_source": "https://www.wunderground.com/history/daily/nz/wellington/NZWN",
+      "timezone": "Pacific/Auckland",
+      "cluster": "Wellington",
+      "unit": "C",
+      "historical_peak_hour": 14.0,
+      "diurnal_amplitude_c": 5.5
+    },
+    {
       "name": "Wuhan",
       "aliases": [
         "Wuhan",
@@ -982,202 +1304,6 @@
       "unit": "C",
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.0
-    },
-    {
-      "name": "Auckland",
-      "aliases": [
-        "Auckland",
-        "auckland"
-      ],
-      "slug_names": [
-        "auckland"
-      ],
-      "noaa": null,
-      "lat": -36.8509,
-      "lon": 174.7645,
-      "wu_station": "NZAA",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Auckland Airport",
-      "country_code": "NZ",
-      "settlement_source": "https://www.wunderground.com/history/daily/nz/auckland/NZAA",
-      "timezone": "Pacific/Auckland",
-      "cluster": "Auckland",
-      "unit": "C",
-      "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 6.5
-    },
-    {
-      "name": "Kuala Lumpur",
-      "aliases": [
-        "Kuala Lumpur",
-        "kuala lumpur",
-        "KL"
-      ],
-      "slug_names": [
-        "kuala-lumpur"
-      ],
-      "noaa": null,
-      "lat": 2.7456,
-      "lon": 101.7072,
-      "wu_station": "WMKK",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Kuala Lumpur Intl Airport",
-      "country_code": "MY",
-      "settlement_source": "https://www.wunderground.com/history/daily/my/sepang/WMKK",
-      "timezone": "Asia/Kuala_Lumpur",
-      "cluster": "Kuala Lumpur",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 5.0
-    },
-    {
-      "name": "Lagos",
-      "aliases": [
-        "Lagos",
-        "lagos"
-      ],
-      "slug_names": [
-        "lagos"
-      ],
-      "noaa": null,
-      "lat": 6.5774,
-      "lon": 3.3213,
-      "wu_station": "DNMM",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Murtala Muhammed Intl Airport",
-      "country_code": "NG",
-      "settlement_source": "https://www.wunderground.com/history/daily/ng/lagos/DNMM",
-      "timezone": "Africa/Lagos",
-      "cluster": "Lagos",
-      "unit": "C",
-      "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 5.5
-    },
-    {
-      "name": "Jeddah",
-      "aliases": [
-        "Jeddah",
-        "jeddah",
-        "Jiddah"
-      ],
-      "slug_names": [
-        "jeddah"
-      ],
-      "noaa": null,
-      "lat": 21.6796,
-      "lon": 39.1565,
-      "wu_station": "OEJN",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "King Abdulaziz Intl Airport",
-      "country_code": "SA",
-      "settlement_source": "https://www.wunderground.com/history/daily/sa/jeddah/OEJN",
-      "timezone": "Asia/Riyadh",
-      "cluster": "Jeddah",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.0
-    },
-    {
-      "name": "Cape Town",
-      "aliases": [
-        "Cape Town",
-        "cape town"
-      ],
-      "slug_names": [
-        "cape-town"
-      ],
-      "noaa": null,
-      "lat": -33.9649,
-      "lon": 18.6017,
-      "wu_station": "FACT",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Cape Town Intl Airport",
-      "country_code": "ZA",
-      "settlement_source": "https://www.wunderground.com/history/daily/za/cape-town/FACT",
-      "timezone": "Africa/Johannesburg",
-      "cluster": "Cape Town",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 8.0
-    },
-    {
-      "name": "Busan",
-      "aliases": [
-        "Busan",
-        "busan",
-        "Pusan"
-      ],
-      "slug_names": [
-        "busan"
-      ],
-      "noaa": null,
-      "lat": 35.1796,
-      "lon": 128.9382,
-      "wu_station": "RKPK",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Gimhae Intl Airport",
-      "country_code": "KR",
-      "settlement_source": "https://www.wunderground.com/history/daily/kr/busan/RKPK",
-      "timezone": "Asia/Seoul",
-      "cluster": "Busan",
-      "unit": "C",
-      "historical_peak_hour": 14.5,
-      "diurnal_amplitude_c": 7.5
-    },
-    {
-      "name": "Jakarta",
-      "aliases": [
-        "Jakarta",
-        "jakarta"
-      ],
-      "slug_names": [
-        "jakarta"
-      ],
-      "noaa": null,
-      "lat": -6.1256,
-      "lon": 106.6558,
-      "wu_station": "WIII",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Soekarno-Hatta Intl Airport",
-      "country_code": "ID",
-      "settlement_source": "https://www.wunderground.com/history/daily/id/tangerang/WIII",
-      "timezone": "Asia/Jakarta",
-      "cluster": "Jakarta",
-      "unit": "C",
-      "historical_peak_hour": 13.5,
-      "diurnal_amplitude_c": 5.0
-    },
-    {
-      "name": "Panama City",
-      "aliases": [
-        "Panama City",
-        "panama city",
-        "Panama"
-      ],
-      "slug_names": [
-        "panama-city"
-      ],
-      "noaa": null,
-      "lat": 9.0714,
-      "lon": -79.3835,
-      "wu_station": "MPTO",
-      "wu_pws": null,
-      "meteostat_station": null,
-      "airport_name": "Tocumen Intl Airport",
-      "country_code": "PA",
-      "settlement_source": "https://www.wunderground.com/history/daily/pa/panama-city/MPTO",
-      "timezone": "America/Panama",
-      "cluster": "Panama City",
-      "unit": "C",
-      "historical_peak_hour": 14.0,
-      "diurnal_amplitude_c": 4.5
     }
   ]
 }
