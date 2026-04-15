@@ -398,14 +398,12 @@ active_operations_registry:
   current_state: docs/operations/current_state.md
   required_labels:
     - Primary packet file
-    - Active sidecars
     - Active backlog
     - Active checklist/evidence
     - Next packet
   surface_prefix: docs/operations/
   required_anchors:
     - docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx
-    - docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md
 
 docs_subroots:
   - path: "docs/authority"

@@ -26,7 +26,6 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/phase1live_2026-04-11_plan.md` — Phase 1 Live Daemon Maturity plan (IN PROGRESS since 2026-04-11, no updates since creation; conceptual authority only)
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
-  - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record (20 entries, current as of 2026-04-15)
 - Next packet: Packet 4 — source file rationale mapping
 
 ## Runtime
