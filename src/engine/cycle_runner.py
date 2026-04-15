@@ -245,11 +245,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         smoke_test_cap = None
     open_cost_basis_usd = 0.0
     if smoke_test_cap is not None:
-        terminal_phases = {"settled", "voided", "admin_closed"}
+        terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}
         open_cost_basis_usd = sum(
             float(getattr(pos, "cost_basis_usd", 0.0) or 0.0)
             for pos in portfolio.positions
-            if str(getattr(pos, "phase", "") or "") not in terminal_phases
+            if str(getattr(pos, "state", "") or "") not in terminal_states
         )
         summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
         summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)

@@ -124,6 +124,7 @@ class IngestionGuard:
         details: dict,
     ) -> None:
         """Best-effort INSERT into availability_fact. Swallows exceptions silently."""
+        conn = None
         try:
             from src.state.db import get_world_connection, log_availability_fact
             conn = get_world_connection()
@@ -140,14 +141,15 @@ class IngestionGuard:
                 details=details,
             )
             conn.commit()
-            conn.close()  # K3.7: prevent fd leak on high-rejection backfills
         except Exception as exc:
-            # Bug #31: log instead of silently swallowing
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "availability fact write failed for %s/%s: %s",
                 city, target_date, exc,
             )
+        finally:
+            if conn is not None:
+                conn.close()
 
     # ------------------------------------------------------------------
     # Layer 1 — unit consistency

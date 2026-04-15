@@ -135,13 +135,21 @@ def member_maxes_for_target_date(
     times: list[str],
     timezone_name: str | ZoneInfo,
     target_date: date,
+    *,
+    temperature_metric: str = "high",
 ) -> np.ndarray:
-    """Compute per-member daily maxes using the local target-date slice."""
+    """Compute per-member daily extrema using the local target-date slice.
+
+    For high-temperature markets (default), returns per-member daily maxes.
+    For low-temperature markets, returns per-member daily mins.
+    """
     tz_hours = select_hours_for_target_date(
         target_date,
         timezone_name,
         times=times,
     )
+    if temperature_metric == "low":
+        return members_hourly[:, tz_hours].min(axis=1)
     return members_hourly[:, tz_hours].max(axis=1)
 
 
@@ -245,12 +253,15 @@ class EnsembleSignal:
                 f"{members_hourly.shape[1]}."
             )
 
-        # Daily max per member, respecting city timezone for day boundary
+        # Daily extrema per member, respecting city timezone for day boundary.
+        # For low-temperature markets, computes daily mins instead of maxes.
+        self.temperature_metric = temperature_metric
         self.member_maxes = member_maxes_for_target_date(
             members_hourly,
             times,
             city.timezone,
             target_date,
+            temperature_metric=temperature_metric,
         )
         
         # Bias correction: subtract per-city×season systematic ECMWF bias

@@ -22,6 +22,9 @@ from src.calibration.store import (
     save_platt_model,
 )
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
+from src.contracts.calibration_bins import F_CANONICAL_GRID, C_CANONICAL_GRID
+
+_EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
 
 def lat_for_city(city_name: str) -> float:
@@ -140,7 +143,7 @@ def get_calibrator(
     model_data = load_platt_model(conn, bk)
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
-            refit = _fit_from_pairs(conn, cluster, season)
+            refit = _fit_from_pairs(conn, cluster, season, unit=city.settlement_unit)
             if refit is not None:
                 level = maturity_level(refit.n_samples)
                 return refit, level
@@ -158,7 +161,7 @@ def get_calibrator(
     n = get_decision_group_count(conn, cluster, season)
     _, _, level3 = calibration_maturity_thresholds()
     if n >= level3:
-        cal = _fit_from_pairs(conn, cluster, season)
+        cal = _fit_from_pairs(conn, cluster, season, unit=city.settlement_unit)
         if cal is not None:
             level = maturity_level(n)
             return cal, level
@@ -200,7 +203,7 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
 
 
 def _fit_from_pairs(
-    conn, cluster: str, season: str
+    conn, cluster: str, season: str, *, unit: str | None = None,
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs."""
     pairs = get_pairs_for_bucket(conn, cluster, season, bin_source_filter="canonical_v1")
@@ -215,7 +218,7 @@ def _fit_from_pairs(
     n_eff = len({str(group_id) for group_id in decision_group_ids})
     if n_eff < level3:
         return None
-    if not _canonical_pair_groups_valid(pairs):
+    if not _canonical_pair_groups_valid(pairs, unit=unit):
         logger.warning("Platt fit refused for %s_%s: invalid canonical group shape", cluster, season)
         return None
 
@@ -258,7 +261,8 @@ def _fit_from_pairs(
     return cal
 
 
-def _canonical_pair_groups_valid(pairs: list[dict]) -> bool:
+def _canonical_pair_groups_valid(pairs: list[dict], *, unit: str | None = None) -> bool:
+    expected_rows = _EXPECTED_GROUP_ROWS.get(unit) if unit else None
     groups: dict[str, dict] = {}
     for pair in pairs:
         group_id = str(pair.get("decision_group_id") or "")
@@ -267,7 +271,10 @@ def _canonical_pair_groups_valid(pairs: list[dict]) -> bool:
         group["positives"] += int(pair.get("outcome") == 1)
         group["labels"].add(str(pair.get("range_label")))
     for group in groups.values():
-        if group["rows"] not in (92, 102):
+        if expected_rows is not None:
+            if group["rows"] != expected_rows:
+                return False
+        elif group["rows"] not in (92, 102):
             return False
         if group["positives"] != 1:
             return False
@@ -279,5 +286,5 @@ def _canonical_pair_groups_valid(pairs: list[dict]) -> bool:
 def maybe_refit_bucket(conn, city: City, target_date: str) -> bool:
     """Refit the city's cluster-season bucket if enough fresh pairs now exist."""
     season = season_from_date(target_date, lat=city.lat)
-    cal = _fit_from_pairs(conn, city.cluster, season)
+    cal = _fit_from_pairs(conn, city.cluster, season, unit=city.settlement_unit)
     return cal is not None

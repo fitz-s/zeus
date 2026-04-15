@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from src.config import calibration_maturity_thresholds
+from src.config import calibration_maturity_thresholds, cities_by_name
 
 
 @dataclass(frozen=True)
@@ -217,11 +217,23 @@ def _raise_on_group_collision(row: sqlite3.Row) -> None:
             "canonical decision group must have exactly one positive row: "
             f"{row['decision_group_id']!r} has {row['n_positive_rows']}"
         )
-    if row["bin_source"] == "canonical_v1" and int(row["n_pair_rows"] or 0) not in (92, 102):
-        raise ValueError(
-            "canonical decision group has truncated pair rows: "
-            f"{row['decision_group_id']!r} has {row['n_pair_rows']}"
-        )
+    if row["bin_source"] == "canonical_v1":
+        n_pair_rows = int(row["n_pair_rows"] or 0)
+        city_name = str(row["city"]) if "city" in row.keys() else None
+        city_obj = cities_by_name.get(city_name) if city_name else None
+        if city_obj:
+            from src.contracts.calibration_bins import F_CANONICAL_GRID, C_CANONICAL_GRID
+            expected = F_CANONICAL_GRID.n_bins if city_obj.settlement_unit == "F" else C_CANONICAL_GRID.n_bins
+            if n_pair_rows != expected:
+                raise ValueError(
+                    f"canonical decision group has wrong pair row count for unit {city_obj.settlement_unit!r}: "
+                    f"{row['decision_group_id']!r} has {n_pair_rows} (expected {expected})"
+                )
+        elif n_pair_rows not in (92, 102):
+            raise ValueError(
+                "canonical decision group has truncated pair rows: "
+                f"{row['decision_group_id']!r} has {n_pair_rows}"
+            )
     if row["bin_source"] == "canonical_v1" and int(row["distinct_range_label"] or 0) != int(row["n_pair_rows"] or 0):
         raise ValueError(
             "canonical decision group has duplicate range labels: "

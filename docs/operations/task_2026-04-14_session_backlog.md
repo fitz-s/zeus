@@ -79,7 +79,7 @@ All four depend on #63 producing `calibration_pairs` rows under the new canonica
 | **#47** | J — eps value | `src/calibration/*` | OPEN QUESTION: current code uses `eps=0.01`, math spec (`docs/reference/zeus_math_spec.md`) says `1e-6`. Pick one and align both code + spec. Neither is obviously wrong — `0.01` is conservative against numerical underflow at Platt edges, `1e-6` is theoretically tighter. User decision required. |
 | **#48** | K — Platt bootstrap by decision_group | `src/calibration/platt.py` | IMPLEMENTED in refit-preflight repair: `ExtendedPlattCalibrator.fit(..., decision_group_ids=...)` bootstraps by decision group when IDs are provided. |
 | **#49** | N — live `_bin_probability` histogram equivalence | `src/strategy/market_analysis.py`, `src/types/market.py`, `src/signal/ensemble_signal.py` | IMPLEMENTED in refit-preflight repair: live and signal paths share bin containment/count helpers. |
-| **#50** | G.7 — `maturity_level` uses `n_eff` not row count | `src/calibration/manager.py`, `scripts/refit_platt.py`, `src/calibration/effective_sample_size.py` | PARTIAL in refit-preflight repair: bucket eligibility/maturity uses distinct `decision_group_id` counts, but canonical group row-count validation still accepts either 92 or 102 rows for any city/unit. Needs unit-aware group-shape gate before full closure. |
+| **#50** | G.7 — `maturity_level` uses `n_eff` not row count | `src/calibration/manager.py`, `scripts/refit_platt.py`, `src/calibration/effective_sample_size.py` | DONE. Unit-aware group-shape gate: `_canonical_pair_groups_valid` now accepts `unit` param and validates against `F_CANONICAL_GRID.n_bins`/`C_CANONICAL_GRID.n_bins`. `effective_sample_size._raise_on_group_collision` also unit-aware via city→unit lookup. |
 
 ---
 
@@ -91,8 +91,8 @@ These are NOT unblocked by post-download work; they're small targeted cleanups t
 |----|--------|-----------|----------|
 | **#41** | G.6 — delete `store.py decision_group_id` fallback | `src/calibration/store.py` | IMPLEMENTED in refit-preflight repair: `add_calibration_pair` now requires nonblank explicit `decision_group_id`; call sites use `compute_id()`. |
 | **#42** | H — `Bin` ±inf + `to_json_safe/from_json_safe` | `src/types/market.py` | IMPLEMENTED in refit-preflight repair with staged `None`/±inf compatibility and JSON sentinels. |
-| **#43** | I — `validate_bin_topology` helper | `src/types/market.py` | PARTIAL/HELPER IMPLEMENTED in refit-preflight repair: helper rejects gaps, overlaps, missing shoulders, and universal open-open market topology; live evaluator entry gate wiring remains pending. |
-| **#45** | B — `load_cities` metadata validation | `src/config.py:load_cities` | DEFERRED. Validate that every city in `config/cities.json` has the required `cluster` / `wu_station` / `settlement_unit` / `timezone` / `lat` / `lon`. Currently partial. |
+| **#43** | I — `validate_bin_topology` helper | `src/types/market.py` | DONE. Helper implemented + evaluator entry gate wired in `evaluator.py` (catches `BinTopologyError` → MARKET_FILTER rejection). |
+| **#45** | B — `load_cities` metadata validation | `src/config.py:load_cities` | DONE. Explicit validation for `unit`, `timezone`, `wu_station`, `country_code`, and `lat`/`lon` with clear error messages. All 51 cities pass. |
 | **#51** | Test file prune — remove dead relationship tests | `tests/test_cross_module_relationships.py` | DONE. R4 (_load_baselines_from_risk_history removed) and R5 (positions.json decoupled) deleted. R2 RETAINED (detects live orphan positions bug). R3 RETAINED (Phase 2 re-enablement). R6 RETAINED (active fill-status regression guard). K2 coverage is ORTHOGONAL (weather ETL), NOT superseding (trade lifecycle). |
 
 ---
@@ -102,7 +102,7 @@ These are NOT unblocked by post-download work; they're small targeted cleanups t
 | ID | Task | Action |
 |----|------|--------|
 | **#62** | WU_API_KEY rotation (security) | Transition key `e1f10a1e78da46f5b10a1e78da96f525` is still exported inline by `scripts/post_sequential_fillback.sh` and `scripts/resume_backfills_sequential.sh`. **Operator action:** (a) rotate at weather.com, (b) set new key in operator env (`~/.zshrc` / launchd plist), (c) delete the two inline `export WU_API_KEY=...` blocks and re-commit the scripts. Currently blocks clean fresh-clone deployment. |
-| **#64** | K2 Phase C cleanup (deferred reviewer findings) | `source_applies_to_city → cities.json` config; `_log_availability_failure` fd leak; `forecasts.rebuild_run_id → ForecastRow`; shared Open-Meteo client extraction; **post-ingestion relationship tests for Layer 3 replacement** (Layer 3 deletion at `ff287ad` left a relationship gap — `test_ingestion_guard.py` no longer tests seasonal implausibility; the replacement should be a post-ingest anomaly detector, not a pre-ingest gate). |
+| **#64** | K2 Phase C cleanup (deferred reviewer findings) | PARTIAL. `_log_availability_failure` fd leak FIXED (try/finally pattern). Remaining: `source_applies_to_city → cities.json` config; `forecasts.rebuild_run_id → ForecastRow`; shared Open-Meteo client extraction; post-ingestion relationship tests for Layer 3 replacement. |
 
 ---
 

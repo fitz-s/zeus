@@ -57,6 +57,7 @@ from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import AuthorityViolation, compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
 from src.types import Bin, BinEdge
+from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
@@ -685,6 +686,18 @@ def evaluate_candidate(
             rejection_reasons=["< 3 parseable bins"],
             selected_method=selected_method,
             applied_validations=["market_filter"],
+        )]
+
+    try:
+        validate_bin_topology(bins)
+    except BinTopologyError as e:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="MARKET_FILTER",
+            rejection_reasons=[f"bin topology: {e}"],
+            selected_method=selected_method,
+            applied_validations=["validate_bin_topology"],
         )]
 
     target_d = date.fromisoformat(target_date)
