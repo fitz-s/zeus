@@ -83,7 +83,6 @@ long_lived_naming:
     _yaml_bootstrap.py: import bootstrap helper for script entrypoints
     antibody_scan.py: established operator diagnostic name
     apply_recommended_controls.py: established control-plane repair entrypoint
-    auto_pause_live.sh: established operator emergency control
     automation_analysis.py: established automation diagnostic report
     baseline_experiment.py: established diagnostic baseline report
     cleanup_ghost_positions.py: established repair command name
@@ -330,14 +329,15 @@ scripts:
   audit_replay_completeness.py: {class: diagnostic}
   audit_replay_fidelity.py: {class: diagnostic}
   audit_time_semantics.py: {class: diagnostic}
-  auto_pause_live.sh: {class: runtime_support, canonical_command: "bash scripts/auto_pause_live.sh"}
   automation_analysis.py: {class: diagnostic}
+  audit_polymarket_city_settlement.py: {class: diagnostic_report_writer, write_targets: [state/city_settlement_audit.json, stdout], external_inputs: [Polymarket Gamma API, config/cities.json], required_tests: [tests/test_config.py]}
   backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_ens.py: {class: etl_writer}
   backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_hko_daily.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
   backfill_hourly_openmeteo.py: {class: etl_writer}
+  backfill_ogimet_metar.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics], external_inputs: [Ogimet METAR/SYNOP], target_db: state/zeus-world.db}
   backfill_observations_from_settlements.py: {class: etl_writer}
   backfill_open_positions_canonical.py: {class: stale_deprecated, reason: stale helper target deleted}
   backfill_openmeteo_previous_runs.py: {class: etl_writer}

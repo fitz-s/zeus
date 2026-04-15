@@ -32,6 +32,10 @@ state/rebuild-*.log
 state/rebuild-*.out
 state/fillback-*.log
 state/fillback-*.out
+state/hko-catchup-*.log
+state/ogimet-*.log
+state/wu-*.log
+state/city_settlement_audit.json
 
 # Orphan SQLite sidecars at repo root (should never exist; canonical DB is state/zeus-world.db).
 /zeus-world.db-shm
