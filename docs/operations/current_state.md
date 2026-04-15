@@ -33,6 +33,17 @@ Role: single live control-entry surface for the repo.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
 - Packet 3 is repairing the docs mesh surfaced by topology strict mode.
 
+## 75-Bug Audit Progress (data-improve branch)
+
+| Phase | Macros | Bugs | Status | Commit |
+|-------|--------|------|--------|--------|
+| Phase 1 | K1+K2 | 39 | ✅ Complete | `96b70a8`, `f6f612e` |
+| Phase 2 | K4+K5 | 13 | ✅ Complete | `4abbeb7` |
+| Phase 3 | K6+K7 | 10 | ✅ Complete | `f6092ca` |
+| Phase 4 | K3+K8 | 13 | ⏳ Next | — |
+
+62 of 75 bugs addressed (implemented or confirmed pre-fixed). Remaining: K3 (数学与语义统一, 6 bugs) + K8 (审计/可観測/可復盤, 7 bugs).
+
 ## Boundaries
 
 - Do not mutate DB files from this packet.

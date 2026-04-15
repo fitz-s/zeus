@@ -86,6 +86,9 @@ categories:
     - tests/test_observation_instants_etl.py
     - tests/test_platt.py
     - tests/test_k3_5_fix_pack.py
+    - tests/test_k6_slice_m.py
+    - tests/test_k6_slice_n.py
+    - tests/test_k7_slice_o.py
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
@@ -133,7 +136,7 @@ law_gate:
       - scripts/onboard_cities.py
       - scripts/validate_dynamic_alpha.py
       - scripts/etl_tigge_direct_calibration.py
-      - scripts/generate_calibration_pairs.py
+      - scripts/rebuild_calibration_pairs_canonical.py
       - scripts/audit_divergence_exit_counterfactual.py
       - scripts/etl_forecast_skill_from_forecasts.py
   LIFECYCLE:
