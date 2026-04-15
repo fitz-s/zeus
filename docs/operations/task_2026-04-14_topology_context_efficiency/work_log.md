@@ -129,3 +129,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_reference_
 Summary: Moved reference replacement and core-claim checker implementations into `topology_doctor_reference_checks.py`; `topology_doctor.py` keeps wrapper functions for existing callers, core-map claim lookup, and CLI behavior.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'reference_replacement or core_claims or core_map or cli_json_parity'`; `python scripts/topology_doctor.py --reference-replacement --summary-only`; `python scripts/topology_doctor.py --core-claims --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_reference_checks.py`.
 Next: Defer map-maintenance splitting until dirty script changes are isolated.
+
+## 2026-04-15 — Context Pack Builder Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the context-pack and impact builder family behind existing wrappers.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_context_pack.py`, `architecture/script_manifest.yaml`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved `build_impact`, context-pack profile validation, debug/package-review packet builders, lore layering, route/repo health, and related helper builders into `topology_doctor_context_pack.py`; `topology_doctor.py` keeps wrappers and the existing CLI/API surface.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'context_pack or package_review or debug_context or impact or cli_json_parity'`; `python scripts/topology_doctor.py --context-packs --summary-only`; `python scripts/topology_doctor.py context-pack --pack-type debug ... --json`.
+Next: Defer `build_digest` and map-maintenance splits until separate golden parity coverage is added.

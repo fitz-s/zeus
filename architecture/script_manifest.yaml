@@ -107,6 +107,7 @@ long_lived_naming:
     semantic_linter.py: established enforcement tool
     topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
     topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
+    topology_doctor_context_pack.py: context-pack/impact builder-family module imported by topology_doctor.py
     topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
     topology_doctor_reference_checks.py: reference/core-claim checker-family module imported by topology_doctor.py
     topology_doctor.py: established topology compiler/checker
@@ -420,6 +421,7 @@ scripts:
   semantic_linter.py: {class: enforcement}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}
+  topology_doctor_context_pack.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for context-pack/impact builder family}
   topology_doctor_docs_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for docs checker family}
   topology_doctor_reference_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for reference/core-claim checker family}
   topology_doctor.py: {class: enforcement}

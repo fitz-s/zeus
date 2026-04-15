@@ -99,6 +99,22 @@ def test_cli_json_parity_for_context_pack_command():
     )
 
 
+def test_cli_json_parity_for_impact_command():
+    args = [
+        "impact",
+        "--files",
+        "src/contracts/settlement_semantics.py",
+        "src/calibration/platt.py",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_impact(
+        ["src/contracts/settlement_semantics.py", "src/calibration/platt.py"],
+    )
+
+
 def test_cli_json_parity_for_core_map_command():
     payload = run_cli_json(["core-map", "--profile", "probability-chain", "--json"])
 
