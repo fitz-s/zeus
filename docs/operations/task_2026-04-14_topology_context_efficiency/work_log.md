@@ -139,3 +139,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_context_pa
 Summary: Moved `build_impact`, context-pack profile validation, debug/package-review packet builders, lore layering, route/repo health, and related helper builders into `topology_doctor_context_pack.py`; `topology_doctor.py` keeps wrappers and the existing CLI/API surface.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'context_pack or package_review or debug_context or impact or cli_json_parity'`; `python scripts/topology_doctor.py --context-packs --summary-only`; `python scripts/topology_doctor.py context-pack --pack-type debug ... --json`.
 Next: Defer `build_digest` and map-maintenance splits until separate golden parity coverage is added.
+
+## 2026-04-15 — Digest Builder Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the digest builder family behind existing wrappers.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_digest.py`, `architecture/script_manifest.yaml`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved data-rebuild digest, script-lifecycle digest, compact lore cards, matched history lore, and `build_digest` into `topology_doctor_digest.py`; `topology_doctor.py` keeps wrapper functions and navigation behavior.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'digest or navigation or context_budget or cli_json_parity'`; `python scripts/topology_doctor.py digest --task ... --json`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_digest.py`.
+Next: Avoid splitting map-maintenance until dirty script state is isolated; remaining safe split candidate is compiled-topology/core-map only if additional parity is needed.
