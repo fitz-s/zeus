@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS token_suppression (
     condition_id TEXT,
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
+        'chain_only_quarantined',
         'settled_position'
     )),
     source_module TEXT NOT NULL,

@@ -8,6 +8,7 @@ This constraint dramatically narrows probability distribution near settlement.
 import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
+from src.contracts.settlement_semantics import round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     day0_backbone_context,
     day0_backbone_high,
@@ -96,13 +97,11 @@ class Day0Signal:
 
         Mirrors EnsembleSignal._simulate_settlement() logic.
         precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses numpy's default round_half_to_even (banker's rounding).
+        Uses WMO asymmetric half-up rounding: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
         Accepts both scalar and ndarray inputs.
         """
-        arr = np.asarray(values, dtype=float)
-        inv = 1.0 / self._precision if self._precision > 0 else 1.0
-        return np.round(arr * inv) / inv
+        return round_wmo_half_up_values(values, self._precision)
 
     def p_vector(self, bins: list[Bin], n_mc: int | None = None) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.

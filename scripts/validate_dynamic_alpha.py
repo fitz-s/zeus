@@ -63,6 +63,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_world_connection as get_connection
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 
 
 def season_from_date(date_str: str, city_name: str = "") -> str:
@@ -195,7 +196,11 @@ def run():
         season = row["season"]
         lead = row["lead_days"]
         error = abs(row["error"])
-        actual = round(float(row["settlement_value"])) if row["settlement_value"] is not None else None
+        actual = (
+            round_wmo_half_up_value(float(row["settlement_value"]))
+            if row["settlement_value"] is not None
+            else None
+        )
         forecast = row["forecast_temp"]
         
         cs_key = (city, season)

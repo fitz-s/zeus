@@ -1,0 +1,173 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "Reference Replacement Matrix"
+  purpose: >
+    Track whether bulky reference docs have been replaced by machine manifests,
+    lore cards, contracts, tests, or digest routing. This manifest does not
+    delete files; it records deletion eligibility.
+
+allowed_replacement_statuses:
+  - not_replaced
+  - partial_replacement_candidate
+  - mostly_replaced
+  - replaced
+
+allowed_actions:
+  - keep_default
+  - keep_conditional
+  - demote_from_default_reads
+  - extract_lore_then_reassess
+  - keep_until_machine_inventory
+
+required_entry_fields:
+  - path
+  - default_read
+  - replacement_status
+  - delete_allowed
+  - replaced_by
+  - unique_remaining
+  - allowed_action
+  - rationale
+
+entries:
+  - path: docs/reference/zeus_domain_model.md
+    default_read: true
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - AGENTS.md
+      - architecture/history_lore.yaml
+      - architecture/runtime_modes.yaml
+    unique_remaining:
+      - worked domain examples
+      - strategy shape explanations
+      - translation loss and structural decision methodology
+      - data provenance model narrative
+    allowed_action: keep_default
+    rationale: >
+      Root AGENTS keeps only the first-read mental model. This file remains the
+      conditional deep "why" reference for domain/math work.
+
+  - path: docs/reference/repo_overview.md
+    default_read: false
+    replacement_status: mostly_replaced
+    delete_allowed: false
+    replaced_by:
+      - AGENTS.md
+      - workspace_map.md
+      - architecture/source_rationale.yaml
+      - architecture/topology.yaml
+      - architecture/runtime_modes.yaml
+    unique_remaining:
+      - dependency summary
+      - logs summary
+      - compact external boundary summary
+    allowed_action: demote_from_default_reads
+    rationale: >
+      The orientation role is now mostly served by root AGENTS plus workspace
+      map and machine manifests. The remaining short summaries should be
+      reassessed before deletion.
+
+  - path: docs/reference/data_inventory.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/data_rebuild_topology.yaml
+      - architecture/history_lore.yaml
+      - docs/operations/current_state.md
+    unique_remaining:
+      - current data coverage numbers
+      - source inventory status
+      - utilization status by asset
+    allowed_action: keep_until_machine_inventory
+    rationale: >
+      Data certification rules moved to machine topology, but current coverage
+      facts still need a human-readable inventory until a generated inventory
+      exists.
+
+  - path: docs/reference/data_strategy.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/data_rebuild_topology.yaml
+      - architecture/history_lore.yaml
+      - docs/operations/task_2026-04-13_remaining_repair_backlog.md
+    unique_remaining:
+      - prioritized data roadmap prose
+      - near/mid/later sequencing
+    allowed_action: extract_lore_then_reassess
+    rationale: >
+      Strategic priorities are partly represented in data_rebuild_topology and
+      operations backlog, but the roadmap prose is not fully replaced.
+
+  - path: docs/reference/statistical_methodology.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/history_lore.yaml
+      - docs/reference/zeus_math_spec.md
+      - tests/test_instrument_invariants.py
+      - tests/test_fdr.py
+      - tests/test_kelly.py
+    unique_remaining:
+      - statistical methodology narrative
+      - small-sample and bootstrap reasoning
+      - data quality design notes
+    allowed_action: keep_conditional
+    rationale: >
+      Several lessons have been extracted, but this remains a conditional deep
+      reference for statistical design.
+
+  - path: docs/reference/quantitative_research.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/history_lore.yaml
+      - docs/reference/zeus_domain_model.md
+    unique_remaining:
+      - market/data/model research findings
+      - failure-mode survey
+      - strategy-research background
+    allowed_action: extract_lore_then_reassess
+    rationale: >
+      This is a candidate for further lore extraction, not deletion.
+
+  - path: docs/reference/market_microstructure.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/history_lore.yaml
+      - src/contracts/execution_price.py
+      - src/contracts/vig_treatment.py
+    unique_remaining:
+      - participant structure
+      - liquidity/edge persistence research
+      - strategy-shape market microstructure rationale
+    allowed_action: extract_lore_then_reassess
+    rationale: >
+      Some execution-price/vig lessons moved into contracts and lore, but the
+      broader market-structure research is not replaced.
+
+  - path: docs/reference/zeus_math_spec.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/history_lore.yaml
+      - architecture/data_rebuild_topology.yaml
+      - tests/test_data_rebuild_relationships.py
+      - tests/test_instrument_invariants.py
+    unique_remaining:
+      - full math/statistics fact specification
+      - decision-group and calibration construction details
+      - known defects and deferred upgrade inventory
+    allowed_action: keep_conditional
+    rationale: >
+      This is not top-level authority, but its factual content is still a dense
+      reference until fully reflected in executable contracts and manifests.

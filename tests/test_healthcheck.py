@@ -319,6 +319,223 @@ def test_healthcheck_is_not_healthy_when_last_cycle_failed(monkeypatch, tmp_path
     assert healthcheck.exit_code_for(result) == 1
 
 
+def test_healthcheck_projects_force_exit_review_scope(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={
+            "force_exit_review": True,
+            "force_exit_review_scope": "entry_block_only",
+            "entries_blocked_reason": "force_exit_review_daily_loss_red",
+        },
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["force_exit_review_scope"] == "entry_block_only"
+    assert result["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
+    assert result["healthy"] is True
+
+
+def test_healthcheck_projects_yellow_risk_block_reason(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={"entries_blocked_reason": "risk_level=YELLOW"},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entries_blocked_reason"] == "risk_level=YELLOW"
+    assert result["healthy"] is True
+
+
+def test_healthcheck_projects_infrastructure_red_as_unhealthy(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        risk={
+            "level": "GREEN",
+            "infrastructure_level": "RED",
+            "infrastructure_issues": ["execution_summary_unavailable"],
+            "details": {
+                "execution_quality_level": "GREEN",
+                "strategy_signal_level": "GREEN",
+                "recommended_controls": [],
+                "recommended_strategy_gates": [],
+            },
+        },
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["risk_level"] == "GREEN"
+    assert result["infrastructure_level"] == "RED"
+    assert result["infrastructure_issues"] == ["execution_summary_unavailable"]
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_keeps_infrastructure_yellow_healthy(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        risk={
+            "level": "GREEN",
+            "infrastructure_level": "YELLOW",
+            "infrastructure_issues": ["cycle_risk_level_mismatch:YELLOW->GREEN"],
+            "details": {
+                "execution_quality_level": "GREEN",
+                "strategy_signal_level": "GREEN",
+                "recommended_controls": [],
+                "recommended_strategy_gates": [],
+            },
+        },
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["infrastructure_level"] == "YELLOW"
+    assert result["infrastructure_issues"] == ["cycle_risk_level_mismatch:YELLOW->GREEN"]
+    assert result["healthy"] is True
+    assert healthcheck.exit_code_for(result) == 0
+
+
+def test_healthcheck_projects_quarantine_expired_cycle_field(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={
+            "entries_blocked_reason": "portfolio_quarantined",
+            "portfolio_quarantined": True,
+            "quarantine_expired": 2,
+        },
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entries_blocked_reason"] == "portfolio_quarantined"
+    assert result["quarantine_expired"] == 2
+    assert result["healthy"] is True
+
+
+def test_healthcheck_projects_current_auto_pause_reason_from_control(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        portfolio={"open_positions": 1, "total_exposure_usd": 6.99},
+        cycle={
+            "entries_paused": True,
+            "entries_pause_reason": "auto_pause:StaleCycleReason",
+        },
+        control={"entries_paused": True, "entries_pause_source": "auto_exception", "entries_pause_reason": "auto_pause:ValueError", **{
+            "strategy_gates": {},
+            "recommended_but_not_gated": [],
+            "gated_but_not_recommended": [],
+            "recommended_controls_not_applied": [],
+            "recommended_auto_commands": [],
+            "review_required_commands": [],
+            "recommended_commands": [],
+        }},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entries_pause_source"] == "auto_exception"
+    assert result["entries_pause_reason"] == "auto_pause:ValueError"
+    assert result["control_state"]["entries_paused"] is True
+    assert result["healthy"] is True
+
+
 def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"

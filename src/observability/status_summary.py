@@ -1,7 +1,7 @@
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
-Written to the mode-qualified truth file for Venus/OpenClaw to read.
+Written to a derived live status file for Venus/OpenClaw to read.
 """
 
 import json
@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 from src.config import get_mode, settings, state_path
 from src.control.control_plane import (
+    get_entries_pause_reason,
+    get_entries_pause_source,
     get_edge_threshold_multiplier,
     is_entries_paused,
     recommended_autosafe_commands_from_status,
@@ -72,6 +74,7 @@ def write_status(cycle_summary: dict = None) -> None:
     generated_at = datetime.now(timezone.utc).isoformat()
     risk_details = _get_risk_details()
     riskguard_level = _get_risk_level()
+    cycle_summary_from_prior = cycle_summary is None
     if cycle_summary is None and STATUS_PATH.exists():
         try:
             with open(STATUS_PATH) as f:
@@ -85,6 +88,18 @@ def write_status(cycle_summary: dict = None) -> None:
         for strategy, reasons in (risk_details.get("recommended_strategy_gate_reasons", {}) or {}).items()
         if isinstance(reasons, list)
     }
+    current_entries_paused = is_entries_paused()
+    if cycle_summary_from_prior:
+        cycle_summary = dict(cycle_summary or {})
+        if current_entries_paused:
+            cycle_summary["entries_paused"] = True
+            cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary["entries_blocked_reason"] = "entries_paused"
+        else:
+            cycle_summary.pop("entries_paused", None)
+            cycle_summary.pop("entries_pause_reason", None)
+            if cycle_summary.get("entries_blocked_reason") == "entries_paused":
+                cycle_summary.pop("entries_blocked_reason", None)
     current_strategy_gates = strategy_gates()
     recommended_but_not_gated = sorted(
         strategy for strategy in recommended_strategy_gates
@@ -184,7 +199,9 @@ def write_status(cycle_summary: dict = None) -> None:
             "version": "zeus_v2",
         },
         "control": {
-            "entries_paused": is_entries_paused(),
+            "entries_paused": current_entries_paused,
+            "entries_pause_source": get_entries_pause_source(),
+            "entries_pause_reason": get_entries_pause_reason(),
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
             "strategy_gates": {k: v.to_dict() for k, v in current_strategy_gates.items()},
             "recommended_controls": recommended_controls,
@@ -307,6 +324,9 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("learning_summary_unavailable")
     if status.get("no_trade", {}).get("error"):
         consistency_issues.append("no_trade_summary_unavailable")
+    monitor_chain_missing = int((cycle_summary or {}).get("monitor_chain_missing", 0) or 0)
+    if monitor_chain_missing > 0:
+        consistency_issues.append(f"cycle_monitor_chain_missing:{monitor_chain_missing}")
     if position_view.get("status") != "ok":
         consistency_issues.append(f"position_current_{position_view.get('status')}")
     strategy_health_status = str(strategy_health.get("status") or "")
@@ -337,6 +357,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "execution_summary_unavailable",
             "learning_summary_unavailable",
             "no_trade_summary_unavailable",
+            "cycle_monitor_chain_missing",
             "position_current_missing_table",
             "position_current_query_error",
         )

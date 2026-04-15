@@ -3,15 +3,20 @@ import ast
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
+from src.contracts.hold_value import HoldValue, HoldValueCostDeclarationError
+from src.contracts.vig_treatment import VigTreatment
 from src.strategy.kelly import kelly_size
+from src.strategy.market_fusion import compute_posterior
 
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
 EXIT_TRIGGERS_PY = ZEUS_ROOT / "src" / "execution" / "exit_triggers.py"
+PORTFOLIO_PY = ZEUS_ROOT / "src" / "state" / "portfolio.py"
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +61,66 @@ class TestExecutionPriceConstruction:
             currency="probability_units",
         )
         assert ep.price_type == "implied_probability"
+
+
+class TestVigTreatmentSeam:
+    def test_compute_posterior_rejects_zero_market_vector(self):
+        with pytest.raises(ValueError, match="cannot compute vig"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([0.0, 0.0]),
+                0.5,
+            )
+
+    def test_compute_posterior_rejects_negative_market_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([-0.1, 1.1]),
+                0.5,
+            )
+
+    def test_vig_treatment_constructor_rejects_negative_raw_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            VigTreatment(
+                raw_market_prices=np.array([-0.1, 1.1]),
+                vig_factor=1.0,
+                clean_prices=np.array([-0.1, 1.1]),
+                applied_before_blend=True,
+            )
+
+
+class TestHoldValueSeam:
+    def test_hold_value_requires_fee_and_time_declarations(self):
+        with pytest.raises(HoldValueCostDeclarationError):
+            HoldValue(
+                gross_value=10.0,
+                fee_cost=0.0,
+                time_cost=0.0,
+                net_value=10.0,
+                costs_declared=[],
+            )
+
+    def test_hold_value_compute_declares_zero_costs_explicitly(self):
+        hold = HoldValue.compute(gross_value=10.0, fee_cost=0.0, time_cost=0.0)
+
+        assert hold.net_value == pytest.approx(10.0)
+        assert hold.costs_declared == ["fee", "time"]
+
+    def test_exit_ev_gate_uses_hold_value_contract(self):
+        portfolio_src = PORTFOLIO_PY.read_text()
+        exit_src = EXIT_TRIGGERS_PY.read_text()
+
+        assert "HoldValue.compute" in portfolio_src
+        assert "HoldValue.compute" in exit_src
+
+
+class TestTailTreatmentSeam:
+    def test_market_fusion_routes_tail_scale_through_tail_treatment(self):
+        source = (ZEUS_ROOT / "src" / "strategy" / "market_fusion.py").read_text()
+
+        assert "DEFAULT_TAIL_TREATMENT" in source
+        assert "float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor" in source
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +210,15 @@ class TestNoBareFloatAtKellyBoundary:
             "This documents the D3 systematic Kelly oversizing."
         )
 
-    def test_kelly_size_still_accepts_bare_float(self):
-        """Document current state: kelly_size accepts bare float entry_price (pre-seam wiring).
-
-        This test PASSES now (bare float accepted) and should be UPDATED to assert
-        ExecutionPriceContractError once evaluator.py is rewritten with the D3 seam.
-        """
+    def test_kelly_size_remains_numeric_kernel(self):
+        """Kelly stays numeric; evaluator owns the ExecutionPrice boundary."""
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,  # bare float — currently accepted
+            entry_price=0.40,
             bankroll=1000.0,
             kelly_mult=0.25,
         )
-        assert size > 0.0, "kelly_size with bare float entry_price should still work (pre-seam)"
+        assert size > 0.0, "kelly_size remains a numeric kernel behind the evaluator seam"
 
 
 # ---------------------------------------------------------------------------

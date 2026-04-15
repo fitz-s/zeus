@@ -23,6 +23,7 @@ from src.calibration.manager import season_from_date
 from src.calibration.effective_sample_size import build_decision_groups, write_decision_groups
 from src.calibration.store import add_calibration_pair, get_pairs_count
 from src.config import cities_by_name
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.market_scanner import _parse_temp_range
 from src.state.db import get_world_connection as get_connection, init_schema
 
@@ -113,7 +114,7 @@ def generate_pairs() -> dict:
                 season=season,
                 cluster=city.cluster,
                 forecast_available_at=available_at,
-                settlement_value=(round(float(row["settlement_value"]))
+                settlement_value=(round_wmo_half_up_value(float(row["settlement_value"]))
                                   if row["settlement_value"] is not None else None),
             )
             total_pairs += 1

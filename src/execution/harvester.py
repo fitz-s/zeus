@@ -20,6 +20,7 @@ from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name, get_mode
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
@@ -102,6 +103,52 @@ def _canonical_phase_before_for_settlement(pos) -> str:
 
 
 _TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
+_HARVESTER_STAGE2_TRADE_TABLES = (
+    "position_events",
+    "position_current",
+    "decision_log",
+    "chronicle",
+)
+_HARVESTER_STAGE2_SHARED_TABLES = (
+    "ensemble_snapshots",
+    "calibration_pairs",
+    "calibration_decision_group",
+    "platt_models",
+)
+
+
+def _missing_tables(conn, table_names: tuple[str, ...]) -> list[str]:
+    missing: list[str] = []
+    for table_name in table_names:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+        except sqlite3.Error:
+            missing.append(table_name)
+            continue
+        if row is None:
+            missing.append(table_name)
+    return missing
+
+
+def _preflight_harvester_stage2_db_shape(trade_conn, shared_conn) -> dict:
+    """Check whether Stage-2 calibration learning dependencies are installed."""
+    missing_trade = _missing_tables(trade_conn, _HARVESTER_STAGE2_TRADE_TABLES)
+    missing_shared = _missing_tables(shared_conn, _HARVESTER_STAGE2_SHARED_TABLES)
+    if missing_trade or missing_shared:
+        return {
+            "stage2_status": "skipped_db_shape_preflight",
+            "stage2_skip_reason": "missing_stage2_runtime_tables",
+            "stage2_missing_trade_tables": missing_trade,
+            "stage2_missing_shared_tables": missing_shared,
+        }
+    return {
+        "stage2_status": "ready",
+        "stage2_missing_trade_tables": [],
+        "stage2_missing_shared_tables": [],
+    }
 
 
 def _current_phase_in_db(conn, trade_id: str) -> str | None:
@@ -194,7 +241,7 @@ def _dual_write_canonical_settlement_if_available(
 def run_harvester() -> dict:
     """Run one harvester cycle. Polls for settled markets.
 
-    Returns: {"settlements_found": int, "pairs_created": int, "positions_settled": int}
+    Returns: harvester counts plus stage2_status / stage2 preflight details.
     """
     # Split connections: trade DB for position/settlement events, shared DB for
     # ensemble snapshots and calibration pairs.
@@ -204,6 +251,22 @@ def run_harvester() -> dict:
 
     settled_events = _fetch_settled_events()
     logger.info("Harvester: found %d settled events", len(settled_events))
+    stage2_preflight = (
+        _preflight_harvester_stage2_db_shape(trade_conn, shared_conn)
+        if settled_events
+        else {
+            "stage2_status": "not_run_no_settled_events",
+            "stage2_missing_trade_tables": [],
+            "stage2_missing_shared_tables": [],
+        }
+    )
+    stage2_ready = stage2_preflight.get("stage2_status") == "ready"
+    if settled_events and not stage2_ready:
+        logger.warning(
+            "Harvester Stage-2 skipped by DB shape preflight: trade_missing=%s shared_missing=%s",
+            stage2_preflight.get("stage2_missing_trade_tables", []),
+            stage2_preflight.get("stage2_missing_shared_tables", []),
+        )
 
     total_pairs = 0
     positions_settled = 0
@@ -230,25 +293,27 @@ def run_harvester() -> dict:
 
             # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
-            # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
-            # and position_events via query_settlement_events — pass trade_conn for event
-            # spine queries, shared_conn for snapshot lookups.
-            snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
-                trade_conn, shared_conn, portfolio, city.name, target_date
-            )
-            _log_snapshot_context_resolution(
-                trade_conn,
-                city=city.name,
-                target_date=target_date,
-                snapshot_contexts=snapshot_contexts,
-                dropped_rows=dropped_rows,
-            )
-            learning_contexts = [
-                context
-                for context in snapshot_contexts
-                if context.get("learning_snapshot_ready", False)
-                and context.get("authority_level") != "working_state_fallback"
-            ]
+            learning_contexts = []
+            if stage2_ready:
+                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
+                # and position_events via query_settlement_events — pass trade_conn for event
+                # spine queries, shared_conn for snapshot lookups.
+                snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
+                    trade_conn, shared_conn, portfolio, city.name, target_date
+                )
+                _log_snapshot_context_resolution(
+                    trade_conn,
+                    city=city.name,
+                    target_date=target_date,
+                    snapshot_contexts=snapshot_contexts,
+                    dropped_rows=dropped_rows,
+                )
+                learning_contexts = [
+                    context
+                    for context in snapshot_contexts
+                    if context.get("learning_snapshot_ready", False)
+                    and context.get("authority_level") != "working_state_fallback"
+                ]
             event_pairs = 0
             for context in learning_contexts:
                 event_pairs += harvest_settlement(
@@ -283,8 +348,15 @@ def run_harvester() -> dict:
             logger.error("Harvester error for event %s: %s",
                          event.get("slug", "?"), e)
 
-    if settlement_records:
+    legacy_settlement_records_skipped = 0
+    if settlement_records and "decision_log" not in stage2_preflight.get("stage2_missing_trade_tables", []):
         store_settlement_records(trade_conn, settlement_records, source="harvester")
+    elif settlement_records:
+        legacy_settlement_records_skipped = len(settlement_records)
+        logger.warning(
+            "Legacy settlement record storage skipped: decision_log missing; records=%d",
+            legacy_settlement_records_skipped,
+        )
 
     if positions_settled > 0:
         save_portfolio(portfolio)
@@ -300,6 +372,8 @@ def run_harvester() -> dict:
         "settlements_found": len(settled_events),
         "pairs_created": total_pairs,
         "positions_settled": positions_settled,
+        "legacy_settlement_records_skipped": legacy_settlement_records_skipped,
+        **stage2_preflight,
     }
 
 
@@ -649,7 +723,7 @@ def harvest_settlement(
             range_label=label, p_raw=p_raw, outcome=outcome,
             lead_days=lead_days, season=season, cluster=city.cluster,
             forecast_available_at=now,
-            settlement_value=(round(float(settlement_value))
+            settlement_value=(round_wmo_half_up_value(float(settlement_value))
                               if settlement_value is not None else None),
         )
         count += 1

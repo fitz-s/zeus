@@ -67,6 +67,14 @@ def is_entries_paused() -> bool:
     return _control_state.get("entries_paused", False)
 
 
+def get_entries_pause_source() -> str | None:
+    return _control_state.get("entries_pause_source")
+
+
+def get_entries_pause_reason() -> str | None:
+    return _control_state.get("entries_pause_reason")
+
+
 
 def alert_auto_pause(reason_code: str) -> None:
     """Emit a structured log warning when entries are auto-paused by exception."""
@@ -85,6 +93,7 @@ def pause_entries(reason_code: str) -> None:
     survives a daemon restart. Operator must explicitly resume to re-enable.
     """
     _control_state["entries_paused"] = True
+    _control_state["entries_pause_source"] = "auto_exception"
     _control_state["entries_pause_reason"] = reason_code
     alert_auto_pause(reason_code)
     # Persist so a daemon restart does not silently lose the pause.
@@ -188,6 +197,8 @@ def refresh_control_state() -> None:
                 acknowledged_tokens.add(token_id)
             continue
     _control_state["entries_paused"] = entries_paused
+    _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
+    _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
     _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
@@ -258,7 +269,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 target_key="entries",
                 action_type="gate",
                 value="true",
-                issued_by=issued_by,
+                issued_by="control_plane",
                 issued_at=issued_at,
                 reason=note or "control_plane:pause_entries",
                 effective_until=effective_until,

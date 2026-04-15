@@ -9,7 +9,19 @@ import numpy as np
 
 from src.config import settings
 from src.contracts.alpha_decision import AlphaDecision
+from src.contracts.tail_treatment import TailTreatment
+from src.contracts.vig_treatment import VigTreatment
 from src.types.temperature import TemperatureDelta
+
+
+class AuthorityViolation(ValueError):
+    """Raised when the computation chain receives UNVERIFIED calibration data.
+
+    K4 hard gate: market_fusion refuses to compute alpha on data whose
+    provenance has not been verified. This is not a soft warning -- it is
+    a hard raise that prevents UNVERIFIED data from entering the edge
+    computation chain.
+    """
 
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
 # This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
@@ -31,6 +43,17 @@ BASE_ALPHA_BY_LEVEL = {
     3: settings["edge"]["base_alpha"]["level3"],
     4: settings["edge"]["base_alpha"]["level4"],
 }
+TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is Brier-optimal
+DEFAULT_TAIL_TREATMENT = TailTreatment(
+    scale_factor=TAIL_ALPHA_SCALE,
+    serves="calibration_accuracy",
+    validated_against=(
+        "D3 sweep 2026-03-31 tail bins, Brier improvement -0.042; "
+        "not validated against buy_no P&L"
+    ),
+)
+COMPLETE_MARKET_VIG_MIN = 0.90
+COMPLETE_MARKET_VIG_MAX = 1.10
 
 
 def vwmp(best_bid: float, best_ask: float,
@@ -60,6 +83,8 @@ def compute_alpha(
     hours_since_open: float,
     city_name: str = "",
     season: str = "",
+    *,
+    authority_verified: bool,
 ) -> AlphaDecision:
     """Compute α for model-market blending. Spec §4.5.
 
@@ -79,6 +104,16 @@ def compute_alpha(
     ensemble_spread must be a TemperatureDelta. This is a hard rule:
     spread thresholds are unit-aware and must not silently fall back to bare floats.
     """
+    # K4 authority hard gate: refuse UNVERIFIED calibration data.
+    # The evaluator already gates via get_pairs_for_bucket(authority_filter='VERIFIED');
+    # this is a second line of defense at the market_fusion boundary.
+    if not authority_verified:
+        raise AuthorityViolation(
+            f"market_fusion refused UNVERIFIED calibration for "
+            f"{city_name!r}/{season!r} "
+            f"(calibration_level={calibration_level})"
+        )
+
     if not isinstance(ensemble_spread, TemperatureDelta):
         raise TypeError(
             "compute_alpha requires ensemble_spread to be TemperatureDelta. "
@@ -193,28 +228,42 @@ def compute_posterior(
     overall Brier by 0.042. When bins are provided, tail bins get
     α_tail = α × TAIL_ALPHA_SCALE.
 
-    p_market sums to vig (~0.95-1.05), not 1.0, so the blend must
-    be re-normalized. CLAUDE.md types: p_posterior sums to 1.0.
+    Complete p_market vectors sum to plausible vig (~0.90-1.10), not 1.0, so vig is
+    removed before blending. Sparse monitor vectors are not complete market
+    families and stay in raw observed-price space. The final posterior is still
+    normalized because per-bin tail alpha can make the blended vector drift.
     """
-    # D3: per-bin alpha scaling for tail bins
-    # Tail bins = bins where one boundary is None (open-ended: "X or below", "X or higher")
-    # Scale factor 0.5 gives Brier improvement of -0.042 over uniform α
-    TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is optimal
-
-    if bins is not None and len(bins) == len(p_cal):
-        alpha_vec = np.full_like(p_cal, alpha)
-        for i, b in enumerate(bins):
-            is_tail = (hasattr(b, 'low') and b.low is None) or (hasattr(b, 'high') and b.high is None)
-            if not is_tail and hasattr(b, 'label'):
-                label = b.label.lower()
-                is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
-            if is_tail:
-                alpha_vec[i] = max(0.20, alpha * TAIL_ALPHA_SCALE)
-        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * p_market
+    if not np.all(np.isfinite(p_market)):
+        raise ValueError("p_market must be finite")
+    if np.any(p_market < 0.0):
+        raise ValueError("p_market must be non-negative")
+    market_total = float(np.sum(p_market))
+    if market_total <= 0.0:
+        VigTreatment.from_raw(p_market)
+    positive_components = int(np.count_nonzero(p_market > 0.0))
+    looks_complete = positive_components >= min(len(p_market), 2)
+    if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
+        market = VigTreatment.from_raw(p_market).clean_prices
     else:
-        raw = alpha * p_cal + (1.0 - alpha) * p_market
+        market = p_market
+    if bins is not None and len(bins) == len(p_cal):
+        alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
+        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * market
+    else:
+        raw = alpha * p_cal + (1.0 - alpha) * market
 
     total = raw.sum()
     if total > 0:
         return raw / total
     return raw
+
+
+def alpha_for_bin(alpha: float, bin) -> float:
+    """Return the effective alpha for one bin, including tail scaling."""
+    is_tail = (hasattr(bin, 'low') and bin.low is None) or (hasattr(bin, 'high') and bin.high is None)
+    if not is_tail and hasattr(bin, 'label'):
+        label = bin.label.lower()
+        is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
+    if is_tail:
+        return max(0.20, float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor)
+    return float(alpha)

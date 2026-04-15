@@ -273,8 +273,19 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             result.get("orderID")
             or result.get("orderId")
             or result.get("id")
-            or intent.trade_id
         )
+        if not order_id:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason="missing_order_id",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+                venue_status=str(result.get("status") or ""),
+            )
         result_obj = OrderResult(
             trade_id=intent.trade_id,
             status="pending",

@@ -12,7 +12,6 @@ class RiskLimits:
     max_portfolio_heat_pct: float | None = None
     max_correlated_pct: float | None = None
     max_city_pct: float | None = None
-    max_region_pct: float | None = None
     min_order_usd: float | None = None
 
     def __post_init__(self) -> None:
@@ -26,15 +25,14 @@ def check_position_allowed(
     size_usd: float,
     bankroll: float,
     city: str,
-    cluster: str,
     current_city_exposure: float,
-    current_cluster_exposure: float,
     current_portfolio_heat: float,
     limits: RiskLimits,
 ) -> tuple[bool, str]:
     """Check if a proposed position passes all risk limits.
 
     Returns: (allowed, reason). If not allowed, reason explains why.
+    Removed: cluster/max_region_pct check (K3 cluster collapse — no regional tier).
     """
     if size_usd < limits.min_order_usd:
         return False, f"Size ${size_usd:.2f} below minimum ${limits.min_order_usd:.2f}"
@@ -62,13 +60,6 @@ def check_position_allowed(
         return False, (
             f"City {city} exposure would be {new_city:.1%}, "
             f"exceeds limit {limits.max_city_pct:.1%}"
-        )
-
-    new_cluster = current_cluster_exposure + position_pct
-    if new_cluster > limits.max_region_pct:
-        return False, (
-            f"Region {cluster} exposure would be {new_cluster:.1%}, "
-            f"exceeds limit {limits.max_region_pct:.1%}"
         )
 
     return True, "OK"

@@ -27,12 +27,72 @@ from src.config import (
     ensemble_unimodal_range_epsilon,
 )
 from src.types import Bin
+from src.types.market import bin_counts_from_array
 from src.types.temperature import TemperatureDelta, Unit
 
 
 def sigma_instrument(unit: Unit) -> TemperatureDelta:
-    """ASOS sensor precision. °C value independently calibrated, not °F/1.8."""
+    """ASOS sensor precision (unit-default).
+
+    Returns the unit-keyed σ from ``settings.json`` (0.5°F / 0.28°C as of
+    2026-04-14). These are calibrated against ASOS / AWOS automated airport
+    weather stations, which is what 44 of Zeus's 51 cities use as their
+    Polymarket settlement source (WU ICAO history endpoint or NOAA
+    weather.gov METAR re-distribution — both pull from the same
+    ICAO/AWOS stream).
+
+    For the 4 cities whose settlement source is NOT an ASOS-class
+    station, prefer ``sigma_instrument_for_city(city)`` which honours the
+    per-city override.
+    """
     return TemperatureDelta(ensemble_instrument_noise(unit), unit)
+
+
+def sigma_instrument_for_city(city) -> TemperatureDelta:
+    """Per-city sensor precision, honouring optional cities.json override.
+
+    Why this exists (2026-04-14)
+    ----------------------------
+    The default ``sigma_instrument(unit)`` is calibrated to ASOS/AWOS
+    airport weather stations (NWS spec: ±0.5°F / ±0.28°C). 44 of Zeus's
+    51 cities settle off ASOS-class stations and the default σ is
+    correct for them. The 4 exceptions are:
+
+    - **Hong Kong (HKO)**: institutional research-grade station at HKO
+      Headquarters (Tsim Sha Tsui). Published precision is 0.1°C raw,
+      reported as integer °C. The effective post-quantization uncertainty
+      is dominated by the 0.5°C rounding bin width, but the underlying
+      sensor is materially tighter than ASOS.
+
+    - **Istanbul (NOAA LTFM)** + **Moscow (NOAA UUWW)**: foreign aviation
+      AWOS read via NOAA / Ogimet METAR stream. Sensor specs are
+      similar to ASOS (international ICAO standard requires ±0.5°C
+      class precision). σ = ASOS default is correct.
+
+    - **Taipei (CWA station 46692)**: Taiwan Central Weather Administration
+      professional station at Zhongzheng. Published precision is 0.1°C,
+      similar quality to HKO.
+
+    For HKO and Taipei, the override should be **tighter** than ASOS to
+    reflect the underlying sensor accuracy. The chosen value (0.18°F /
+    0.10°C) is roughly half the ASOS default — a conservative first
+    estimate that should be empirically refit against historical residuals
+    once the recalibration pipeline produces enough decision-group rows
+    to support per-city σ optimization.
+
+    For Istanbul and Moscow no override is set: the underlying station
+    class is ASOS-equivalent (international airport AWOS). Reading
+    METARs through NOAA/Ogimet does not change the physical sensor.
+
+    Returns
+    -------
+    TemperatureDelta in the city's settlement_unit. Caller can extract
+    ``.value`` for use in numpy noise sampling.
+    """
+    override = getattr(city, "instrument_noise_override", None)
+    if override is not None:
+        return TemperatureDelta(float(override), city.settlement_unit)
+    return sigma_instrument(city.settlement_unit)
 
 
 # Compatibility aliases for tests and assumption audits.
@@ -85,6 +145,69 @@ def member_maxes_for_target_date(
     return members_hourly[:, tz_hours].max(axis=1)
 
 
+def p_raw_vector_from_maxes(
+    member_maxes: np.ndarray,
+    city: City,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    *,
+    n_mc: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Monte Carlo P_raw vector from per-member daily maxes.
+
+    Spec §2.1: Simulates the full settlement chain:
+    atmosphere -> NWP member -> sensor noise -> METAR rounding -> WU integer display.
+
+    Extracted from ``EnsembleSignal.p_raw_vector`` so offline calibration
+    rebuilds (which load ``member_maxes`` from ``ensemble_snapshots.members_json``
+    without hourly context) and live inference (which slices maxes from hourly
+    data) share **exactly the same MC + noise + rounding code path**. Training
+    and inference MUST use this function — naive member counting (iterating
+    members and testing bin membership directly without Monte Carlo) is
+    forbidden because it produces a distribution shape that diverges from the
+    live P_raw space, and Platt learned on that shape would not generalize.
+
+    Args:
+        member_maxes: per-member daily max temperatures, shape (n_members,),
+            already in ``city.settlement_unit``.
+        city: city config — used for instrument sigma lookup.
+        settlement_semantics: per-market rounding rules.
+        bins: bin partition to compute probabilities over. Must be a complete
+            partition (cover the real line including shoulders) for the result
+            to sum to 1.0; the caller is responsible for grid completeness.
+        n_mc: Monte Carlo iterations. Defaults to ``ensemble_n_mc()`` (10,000).
+        rng: numpy Generator. Callers should seed externally for reproducible
+            tests; defaults to ``np.random.default_rng()``.
+
+    Returns:
+        np.ndarray shape (n_bins,). If the grid is complete the vector sums to
+        1.0; if not, it is normalized so whatever mass landed sums to 1.0.
+    """
+    if n_mc is None:
+        n_mc = ensemble_n_mc()
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_bins = len(bins)
+    n_members = len(member_maxes)
+    p = np.zeros(n_bins)
+    sig = sigma_instrument_for_city(city)
+
+    for _ in range(n_mc):
+        noised = member_maxes + rng.normal(0, sig.value, n_members)
+        measured = settlement_semantics.round_values(noised)
+
+        p += bin_counts_from_array(measured, bins)
+
+    p = p / (float(n_members) * n_mc)
+
+    total = p.sum()
+    if total > 0:
+        p = p / total
+    return p
+
+
 class EnsembleSignal:
     """51 ensemble members → probability vector over all bins.
 
@@ -135,7 +258,7 @@ class EnsembleSignal:
         self.bias_corrected = False
         try:
             from src.config import settings
-            if settings._data.get("bias_correction_enabled", False):
+            if settings.bias_correction_enabled:
                 self.member_maxes = self._apply_bias_correction(
                     self.member_maxes, city, target_date
                 )
@@ -231,43 +354,21 @@ class EnsembleSignal:
         Spec §2.1: Monte Carlo with ε ~ N(0, σ_instrument²) per member.
         Simulates full settlement chain according to SettlementSemantics rules.
 
+        Delegates to ``p_raw_vector_from_maxes`` (module-level) so offline
+        calibration rebuilds that do not have hourly context share the exact
+        same code path. The seed=None default preserves legacy behavior;
+        tests that require determinism should patch ``np.random.default_rng``
+        or pass ``rng`` through the module-level function directly.
+
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
-        if n_mc is None:
-            n_mc = ensemble_n_mc()
-
-        n_bins = len(bins)
-        n_members = len(self.member_maxes)
-        p = np.zeros(n_bins)
-
-        rng = np.random.default_rng(seed=None)  # Tests should seed externally
-        # Use city-appropriate instrument noise (°C independently calibrated)
-        sig = sigma_instrument(self.city.settlement_unit)
-
-        for _ in range(n_mc):
-            # Add instrument noise to each member's daily max
-            noised = self.member_maxes + rng.normal(0, sig.value, n_members)
-            measured = self._simulate_settlement(noised)
-
-            for i, b in enumerate(bins):
-                if b.is_open_low:
-                    # Shoulder low: "X or below"
-                    p[i] += np.sum(measured <= b.high)
-                elif b.is_open_high:
-                    # Shoulder high: "X or higher"
-                    p[i] += np.sum(measured >= b.low)
-                else:
-                    p[i] += np.sum(
-                        (measured >= b.low) & (measured <= b.high)
-                    )
-
-        p = p / (float(n_members) * n_mc)
-
-        # Normalize to sum=1.0. If total=0 (impossible but defensive), return as-is.
-        total = p.sum()
-        if total > 0:
-            p = p / total
-        return p
+        return p_raw_vector_from_maxes(
+            self.member_maxes,
+            self.city,
+            self.settlement_semantics,
+            bins,
+            n_mc=n_mc,
+        )
 
     def spread(self) -> TemperatureDelta:
         """Ensemble spread (σ of member daily maxes) as typed TemperatureDelta."""
@@ -286,8 +387,8 @@ class EnsembleSignal:
         maxes = self.member_maxes
         rng = float(maxes.max() - maxes.min())
 
-        # Unit-aware: if spread < 1 instrument noise, members are in consensus
-        if rng < sigma_instrument(self.city.settlement_unit).value:
+        # Per-city: if spread < 1 instrument noise, members are in consensus
+        if rng < sigma_instrument_for_city(self.city).value:
             return False  # All members agree — definitely unimodal
 
         try:
@@ -305,10 +406,12 @@ class EnsembleSignal:
     def boundary_sensitivity(self, boundary: float) -> float:
         """Fraction of 51 members within ±σ_instrument of a bin boundary.
 
-        Window is unit-aware: 0.5°F for US cities, 0.28°C for metric cities.
+        Window is per-city: ASOS 0.5°F / 0.28°C for the 49 airport-station
+        cities, with optional override for HKO and Taiwan CWA stations whose
+        sensors are tighter than ASOS. See ``sigma_instrument_for_city``.
         High sensitivity → probability estimate is fragile at this boundary.
         """
-        window = sigma_instrument(self.city.settlement_unit).value
+        window = sigma_instrument_for_city(self.city).value
         return float(
             np.sum(np.abs(self.member_maxes - boundary) < window)
         ) / len(self.member_maxes)

@@ -223,6 +223,52 @@ def build_entry_canonical_write(
     return events, projection
 
 
+def build_entry_fill_only_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    decision_id: str | None = None,
+    source_module: str = "src.execution.fill_tracker",
+) -> tuple[list[dict], dict]:
+    """Emit ONLY the ENTRY_ORDER_FILLED event for a position whose
+    POSITION_OPEN_INTENT and ENTRY_ORDER_POSTED events already exist.
+
+    Used by fill detection (fill_tracker._mark_entry_filled) to advance a
+    position from pending_entry → active without re-inserting the earlier
+    two entry events (which would violate the unique (position_id, seq) key).
+
+    The caller must pass the next available sequence_no. The position's
+    runtime state must have already been updated so that
+    canonical_phase_for_position(position) == 'active' or 'day0_window'.
+    """
+    projection = build_position_current_projection(position)
+    canonical_phase = projection["phase"]
+    if canonical_phase not in {ACTIVE, DAY0_WINDOW}:
+        raise ValueError(
+            f"entry fill-only builder requires active/day0_window phase, got {canonical_phase!r}"
+        )
+    filled_at = _non_empty(
+        getattr(position, "entered_at", ""),
+        getattr(position, "day0_entered_at", ""),
+        getattr(position, "order_posted_at", ""),
+    )
+    order_id = _nullable(getattr(position, "order_id", ""))
+    events = [
+        _entry_event(
+            position=position,
+            event_type="ENTRY_ORDER_FILLED",
+            sequence_no=sequence_no,
+            occurred_at=filled_at,
+            phase_before=PENDING_ENTRY,
+            phase_after=fold_lifecycle_phase(PENDING_ENTRY, canonical_phase).value,
+            decision_id=decision_id,
+            source_module=source_module,
+            order_id=order_id,
+        )
+    ]
+    return events, projection
+
+
 def build_settlement_canonical_write(
     position: Any,
     *,

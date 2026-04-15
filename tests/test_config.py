@@ -23,7 +23,6 @@ from src.config import (
     ensemble_n_mc,
     ensemble_unimodal_range_epsilon,
     load_cities,
-    correlation_matrix,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -78,14 +77,15 @@ def test_city_settlement_units():
 def test_city_clusters():
     cities = load_cities()
     by_name = {c.name: c for c in cities}
-    assert by_name["NYC"].cluster == "US-Northeast"
-    assert by_name["Chicago"].cluster == "US-GreatLakes"
-    assert by_name["Atlanta"].cluster == "US-Southeast-Inland"
-    assert by_name["London"].cluster == "Europe-Maritime"
-    assert by_name["Paris"].cluster == "Europe-Continental"
-    assert by_name["Seoul"].cluster == "Asia-Northeast"
-    assert by_name["Shanghai"].cluster == "Asia-East-China"
-    assert by_name["Denver"].cluster == "US-Rockies"
+    # K3: cluster == city name for all cities
+    assert by_name["NYC"].cluster == "NYC"
+    assert by_name["Chicago"].cluster == "Chicago"
+    assert by_name["Atlanta"].cluster == "Atlanta"
+    assert by_name["London"].cluster == "London"
+    assert by_name["Paris"].cluster == "Paris"
+    assert by_name["Seoul"].cluster == "Seoul"
+    assert by_name["Shanghai"].cluster == "Shanghai"
+    assert by_name["Denver"].cluster == "Denver"
     assert set(calibration_clusters()) == set(ALL_CLUSTERS)
 
 
@@ -148,17 +148,19 @@ def test_risk_limit_defaults_are_single_sourced_from_settings():
     assert limits.max_portfolio_heat_pct == defaults["max_portfolio_heat_pct"]
     assert limits.max_correlated_pct == defaults["max_correlated_pct"]
     assert limits.max_city_pct == defaults["max_city_pct"]
-    assert limits.max_region_pct == defaults["max_region_pct"]
     assert limits.min_order_usd == defaults["min_order_usd"]
 
 
 def test_correlation_matrix_covers_all_configured_clusters():
-    matrix = correlation_matrix()
-    assert set(matrix) == set(ALL_CLUSTERS)
-    for cluster, mapping in matrix.items():
-        assert cluster in ALL_CLUSTERS
-        assert set(mapping).issubset(set(ALL_CLUSTERS))
-        assert cluster not in mapping
+    # K3: correlation_matrix() removed from src.config — matrix is now in
+    # config/city_correlation_matrix.json, accessed via src.strategy.correlation.
+    # Coverage: test_cluster_collapse.py::test_correlation_self_is_one and
+    # test_correlation_function_returns_float_in_01.
+    # Verify get_correlation is importable and returns sane values for all clusters.
+    from src.strategy.correlation import get_correlation
+    for cluster in ALL_CLUSTERS:
+        r = get_correlation(cluster, cluster)
+        assert r == 1.0, f"{cluster} self-correlation should be 1.0"
 
 
 def test_signal_constants_are_single_sourced_from_settings():
@@ -258,6 +260,104 @@ def test_market_scanner_short_aliases_do_not_match_inside_other_city_names():
         "Highest temperature in LA on April 12?",
         "highest-temperature-in-la-on-april-12-2026",
     ).name == "Los Angeles"
+
+
+def _gamma_temperature_event(*, title: str, slug: str, question: str, **extra):
+    event = {
+        "id": "event-city-sanity",
+        "title": title,
+        "slug": slug,
+        "endDate": "2026-04-13T23:59:00Z",
+        "markets": [
+            {
+                "id": "market-city-sanity",
+                "conditionId": "condition-city-sanity",
+                "question": question,
+                "clobTokenIds": json.dumps(["yes-token", "no-token"]),
+                "outcomePrices": json.dumps([0.4, 0.6]),
+            }
+        ],
+    }
+    event.update(extra)
+    return event
+
+
+def test_market_scanner_rejects_la_event_with_milan_market_question():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Milan be 20°C or higher?",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_rejects_conflicting_title_and_slug_city():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Milan on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_rejects_la_event_with_milan_station_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+        resolutionSource="Milan Malpensa Airport LIMC",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_accepts_la_event_with_la_station_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+        resolutionSource="Los Angeles International Airport KLAX",
+    )
+
+    parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)
+
+    assert parsed is not None
+    assert parsed["city"].name == "Los Angeles"
+    assert parsed["outcomes"][0]["range_low"] == pytest.approx(68.0)
+
+
+def test_market_scanner_accepts_self_consistent_configured_city_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    for city in load_cities():
+        slug_city = (city.slug_names[0] if city.slug_names else city.name.lower().replace(" ", "-"))
+        temp_label = "68°F" if city.settlement_unit == "F" else "20°C"
+        event = _gamma_temperature_event(
+            title=f"Highest temperature in {city.name} on April 13?",
+            slug=f"highest-temperature-in-{slug_city}-on-april-13-2026",
+            question=f"Will the high temperature in {city.name} be {temp_label} or higher?",
+            resolutionSource=f"{city.airport_name} {city.wu_station}",
+        )
+
+        parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)
+
+        assert parsed is not None, city.name
+        assert parsed["city"].name == city.name
 
 
 def test_settlement_semantics_matches_city_metadata():

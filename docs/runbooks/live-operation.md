@@ -1,6 +1,6 @@
 # Zeus Live Operation Runbook
 
-Authority: `docs/governance/zeus_autonomous_delivery_constitution.md`
+Authority: `docs/authority/zeus_current_delivery.md`
 Applies to: Day-to-day live daemon operation, Phase 1.
 
 ---
@@ -37,11 +37,11 @@ These appear in logs and are **normal** during Phase 1:
 ### Operator-visible metadata (NOT decision inputs)
 
 - `capped_by_safety_cap`: logged when a position size was clipped by `live_safety_cap_usd`. This is an audit field for the operator. It does NOT feed back into any signal or decision. Do not treat it as a strategy output.
-- `reason_code` in control state: operational metadata. Describes why a gate was set or cleared. It is not a truth surface and does not govern trading. See `docs/governance/zeus_autonomous_delivery_constitution.md` for control state authority rules.
+- `reason_code` in control state: operational metadata. Describes why a gate was set or cleared. It is not a truth surface and does not govern trading. See `docs/authority/zeus_current_delivery.md` and `docs/authority/zeus_current_architecture.md` for control state authority rules.
 
 ### Config key note
 
-There are no `paper_*` counterparts to `live_*` config keys. Paper and live share the same config keys. Mode is determined by `ZEUS_MODE` environment variable only. A key named `live_safety_cap_usd` is active in all modes when loaded u2014 this is intentional: paper mode exercises the same code paths.
+There are no `paper_*` counterparts to `live_*` config keys. Zeus is live-only; backtest evaluates and shadow observes, but neither is a peer execution mode. A key named `live_safety_cap_usd` is live execution policy, not a paper-mode setting.
 
 ---
 

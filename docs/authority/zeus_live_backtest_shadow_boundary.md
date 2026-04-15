@@ -57,14 +57,14 @@ It may NOT:
 - Paper mode decommissioned: DONE (Phase 1 complete)
 - Shadow instrumentation boundary: DECLARED (this doc)
 - Replay demotion: DECLARED (this doc)
-- Full-family FDR for live: PENDING (IR-02)
+- Live candidate-family FDR: ACTIVE for candidate/market/snapshot tested families; whole-cycle BH is not claimed
 
 ## 6. Promotion protocol
 
 To promote any math change from shadow/backtest to live:
 
 1. Shadow instrumentation must have collected >= 30 days of parallel data
-2. Backtest evaluation must use honest replay (market prices, active sizing, full FDR)
+2. Backtest evaluation must use honest replay (market prices, active sizing, and selection-family parity with the live control unit)
 3. Candidate evaluation must show statistical improvement on the live-relevant metric
 4. Operator must explicitly approve the cutover
 5. A governance packet must document the promotion with rollback plan

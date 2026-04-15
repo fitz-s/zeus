@@ -73,8 +73,8 @@ class TestRiskLimits:
     def test_allowed(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is True
@@ -82,8 +82,8 @@ class TestRiskLimits:
     def test_below_minimum(self):
         ok, reason = check_position_allowed(
             size_usd=0.50, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False
@@ -92,8 +92,8 @@ class TestRiskLimits:
     def test_exceeds_single_position(self):
         ok, reason = check_position_allowed(
             size_usd=15.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False
@@ -102,8 +102,8 @@ class TestRiskLimits:
     def test_exceeds_portfolio_heat(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.48, limits=RiskLimits(),
         )
         assert ok is False
@@ -112,8 +112,8 @@ class TestRiskLimits:
     def test_exceeds_city_limit(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.18, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.18,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False

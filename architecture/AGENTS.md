@@ -39,6 +39,18 @@ Changes here are architecture or governance changes, never “just docs.”
 | `zones.yaml` | Zone definitions with import rules (K0-K4) |
 | `negative_constraints.yaml` | 10 negative constraint definitions |
 | `maturity_model.yaml` | Maturity model definitions |
+| `topology_schema.yaml` | Schema for compiled topology graph nodes, enums, and strict issue codes |
+| `topology.yaml` | Initial compiled topology graph for root/src/tests/scripts/docs/config/CI/state/runtime/shadow surfaces |
+| `source_rationale.yaml` | Per-file rationale map for tracked `src/**` files, hazards, and write-route cards |
+| `test_topology.yaml` | Test-suite topology manifest: law gate, categories, high-sensitivity skips, reverse-antibody status |
+| `script_manifest.yaml` | Script manifest with authority class, write targets, dry-run/apply metadata, and safety gates |
+| `data_rebuild_topology.yaml` | Data/rebuild certification criteria and non-promotion topology |
+| `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
+| `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
+| `code_idioms.yaml` | Registry for intentional non-obvious code shapes such as static-analysis hooks |
+| `runtime_modes.yaml` | Discovery mode index: opening_hunt, update_reaction, day0_capture |
+| `reference_replacement.yaml` | Replacement matrix for bulky reference docs and deletion eligibility |
+| `map_maintenance.yaml` | Companion-registry rules for added/deleted files in active surfaces |
 | `lifecycle_grammar.md` | Lifecycle grammar specification |
 | `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |
 | `self_check/zero_context_entry.md` | Zero-context agent entry checklist |

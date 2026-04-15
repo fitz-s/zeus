@@ -121,6 +121,19 @@ class TestSelectionFamilySubstrate:
         assert out[2]["q_value"] <= 0.10
         assert out[3]["q_value"] is None
 
+    def test_candidate_snapshot_families_are_independent_not_cycle_wide(self):
+        rows = [
+            {"family_id": "nyc|2026-04-01|snap-1", "hypothesis_id": "nyc-1", "p_value": 0.049, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-1", "p_value": 0.200, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-2", "p_value": 0.200, "tested": True},
+            {"family_id": "dal|2026-04-01|snap-2", "hypothesis_id": "dal-3", "p_value": 0.200, "tested": True},
+        ]
+
+        out = apply_familywise_fdr(rows, q=0.10)
+
+        assert out[0]["selected_post_fdr"] == 1
+        assert [row["selected_post_fdr"] for row in out[1:]] == [0, 0, 0]
+
     def test_selection_family_facts_record_all_tested_hypotheses(self, tmp_path):
         conn = get_connection(tmp_path / "selection_facts.db")
         init_schema(conn)
@@ -424,6 +437,18 @@ class TestSelectionFamilySubstrate:
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
+        monkeypatch.setattr(
+            evaluator_module,
+            "resolve_strategy_policy",
+            lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
+                strategy_key=strategy_key,
+                gated=False,
+                allocation_multiplier=1.0,
+                threshold_multiplier=1.0,
+                exit_only=False,
+                sources=[],
+            ),
+        )
 
         candidate = evaluator_module.MarketCandidate(
             city=cities_by_name["Dallas"],
@@ -459,3 +484,142 @@ class TestSelectionFamilySubstrate:
         assert hypothesis_count == 6
         assert meta["tested_hypotheses"] == 6
         assert meta["active_fdr_selected"] == 1
+
+    def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
+        conn = get_connection(tmp_path / "selection_fail_closed.db")
+        init_schema(conn)
+        now = datetime.now(timezone.utc)
+
+        class FakeEns:
+            def __init__(self, *args, **kwargs):
+                self.member_maxes = np.array([70.0, 71.0, 72.0, 73.0])
+
+            def spread(self):
+                return evaluator_module.TemperatureDelta(1.0, "F")
+
+            def spread_float(self):
+                return 1.0
+
+            def is_bimodal(self):
+                return False
+
+        class FakeDay0Signal:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def p_vector(self, bins):
+                return np.array([0.2, 0.5, 0.3])
+
+            def forecast_context(self):
+                return {"day0_test": True}
+
+        class FakeAnalysis:
+            def __init__(self, **kwargs):
+                self.bins = kwargs["bins"]
+                self.p_raw = kwargs["p_raw"]
+                self.p_cal = kwargs["p_cal"]
+                self.p_market = np.array([0.1, 0.2, 0.7])
+                self.p_posterior = np.array([0.2, 0.3, 0.5])
+
+            def forecast_context(self):
+                return {"uncertainty": {}, "location": {}}
+
+            def find_edges(self, n_bootstrap=None):
+                return [
+                    BinEdge(
+                        bin=self.bins[0],
+                        direction="buy_yes",
+                        edge=0.1,
+                        ci_lower=0.02,
+                        ci_upper=0.2,
+                        p_model=0.2,
+                        p_market=0.1,
+                        p_posterior=0.2,
+                        entry_price=0.1,
+                        p_value=0.001,
+                        vwmp=0.1,
+                        forward_edge=0.1,
+                    )
+                ]
+
+        class FakeClob:
+            paper_mode = True
+
+            def get_best_bid_ask(self, token_id):
+                return (0.1, 0.2, 10.0, 10.0)
+
+        monkeypatch.setattr(
+            evaluator_module,
+            "fetch_ensemble",
+            lambda city, forecast_days, **kwargs: {
+                "members_hourly": np.ones((51, 2)) * 72.0,
+                "times": [now, now],
+                "fetch_time": now,
+                "issue_time": now,
+                "first_valid_time": now,
+                "model": "ecmwf_ifs025",
+            },
+        )
+        monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
+        monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
+        monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        monkeypatch.setattr(
+            evaluator_module,
+            "_get_day0_temporal_context",
+            lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=now),
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "remaining_member_maxes_for_day0",
+            lambda *args, **kwargs: (np.array([70.0, 71.0, 72.0, 73.0]), 2.0),
+        )
+        monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
+        monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
+        monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("family scan down")))
+        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+        monkeypatch.setattr(
+            evaluator_module,
+            "resolve_strategy_policy",
+            lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
+                strategy_key=strategy_key,
+                gated=False,
+                allocation_multiplier=1.0,
+                threshold_multiplier=1.0,
+                exit_only=False,
+                sources=[],
+            ),
+        )
+
+        candidate = evaluator_module.MarketCandidate(
+            city=cities_by_name["Dallas"],
+            target_date="2026-04-12",
+            outcomes=[
+                {"title": "68-69°F", "range_low": 68, "range_high": 69, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+                {"title": "70-71°F", "range_low": 70, "range_high": 71, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
+                {"title": "72°F or higher", "range_low": 72, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
+            ],
+            hours_since_open=2.0,
+            hours_to_resolution=12.0,
+            event_id="event-test",
+            discovery_mode="day0_capture",
+            observation={"high_so_far": 70, "current_temp": 69, "source": "test", "observation_time": now.isoformat()},
+        )
+
+        decisions = evaluator_module.evaluate_candidate(
+            candidate,
+            conn,
+            PortfolioState(bankroll=150.0, positions=[]),
+            FakeClob(),
+            RiskLimits(min_order_usd=1.0),
+            entry_bankroll=150.0,
+            decision_time=now,
+        )
+        conn.close()
+
+        assert len(decisions) == 1
+        assert decisions[0].should_trade is False
+        assert decisions[0].rejection_stage == "FDR_FAMILY_SCAN_UNAVAILABLE"
+        assert decisions[0].fdr_fallback_fired is True
+        assert decisions[0].fdr_family_size == 0
+        assert decisions[0].n_edges_found == 1
+        assert decisions[0].n_edges_after_fdr == 0

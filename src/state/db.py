@@ -24,6 +24,7 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
 ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
+ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
 
@@ -50,6 +51,15 @@ def get_trade_connection() -> sqlite3.Connection:
 def get_world_connection() -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
     return _connect(ZEUS_WORLD_DB_PATH)
+
+
+def get_backtest_connection() -> sqlite3.Connection:
+    """Derived backtest DB connection.
+
+    This DB is a reporting/audit surface only. Live runtime execution must not
+    read it as authority or write trade/world truth through it.
+    """
+    return _connect(ZEUS_BACKTEST_DB_PATH)
 
 
 def get_trade_connection_with_world() -> sqlite3.Connection:
@@ -137,8 +147,13 @@ def _is_semantic_advance(current_runtime: str, legacy_state: str) -> bool:
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
     "operator_quarantine_clear",
+    "chain_only_quarantined",
     "settled_position",
 })
+RESOLVED_TOKEN_SUPPRESSION_REASONS = (
+    "operator_quarantine_clear",
+    "settled_position",
+)
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -168,6 +183,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL,
             settlement_source TEXT,
             settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             UNIQUE(city, target_date)
         );
 
@@ -182,6 +198,32 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             unit TEXT NOT NULL,
             station_id TEXT,
             fetched_at TEXT,
+            -- K1 additions: raw value/unit contract
+            raw_value REAL,
+            raw_unit TEXT CHECK (raw_unit IN ('F', 'C', 'K')),
+            target_unit TEXT CHECK (target_unit IN ('F', 'C')),
+            value_type TEXT CHECK (value_type IN ('high', 'low', 'mean')),
+            -- K1 additions: temporal provenance
+            fetch_utc TEXT,
+            local_time TEXT,
+            collection_window_start_utc TEXT,
+            collection_window_end_utc TEXT,
+            -- K1 additions: DST context
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER CHECK (dst_active IN (0, 1)),
+            is_ambiguous_local_hour INTEGER CHECK (is_ambiguous_local_hour IN (0, 1)),
+            is_missing_local_hour INTEGER CHECK (is_missing_local_hour IN (0, 1)),
+            -- K1 additions: geographic/seasonal
+            hemisphere TEXT CHECK (hemisphere IN ('N', 'S')),
+            season TEXT CHECK (season IN ('DJF', 'MAM', 'JJA', 'SON')),
+            month INTEGER CHECK (month BETWEEN 1 AND 12),
+            -- K1 additions: run provenance
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            -- K1 additions: authority + extensibility
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
         );
 
@@ -235,6 +277,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL DEFAULT 'v1',
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -252,7 +295,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             forecast_available_at TEXT NOT NULL,
             settlement_value REAL,
             decision_group_id TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1))
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            bin_source TEXT NOT NULL DEFAULT 'legacy'
         );
 
         -- Independent forecast-event units derived from calibration_pairs.
@@ -289,7 +334,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             brier_insample REAL,
             fitted_at TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability'
+            input_space TEXT NOT NULL DEFAULT 'raw_probability',
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Trade decisions with full audit trail
@@ -408,7 +454,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
             ON probability_trace_fact(decision_snapshot_id);
 
-        -- Selection-family substrate for later family-wise FDR cutover.
+        -- Selection-family facts for active candidate-family FDR accounting.
         CREATE TABLE IF NOT EXISTS selection_family_fact (
             family_id TEXT PRIMARY KEY,
             cycle_mode TEXT NOT NULL,
@@ -507,6 +553,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
 
         -- Append-only trade chronicle
+        -- env column: added via ALTER TABLE in init_schema lines ~854-859 — see chronicler.py:76
         CREATE TABLE IF NOT EXISTS chronicle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -795,6 +842,48 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
 
+        -- K2 data-coverage index — the immune system's memory for live data ingestion.
+        -- One row per expected (data_table × city × data_source × target_date × sub_key);
+        -- live appenders flip rows to WRITTEN, scanners write MISSING for unrecorded
+        -- expected rows, and known exceptions (HKO incomplete-flag days, UKMO pre-start,
+        -- new-city onboard lag) are pinned as LEGITIMATE_GAP so the scanner won't
+        -- keep re-attempting them. Distinct from `availability_fact` which logs
+        -- runtime cycle/order outages — this table is specifically a data-ingestion
+        -- coverage ledger.
+        CREATE TABLE IF NOT EXISTS data_coverage (
+            data_table  TEXT NOT NULL
+                CHECK (data_table IN ('observations','observation_instants','solar_daily','forecasts')),
+            city        TEXT NOT NULL,
+            data_source TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            sub_key     TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL
+                CHECK (status IN ('WRITTEN','LEGITIMATE_GAP','FAILED','MISSING')),
+            reason      TEXT,
+            fetched_at  TEXT NOT NULL,
+            expected_at TEXT,
+            retry_after TEXT,
+            PRIMARY KEY (data_table, city, data_source, target_date, sub_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_status
+            ON data_coverage(status, data_table);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_scan
+            ON data_coverage(data_table, city, data_source, target_date);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_retry
+            ON data_coverage(status, retry_after) WHERE status = 'FAILED';
+
+        -- Availability/outage fact log (observability — kernel §availability_fact)
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+        );
+
         -- Replay engine results
         CREATE TABLE IF NOT EXISTS replay_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -887,6 +976,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     for ddl in [
         "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
         "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
+        # 2026-04-14 refactor: bin_source discriminator separates canonical-grid
+        # training pairs from legacy market-derived pairs so the destructive
+        # DELETE path in rebuild_calibration_pairs_canonical.py can target
+        # WHERE bin_source='canonical_v1' without LIKE blast radius.
+        "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
     ]:
         try:
             conn.execute(ddl)
@@ -956,6 +1050,83 @@ def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> Non
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
     """Apply canonical architecture kernel schema."""
     apply_architecture_kernel_schema(conn)
+
+
+def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
+    """Create derived backtest/reporting tables. Idempotent."""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_backtest_connection()
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            run_id TEXT PRIMARY KEY,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            authority_scope TEXT NOT NULL CHECK (
+                authority_scope = 'diagnostic_non_promotion'
+            ),
+            config_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS backtest_outcome_comparison (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            subject_id TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            settlement_value REAL,
+            settlement_unit TEXT,
+            derived_wu_outcome INTEGER,
+            actual_trade_outcome INTEGER,
+            actual_pnl REAL,
+            truth_source TEXT NOT NULL,
+            divergence_status TEXT NOT NULL CHECK (
+                divergence_status IN (
+                    'not_applicable',
+                    'match',
+                    'wu_win_trade_loss',
+                    'wu_loss_trade_win',
+                    'trade_unresolved',
+                    'wu_missing',
+                    'bin_unparseable',
+                    'ambiguous_subject',
+                    'orphan_trade_decision'
+                )
+            ),
+            decision_reference_source TEXT,
+            forecast_reference_id TEXT,
+            evidence_json TEXT NOT NULL,
+            missing_reason_json TEXT NOT NULL,
+            authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
+                CHECK (authority_scope = 'diagnostic_non_promotion'),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_lane_city_date
+            ON backtest_outcome_comparison(lane, city, target_date);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_subject
+            ON backtest_outcome_comparison(subject_id);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_divergence
+            ON backtest_outcome_comparison(divergence_status);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_run
+            ON backtest_outcome_comparison(run_id);
+    """)
+    conn.commit()
+    if own_conn:
+        conn.close()
 
 
 
@@ -3135,11 +3306,11 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "edge_source": str(row["edge_source"] or row["strategy_key"] or ""),
                 "discovery_mode": str(row["discovery_mode"] or ""),
                 "chain_state": str(row["chain_state"] or "unknown"),
-                "order_id": str(row["order_id"] or ""),
-                "order_status": str(row["order_status"] or ""),
                 "token_id": str(row["token_id"] or ""),
                 "no_token_id": str(row["no_token_id"] or ""),
                 "condition_id": str(row["condition_id"] or ""),
+                "order_id": str(row["order_id"] or ""),
+                "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
                 "env": "live",
                 "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
@@ -3222,7 +3393,29 @@ def record_token_suppression(
     if not normalized_source:
         raise ValueError("token suppression requires source_module")
     now = created_at or datetime.now(timezone.utc).isoformat()
-    evidence_json = json.dumps(evidence or {}, sort_keys=True)
+    evidence_payload = dict(evidence or {})
+    if normalized_reason == "chain_only_quarantined":
+        existing = conn.execute(
+            """
+            SELECT suppression_reason, created_at, evidence_json
+            FROM token_suppression
+            WHERE token_id = ?
+            """,
+            (normalized_token,),
+        ).fetchone()
+        if existing is not None and str(existing["suppression_reason"] or "") == "chain_only_quarantined":
+            try:
+                existing_evidence = json.loads(str(existing["evidence_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                existing_evidence = {}
+            first_seen_at = str(
+                existing_evidence.get("first_seen_at")
+                or existing["created_at"]
+                or ""
+            )
+            if first_seen_at:
+                evidence_payload["first_seen_at"] = first_seen_at
+    evidence_json = json.dumps(evidence_payload, sort_keys=True)
     conn.execute(
         """
         INSERT INTO token_suppression (
@@ -3262,13 +3455,30 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     if conn is None or not _table_exists(conn, "token_suppression"):
         return []
     rows = conn.execute(
-        """
+        f"""
         SELECT token_id
         FROM token_suppression
+        WHERE suppression_reason IN ({", ".join(["?"] * len(RESOLVED_TOKEN_SUPPRESSION_REASONS))})
+        ORDER BY created_at ASC, token_id ASC
+        """,
+        RESOLVED_TOKEN_SUPPRESSION_REASONS,
+    ).fetchall()
+    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+
+
+def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
+    """Return unresolved chain-only quarantine facts for runtime cache hydration."""
+    if conn is None or not _table_exists(conn, "token_suppression"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT token_id, condition_id, created_at, updated_at, evidence_json
+        FROM token_suppression
+        WHERE suppression_reason = 'chain_only_quarantined'
         ORDER BY created_at ASC, token_id ASC
         """
     ).fetchall()
-    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+    return [dict(row) for row in rows]
 
 
 def expire_control_override(
@@ -3308,6 +3518,8 @@ def query_control_override_state(
         return {
             "status": "skipped_no_connection",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
@@ -3315,12 +3527,14 @@ def query_control_override_state(
         return {
             "status": "missing_table",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
     rows = conn.execute(
         """
-        SELECT override_id, target_type, target_key, action_type, value, precedence, issued_at
+        SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
         FROM control_overrides
         WHERE target_type IN ('global', 'strategy')
           AND issued_at <= ?
@@ -3330,6 +3544,8 @@ def query_control_override_state(
         (current_time, current_time),
     ).fetchall()
     entries_paused = False
+    entries_pause_source = None
+    entries_pause_reason = None
     edge_threshold_multiplier = 1.0
     strategy_gates: dict[str, bool] = {}
     seen_strategy_gate: set[str] = set()
@@ -3342,6 +3558,14 @@ def query_control_override_state(
         value = str(row["value"] or "")
         if target_type == "global" and target_key == "entries" and action_type == "gate" and not global_gate_seen:
             entries_paused = _parse_boolish_text(value)
+            if entries_paused:
+                reason = str(row["reason"] or "")
+                issued_by = str(row["issued_by"] or "")
+                if issued_by.startswith("auto:auto_pause:"):
+                    entries_pause_source = "auto_exception"
+                    entries_pause_reason = issued_by.removeprefix("auto:")
+                else:
+                    entries_pause_source = "manual_command"
             global_gate_seen = True
             continue
         if target_type == "global" and target_key == "entries" and action_type == "threshold_multiplier" and not global_threshold_seen:
@@ -3357,6 +3581,8 @@ def query_control_override_state(
     return {
         "status": "ok",
         "entries_paused": entries_paused,
+        "entries_pause_source": entries_pause_source,
+        "entries_pause_reason": entries_pause_reason,
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }
@@ -3881,5 +4107,3 @@ def log_pending_exit_recovery_event(
         error=error,
         timestamp=timestamp,
     )
-
-

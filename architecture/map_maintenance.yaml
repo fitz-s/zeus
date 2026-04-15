@@ -1,0 +1,72 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "Map Maintenance Gate"
+  purpose: >
+    Declare which companion map/registry files must move with added or deleted
+    files in active surfaces. This gate is intentionally narrow: it enforces
+    registry ownership, not broad prose rewrites.
+  operating_model: >
+    During active refactors this is an advisory map-delta reporter. At
+    precommit/closeout it becomes a blocking ownership check.
+  git_tracking: >
+    If the caller omits changed_files, topology_doctor reads git status and
+    derives added/deleted/modified/renamed paths itself.
+
+modes:
+  advisory:
+    blocking: false
+    use: "During active implementation; report pending map delta only."
+  precommit:
+    blocking: true
+    use: "Before committing a verified slice."
+  closeout:
+    blocking: true
+    use: "At packet closeout; unresolved map delta must be handled or explicitly deferred."
+
+rules:
+  - id: src_file_registry
+    path_globs: ["src/**/*.py"]
+    on_change: [added, deleted]
+    required_companions:
+      - architecture/source_rationale.yaml
+    rationale: source_rationale owns file-level src registry.
+  - id: test_file_registry
+    path_globs: ["tests/test_*.py"]
+    on_change: [added, deleted]
+    required_companions:
+      - architecture/test_topology.yaml
+    rationale: test_topology owns top-level active test classification.
+  - id: script_file_registry
+    path_globs: ["scripts/*.py", "scripts/*.sh"]
+    on_change: [added, deleted]
+    required_companions:
+      - architecture/script_manifest.yaml
+    rationale: script_manifest owns top-level script registry and lifecycle.
+  - id: reference_doc_registry
+    path_globs: ["docs/reference/*.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/reference/AGENTS.md
+      - architecture/reference_replacement.yaml
+    rationale: reference docs keep a human registry plus a replacement matrix.
+  - id: authority_doc_registry
+    path_globs: ["docs/authority/*.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/authority/AGENTS.md
+    rationale: authority docs remain explicitly enumerated for active law routing.
+  - id: architecture_manifest_registry
+    path_globs: ["architecture/*.yaml", "architecture/*.md", "architecture/*.sql"]
+    on_change: [added, deleted]
+    required_companions:
+      - architecture/AGENTS.md
+      - workspace_map.md
+    rationale: new or removed architecture surfaces change root-level navigation.
+  - id: tests_contracts_registry
+    path_globs: ["tests/contracts/*.py"]
+    on_change: [added, deleted]
+    required_companions:
+      - tests/contracts/AGENTS.md
+      - architecture/test_topology.yaml
+    rationale: contract manifests need a local registry and test-topology awareness.

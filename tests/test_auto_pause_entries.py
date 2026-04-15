@@ -20,6 +20,7 @@ import src.engine.cycle_runner as cr
 import src.state.chain_reconciliation as cr_chain
 from src.engine.discovery_mode import DiscoveryMode
 from src.riskguard.risk_level import RiskLevel
+from src.state.db import apply_architecture_kernel_schema, get_connection
 from src.state.portfolio import PortfolioState
 from src.state.strategy_tracker import StrategyTracker
 
@@ -93,6 +94,8 @@ class TestAutoRauseEntries:
         assert cp.is_entries_paused() is True
 
         # Criterion #3: reason_code is machine-readable
+        assert cp.get_entries_pause_source() == "auto_exception"
+        assert cp.get_entries_pause_reason() == "auto_pause:ValueError"
         assert cp._control_state.get("entries_pause_reason") == "auto_pause:ValueError"
 
         # Criterion #4: alert called exactly once with the reason code
@@ -183,4 +186,38 @@ class TestAutoRauseEntries:
 
         # In-memory pause must survive the DB failure
         assert cp.is_entries_paused() is True
+        assert cp.get_entries_pause_source() == "auto_exception"
+        assert cp.get_entries_pause_reason() == "auto_pause:RuntimeError"
         assert cp._control_state.get("entries_pause_reason") == "auto_pause:RuntimeError"
+
+    def test_auto_pause_reason_hydrates_from_active_control_override_and_clears_on_resume(self, monkeypatch, tmp_path):
+        control_path = tmp_path / "control_plane.json"
+        db_path = tmp_path / "zeus.db"
+        conn = get_connection(db_path)
+        apply_architecture_kernel_schema(conn)
+        conn.close()
+        monkeypatch.setattr(cp, "CONTROL_PATH", control_path)
+        monkeypatch.setattr(cp, "get_world_connection", lambda: get_connection(db_path))
+        monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
+
+        control_path.write_text('{"commands": [], "acks": []}')
+        cp._control_state.clear()
+        cp.pause_entries("auto_pause:ValueError")
+
+        assert cp.is_entries_paused() is True
+        assert cp.get_entries_pause_source() == "auto_exception"
+        assert cp.get_entries_pause_reason() == "auto_pause:ValueError"
+
+        cp._control_state.clear()
+        cp.refresh_control_state()
+
+        assert cp.is_entries_paused() is True
+        assert cp.get_entries_pause_source() == "auto_exception"
+        assert cp.get_entries_pause_reason() == "auto_pause:ValueError"
+
+        control_path.write_text('{"commands": [{"command": "resume"}], "acks": []}')
+        assert cp.process_commands() == ["resume"]
+
+        assert cp.is_entries_paused() is False
+        assert cp.get_entries_pause_source() is None
+        assert cp.get_entries_pause_reason() is None

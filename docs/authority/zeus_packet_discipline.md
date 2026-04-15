@@ -178,6 +178,22 @@ Small events, retries, scout findings, timeout notes, and experiment breadcrumbs
 
 ---
 
+## 10. Script disposal and promotion
+
+Every packet closeout must include a **Script Disposal** section when the packet added, modified, ran, or deprecated a top-level script.
+
+For each affected script, state one disposition:
+
+- **Deleted** — one-off probe removed after its evidence was captured.
+- **Promoted** — hardened into a `long_lived` script with stable naming, manifest metadata, reuse rules, and tests or a smoke gate.
+- **Promotion candidate** — kept temporarily with `lifecycle: promotion_candidate`, an owner packet, and a dated promotion decision.
+- **Packet-ephemeral** — still temporary with `lifecycle: packet_ephemeral`, `delete_by: YYYY-MM-DD`, and a reason it cannot be deleted yet. `delete_on_packet_close: true` is extra intent only; a dated deadline is still required.
+- **Deprecated fail-closed** — retained only to make stale references fail visibly, with `status: deprecated`, `fail_closed: true`, and `canonical_command: DO_NOT_RUN`.
+
+Do not close a packet with anonymous one-off scripts still living in `scripts/`. A script either becomes a reusable tool that future agents should discover and reuse, or it is deleted / fail-closed with an explicit disposition.
+
+---
+
 ## Related documents
 
 - `AGENTS.md` §7 — Working discipline (summary + cross-reference)

@@ -1,280 +1,114 @@
 # Zeus Workspace Map
 
-> Master topology node for the Zeus mesh network.
-> Every directory has an `AGENTS.md` with a file registry. This file links them all.
-> For operating rules, see root `AGENTS.md`. For domain model, see `docs/reference/zeus_domain_model.md`.
+This is the root directory router for zero-context agents. It is not a system
+encyclopedia and does not override `AGENTS.md`, scoped `AGENTS.md` files, or
+machine manifests.
 
-## How to navigate
+Use this file to choose the next scoped entry point, then run:
 
-```
-workspace_map.md (YOU ARE HERE)
-  ├── AGENTS.md              ← operating rules, invariants, zones
-  ├── src/AGENTS.md          ← source root: zone map + navigation
-  │   └── src/*/AGENTS.md    ← zone-specific rules + file registry per package
-  ├── tests/AGENTS.md        ← test catalog with invariant mappings
-  │   └── tests/contracts/AGENTS.md  ← spec-owned validation manifests
-  ├── docs/AGENTS.md         ← docs root: design principle + directory index
-  │   ├── docs/authority/AGENTS.md   ← architecture + governance file registry
-  │   ├── docs/reference/AGENTS.md   ← domain model + research file registry
-  │   ├── docs/operations/AGENTS.md  ← active work packets file registry
-  │   └── docs/archives/AGENTS.md    ← archive rules (read-only, never authority)
-  ├── architecture/AGENTS.md ← machine-checkable authority files
-  │   ├── architecture/ast_rules/AGENTS.md       ← AST enforcement rules
-  │   ├── architecture/packet_templates/AGENTS.md ← work packet templates
-  │   └── architecture/self_check/AGENTS.md       ← agent entry checklists
-  ├── config/AGENTS.md       ← runtime parameters + reality contracts
-  │   └── config/reality_contracts/AGENTS.md ← external assumption contracts (INV-11)
-  ├── scripts/AGENTS.md      ← script catalog
-  └── .github/workflows/AGENTS.md ← CI gate rules
-```
+`python scripts/topology_doctor.py --navigation --task "<task>" --files <optional files>`
 
-**Navigation rule**: Read this file for orientation. Then read the `AGENTS.md` in the directory you're editing. That file has the complete file registry and domain rules for its zone.
+## Default Route
 
-**Maintenance rule**: When you add, rename, or delete a file, update the `AGENTS.md` in that directory AND this file if it changes directory-level structure. See root `AGENTS.md` §7 "Mesh topology maintenance."
+1. Read root `AGENTS.md`.
+2. Read this map for directory-level orientation.
+3. Run a task digest.
+4. Read the scoped `AGENTS.md` for the directory you will touch.
+5. Read code/tests only after the route is narrow.
 
----
+If the pre-code navigation set grows beyond the task budget in
+`architecture/context_budget.yaml`, stop and narrow with a digest or packet
+plan.
 
-## Root
+## Directory Router
 
-| Item | Purpose |
+| Path | Role | Next Read |
+|------|------|-----------|
+| `src/` | Runtime source code | `src/AGENTS.md`, then package `AGENTS.md` |
+| `tests/` | Regression and law gates | `tests/AGENTS.md`; machine view in `architecture/test_topology.yaml` |
+| `scripts/` | Operator, ETL, audit, repair, and enforcement tools | `scripts/AGENTS.md`; machine view in `architecture/script_manifest.yaml` |
+| `docs/authority/` | Current governance and architecture law | `docs/authority/AGENTS.md` |
+| `docs/reference/` | Conditional domain/math/data references | `docs/reference/AGENTS.md` |
+| `docs/operations/` | Active packet/control pointers | `docs/operations/AGENTS.md` |
+| `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
+| `docs/archives/` | Historical evidence only | `docs/archives/AGENTS.md`; do not default-read |
+| `architecture/` | Machine-checkable authority and topology | `architecture/AGENTS.md` |
+| `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
+| `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |
+| `state/` | Runtime DB/cache artifacts, mostly gitignored | classify before treating as truth |
+
+## Source Packages
+
+The canonical file-level zone map is `architecture/zones.yaml`; package labels
+below are navigation only.
+
+| Package | Main Role |
+|---------|-----------|
+| `src/contracts/` | Typed semantic contracts: settlement, execution price, alpha, hold value, provenance |
+| `src/state/` | Mixed truth/runtime surfaces; file-level zone map wins |
+| `src/riskguard/` | Risk process and behavior-changing risk levels |
+| `src/control/` | Venus/OpenClaw control plane |
+| `src/execution/` | CLOB execution, exits, settlement harvesting |
+| `src/supervisor_api/` | Typed Zeus/Venus boundary contracts |
+| `src/engine/` | Cycle orchestration, evaluator, replay/backtest |
+| `src/signal/` | Probability generation, Day0, diurnal/model signals |
+| `src/calibration/` | Platt calibration and sample/authority logic |
+| `src/strategy/` | Edge, fusion, FDR, Kelly, correlation |
+| `src/data/` | ECMWF, Polymarket, WU/Open-Meteo ingestion |
+| `src/observability/` | Derived status summary for operators/Venus |
+| `src/types/` | Unit-safe domain types |
+
+## Machine Manifests
+
+Prefer these over hand-maintained prose when they exist:
+
+| Manifest | Use |
+|----------|-----|
+| `architecture/invariants.yaml` | Invariant IDs and enforcement intent |
+| `architecture/zones.yaml` | Canonical file-level zone ownership |
+| `architecture/negative_constraints.yaml` | Forbidden moves and failure modes |
+| `architecture/topology.yaml` | Coverage roots, state/root classification, digest profiles |
+| `architecture/source_rationale.yaml` | Per-file `src/**` rationale, hazards, write routes |
+| `architecture/test_topology.yaml` | Test categories, law gates, high-sensitivity skips |
+| `architecture/script_manifest.yaml` | Script lifecycle, authority scope, read/write targets |
+| `architecture/data_rebuild_topology.yaml` | Data rebuild certification and non-promotion gates |
+| `architecture/history_lore.yaml` | Dense historical failure lessons and antibodies |
+| `architecture/context_budget.yaml` | Entry-map budget and maintenance cadence |
+| `architecture/code_idioms.yaml` | Intentional non-obvious code shapes and their owner gates |
+| `architecture/runtime_modes.yaml` | Discovery mode index and shared CycleRunner path |
+| `architecture/reference_replacement.yaml` | Reference-doc replacement evidence and deletion eligibility |
+| `architecture/map_maintenance.yaml` | Added/deleted-file companion registry rules |
+
+## High-Signal Commands
+
+| Need | Command |
 |------|---------|
-| `AGENTS.md` | Root operating brief — read first, always |
-| `workspace_map.md` | This file — master topology node |
-| `src/main.py` | Daemon entry point (paper/live mode) |
-| `requirements.txt` | Python dependencies |
-| `.gitignore` | Git exclusions |
-| `.importlinter` | Zone boundary enforcement (import rules) |
+| Default navigation | `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>` |
+| Task digest only | `python scripts/topology_doctor.py digest --task "<task>" --files <files>` |
+| Context budget | `python scripts/topology_doctor.py --context-budget --json` |
+| Lore cards | `python scripts/topology_doctor.py --history-lore --json` |
+| Source rationale | `python scripts/topology_doctor.py --source --json` |
+| Test topology | `python scripts/topology_doctor.py --tests --json` |
+| Script safety | `python scripts/topology_doctor.py --scripts --json` |
+| Data rebuild gates | `python scripts/topology_doctor.py --data-rebuild --json` |
 
----
+## Do Not Default-Read
 
-## `src/` — Source Code (14 packages, organized by zone)
+- `docs/archives/**` — historical evidence only.
+- `.omx/context/**` — micro-logs/evidence breadcrumbs, not governing law.
+- `docs/known_gaps.md` — load only when investigating active blockers.
+- Long math references such as `docs/reference/statistical_methodology.md` and
+  `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
+- `docs/data improve large pack/**` — active external package; do not edit,
+  move, normalize, or use as active authority.
 
-See `src/AGENTS.md` for the zone map and navigation guide. Each package has its own `AGENTS.md` with zone rules, domain context, and a complete file registry. Read the package `AGENTS.md` before editing any file in that package.
+## Maintenance Rule
 
-### Zone K0 — Kernel (truth, lifecycle, contracts)
+When adding, renaming, or deleting a file:
 
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/contracts/` | 17 | Typed semantic boundaries — settlement semantics, execution prices, edge context, provenance registry, reality contracts | `settlement_semantics.py`, `edge_context.py` |
-| `src/state/` | 10 | Truth surface — DB, portfolio, lifecycle FSM, chronicler, chain reconciliation, strategy tracker | `db.py`, `lifecycle_manager.py` |
+1. Update the scoped `AGENTS.md` in that directory.
+2. Update this map only if directory-level structure changes.
+3. Update the relevant machine manifest when one owns the registry.
 
-### Zone K1 — Protective (risk, control)
-
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/riskguard/` | 5 | Independent risk process — risk levels, metrics, policy, Discord alerts | `riskguard.py` |
-| `src/control/` | 1 | Control plane — 6 commands from Venus/OpenClaw, runtime behavior changes | `control_plane.py` |
-
-### Zone K2 — Execution (orders, supervisor)
-
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/execution/` | 6 | Order execution — limit orders on CLOB, exit triggers, fill tracking, settlement harvesting | `executor.py` |
-| `src/supervisor_api/` | 1 | Typed contracts between Zeus and Venus (O/P/C/O pattern) | `contracts.py` |
-
-### Zone K3 — Math/Data (signals, calibration, strategy, data, engine)
-
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/engine/` | 9 | Cycle orchestration — trading cycle runner, evaluator pipeline, replay, discovery modes | `cycle_runner.py`, `evaluator.py` |
-| `src/signal/` | 6 | Probability generation — 51-member Monte Carlo, day-0 signal, diurnal, model agreement | `ensemble_signal.py` |
-| `src/calibration/` | 4 | Extended Platt calibration — 3-param logistic with temporal decay, maturity gates, drift detection | `platt.py`, `manager.py` |
-| `src/strategy/` | 6 | Trading decisions — edge computation, α-weighted fusion, FDR filter, Kelly sizing, correlation | `market_analysis.py`, `kelly.py` |
-| `src/data/` | 7 | External data — ECMWF ENS fetch, Polymarket CLOB, WU observations, Open-Meteo | `ecmwf_open_data.py`, `polymarket_client.py` |
-
-### Zone K4 — Extension (observability, analysis)
-
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/observability/` | 1 | Status summary — cycle health snapshot for Venus (derived, never canonical) | `status_summary.py` |
-| `src/analysis/` | 0 | Placeholder for analysis utilities (empty) | — |
-
-### Cross-cutting
-
-| Package | Files | Purpose | Key entry point |
-|---------|-------|---------|-----------------|
-| `src/types/` | 3 | Unit-safe types — Temperature, TemperatureDelta, market types, solar types | `temperature.py` |
-
-### Standalone
-
-| File | Purpose |
-|------|---------|
-| `src/config.py` | Runtime configuration — settings loader, state paths, mode qualification |
-
----
-
-## `tests/` — Test Suite (68 test files)
-
-See `tests/AGENTS.md` for the complete test catalog with invariant mappings.
-
-### Architecture-critical tests (break these = code is wrong)
-
-| File | Tests | Invariant |
-|------|-------|-----------|
-| `test_cross_module_invariants.py` | Cross-module boundary contracts | INV-12 |
-| `test_cross_module_relationships.py` | Module dependency rules | Zone boundaries |
-| `test_architecture_contracts.py` | Cross-module invariant enforcement | Multiple |
-| `test_lifecycle.py` | 9-state FSM transitions | INV-01, INV-08 |
-| `test_provenance_enforcement.py` | Constant registration in cascades | INV-13 |
-| `test_reality_contracts.py` | External assumption contracts | INV-11 |
-| `test_no_bare_float_seams.py` | No bare floats at cross-layer seams | INV-12 |
-| `test_live_safety_invariants.py` | Pre-live safety gates | Safety |
-| `test_truth_surface_health.py` | Truth surface consistency | INV-03 |
-
-### Math/signal tests
-
-| File | Tests |
-|------|-------|
-| `test_ensemble_signal.py` | Monte Carlo signal generation |
-| `test_platt.py` | Calibration correctness |
-| `test_fdr.py` | FDR filter |
-| `test_kelly.py` + `test_kelly_cascade_bounds.py` | Kelly sizing + cascade bounds |
-| `test_market_analysis.py` | Edge computation |
-| `test_calibration_*.py` | Calibration manager, quality, unification |
-| `test_day0_*.py` | Day-0 signal, window, exit gate, runtime observation |
-| `test_diurnal.py` | Diurnal adjustments |
-| `test_correlation.py` | Cross-city/bin correlation |
-| `test_temperature.py` | Unit-safe temperature types |
-
-### Execution/lifecycle tests
-
-| File | Tests |
-|------|-------|
-| `test_executor.py` | Order execution (paper + live) |
-| `test_riskguard.py` | Risk level behavior changes |
-| `test_entry_exit_symmetry.py` | Entry/exit statistical burden fairness |
-| `test_exit_authority.py` | Exit decision authority |
-| `test_churn_defense.py` | 8-layer churn defense |
-| `test_pnl_flow_and_audit.py` | P&L data flow chain |
-
-### Data/ETL tests
-
-| File | Tests |
-|------|-------|
-| `test_ensemble_client.py` | Ensemble data retrieval |
-| `test_backfill_openmeteo_previous_runs.py` | Dynamic-city forecast-history backfill |
-| `test_etl_recalibrate_chain.py` | ETL recalibration chain |
-| `test_observation_*.py` | Observation contracts and instants |
-| `test_solar_etl.py` | Solar time ETL |
-
-### Infrastructure tests
-
-| File | Tests |
-|------|-------|
-| `test_config.py` | Configuration loading |
-| `test_db.py` | Database operations |
-| `test_healthcheck.py` | System health checks |
-| `test_structural_linter.py` | Code structure quality |
-
-### Subdirectory
-
-| Path | Purpose |
-|------|---------|
-| `tests/contracts/` | Spec-owned validation manifests (YAML) |
-
----
-
-## `docs/` — Documentation (flat mesh architecture)
-
-See `docs/AGENTS.md` for the docs root index, or `docs/README.md` for the detailed docs index.
-
-| Directory | Files | Purpose | AGENTS.md |
-|-----------|-------|---------|-----------|
-| `docs/authority/` | 6 | Current architecture + current delivery law + packet/autonomy/boundary governance | `docs/authority/AGENTS.md` |
-| `docs/reference/` | 7 | Domain model, repo orientation, data status, and conditional research/methodology | `docs/reference/AGENTS.md` |
-| `docs/operations/` | 1 | Live control pointer + active work packets | `docs/operations/AGENTS.md` |
-| `docs/archives/` | many | Historical — never active authority | `docs/archives/AGENTS.md` |
-
-Root docs: `docs/README.md` (index), `docs/known_gaps.md` (operational gap register).
-
-Default active-law docs: `docs/authority/zeus_current_architecture.md`, `docs/authority/zeus_current_delivery.md`.
-
----
-
-## `architecture/` — Machine-Checkable Authority
-
-See `architecture/AGENTS.md` for zone rules. Changes here are ALWAYS governance changes. Subdirectories (`ast_rules/`, `packet_templates/`, `self_check/`) each have their own `AGENTS.md`.
-
-| File | Purpose |
-|------|---------|
-| `kernel_manifest.yaml` | Kernel file ownership and protection rules |
-| `invariants.yaml` | 10 invariant definitions (INV-01 through INV-10) |
-| `zones.yaml` | Zone definitions with import rules (K0-K4) |
-| `negative_constraints.yaml` | 10 negative constraint definitions |
-| `maturity_model.yaml` | Maturity model definitions |
-| `lifecycle_grammar.md` | Lifecycle grammar specification |
-| `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |
-| `self_check/zero_context_entry.md` | Zero-context agent entry checklist |
-| `ast_rules/semgrep_zeus.yml` | Semgrep rules for code enforcement |
-| `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
-| `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
-
----
-
-## `config/` — Runtime Parameters
-
-See `config/AGENTS.md` for file registry and rules.
-
-| File | Purpose |
-|------|---------|
-| `settings.json` | All runtime parameters (single source of truth) |
-| `cities.json` | 16 cities with coordinates, stations, peak hours, units |
-| `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade |
-| `reality_contracts/*.yaml` | External assumption contracts (INV-11) |
-
----
-
-## `scripts/` — Operations & ETL
-
-See `scripts/AGENTS.md` for rules. Scripts are one-time operations, NOT part of the runtime.
-
-| Category | Examples |
-|----------|---------|
-| **ETL** | `etl_diurnal_curves.py`, `etl_forecast_error_profiles.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_solar_times.py`, `etl_tigge_*.py`, `etl_observation_instants.py`, `etl_market_price_history.py` |
-| **Backfill** | `backfill_ens.py`, `backfill_openmeteo_previous_runs.py`, `backfill_wu_daily_all.py`, `backfill_hourly_openmeteo.py`, `backfill_semantic_snapshots.py`, `backfill_cluster_taxonomy.py`, `backfill_exit_telemetry.py` |
-| **Audit** | `audit_paper_explainability.py`, `audit_realtime_pnl.py`, `audit_replay_*.py`, `audit_divergence_*.py`, `audit_time_semantics.py` |
-| **Architecture checks** | `check_kernel_manifests.py`, `check_module_boundaries.py`, `check_work_packets.py`, `check_advisory_gates.py` |
-| **Analysis** | `analyze_paper_trading.py`, `equity_curve.py`, `baseline_experiment.py`, `automation_analysis.py` |
-| **Replay** | `run_replay.py`, `replay_parity.py`, `capture_replay_artifact.py`, `profit_validation_replay.py` |
-| **Operations** | `healthcheck.py`, `heartbeat_dispatcher.py`, `live_smoke_test.py`, `auto_pause_live.sh`, `force_lifecycle.py`, `cleanup_ghost_positions.py` |
-| **Venus integration** | `venus_autonomy_gate.py`, `venus_sensing_report.py` |
-| **Calibration** | `refit_platt.py`, `generate_calibration_pairs.py`, `validate_dynamic_alpha.py` |
-| **Migration** | `migrate_rainstorm_full.py`, `migrate_to_isolated_dbs.py`, `onboard_cities.py` |
-| **Validation** | `validate_assumptions.py`, `verify_truth_surfaces.py`, `diagnose_*.py`, `semantic_linter.py` |
-
----
-
-## `state/` — Persistent State (gitignored)
-
-| File/Dir | Purpose |
-|----------|---------|
-| `zeus-paper.db` / `zeus-live.db` | Mode-specific trade databases |
-| `zeus-world.db` | Shared world-data database |
-| `risk_state-*.db` | Mode-specific RiskGuard state |
-| `positions-*.json` | Mode-qualified position files |
-| `ensemble-log/` | ENS snapshots (append-only) |
-| `status_summary-*.json` | Cycle health snapshots (derived, for Venus) |
-
----
-
-## `.github/workflows/` — CI/CD
-
-See `.github/workflows/AGENTS.md` for gate rules.
-
-| File | Purpose |
-|------|---------|
-| `architecture_advisory_gates.yml` | Advisory architecture gates (non-blocking) |
-
----
-
-## File Placement & Naming Rules
-
-See `AGENTS.md` §8 for canonical file placement rules and naming conventions. That is the single source of truth — do not duplicate here.
-
-## What Does NOT Belong Here
-
-- old Rainstorm
-- TIGGE raw data → `workspace-venus/51 source data/`
-- Session prompts, code review docs → `project level docs/archive/`
-- OpenClaw central config → `~/.openclaw/openclaw.json`
-- Venus agent identity files → `workspace-venus/` root
+Run `python scripts/topology_doctor.py --context-budget --json` after every five
+completed packets or when an entry/default-read file grows materially.

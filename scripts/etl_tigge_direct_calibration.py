@@ -33,7 +33,10 @@ from src.calibration.effective_sample_size import build_decision_groups, write_d
 from src.calibration.store import add_calibration_pair
 from src.config import cities_by_name
 from src.contracts import SettlementSemantics
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection as get_connection, init_schema
+from src.types import Bin
+from scripts.backfill_tigge_snapshot_p_raw import p_raw_from_member_values
 
 
 TIGGE_BASE = Path.home() / ".openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens"
@@ -180,7 +183,7 @@ def run_etl(dry_run: bool = False) -> dict:
     """).fetchall():
         key = (row["city"], row["target_date"])
         settlements[key] = {
-            "value": round(float(row["settlement_value"])),
+            "value": round_wmo_half_up_value(float(row["settlement_value"])),
             "winning_bin": row["winning_bin"],
         }
 
@@ -241,10 +244,11 @@ def run_etl(dry_run: bool = False) -> dict:
             # Check if already imported
             dv = "tigge_direct_cal_v1"
             existing = conn.execute("""
-                SELECT COUNT(*) FROM ensemble_snapshots
+                SELECT snapshot_id, p_raw_json FROM ensemble_snapshots
                 WHERE city = ? AND target_date = ? AND data_version = ?
-            """, (city_name, target_date, dv)).fetchone()[0]
-            if existing > 0:
+                LIMIT 1
+            """, (city_name, target_date, dv)).fetchone()
+            if existing is not None and existing["p_raw_json"] not in (None, ""):
                 skipped_already_exists += 1
                 continue
 
@@ -300,6 +304,23 @@ def run_etl(dry_run: bool = False) -> dict:
             # Synthesize bins + generate calibration pairs using settlement_value
             settlement_temp = settlement["value"]
             bins = _synthesize_bins(float(np.median(values)), city.settlement_unit)
+            p_raw_vector = p_raw_from_member_values(
+                values,
+                [
+                    Bin(low=low, high=high, label=label, unit=city.settlement_unit)
+                    for label, low, high in bins
+                ],
+                city,
+            )
+            if p_raw_vector and not dry_run:
+                conn.execute(
+                    """
+                    UPDATE ensemble_snapshots
+                    SET p_raw_json = ?
+                    WHERE city = ? AND target_date = ? AND data_version = ?
+                    """,
+                    (json.dumps(p_raw_vector), city_name, target_date, dv),
+                )
             season = season_from_date(target_date, lat=city.lat)
 
             for label, low, high in bins:

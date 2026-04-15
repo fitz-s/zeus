@@ -21,4 +21,20 @@ __pycache__/
 
 state/*.db
 state/*.bak
+state/*.db.aborted-*
+state/*.db.pre-rebuild-*
+
+# Backfill / rebuild scratch logs (transient nohup + tee output).
+# Topology doctor walks state/ directly; active run logs are still
+# classified per-file in architecture/topology.yaml, but new run logs
+# should default to ignored so they don't pile up as unclassified.
+state/rebuild-*.log
+state/rebuild-*.out
+state/fillback-*.log
+state/fillback-*.out
+
+# Orphan SQLite sidecars at repo root (should never exist; canonical DB is state/zeus-world.db).
+/zeus-world.db-shm
+/zeus-world.db-wal
+
 .git-commit-msg.tmp

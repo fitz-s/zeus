@@ -6,16 +6,39 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 
 | File | Purpose |
 |------|---------|
-| `settings.json` | All runtime parameters (single source of truth) — cycle intervals, thresholds, Kelly multipliers, risk limits |
-| `cities.json` | 16 cities with coordinates, WU stations, peak hours, temperature units (F/C) |
+| `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
+| `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster. **Routine check needed** — see discipline note below |
+| `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
+| `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |
 | `reality_contracts/execution.yaml` | External assumption contract: Polymarket execution behavior |
 | `reality_contracts/protocol.yaml` | External assumption contract: Polymarket protocol rules |
 | `reality_contracts/economic.yaml` | External assumption contract: economic/market assumptions |
 | `reality_contracts/data.yaml` | External assumption contract: data source availability and behavior |
+| `data_availability_exceptions.yaml` | K2 hole_scanner whitelist: per-model retro-start dates, publication lag, onboarding floor, fill policy |
 
 ## Rules
 
-- `settings.json` is the single source of truth for runtime config — no other config files
+- `settings.json` is the source for tunable runtime parameters. Other config files have scoped authority for cities, generated data bounds/correlation, provenance, and reality contracts.
 - Reality contracts (INV-11) define what Zeus assumes about external systems — when assumptions break, contracts flag it
 - Changes to `provenance_registry.yaml` require tracing to source literature/data
+
+## cities.json — routine check discipline (ROUTINE CHECK NEEDED)
+
+Every `cities.json` row must match the **current** Polymarket market description text for that city. Polymarket can change a city's settlement source, station, or unit at any time — and they do (verified 2026-04-14: Istanbul and Moscow are NOAA, London moved EGLL→EGLC, Jakarta moved WIII→WIHH, Panama City moved MPTO→MPMG, Taipei moved WU→Taiwan CWA station 46692, London unit transitioned °F→°C).
+
+**Audit cadence**: monthly, plus before any recalibration run or new-city onboarding.
+
+**Single source of truth**: the `description` field of the most recent active Polymarket market for each city. The market wins when any mirror (cities.json, Wunderground page, code constants) disagrees.
+
+**`settlement_source_type` values**:
+- `wu_icao` (default) — WU ICAO history endpoint; `wu_station` is a 4-letter ICAO
+- `hko` — Hong Kong Observatory API (`weather.gov.hk/.../cis/climat.htm`); `wu_station` is `null`, `hko_station` holds the station id
+- `noaa` — NOAA weather.gov timeseries (`weather.gov/wrh/timeseries?site=<ICAO>`); `wu_station` holds the ICAO that NOAA serves
+- `cwa_station` — Taiwan Central Weather Administration (`cwa.gov.tw/V8/C/W/OBS_Station.html?ID=<id>`); `wu_station` holds the numeric CWA station id
+
+**Downstream consequence**: any station-ICAO change invalidates prior `observations` rows for that city (wrong station = wrong temperatures). Delete the stale rows and re-backfill before running calibration.
+
+**Coordinate invariant**: `lat`/`lon` MUST correspond to the same physical station as `wu_station` / `hko_station` / CWA id. Do not use city-center or approximate coordinates — this drives ENS grid-point selection.
+
+**The 4 non-wu_icao cities (2026-04-14)**: Hong Kong (HKO), Istanbul (NOAA LTFM), Moscow (NOAA UUWW), Taipei (CWA 46692). Fetchers for NOAA and CWA are not yet implemented; `scripts/backfill_wu_daily_all.py::CITY_STATIONS` intentionally excludes these four cities.

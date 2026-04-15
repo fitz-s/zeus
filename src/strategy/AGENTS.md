@@ -5,7 +5,7 @@
 Strategy converts calibrated probabilities into trading decisions: edge computation, statistical filtering, and position sizing. Three critical subsystems work together:
 
 1. **MarketAnalysis**: double-bootstrap CI captures three σ sources (ensemble, instrument, parameter)
-2. **FDR filter**: Benjamini-Hochberg controls false discovery rate across ~220 simultaneous hypotheses
+2. **FDR filter**: Benjamini-Hochberg controls false discovery rate across the active tested candidate family
 3. **Kelly**: fractional Kelly with dynamic multiplier sizes positions
 
 If you break the statistical pipeline, Zeus either overtrades (false edges) or undersizes (missed real edges).
@@ -33,7 +33,7 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 
 ## Live selection rules (post-Phase 1)
 
-- **Full tested hypothesis family is the FDR budget basis.** `attempted` = COUNT of ALL hypotheses tested, not just those with positive CI. Legacy prefiltered-edge paths under-count the family, creating false statistical significance. (IR-02 pending)
+- **Full tested hypothesis family is the FDR budget basis.** `attempted` = COUNT of ALL hypotheses tested in the active candidate/market/snapshot family, not just those with positive CI. Legacy prefiltered-edge paths under-count the family, creating false statistical significance. Zeus does not currently claim whole-cycle BH across all candidate markets.
 - Live Kelly output is hard-clipped to `config.live_safety_cap_usd` ($5 in Phase 1 canary)
 - Strategy gates carry `GateDecision` provenance with `ReasonCode` enum — no bare bool gates
 - `reason_refuted()` returns False for all codes in Phase 1 (conservative); auto-un-gate recommendations require explicit refutation logic
@@ -41,6 +41,6 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 ## Common mistakes
 
 - Using normal approximation for p-values instead of bootstrap empirical distribution
-- Applying FDR per-city instead of across all 220 hypotheses → defeats the purpose
+- Applying FDR only to prefiltered positive-CI edges instead of the full tested family → defeats the purpose
 - Adding a new Kelly multiplier adjustment without registering it in `provenance_registry.yaml`
 - Confusing gross edge (before fees) with net edge → fee leakage

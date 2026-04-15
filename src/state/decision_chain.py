@@ -103,6 +103,7 @@ class NoTradeCase:
     p_cal_vector: list[float] = field(default_factory=list)
     p_market_vector: list[float] = field(default_factory=list)
     alpha: float = 0.0
+    market_hours_open: float | None = None
     agreement: str = ""
     timestamp: str = ""
     

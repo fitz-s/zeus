@@ -1,0 +1,385 @@
+schema_version: 1
+metadata:
+  created: "2026-04-13"
+  owner_packet: "Packet 6 scripts manifest and DB repair guardrails"
+  note: >
+    Manifest for top-level scripts. Effective metadata is class defaults plus
+    per-script overrides. This is a safety manifest, not permission to run any
+    script.
+
+required_effective_fields:
+  - class
+  - status
+  - lifecycle
+  - authority_scope
+  - reuse_when
+  - do_not_use_when
+  - canonical_command
+  - delete_policy
+  - read_targets
+  - write_targets
+  - dry_run_default
+  - apply_flag
+  - target_db
+  - external_inputs
+  - dangerous_if_run
+  - promotion_barrier
+  - required_helpers
+  - required_tests
+
+canonical_db_targets:
+  - state/zeus_trades.db
+  - state/zeus-world.db
+  - state/risk_state.db
+  - state/zeus.db
+  - state/zeus-paper.db
+  - state/zeus-shared.db
+
+diagnostic_allowed_write_targets:
+  - stdout
+  - temp
+  - state/zeus_backtest.db
+  - state/*.json
+  - docs/reports
+  - docs/reports/*
+
+allowed_lifecycles:
+  - long_lived
+  - packet_ephemeral
+  - promotion_candidate
+  - deprecated_fail_closed
+
+long_lived_naming:
+  allowed_prefixes:
+    - check_
+    - validate_
+    - verify_
+    - audit_
+    - diagnose_
+    - etl_
+    - backfill_
+    - rebuild_
+    - migrate_
+    - repair_
+    - run_
+    - generate_
+    - build_
+    - capture_
+  exceptions:
+    _yaml_bootstrap.py: import bootstrap helper for script entrypoints
+    antibody_scan.py: established operator diagnostic name
+    apply_recommended_controls.py: established control-plane repair entrypoint
+    auto_pause_live.sh: established operator emergency control
+    automation_analysis.py: established automation diagnostic report
+    baseline_experiment.py: established diagnostic baseline report
+    cleanup_ghost_positions.py: established repair command name
+    data_completeness_audit.py: legacy word-order exception; keep until renamed
+    deep_heartbeat.py: established runtime heartbeat helper
+    deprecate_legacy_state_files.py: established repair command name
+    equity_curve.py: established diagnostic report command
+    force_lifecycle.py: established repair command name; dangerous and packet-gated
+    healthcheck.py: established operator entrypoint
+    heartbeat_dispatcher.py: established runtime dispatcher
+    investigate_ecmwf_bias.py: established diagnostic report name
+    live_smoke_test.py: established runtime smoke entrypoint
+    nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
+    onboard_cities.py: established ETL/operator onboarding entrypoint
+    parse_change_log.py: established utility entrypoint
+    post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
+    resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
+    profit_validation_replay.py: established diagnostic report command
+    refit_platt.py: established repair command name
+    replay_parity.py: established diagnostic command
+    semantic_linter.py: established enforcement tool
+    topology_doctor.py: established topology compiler/checker
+    venus_autonomy_gate.py: established Venus boundary gate
+    venus_sensing_report.py: established Venus boundary report
+
+class_defaults:
+  enforcement:
+    lifecycle: long_lived
+    reuse_when: Repeatable repo policy, topology, or contract enforcement is needed.
+    do_not_use_when: The task is a one-off investigation or migration probe.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: blocking_or_policy_check
+    read_targets: [repo]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "May block only when signal is reliable and owned."
+    required_helpers: []
+    required_tests: [tests/test_topology_doctor.py, tests/test_structural_linter.py]
+  diagnostic:
+    lifecycle: long_lived
+    reuse_when: Repeatable read-only diagnosis is needed without mutating canonical truth.
+    do_not_use_when: The output would authorize live changes or write canonical DB truth.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: diagnostic_non_promotion
+    read_targets: [state]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Diagnostic output cannot authorize live strategy or DB truth changes."
+    required_helpers: []
+    required_tests: []
+  runtime_support:
+    lifecycle: long_lived
+    reuse_when: Operators need a repeatable runtime support or health command.
+    do_not_use_when: The task is a data repair, migration, or strategy diagnostic.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: operator_runtime_support
+    read_targets: [state, logs]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Runtime support must not become hidden authority."
+    required_helpers: []
+    required_tests: [tests/test_healthcheck.py, tests/test_runtime_guards.py]
+  shadow_artifact_writer:
+    lifecycle: long_lived
+    reuse_when: Shadow observation artifacts must be written through the declared shadow lane.
+    do_not_use_when: The output would place trades, mutate lifecycle truth, or promote diagnostics.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: shadow_observation_write
+    read_targets: [state/zeus-world.db, market_data]
+    write_targets: [state/zeus-world.db]
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-world.db
+    external_inputs: [Polymarket CLOB, Weather observations]
+    dangerous_if_run: true
+    unguarded_write_rationale: "Existing capture script writes shadow_signals/decision_log without an apply flag; classified as dangerous shadow write until hardened."
+    promotion_barrier: "Writes shadow/decision artifacts only; output cannot place trades or promote replay authority."
+    required_helpers: [src.state.db.log_shadow_signal, src.state.decision_chain.store_artifact]
+    required_tests: [tests/test_run_replay_cli.py, tests/test_replay_time_provenance.py]
+  etl_writer:
+    lifecycle: long_lived
+    reuse_when: A repeatable ETL/backfill writes declared world-data targets.
+    do_not_use_when: The task is exploratory or lacks a packet-reviewed write target.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: world_data_write
+    read_targets: [external_data, state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-world.db
+    external_inputs: []
+    dangerous_if_run: true
+    write_by_default: true
+    unguarded_write_rationale: "Existing ETL writers often default to writing; Packet 6 marks them dangerous pending CLI hardening."
+    promotion_barrier: "Must not promote output to live authority without packet evidence."
+    required_helpers: [src.state.db.get_world_connection]
+    required_tests: []
+  diagnostic_report_writer:
+    lifecycle: long_lived
+    reuse_when: A repeatable diagnostic report artifact is needed for non-promotion evidence.
+    do_not_use_when: The report would become live authority or replace typed runtime truth.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: report_artifact_non_promotion
+    read_targets: [state]
+    write_targets: [docs/reports, state/*.json, stdout]
+    dry_run_default: true
+    apply_flag: implicit
+    target_db: report_artifact
+    external_inputs: []
+    dangerous_if_run: true
+    unguarded_write_rationale: "Existing report writers write non-authority report artifacts without an apply flag; Packet 6 classifies targets explicitly."
+    promotion_barrier: "Writes diagnostic report artifacts only; reports do not become live authority."
+    required_helpers: []
+    required_tests: []
+  repair:
+    lifecycle: long_lived
+    reuse_when: A packet-approved repair needs an explicit dry-run/apply boundary.
+    do_not_use_when: The repair is exploratory, unreviewed, or lacks target DB metadata.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: repair_write
+    read_targets: [state]
+    write_targets: [state]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state
+    external_inputs: []
+    dangerous_if_run: true
+    promotion_barrier: "Requires explicit packet, dry-run evidence, and target DB."
+    required_helpers: []
+    required_tests: []
+  stale_deprecated:
+    lifecycle: deprecated_fail_closed
+    reuse_when: Never; retained only so stale references fail visibly.
+    do_not_use_when: Always.
+    canonical_command: DO_NOT_RUN
+    delete_policy: archive_or_delete_in_cleanup_packet
+    status: deprecated
+    authority_scope: none
+    read_targets: []
+    write_targets: []
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    fail_closed: true
+    promotion_barrier: "Do not run; replace or archive in cleanup packet."
+    required_helpers: []
+    required_tests: []
+  config_writer:
+    lifecycle: long_lived
+    reuse_when: A repeatable config artifact must be generated from declared inputs.
+    do_not_use_when: The generated config cannot be reviewed before promotion.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: config_generation
+    read_targets: [state/zeus-world.db]
+    write_targets: [config/city_monthly_bounds.json]
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: config/city_monthly_bounds.json
+    external_inputs: []
+    dangerous_if_run: true
+    write_by_default: true
+    unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."
+    promotion_barrier: "Generated config cannot be promoted without review and diff evidence."
+    required_helpers: []
+    required_tests: [tests/test_ingestion_guard.py, tests/test_cities_config_authoritative.py]
+  utility:
+    lifecycle: long_lived
+    reuse_when: A narrow reusable repo utility is needed.
+    do_not_use_when: The utility would become hidden authority or mutate truth.
+    canonical_command: "python scripts/{script}"
+    delete_policy: retain_until_superseded
+    status: active
+    authority_scope: utility
+    read_targets: [repo]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Utility output is not authority."
+    required_helpers: []
+    required_tests: []
+
+scripts:
+  _verify_isolation.py: {class: stale_deprecated, reason: legacy isolation probe against old DB layout}
+  _yaml_bootstrap.py: {class: utility}
+  analyze_paper_trading.py: {class: diagnostic_report_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/paper_trading_analysis.json, stdout], replacement: run_replay.py, reason: paper-era report}
+  antibody_scan.py: {class: diagnostic}
+  apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
+  audit_architecture_alignment.py: {class: diagnostic}
+  audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
+  audit_divergence_counterfactual.py: {class: diagnostic}
+  audit_divergence_exit_counterfactual.py: {class: diagnostic}
+  audit_divergence_hindsight.py: {class: diagnostic}
+  audit_divergence_postchange.py: {class: diagnostic}
+  audit_divergence_thresholds.py: {class: diagnostic}
+  audit_paper_explainability.py: {class: stale_deprecated, reason: paper-era audit}
+  audit_realtime_pnl.py: {class: diagnostic}
+  audit_replay_completeness.py: {class: diagnostic}
+  audit_replay_fidelity.py: {class: diagnostic}
+  audit_time_semantics.py: {class: diagnostic}
+  auto_pause_live.sh: {class: runtime_support, canonical_command: "bash scripts/auto_pause_live.sh"}
+  automation_analysis.py: {class: diagnostic}
+  backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  backfill_current_market_price_snapshots.py: {class: etl_writer}
+  backfill_ens.py: {class: etl_writer}
+  backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
+  backfill_hko_daily.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
+  backfill_hourly_openmeteo.py: {class: etl_writer}
+  backfill_observations_from_settlements.py: {class: etl_writer}
+  backfill_open_positions_canonical.py: {class: stale_deprecated, reason: stale helper target deleted}
+  backfill_openmeteo_previous_runs.py: {class: etl_writer}
+  backfill_outcome_fact.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
+  backfill_probability_traces_from_opportunities.py: {class: etl_writer}
+  backfill_recent_exits_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
+  backfill_semantic_snapshots.py: {class: etl_writer, write_targets: [state/zeus_trades.db, state/zeus-world.db], target_db: state}
+  backfill_solar_openmeteo.py: {class: etl_writer}
+  backfill_tigge_snapshot_p_raw.py: {class: etl_writer}
+  backfill_trade_decision_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
+  backfill_truth_metadata.py: {class: etl_writer}
+  backfill_wu_daily_all.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
+  baseline_experiment.py: {class: diagnostic_report_writer, write_targets: [state/baseline_results.json, stdout]}
+  build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
+  capture_replay_artifact.py: {class: shadow_artifact_writer}
+  check_advisory_gates.py: {class: enforcement}
+  check_daemon_heartbeat.py: {class: runtime_support}
+  check_kernel_manifests.py: {class: enforcement}
+  check_module_boundaries.py: {class: enforcement}
+  check_work_packets.py: {class: enforcement}
+  cleanup_ghost_positions.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
+  data_completeness_audit.py: {class: diagnostic_report_writer, write_targets: [docs/reports/data_completeness_report.md, stdout]}
+  deep_heartbeat.py: {class: runtime_support}
+  deprecate_legacy_state_files.py: {class: repair, apply_flag: implicit, target_db: state, unguarded_write_rationale: "Existing legacy-state deprecation script mutates state files without an apply flag; manifest marks it dangerous pending hardening."}
+  diagnose_center_buy_failure.py: {class: diagnostic}
+  diagnose_truth_surfaces.py: {class: diagnostic}
+  equity_curve.py: {class: diagnostic}
+  etl_asos_wu_offset.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_diurnal_curves.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_forecast_error_profiles.py: {class: etl_writer}
+  etl_forecast_skill_from_forecasts.py: {class: etl_writer}
+  etl_historical_forecasts.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_hourly_observations.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_ladder_backfill.py: {class: etl_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, apply_flag: implicit, target_db: state/zeus-world.db, archive_reason: legacy ladder ETL pending archive, unguarded_write_rationale: "Legacy ladder ETL can mutate forecast_skill/model_bias if source DB exists; manifest marks it dangerous pending archive."}
+  etl_market_price_history.py: {class: etl_writer}
+  etl_observation_instants.py: {class: etl_writer}
+  etl_solar_times.py: {class: etl_writer, external_inputs: [external_absolute_path]}
+  etl_temp_persistence.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_tigge_calibration.py: {class: etl_writer}
+  etl_tigge_direct_calibration.py: {class: etl_writer}
+  etl_tigge_ens.py: {class: etl_writer}
+  force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
+  generate_calibration_pairs.py: {class: etl_writer}
+  generate_monthly_bounds.py: {class: config_writer}
+  healthcheck.py: {class: runtime_support}
+  heartbeat_dispatcher.py: {class: runtime_support, external_inputs: [openclaw_binary, host_log_path]}
+  investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
+  live_smoke_test.py: {class: runtime_support}
+  migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
+  migrate_cluster_to_city.py: {class: repair, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing migration mutates calibration tables without an apply flag; manifest marks it dangerous pending hardening."}
+  migrate_rainstorm_full.py: {class: stale_deprecated, reason: migration complete no-op}
+  migrate_to_isolated_dbs.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
+  nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--mode", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
+  onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
+  parse_change_log.py: {class: utility}
+  post_sequential_fillback.sh: {class: runtime_support, canonical_command: "bash scripts/post_sequential_fillback.sh <sequential_wrapper_pid>"}
+  profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
+  rebuild_calibration.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_settlements.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
+  refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
+  refresh_paper_runtime_artifacts.py: {class: repair, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/status_summary-paper.json, state/risk_state-paper.db], apply_flag: implicit, target_db: state/status_summary-paper.json + state/risk_state-paper.db, archive_reason: paper runtime artifacts are obsolete in live-only phase, unguarded_write_rationale: "Paper runtime artifact refresh writes obsolete paper status and paper risk DB rows; manifest marks it dangerous pending archive."}
+  replay_parity.py: {class: diagnostic}
+  resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
+  run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
+  semantic_linter.py: {class: enforcement}
+  topology_doctor.py: {class: enforcement}
+  validate_assumptions.py: {class: enforcement}
+  validate_dynamic_alpha.py: {class: diagnostic}
+  venus_autonomy_gate.py: {class: runtime_support}
+  venus_sensing_report.py: {class: runtime_support}
+  verify_truth_surfaces.py: {class: diagnostic}

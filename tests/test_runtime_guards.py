@@ -61,6 +61,17 @@ NYC = City(
 )
 
 
+class _CycleSettingsStub:
+    def __init__(self, *, capital_base_usd: float = 150.0, smoke_test_portfolio_cap_usd=None):
+        self.capital_base_usd = capital_base_usd
+        self._smoke_test_portfolio_cap_usd = smoke_test_portfolio_cap_usd
+
+    def __getitem__(self, key: str):
+        if key == "smoke_test_portfolio_cap_usd":
+            return self._smoke_test_portfolio_cap_usd
+        raise KeyError(key)
+
+
 def _position(**kwargs) -> Position:
     defaults = dict(
         trade_id="t1",
@@ -106,7 +117,6 @@ def _edge() -> BinEdge:
 
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
-    portfolio_path = tmp_path / "positions.json"
     conn = get_connection(db_path)
     init_schema(conn)
     conn.execute(
@@ -117,7 +127,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     )
     conn.commit()
     conn.close()
-    save_portfolio(PortfolioState(positions=[_position(size_usd=8.0, shares=20.0, cost_basis_usd=8.0)]), portfolio_path)
+    portfolio = PortfolioState(positions=[_position(size_usd=8.0, shares=20.0, cost_basis_usd=8.0)])
 
     class DummyClob:
         def __init__(self):
@@ -140,9 +150,9 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: load_portfolio(portfolio_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda mode: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: save_portfolio(state, portfolio_path))
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
@@ -157,8 +167,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-    loaded = load_portfolio(portfolio_path)
-    pos = loaded.positions[0]
+    pos = portfolio.positions[0]
 
     assert summary["chain_sync"]["synced"] == 1
     assert summary["chain_sync"]["updated"] == 1
@@ -387,6 +396,7 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
         def get_open_orders(self):
             return []
 
+    monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub(capital_base_usd=150.0, smoke_test_portfolio_cap_usd=None))
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -896,6 +906,7 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
         def get_balance(self):
             return 100.0
 
+    monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub(capital_base_usd=150.0, smoke_test_portfolio_cap_usd=None))
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
@@ -1104,9 +1115,11 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     assert payload["no_trade_cases"][0]["strategy"] == "opening_inertia"
     assert payload["no_trade_cases"][0]["edge_source"] == "opening_inertia"
     assert payload["no_trade_cases"][0]["rejection_reasons"] == ["strategy_gate_disabled:opening_inertia"]
+    assert payload["no_trade_cases"][0]["market_hours_open"] == 1.0
 
 
-def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
+@pytest.mark.parametrize("risk_level", [RiskLevel.YELLOW, RiskLevel.ORANGE])
+def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatch, tmp_path, risk_level):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -1128,7 +1141,7 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
 
     monitored: list[str] = []
 
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.ORANGE)
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: risk_level)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
@@ -1162,15 +1175,220 @@ def test_orange_risk_still_runs_monitoring(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cycle_runner,
         "evaluate_candidate",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked at ORANGE")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked at elevated risk")),
     )
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert monitored == ["t1"]
     assert summary["monitors"] == 1
-    assert summary["entries_blocked_reason"] == "risk_level=ORANGE"
+    assert summary["entries_blocked_reason"] == f"risk_level={risk_level.value}"
     assert summary["candidates"] == 0
+
+
+def test_force_exit_review_scope_is_entry_block_only(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position(target_date="2026-12-01")])
+
+    class DummyClob:
+        def __init__(self):
+            pass
+
+        def get_balance(self):
+            return 100.0
+
+    monitored: list[str] = []
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: True)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_reconcile_pending_positions",
+        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
+    )
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_entry_bankroll_for_cycle",
+        lambda portfolio, clob: (100.0, {"portfolio_initial_bankroll_usd": 100.0}),
+    )
+
+    def _monitor(conn, clob, portfolio, artifact, tracker, summary):
+        monitored.extend(pos.trade_id for pos in portfolio.positions)
+        summary["monitors"] += len(portfolio.positions)
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor)
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_discovery_phase",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert monitored == ["t1"]
+    assert summary["force_exit_review"] is True
+    assert summary["force_exit_review_scope"] == "entry_block_only"
+    assert summary["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
+    assert summary["monitors"] == 1
+    assert summary["candidates"] == 0
+
+
+def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(positions=[_position(size_usd=0.0, cost_basis_usd=0.0, target_date="2026-12-01")])
+
+    class DummyClob:
+        def __init__(self):
+            pass
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: True)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_reconcile_pending_positions",
+        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
+    )
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_entry_bankroll_for_cycle",
+        lambda portfolio, clob: (100.0, {"portfolio_initial_bankroll_usd": 100.0}),
+    )
+    monitored: list[str] = []
+
+    def _monitor(conn, clob, portfolio, artifact, tracker, summary):
+        monitored.extend(pos.trade_id for pos in portfolio.positions)
+        summary["monitors"] += len(portfolio.positions)
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor)
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_discovery_phase",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay paused")),
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["entries_paused"] is True
+    assert summary["entries_blocked_reason"] == "entries_paused"
+    assert monitored == ["t1"]
+    assert summary["monitors"] == 1
+    assert summary["candidates"] == 0
+
+
+def test_run_cycle_surfaces_fdr_family_scan_failure_without_entries(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    class DummyClob:
+        def __init__(self):
+            pass
+
+        def get_balance(self):
+            return 100.0
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_reconcile_pending_positions",
+        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
+    )
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", lambda *args, **kwargs: (False, False))
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "find_weather_markets",
+        lambda **kwargs: [
+            {
+                "city": NYC,
+                "target_date": "2026-12-01",
+                "hours_since_open": 1.0,
+                "hours_to_resolution": 24.0,
+                "outcomes": [
+                    {
+                        "title": "39-40°F",
+                        "range_low": 39,
+                        "range_high": 40,
+                        "token_id": "yes1",
+                        "no_token_id": "no1",
+                        "market_id": "m1",
+                        "price": 0.35,
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "evaluate_candidate",
+        lambda *args, **kwargs: [
+            EdgeDecision(
+                should_trade=False,
+                decision_id="fdr-down",
+                rejection_stage="FDR_FAMILY_SCAN_UNAVAILABLE",
+                rejection_reasons=["full-family FDR scan unavailable; entry selection failed closed"],
+                fdr_fallback_fired=True,
+                fdr_family_size=0,
+            )
+        ],
+    )
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    conn = get_connection(db_path)
+    artifact_row = conn.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    artifact_payload = json.loads(artifact_row["artifact_json"])
+
+    assert summary["fdr_fallback_fired"] is True
+    assert summary["trades"] == 0
+    assert summary["no_trades"] == 1
+    assert summary["candidates"] == 1
+    assert artifact_payload["no_trade_cases"][0]["rejection_stage"] == "FDR_FAMILY_SCAN_UNAVAILABLE"
+    assert artifact_payload["no_trade_cases"][0]["rejection_reasons"] == [
+        "full-family FDR scan unavailable; entry selection failed closed"
+    ]
 
 
 def test_only_green_risk_allows_new_entries():
@@ -1195,27 +1413,272 @@ def test_chain_quarantine_keeps_direction_unknown():
     assert pos.strategy == ""
 
 
-def test_chain_quarantine_explicitly_warns_exclusion_without_db_calls(caplog):
+def test_chain_quarantine_fails_closed_when_fact_write_fails(caplog):
     class GuardConn:
         def execute(self, *_args, **_kwargs):
-            raise AssertionError("chain-only quarantine exclusion should not touch DB state")
+            raise RuntimeError("db write unavailable")
 
     portfolio = PortfolioState()
     with caplog.at_level("WARNING"):
-        stats = reconcile(
-            portfolio,
-            [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
-            conn=GuardConn(),
-        )
+        with pytest.raises(RuntimeError, match="chain-only quarantine fact write failed"):
+            reconcile(
+                portfolio,
+                [ChainPosition(token_id="yes123", size=12.0, avg_price=0.42, condition_id="cond-1")],
+                conn=GuardConn(),
+            )
+
+    assert portfolio.positions == []
+    assert "EXCLUDED FROM CANONICAL MIGRATION" in caplog.text
+
+
+def test_chain_only_quarantine_persists_reconciliation_fact_without_strategy_default(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    portfolio = PortfolioState()
+
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="yes-chain-only", size=12.0, avg_price=0.42, cost=5.04, condition_id="cond-1")],
+        conn=conn,
+    )
+
+    fact = conn.execute(
+        """
+        SELECT suppression_reason, source_module, evidence_json
+        FROM token_suppression
+        WHERE token_id = 'yes-chain-only'
+        """
+    ).fetchone()
+    canonical_count = conn.execute(
+        "SELECT COUNT(*) FROM position_current WHERE token_id = 'yes-chain-only'"
+    ).fetchone()[0]
+    conn.close()
 
     assert stats["quarantined"] == 1
-    assert len(portfolio.positions) == 1
-    pos = portfolio.positions[0]
-    assert pos.trade_id.startswith("quarantine_")
+    assert canonical_count == 0
+    assert fact["suppression_reason"] == "chain_only_quarantined"
+    assert fact["source_module"] == "src.state.chain_reconciliation"
+    evidence = json.loads(fact["evidence_json"])
+    assert evidence["condition_id"] == "cond-1"
+    assert evidence["size"] == 12.0
+    assert evidence["avg_price"] == 0.42
+    assert portfolio.positions[0].strategy == ""
+
+
+def test_load_portfolio_rehydrates_chain_only_quarantine_fact(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "condition_id": "cond-1",
+            }),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    state = load_portfolio(path)
+
+    assert len(state.positions) == 1
+    pos = state.positions[0]
+    assert pos.trade_id == "quarantine_yes-chai"
+    assert pos.token_id == "yes-chain-only"
     assert pos.direction == "unknown"
+    assert pos.strategy == ""
     assert pos.chain_state == "quarantined"
-    assert "EXCLUDED FROM CANONICAL MIGRATION" in caplog.text
-    assert "pending future governance design" in caplog.text
+    assert pos.quarantined_at == "2026-04-04T00:00:00Z"
+
+
+def test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "condition_id": "cond-1",
+            }),
+        ),
+    )
+    conn.execute("DROP TABLE position_current")
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    state = load_portfolio(path)
+
+    assert state.portfolio_loader_degraded is True
+    assert len(state.positions) == 1
+    assert state.positions[0].token_id == "yes-chain-only"
+    assert state.positions[0].chain_state == "quarantined"
+
+
+def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_token(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+            last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+            decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+        ) VALUES (
+            'db-chain-only', 'quarantined', 'db-chain-only', 'cond-1', 'UNKNOWN', 'Other', 'UNKNOWN', 'UNKNOWN',
+            'unknown', 'F', 5.04, 12.0, 5.04, 0.42, 0.42,
+            NULL, NULL, NULL,
+            NULL, '', 'opening_inertia', NULL, NULL,
+            'quarantined', 'yes-chain-only', NULL, 'cond-1', NULL, NULL, '2026-04-04T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            json.dumps({"size": 12.0, "avg_price": 0.42, "cost": 5.04}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    state = load_portfolio(path)
+
+    assert [pos.token_id for pos in state.positions] == ["yes-chain-only"]
+
+
+def test_load_portfolio_uses_chain_quarantine_evidence_first_seen_at(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-01T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "first_seen_at": "2026-04-04T00:00:00Z",
+            }),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    state = load_portfolio(path)
+
+    assert state.positions[0].quarantined_at == "2026-04-04T00:00:00Z"
+
+
+def test_chain_only_quarantine_upsert_preserves_original_first_seen_at(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    path = tmp_path / "positions-cache.json"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-chain-only",
+            "cond-1",
+            "chain_only_quarantined",
+            "test",
+            "2026-04-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+            json.dumps({
+                "size": 12.0,
+                "avg_price": 0.42,
+                "cost": 5.04,
+                "first_seen_at": "2026-04-01T00:00:00Z",
+            }),
+        ),
+    )
+    portfolio = PortfolioState()
+
+    reconcile(
+        portfolio,
+        [ChainPosition(token_id="yes-chain-only", size=12.0, avg_price=0.42, cost=5.04, condition_id="cond-1")],
+        conn=conn,
+    )
+    row = conn.execute(
+        "SELECT evidence_json FROM token_suppression WHERE token_id = 'yes-chain-only'"
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    path.write_text(json.dumps({"positions": []}))
+
+    evidence = json.loads(row["evidence_json"])
+    state = load_portfolio(path)
+
+    assert evidence["first_seen_at"] == "2026-04-01T00:00:00Z"
+    assert state.positions[0].quarantined_at == "2026-04-01T00:00:00Z"
 
 
 def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
@@ -1402,6 +1865,77 @@ def test_strategy_classification_preserves_day0_and_update_semantics():
         shoulder_no,
     ) == "shoulder_sell"
     assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
+
+
+def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():
+    center_edge = _edge()
+    center_edge.ci_lower = 0.0
+    center_edge.ci_upper = 0.0
+    shoulder_no = BinEdge(
+        bin=Bin(low=None, high=38, label="38°F or below", unit="F"),
+        direction="buy_no",
+        edge=0.11,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.72,
+        p_market=0.58,
+        p_posterior=0.69,
+        entry_price=0.58,
+        p_value=0.02,
+        vwmp=0.58,
+    )
+    update = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+    day0 = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=30.0,
+        hours_to_resolution=2.0,
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+    opening = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    assert evaluator_module._entry_ci_rejection_reason(update, center_edge).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(update, center_edge) == "center_buy"
+    assert evaluator_module._entry_ci_rejection_reason(update, shoulder_no).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(update, shoulder_no) == "shoulder_sell"
+    buy_no_center = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_no",
+        edge=0.11,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.72,
+        p_market=0.58,
+        p_posterior=0.69,
+        entry_price=0.58,
+        p_value=0.02,
+        vwmp=0.58,
+    )
+    assert evaluator_module._strategy_key_for(update, buy_no_center) == "opening_inertia"
+    assert evaluator_module._entry_ci_rejection_reason(day0, center_edge).startswith(
+        "DEGENERATE_CONFIDENCE_BAND"
+    )
+    assert evaluator_module._strategy_key_for(day0, center_edge) == "settlement_capture"
+    assert evaluator_module._entry_ci_rejection_reason(opening, center_edge) is None
 
 
 def test_materialize_position_preserves_evaluator_strategy_key():
@@ -2242,6 +2776,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 4.0)
@@ -2259,6 +2794,238 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     assert [d.should_trade for d in decisions] == [True, False]
     assert heats[0] == pytest.approx(0.0)
     assert heats[1] == pytest.approx(0.4)
+
+
+def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or below",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.20,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.35,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.45,
+            },
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=3000):
+            return np.array([0.25, 0.50, 0.25])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+    degenerate_edge = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_yes",
+        edge=0.12,
+        ci_lower=0.0,
+        ci_upper=0.0,
+        p_model=0.60,
+        p_market=0.35,
+        p_posterior=0.47,
+        entry_price=0.35,
+        p_value=0.02,
+        vwmp=0.35,
+    )
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            degenerate_edge.forward_edge = degenerate_edge.p_posterior - degenerate_edge.p_market
+            return [degenerate_edge]
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-degenerate-ci")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degenerate CI must not reach sizing")))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        entry_bankroll=150.0,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "EDGE_INSUFFICIENT"
+    assert decisions[0].rejection_reasons[0].startswith("DEGENERATE_CONFIDENCE_BAND")
+    assert decisions[0].strategy_key == "center_buy"
+    assert "confidence_band_guard" in decisions[0].applied_validations
+
+
+def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
+    from src.contracts.alpha_decision import AlphaDecision
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or below",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.20,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "price": 0.35,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "price": 0.45,
+            },
+        ],
+        hours_since_open=30.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+            self.member_maxes = np.full(51, 40.0)
+
+        def p_raw_vector(self, bins, n_mc=3000):
+            return np.array([0.25, 0.50, 0.25])
+
+        def spread(self):
+            from src.types.temperature import TemperatureDelta
+
+            return TemperatureDelta(2.0, "F")
+
+        def spread_float(self):
+            return 2.0
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            return (0.34, 0.36, 20.0, 20.0)
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None: {
+            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+            "model": model or "ecmwf_ifs025",
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-alpha-target")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr(
+        evaluator_module,
+        "compute_alpha",
+        lambda *args, **kwargs: AlphaDecision(
+            value=0.65,
+            optimization_target="brier_score",
+            evidence_basis="test brier alpha",
+            ci_bound=0.1,
+        ),
+    )
+    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("alpha mismatch must not reach sizing")))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=DummyClob(),
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        entry_bankroll=150.0,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].rejection_reasons[0].startswith("ALPHA_TARGET_MISMATCH")
+    assert "alpha_target_contract" in decisions[0].applied_validations
 
 
 def test_day0_observation_path_reaches_day0_signal(monkeypatch):
@@ -2390,6 +3157,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
@@ -2622,6 +3390,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
 
     decisions = evaluator_module.evaluate_candidate(
@@ -2729,6 +3498,45 @@ def test_build_exit_context_uses_market_price_as_best_bid_in_paper_mode():
     )
 
     assert ctx.best_bid == pytest.approx(0.46)
+
+
+def test_build_exit_context_preserves_missing_best_bid_for_exit_audit():
+    edge_ctx = type(
+        "EdgeContext",
+        (),
+        {
+            "p_posterior": 0.41,
+            "p_market": np.array([0.46]),
+            "divergence_score": 0.0,
+            "market_velocity_1h": 0.0,
+        },
+    )()
+    pos = Position(
+        trade_id="live-buy-yes-missing-bid",
+        market_id="m1",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        last_monitor_prob=0.41,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.46,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=None,
+    )
+
+    ctx = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=4.0,
+        ExitContext=ExitContext,
+    )
+
+    assert ctx.best_bid is None
+    assert ctx.current_market_price == pytest.approx(0.46)
 
 
 def test_monitoring_skips_sell_pending_when_chain_already_missing():
@@ -3342,6 +4150,183 @@ def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monke
     assert artifact.exit_cases[0].trade_id == "filled-1"
 
 
+def _monitor_chain_deps(now: datetime):
+    return types.SimpleNamespace(
+        MonitorResult=cycle_runner.MonitorResult,
+        logger=logging.getLogger("test_monitor_chain_missing"),
+        cities_by_name={"NYC": NYC},
+        _utcnow=lambda: now,
+        has_acknowledged_quarantine_clear=lambda token_id: False,
+    )
+
+
+def test_monitor_refresh_failure_near_settlement_is_operator_visible(monkeypatch):
+    pos = _position(trade_id="monitor-chain-missing", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh exploded")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_positions"] == ["monitor-chain-missing"]
+    assert summary["monitor_chain_missing_reasons"][0]["reason"] == "refresh_failed:RuntimeError"
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason == "MONITOR_CHAIN_MISSING:refresh_failed:RuntimeError"
+
+
+def test_monitor_refresh_failure_far_from_settlement_is_not_chain_missing(monkeypatch):
+    pos = _position(trade_id="monitor-far", state="holding", target_date="2026-04-10")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh exploded")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert "monitor_chain_missing" not in summary
+    assert artifact.monitor_results == []
+
+
+def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeypatch):
+    pos = _position(trade_id="monitor-incomplete", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            p_market=np.array([]),
+            p_posterior=0.41,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.0,
+        ),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_incomplete_exit_context"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith(
+        "incomplete_exit_context:INCOMPLETE_EXIT_CONTEXT"
+    )
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+
+
+def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
+    pos = _position(trade_id="monitor-execution-failed", state="day0_window")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    def _refresh_position(conn, clob, pos):
+        pos.last_monitor_market_price = 0.46
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = 0.46
+        pos.last_monitor_prob = 0.41
+        pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.46]),
+            p_posterior=0.41,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-0.05,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, exit_context: ExitDecision(True, "EDGE_REVERSAL", trigger="EDGE_REVERSAL"),
+    )
+    monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("execution failed")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert "monitor_chain_missing" not in summary
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason == "EDGE_REVERSAL"
+
+
+def test_time_context_failure_near_active_position_escalates_monitor_chain(monkeypatch):
+    pos = _position(trade_id="monitor-time-context", state="holding", target_date="not-a-date")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("refresh should not run")),
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert summary["monitor_failed"] == 1
+    assert summary["monitor_chain_missing"] == 1
+    assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith("time_context_failed")
+    assert len(artifact.monitor_results) == 1
+    assert artifact.monitor_results[0].exit_reason.startswith("MONITOR_CHAIN_MISSING:time_context_failed")
+
+
 def test_monitoring_phase_persists_live_exit_telemetry_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -3713,6 +4698,20 @@ def test_build_exit_intent_carries_boundary_fields():
     assert intent.shares == pytest.approx(pos.effective_shares)
     assert intent.current_market_price == pytest.approx(0.46)
     assert intent.best_bid == pytest.approx(0.45)
+
+
+def test_sell_result_without_order_id_is_rejected_not_trade_id_fallback():
+    result = exit_lifecycle_module._coerce_sell_result(
+        "trade-1",
+        {"status": "OPEN", "price": 0.44, "shares": 25.0},
+    )
+
+    assert result.status == "rejected"
+    assert result.order_id in (None, "")
+    assert result.external_order_id in (None, "")
+    assert result.order_id != "trade-1"
+    assert result.external_order_id != "trade-1"
+    assert result.reason == "missing_order_id"
 
 
 def test_execute_exit_routes_live_sell_through_executor_exit_path(monkeypatch):

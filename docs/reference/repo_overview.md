@@ -11,16 +11,19 @@
 - **Market**: Polymarket CLOB (weather prediction markets)
 - **Infrastructure**: Import linter (zone boundaries), work packets (change control)
 
-## Runtime modes
+## Runtime contexts
 
-Zeus runs in two modes, controlled by `settings.json`:
+Zeus is live-only. Paper mode was decommissioned in Phase 1; backtest and
+shadow are diagnostic contexts, not peer runtime modes.
 
-| Mode | Database | Positions | Purpose |
-|------|----------|-----------|---------|
-| `paper` | `zeus-paper.db` | `positions-paper.json` | Backtesting, development, validation |
-| `live` | `zeus-live.db` | `positions-live.json` | Real money trading on Polymarket |
+| Context | Authority | Purpose |
+|---------|-----------|---------|
+| `live` | `state/zeus_trades.db` + `state/zeus-world.db` | Real money trading on Polymarket |
+| `backtest` | `state/zeus_backtest.db` | Derived diagnostics and replay reports only |
+| `shadow` | DB-backed observation/instrumentation facts | Observe and compare without gating live execution |
 
-Shared world data (ensemble forecasts, observations) lives in `zeus-shared.db`.
+JSON status/position files are derived operator surfaces and must not be read
+back as runtime authority.
 
 ## Key entry points
 
@@ -33,8 +36,9 @@ Shared world data (ensemble forecasts, observations) lives in `zeus-shared.db`.
 
 ## Configuration
 
-- `config/settings.json` — all runtime parameters (single source of truth)
+- `config/settings.json` — tunable runtime parameters
 - `config/cities.json` — 16 cities with coordinates, stations, peak hours, units
+- `config/reality_contracts/*.yaml` — scoped external assumption contracts
 
 ## Dependencies
 
@@ -46,7 +50,7 @@ See `requirements.txt`. Key libraries:
 
 ## Logs
 
-`logs/zeus-paper.log`, `logs/zeus-paper.err` — rotated by launchd.
+Runtime logs are derived operational evidence; DB truth remains authoritative.
 
 ## External boundaries
 

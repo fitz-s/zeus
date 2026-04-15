@@ -79,6 +79,15 @@ class TestWalletBankrollSource:
         assert bankroll is None
         assert cap["entry_block_reason"] == "wallet_query_failed"
 
+    @pytest.mark.parametrize("balance", [0.0, -1.0])
+    def test_non_positive_wallet_balance_blocks_without_query_failure(self, balance):
+        clob = _LiveClob(balance=balance)
+        portfolio = PortfolioState(bankroll=150.0)
+        bankroll, cap = _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=_FakeDeps)
+        assert bankroll is None
+        assert cap["wallet_balance_usd"] == balance
+        assert cap["entry_block_reason"] == "entry_bankroll_non_positive"
+
     def test_startup_fails_closed_on_wallet_error(self):
         """Criterion #1: wallet raises at startup u2192 daemon refuses to start via sys.exit."""
         import src.main as main_mod

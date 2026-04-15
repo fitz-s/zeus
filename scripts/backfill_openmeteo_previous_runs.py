@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import math
 import sys
 import time
 from collections import Counter
@@ -28,6 +30,8 @@ import httpx
 from src.config import City, cities, cities_by_name
 from src.state.db import get_world_connection, init_schema
 
+logger = logging.getLogger(__name__)
+
 PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 SOURCE = "openmeteo_previous_runs"
 MODEL_SOURCE_MAP = {
@@ -41,6 +45,48 @@ DEFAULT_MODELS = tuple(MODEL_SOURCE_MAP)
 DEFAULT_CHUNK_DAYS = 90
 DEFAULT_LEADS = tuple(range(1, 8))
 MAX_RETRIES = 3
+
+# Earth temperature records — reject any forecast that exceeds these as the
+# model outputting garbage (NaN propagation, numerical overflow, etc.). These
+# match IngestionGuard Layer 1 sub-check b thresholds, kept local to avoid
+# importing the observation-oriented guard into a forecast script.
+_EARTH_HIGH_F = 134.0   # Death Valley 1913
+_EARTH_LOW_F  = -128.6  # Vostok 1983
+_EARTH_HIGH_C = 56.7
+_EARTH_LOW_C  = -89.2
+
+
+def _validate_forecast_temps(
+    high: float,
+    low: float,
+    unit: str,
+) -> str | None:
+    """Return rejection category (short string) or None if valid.
+
+    Checks: finite, Earth records, high >= low. Does NOT check seasonal
+    plausibility (forecasts can legitimately be more extreme than observations
+    within the model's uncertainty envelope) and does NOT check TIGGE-derived
+    p01/p99 bounds (TIGGE bounds under-represent real tails and mis-reject
+    legitimate values — same issue that caused the 2026-04-13 WU backfill
+    Layer 2 false-positive incident).
+    """
+    if not (math.isfinite(high) and math.isfinite(low)):
+        return "not_finite"
+    if high < low:
+        return "high_less_than_low"
+    if unit == "F":
+        if high > _EARTH_HIGH_F:
+            return "high_above_earth_record_f"
+        if low < _EARTH_LOW_F:
+            return "low_below_earth_record_f"
+    elif unit == "C":
+        if high > _EARTH_HIGH_C:
+            return "high_above_earth_record_c"
+        if low < _EARTH_LOW_C:
+            return "low_below_earth_record_c"
+    else:
+        return f"unknown_unit_{unit}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -98,11 +144,26 @@ def _fetch_previous_runs_chunk(
         "models": list(models),
     }
     for attempt in range(1, MAX_RETRIES + 1):
-        response = httpx.get(
-            PREVIOUS_RUNS_URL,
-            params=params,
-            timeout=60.0,
-        )
+        try:
+            response = httpx.get(
+                PREVIOUS_RUNS_URL,
+                params=params,
+                timeout=60.0,
+            )
+        except httpx.HTTPError as exc:
+            # Network layer error (ConnectTimeout, ReadTimeout, ProxyError etc.)
+            # The original script only retried 429 and let network errors
+            # propagate, losing entire chunks on transient glitches.
+            if attempt < MAX_RETRIES:
+                wait = 5.0 * attempt
+                logger.warning(
+                    "Network error on %s %s..%s attempt %d/%d: %s "
+                    "(retrying in %.1fs)",
+                    city.name, start, end, attempt, MAX_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+                continue
+            raise
         if response.status_code == 429 and attempt < MAX_RETRIES:
             retry_after = response.headers.get("retry-after")
             try:
@@ -113,8 +174,7 @@ def _fetch_previous_runs_chunk(
             continue
         response.raise_for_status()
         return response.json()
-    response.raise_for_status()
-    return response.json()
+    raise RuntimeError("_fetch_previous_runs_chunk exhausted retries unexpectedly")
 
 
 def _rows_from_payload(
@@ -159,6 +219,16 @@ def _rows_from_payload(
     for (target_date, lead, source), temps in sorted(by_date.items()):
         target = date.fromisoformat(target_date)
         basis = target - timedelta(days=lead)
+        high = max(temps)
+        low = min(temps)
+        reason = _validate_forecast_temps(high, low, city.settlement_unit)
+        if reason:
+            counters[f"rejected_{reason}"] += 1
+            logger.warning(
+                "forecast rejected: %s %s lead=%d src=%s high=%s low=%s unit=%s reason=%s",
+                city.name, target_date, lead, source, high, low, city.settlement_unit, reason,
+            )
+            continue
         rows.append(
             ForecastBackfillRow(
                 city=city.name,
@@ -168,8 +238,8 @@ def _rows_from_payload(
                 forecast_issue_time=None,
                 lead_days=lead,
                 lead_time_hours=float(lead * 24),
-                forecast_high=max(temps),
-                forecast_low=min(temps),
+                forecast_high=high,
+                forecast_low=low,
                 temp_unit=city.settlement_unit,
                 retrieved_at=retrieved_at,
                 imported_at=imported_at,
