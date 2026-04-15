@@ -74,6 +74,11 @@ from src.contracts.calibration_bins import (
     validate_members_unit_plausible,
     validate_members_vs_observation,
 )
+from src.contracts.ensemble_snapshot_provenance import (
+    DataVersionQuarantinedError,
+    assert_data_version_allowed,
+    is_quarantined,
+)
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
@@ -89,20 +94,14 @@ CANONICAL_BIN_SOURCE = "canonical_v1"
 # is aligned to the TIGGE window [2024-01-01, today].
 MIN_TRAINING_DATE = "2024-01-01"
 
-# Any snapshot whose data_version is in this set is the known partial TIGGE
-# ingest that predates the task #61 rewrite — the member values are derived
-# from step-024-only extraction and reject recalibration until the new 7-step
-# ingest overwrites them. Rebuild refuses unless --allow-unaudited-ensemble
-# is passed explicitly.
-#
-# This is an exact-match SET, not a prefix-match, so that the task #61 rewrite
-# can write new data_version strings (e.g. tigge_step024_v2_*) without
-# accidentally being swept up by a too-broad prefix.
-_UNAUDITED_DATA_VERSIONS = frozenset({
-    "tigge_step024_v1_near_peak",
-    "tigge_step024_v1_overnight_snapshot",
-    "tigge_partial_legacy",
-})
+# Per-snapshot quarantine is now owned by
+# ``src/contracts/ensemble_snapshot_provenance.py``. Use ``is_quarantined``
+# for read-path filtering (below) and ``assert_data_version_allowed`` at
+# any future write site. The contract covers both exact-match known-bad
+# versions and prefix-match conservative blanket refusal of the whole
+# ``tigge_step*`` / ``tigge_param167*`` / ``tigge_2t_instant*`` families.
+# The future ``tigge_mx2t6_local_peak_window_max_v1`` data_version is
+# intentionally NOT quarantined — it is the replacement target.
 
 
 @dataclass
@@ -400,7 +399,7 @@ def rebuild(
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
         dv = (snap["data_version"] or "")
-        if dv in _UNAUDITED_DATA_VERSIONS:
+        if is_quarantined(dv):
             unaudited_ids.append(snap["snapshot_id"])
             if not allow_unaudited_ensemble:
                 continue

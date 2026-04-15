@@ -357,11 +357,14 @@ def _write_day(
     high = max(temps)
     low = min(temps)
     tz = ZoneInfo(city.timezone)
-    # Synthesize a representative local_time as local peak hour; downstream
-    # code mostly reads target_date, so precision here is low-stakes.
+    # Synthesize a representative local_time at a generic local-afternoon
+    # anchor (14:00). The City dataclass does not expose historical_peak_hour
+    # (it lives in cities.json but is not loaded into the dataclass as of
+    # 2026-04-14) and downstream code reads target_date rather than the exact
+    # local_time, so this constant is low-stakes for the observations row.
     local_peak_naive = datetime(
         local_date.year, local_date.month, local_date.day,
-        int(city.historical_peak_hour), 0, 0,
+        14, 0, 0,
     )
     local_time = local_peak_naive.replace(tzinfo=tz)
     offset = local_time.utcoffset() or timedelta(0)

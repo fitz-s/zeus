@@ -83,6 +83,7 @@ class _FakeCity:
         self.settlement_unit = unit
         self.wu_station = wu_station
         self.settlement_source = ""  # WU default path in for_city
+        self.settlement_source_type = "wu_icao"  # default WU ICAO path
         self.cluster = cluster
         self.lat = lat
         self.lon = lon
@@ -702,6 +703,76 @@ def test_R12b_obs_anchor_rejects_nonfinite_observation():
 def test_R12b_obs_anchor_rejects_empty_members():
     with pytest.raises(UnitProvenanceError, match=r"empty"):
         validate_members_vs_observation(np.array([]), NYC_F, 70.0)
+
+
+# ---------------------------------------------------------------------------
+# R14 — ensemble_snapshots data_version quarantine contract
+# ---------------------------------------------------------------------------
+
+
+def test_R14_quarantine_rejects_known_bad_exact_match():
+    from src.contracts.ensemble_snapshot_provenance import (
+        DataVersionQuarantinedError,
+        assert_data_version_allowed,
+        is_quarantined,
+    )
+    for dv in (
+        "tigge_step024_v1_near_peak",
+        "tigge_step024_v1_overnight_snapshot",
+        "tigge_partial_legacy",
+    ):
+        assert is_quarantined(dv), dv
+        with pytest.raises(DataVersionQuarantinedError, match=r"quarantined"):
+            assert_data_version_allowed(dv, context="test")
+
+
+def test_R14_quarantine_rejects_prefix_families():
+    from src.contracts.ensemble_snapshot_provenance import (
+        DataVersionQuarantinedError,
+        assert_data_version_allowed,
+        is_quarantined,
+    )
+    # Future variants of the same wrong physical quantity
+    for dv in (
+        "tigge_step024_v2_anything",
+        "tigge_step048_v1_test",
+        "tigge_param167_v99",
+        "tigge_2t_instant_experimental",
+    ):
+        assert is_quarantined(dv), dv
+        with pytest.raises(DataVersionQuarantinedError):
+            assert_data_version_allowed(dv)
+
+
+def test_R14_quarantine_allows_replacement_tag():
+    """The mx2t6 replacement data_version must pass the guard."""
+    from src.contracts.ensemble_snapshot_provenance import (
+        assert_data_version_allowed,
+        is_quarantined,
+    )
+    allowed = (
+        "tigge_mx2t6_local_peak_window_max_v1",
+        "tigge_mx2t6_local_day_window_max_v1",
+        "openmeteo_ens_ecmwf_ifs025_daily_max_v1",
+        "",
+        None,
+    )
+    for dv in allowed:
+        assert not is_quarantined(dv), dv
+        assert_data_version_allowed(dv)  # must not raise
+
+
+def test_R14_filter_allowed_partitions_rows():
+    from src.contracts.ensemble_snapshot_provenance import filter_allowed
+    rows = [
+        {"id": 1, "data_version": "tigge_mx2t6_local_peak_window_max_v1"},
+        {"id": 2, "data_version": "tigge_step024_v1_near_peak"},
+        {"id": 3, "data_version": "tigge_step048_v1_future"},
+        {"id": 4, "data_version": "openmeteo_ens_v1"},
+    ]
+    allowed, quarantined = filter_allowed(rows)
+    assert [r["id"] for r in allowed] == [1, 4]
+    assert [r["id"] for r in quarantined] == [2, 3]
 
 
 # ---------------------------------------------------------------------------
