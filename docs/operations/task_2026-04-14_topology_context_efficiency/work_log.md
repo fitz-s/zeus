@@ -109,3 +109,13 @@ Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_docs_check
 Summary: Moved docs-specific checker implementations into `topology_doctor_docs_checks.py` while preserving wrapper functions in `topology_doctor.py` for existing tests and callers.
 Verification: `pytest -q tests/test_topology_doctor.py -k 'docs_mode or current_state or hidden_docs or broken_internal or compiled_topology or cli_json_parity'`; `python scripts/topology_doctor.py --docs --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_docs_checks.py scripts/topology_doctor_cli.py`.
 Next: Future splits should move one checker family at a time with the same wrapper/parity pattern.
+
+## 2026-04-15 — Artifact Checker Family Split
+
+Date: 2026-04-15
+Branch: data-improve
+Task: Extract the artifact lifecycle/work-record checker family behind existing wrappers.
+Changed files: `scripts/topology_doctor.py`, `scripts/topology_doctor_artifact_checks.py`, `architecture/script_manifest.yaml`, `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md`
+Summary: Moved artifact lifecycle and work-record checker implementations into `topology_doctor_artifact_checks.py`; `topology_doctor.py` keeps wrapper functions for existing callers and CLI behavior.
+Verification: `pytest -q tests/test_topology_doctor.py -k 'artifact_lifecycle or work_record'`; `python scripts/topology_doctor.py --artifact-lifecycle --summary-only`; `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md --summary-only`; `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_artifact_checks.py`.
+Next: Avoid splitting git-status-dependent map-maintenance until unrelated script dirty state is isolated.

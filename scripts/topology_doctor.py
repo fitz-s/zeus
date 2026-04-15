@@ -2606,201 +2606,45 @@ def run_context_packs() -> StrictResult:
     return StrictResult(ok=not issues, issues=issues)
 
 
+
+def _artifact_checks():
+    try:
+        from scripts import topology_doctor_artifact_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_artifact_checks
+
+    return topology_doctor_artifact_checks
+
+
 def _path_matches_any(path: str, patterns: list[str]) -> bool:
-    return any(fnmatch(path, pattern) for pattern in patterns)
+    return _artifact_checks().path_matches_any(path, patterns)
 
 
 def _artifact_record_contract() -> dict[str, Any]:
-    return load_artifact_lifecycle().get("record_contract") or {}
+    return _artifact_checks().artifact_record_contract(sys.modules[__name__])
 
 
 def _approved_work_record_path(path: str, contract: dict[str, Any] | None = None) -> bool:
-    contract = contract or _artifact_record_contract()
-    return _path_matches_any(path, [str(pattern) for pattern in contract.get("approved_record_globs") or []])
+    return _artifact_checks().approved_work_record_path(sys.modules[__name__], path, contract)
 
 
 def _record_exempt_path(path: str, contract: dict[str, Any] | None = None) -> bool:
-    contract = contract or _artifact_record_contract()
-    if _approved_work_record_path(path, contract):
-        return True
-    return _path_matches_any(path, [str(pattern) for pattern in contract.get("exempt_path_globs") or []])
+    return _artifact_checks().record_exempt_path(sys.modules[__name__], path, contract)
 
 
 def run_artifact_lifecycle() -> StrictResult:
-    if not ARTIFACT_LIFECYCLE_PATH.exists():
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "artifact_lifecycle_manifest_missing",
-                    "architecture/artifact_lifecycle.yaml",
-                    "artifact lifecycle manifest is missing",
-                )
-            ],
-        )
-    manifest = load_artifact_lifecycle()
-    issues: list[TopologyIssue] = []
-    required = manifest.get("required_artifact_class_fields") or []
-    required_liminal = manifest.get("required_liminal_artifact_fields") or []
-    liminal_roles = set(manifest.get("allowed_liminal_artifact_roles") or [])
-    route_classes = set(manifest.get("allowed_route_classes") or [])
-    contract = manifest.get("record_contract") or {}
-    for field in ("minimum_fields", "approved_record_globs", "exempt_path_globs"):
-        if _metadata_missing(contract.get(field)):
-            issues.append(
-                _issue(
-                    "artifact_lifecycle_record_contract_missing",
-                    "architecture/artifact_lifecycle.yaml:record_contract",
-                    f"missing {field}",
-                )
-            )
-    classes: dict[str, dict[str, Any]] = {}
-    for idx, item in enumerate(manifest.get("artifact_classes") or []):
-        class_id = str(item.get("id") or f"artifact_class[{idx}]")
-        path = f"architecture/artifact_lifecycle.yaml:{class_id}"
-        if class_id in classes:
-            issues.append(_issue("artifact_lifecycle_duplicate_class", path, "duplicate artifact class id"))
-        classes[class_id] = item
-        for field in required:
-            if _metadata_missing(item.get(field)):
-                issues.append(_issue("artifact_lifecycle_required_field_missing", path, f"missing {field}"))
-
-    for idx, rule in enumerate(manifest.get("classification_rules") or []):
-        rule_id = str(rule.get("id") or f"classification_rule[{idx}]")
-        path = f"architecture/artifact_lifecycle.yaml:{rule_id}"
-        if _metadata_missing(rule.get("path_globs")):
-            issues.append(_issue("artifact_lifecycle_rule_invalid", path, "missing path_globs"))
-        artifact_class = str(rule.get("artifact_class") or "")
-        if artifact_class not in classes:
-            issues.append(
-                _issue(
-                    "artifact_lifecycle_unknown_class",
-                    path,
-                    f"unknown artifact_class {artifact_class!r}",
-                )
-            )
-        if _metadata_missing(rule.get("lifecycle")):
-            issues.append(_issue("artifact_lifecycle_rule_invalid", path, "missing lifecycle"))
-
-    for idx, item in enumerate(manifest.get("liminal_artifacts") or []):
-        item_path = str(item.get("path") or f"liminal_artifact[{idx}]")
-        path = f"architecture/artifact_lifecycle.yaml:{item_path}"
-        for field in required_liminal:
-            if _metadata_missing(item.get(field)):
-                issues.append(_issue("artifact_lifecycle_liminal_field_missing", path, f"missing {field}"))
-        if item.get("artifact_role") not in liminal_roles:
-            issues.append(
-                _issue(
-                    "artifact_lifecycle_liminal_role_invalid",
-                    path,
-                    f"invalid artifact_role {item.get('artifact_role')!r}",
-                )
-            )
-        if item.get("route_class") not in route_classes:
-            issues.append(
-                _issue(
-                    "artifact_lifecycle_liminal_route_invalid",
-                    path,
-                    f"invalid route_class {item.get('route_class')!r}",
-                )
-            )
-        if item.get("path") and not (ROOT / item_path).exists():
-            issues.append(
-                _issue(
-                    "artifact_lifecycle_liminal_path_missing",
-                    path,
-                    "liminal artifact path does not exist",
-                )
-            )
-    return StrictResult(ok=not issues, issues=issues)
+    return _artifact_checks().run_artifact_lifecycle(sys.modules[__name__])
 
 
 def _record_text_has_field(text: str, field: str) -> bool:
-    return re.search(rf"^{re.escape(field)}:\s*\S", text, re.MULTILINE) is not None
+    return _artifact_checks().record_text_has_field(text, field)
 
 
 def run_work_record(
     changed_files: list[str] | None = None,
     record_path: str | None = None,
 ) -> StrictResult:
-    if not ARTIFACT_LIFECYCLE_PATH.exists():
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "artifact_lifecycle_manifest_missing",
-                    "architecture/artifact_lifecycle.yaml",
-                    "artifact lifecycle manifest is missing",
-                )
-            ],
-        )
-    contract = _artifact_record_contract()
-    try:
-        changes = _map_maintenance_changes(changed_files or [])
-    except subprocess.CalledProcessError as exc:
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "work_record_git_status_failed",
-                    "<git-status>",
-                    f"could not read git status: {exc}",
-                )
-            ],
-        )
-
-    substantive = sorted(
-        path for path in changes
-        if not _record_exempt_path(path, contract)
-    )
-    if not substantive:
-        return StrictResult(ok=True, issues=[])
-
-    if not record_path:
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "work_record_required",
-                    "<work-record>",
-                    "repo-changing work requires a short work record; pass --work-record-path",
-                )
-            ],
-        )
-    if not _approved_work_record_path(record_path, contract):
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "work_record_invalid_path",
-                    record_path,
-                    "work record path is not approved by artifact_lifecycle.yaml",
-                )
-            ],
-        )
-    target = ROOT / record_path
-    if not target.exists() or not target.is_file():
-        return StrictResult(
-            ok=False,
-            issues=[
-                _issue(
-                    "work_record_missing",
-                    record_path,
-                    "work record file does not exist",
-                )
-            ],
-        )
-    text = target.read_text(encoding="utf-8", errors="ignore")
-    issues = [
-        _issue(
-            "work_record_field_missing",
-            record_path,
-            f"work record missing field {field!r}",
-        )
-        for field in contract.get("minimum_fields") or []
-        if not _record_text_has_field(text, str(field))
-    ]
-    return StrictResult(ok=not issues, issues=issues)
+    return _artifact_checks().run_work_record(sys.modules[__name__], changed_files, record_path)
 
 
 def _strict_result_summary(result: StrictResult) -> dict[str, Any]:
