@@ -1261,3 +1261,51 @@ cards:
     zero_context_digest: >
       Semantic Provenance Guards are static-analysis hooks that keep
       probability/edge provenance visible.
+
+  - id: NUMPY_ARRAY_TRUTHINESS_IN_CONDITIONALS
+    status: active_law
+    severity: high
+    sources:
+      - "commit f6eaa72 (data-improve): critic-response — numpy truthiness fix"
+      - "docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md"
+    failure_mode: >
+      Using `if array_variable:` on a numpy array with >1 element raises
+      ValueError at runtime. This only surfaces when the array is non-empty
+      AND has multiple elements — single-element arrays silently work.
+    trigger_context: >
+      Platt-parameterized bootstrap paths in market_analysis.py assigned
+      `platt_params = calibrator.bootstrap_params` (a numpy array), then
+      tested `if platt_params:` in an inner loop. Tests with unfitted
+      calibrators never triggered it. Only adding Platt bootstrap tests
+      with a mock fitted calibrator exposed the crash.
+    wrong_moves:
+      - "Using `if variable:` truthiness checks on numpy arrays"
+      - "Testing only the un-calibrated path and assuming the calibrated path works"
+    correct_rule: >
+      Always use a pre-computed boolean (`has_platt = ... is not None and ...`)
+      or explicit `len()` / `.size` checks for numpy array conditionals.
+      Never rely on truthiness of numpy arrays.
+    antibodies:
+      code:
+        - src/strategy/market_analysis.py
+      tests:
+        - tests/test_k3_slice_p.py
+      gates:
+        - pytest -q tests/test_k3_slice_p.py -k PlattCalibrator
+    residual_risk: >
+      Other numpy arrays in conditional positions may exist elsewhere in
+      the codebase; no static scan currently enforces this.
+    invalidation_condition: >
+      A static linter rule that flags `if <numpy_array>:` patterns would
+      make this lore entry redundant.
+    routing:
+      task_terms: [numpy, truthiness, ValueError, array, bootstrap, platt, calibrator]
+      file_patterns:
+        - src/strategy/market_analysis.py
+        - tests/test_k3_slice_p.py
+    downstream_blast_radius:
+      - src/strategy/market_analysis.py
+      - tests/test_k3_slice_p.py
+    zero_context_digest: >
+      Never use `if numpy_array:` — it raises ValueError when the array
+      has multiple elements. Use a pre-computed boolean instead.

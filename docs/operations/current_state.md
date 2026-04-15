@@ -14,10 +14,10 @@ Role: single live control-entry surface for the repo.
 
 - Branch: `data-improve`
 - Program: Zeus Topology Compiler and Recurrence-Proof Program
-- Active packet: Packet 3 — Mesh Repair and Authority Normalization (acceptance criteria appear met; needs explicit closeout)
+- Active packet: Packet 4 — source file rationale mapping (Packet 3 closed 2026-04-15, all acceptance criteria verified)
 - Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`
-- Active sidecars:
-  - `docs/operations/task_2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE (2026-04-15). Closeout checklist pending (archive, lessons extraction, AGENTS.md removal).
+- Archived:
+  - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
 - Active backlog:
   - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
   - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
@@ -27,7 +27,7 @@ Role: single live control-entry surface for the repo.
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
   - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record (20 entries, current as of 2026-04-15)
-- Next packet: Packet 4 — source file rationale mapping, unless Packet 3 leaves a blocking mesh issue
+- Next packet: Packet 4 — source file rationale mapping
 
 ## Runtime
 
@@ -40,7 +40,7 @@ Role: single live control-entry surface for the repo.
 - Packet 0 closed as a read-only topology inventory baseline.
 - Packet 1 closed the WMO half-up executable rounding law and recurrence gates.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
-- Packet 3 acceptance criteria appear met; explicit closeout not yet recorded.
+- Packet 3 closed 2026-04-15 — docs mesh repair and authority normalization complete.
 
 ## 75-Bug Audit Progress (data-improve branch)
 
