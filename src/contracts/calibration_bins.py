@@ -90,8 +90,24 @@ class UnitProvenanceError(Exception):
 # These are wider than any plausible daily max — the goal is to catch
 # cross-unit confusion (°F values mistaken for °C), not to validate
 # physical correctness.
-_F_PLAUSIBLE_RANGE = (-80.0, 150.0)
-_C_PLAUSIBLE_RANGE = (-70.0, 60.0)
+#
+# Asymmetry note: the F range is necessarily wide because real °F daily
+# maxes span roughly [-30, 130]. Unfortunately this means °C daily maxes
+# (0-30 °C) fall inside the F plausible range — a °C-in-°F leak cannot
+# be caught by a univariate median check alone. This is why
+# ``validate_members_vs_observation`` exists: it anchors the plausibility
+# check to the VERIFIED observation for the same (city, target_date),
+# which closes the univariate asymmetry.
+_F_PLAUSIBLE_RANGE = (-50.0, 140.0)
+_C_PLAUSIBLE_RANGE = (-50.0, 55.0)
+
+# Maximum |median(members) - observation| tolerated at 24h–7d lead. Real
+# TIGGE 24h forecast error is ~2-5 °F / 1-3 °C; 7d lead is ~6-10 °F / 3-5 °C.
+# These thresholds are ~5× the 7d upper bound so they never false-positive
+# on genuine high-error days, but catch cross-unit contamination (°F
+# values written into a °C city produces offsets >30 °F worth).
+_F_VS_OBS_MAX_OFFSET = 40.0  # °F
+_C_VS_OBS_MAX_OFFSET = 22.0  # °C
 
 
 @dataclass(frozen=True)
@@ -323,4 +339,72 @@ def validate_members_unit_plausible(
             f"member median={median:.2f} is outside plausible range "
             f"[{lo}, {hi}]. This likely indicates cross-unit contamination "
             f"in ensemble_snapshots.members_json for this snapshot."
+        )
+
+
+def validate_members_vs_observation(
+    member_maxes: np.ndarray,
+    city: City,
+    observed_value: float,
+) -> None:
+    """Second-line unit-provenance check anchored to the VERIFIED observation.
+
+    Closes the asymmetric gap in ``validate_members_unit_plausible``: °C
+    daily-max values (0-30 °C) fall inside the F plausible range [-50, 140],
+    so a °C-in-°F leak would pass the univariate median check silently.
+    This function anchors the plausibility test to the observation for
+    the same (city, target_date) — if the median of member values differs
+    from the observation by more than a generous forecast-error tolerance
+    it can only be a unit mismatch, not a bad forecast.
+
+    Tolerances are ~5× the nominal 7-day TIGGE skill envelope, chosen to
+    never false-positive on real extreme-weather days but to catch
+    cross-unit contamination unambiguously (°C values in a °F city produce
+    offsets >30 °F worth; °F values in a °C city produce offsets >20 °C
+    worth).
+
+    Rationale for layering two checks:
+        - ``validate_members_unit_plausible`` catches Kelvin leaks and
+          far-out-of-range values without needing an observation.
+        - ``validate_members_vs_observation`` catches °C-in-°F (and
+          vice-versa) by using the observation as the unit anchor.
+        - Both run per-snapshot in the rebuild script; a snapshot must
+          pass both or it is unit-rejected.
+    """
+    arr = np.asarray(member_maxes, dtype=float)
+    if arr.size == 0:
+        raise UnitProvenanceError(
+            f"City {city.name!r}: member_maxes is empty — cannot anchor "
+            f"to observation"
+        )
+    if not np.isfinite(arr).all():
+        raise UnitProvenanceError(
+            f"City {city.name!r}: member_maxes contains non-finite values"
+        )
+    if not np.isfinite(observed_value):
+        raise UnitProvenanceError(
+            f"City {city.name!r}: observed_value={observed_value!r} is "
+            f"non-finite — cannot anchor unit check"
+        )
+
+    median = float(np.median(arr))
+    offset = abs(median - float(observed_value))
+    if city.settlement_unit == "F":
+        tol = _F_VS_OBS_MAX_OFFSET
+    elif city.settlement_unit == "C":
+        tol = _C_VS_OBS_MAX_OFFSET
+    else:
+        raise UnitProvenanceError(
+            f"City {city.name!r} has unknown settlement_unit "
+            f"{city.settlement_unit!r}"
+        )
+
+    if offset > tol:
+        raise UnitProvenanceError(
+            f"City {city.name!r}: member median={median:.2f} vs observation="
+            f"{observed_value:.2f} offset={offset:.2f} {city.settlement_unit} "
+            f"exceeds tolerance {tol:.1f}. This is far outside any plausible "
+            f"TIGGE forecast error at 24h-7d lead and strongly suggests "
+            f"cross-unit contamination between members_json and the "
+            f"observation's unit."
         )

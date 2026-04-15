@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from src.calibration.store import add_calibration_pair, infer_bin_width_from_label
+from src.calibration.decision_group import compute_id
 from src.contracts.calibration_bins import (
     C_CANONICAL_GRID,
     F_CANONICAL_GRID,
@@ -35,12 +36,22 @@ from src.contracts.calibration_bins import (
     UnitProvenanceError,
     grid_for_city,
     validate_members_unit_plausible,
+    validate_members_vs_observation,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.market_scanner import _parse_temp_range
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import init_schema
 from src.types.market import Bin
+
+
+def _decision_group_id(
+    city: str,
+    target_date: str,
+    forecast_available_at: str,
+    source_model_version: str = "test_calibration_bins_canonical_v1",
+) -> str:
+    return compute_id(city, target_date, forecast_available_at, source_model_version)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +436,12 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
         season="JJA",
         cluster="Paris",
         forecast_available_at="2025-06-14T00:00:00Z",
+        decision_group_id=_decision_group_id(
+            "Paris",
+            "2025-06-15",
+            "2025-06-14T00:00:00Z",
+            "legacy_test",
+        ),
         bin_source="legacy",
     )
     add_calibration_pair(
@@ -438,6 +455,12 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
         season="JJA",
         cluster="Paris",
         forecast_available_at="2025-06-15T00:00:00Z",
+        decision_group_id=_decision_group_id(
+            "Paris",
+            "2025-06-16",
+            "2025-06-15T00:00:00Z",
+            "canonical_test",
+        ),
         bin_source="canonical_v1",
     )
     mem_db.commit()
@@ -553,15 +576,14 @@ def test_R11_unverified_snapshot_excluded(mem_db, monkeypatch):
         {"NYC": NYC_F},
     )
 
-    stats = rebuild(
-        mem_db,
-        dry_run=False,
-        force=True,
-        n_mc=10,
-        allow_unaudited_ensemble=True,
-    )
-    assert stats.pairs_written == 0
-    assert stats.snapshots_scanned == 0
+    with pytest.raises(RuntimeError, match="no eligible snapshots"):
+        rebuild(
+            mem_db,
+            dry_run=False,
+            force=True,
+            n_mc=10,
+            allow_unaudited_ensemble=True,
+        )
     # Because the snapshot is not VERIFIED, it should not even be fetched:
     n = mem_db.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
     assert n == 0
@@ -585,15 +607,22 @@ def test_R11_unverified_observation_excluded(mem_db, monkeypatch):
         {"NYC": NYC_F},
     )
 
-    stats = rebuild(
-        mem_db,
-        dry_run=False,
-        force=True,
-        n_mc=10,
-        allow_unaudited_ensemble=True,
-    )
-    assert stats.snapshots_no_observation == 1
-    assert stats.pairs_written == 0
+    # After the 2026-04-14 patch, the rebuild trips the no-observation safety
+    # net (100% of eligible snapshots have no matching VERIFIED observation)
+    # instead of the zero-pairs-written branch. Either way the atomic rebuild
+    # rolls back and no pairs are written.
+    with pytest.raises(
+        RuntimeError, match="no matching VERIFIED observation"
+    ):
+        rebuild(
+            mem_db,
+            dry_run=False,
+            force=True,
+            n_mc=10,
+            allow_unaudited_ensemble=True,
+        )
+    n = mem_db.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
+    assert n == 0
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +657,51 @@ def test_R12_unit_provenance_rejects_nonfinite():
 def test_R12_unit_provenance_rejects_empty():
     with pytest.raises(UnitProvenanceError, match=r"empty"):
         validate_members_unit_plausible(np.array([]), PARIS_C)
+
+
+# ---------------------------------------------------------------------------
+# R12b — obs-anchored unit-provenance antibody (closes °C-in-°F gap)
+# ---------------------------------------------------------------------------
+
+
+def test_R12b_obs_anchor_catches_C_in_F_leak():
+    """°C values (15-25 °C) silently pass validate_members_unit_plausible on
+    an °F city because 15-25 is inside the wide F plausible range. The
+    obs-anchored check catches this by comparing to the verified
+    observation: a °F city with obs=75°F and members ~20 (°C values) yields
+    |20 - 75| = 55 °F offset, far beyond the 40 °F tolerance."""
+    c_values_in_f_city = np.array([15.0, 18.0, 22.0, 20.0, 17.0])  # °C
+    # Univariate check lets it through (these values are in F's plausible range)
+    validate_members_unit_plausible(c_values_in_f_city, NYC_F)
+    # Obs-anchored check catches it
+    with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
+        validate_members_vs_observation(c_values_in_f_city, NYC_F, 75.0)
+
+
+def test_R12b_obs_anchor_catches_F_in_C_leak():
+    """Symmetric: °F values (65-75 °F) sent into a °C city with obs=20°C
+    give |70 - 20| = 50 °C offset, far beyond the 22 °C tolerance."""
+    f_values_in_c_city = np.array([65.0, 70.0, 75.0, 68.0, 72.0])  # °F
+    with pytest.raises(UnitProvenanceError, match=r"exceeds tolerance"):
+        validate_members_vs_observation(f_values_in_c_city, PARIS_C, 20.0)
+
+
+def test_R12b_obs_anchor_accepts_plausible_forecast_error():
+    """A realistic 7-day forecast error (~8 °F high) must not false-positive."""
+    members_8F_cold = np.array([64.0, 67.0, 65.0, 66.0, 63.0])  # mean ~65
+    # Observed = 73 °F → offset = 8 °F, well inside 40 °F tolerance
+    validate_members_vs_observation(members_8F_cold, NYC_F, 73.0)
+
+
+def test_R12b_obs_anchor_rejects_nonfinite_observation():
+    members = np.array([70.0, 72.0, 74.0])
+    with pytest.raises(UnitProvenanceError, match=r"observed_value"):
+        validate_members_vs_observation(members, NYC_F, float("nan"))
+
+
+def test_R12b_obs_anchor_rejects_empty_members():
+    with pytest.raises(UnitProvenanceError, match=r"empty"):
+        validate_members_vs_observation(np.array([]), NYC_F, 70.0)
 
 
 # ---------------------------------------------------------------------------

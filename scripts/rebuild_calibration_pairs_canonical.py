@@ -64,6 +64,7 @@ from src.calibration.effective_sample_size import (
     build_decision_groups,
     write_decision_groups,
 )
+from src.calibration.decision_group import compute_id
 from src.calibration.manager import season_from_date
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name
@@ -71,18 +72,37 @@ from src.contracts.calibration_bins import (
     UnitProvenanceError,
     grid_for_city,
     validate_members_unit_plausible,
+    validate_members_vs_observation,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
+from src.types.market import validate_bin_topology
 
 
 CANONICAL_BIN_SOURCE = "canonical_v1"
 
-# Any snapshot whose data_version matches this prefix is flagged as partial
-# TIGGE (unaudited, per user directive 2026-04-14). Rebuild refuses unless
-# --allow-unaudited-ensemble is passed explicitly.
-_UNAUDITED_DATA_VERSION_PREFIXES = ("tigge_step", "tigge_partial_")
+# Training data must start at this cutoff. TIGGE raw GRIB coverage begins
+# 2024-01-01; any ensemble_snapshots row earlier than this is legacy debris
+# (including a known 2006-10-01 NYC row from a pre-K2 test fixture) and has
+# no matching verified observation. Per user directive 2026-04-14 all data
+# is aligned to the TIGGE window [2024-01-01, today].
+MIN_TRAINING_DATE = "2024-01-01"
+
+# Any snapshot whose data_version is in this set is the known partial TIGGE
+# ingest that predates the task #61 rewrite — the member values are derived
+# from step-024-only extraction and reject recalibration until the new 7-step
+# ingest overwrites them. Rebuild refuses unless --allow-unaudited-ensemble
+# is passed explicitly.
+#
+# This is an exact-match SET, not a prefix-match, so that the task #61 rewrite
+# can write new data_version strings (e.g. tigge_step024_v2_*) without
+# accidentally being swept up by a too-broad prefix.
+_UNAUDITED_DATA_VERSIONS = frozenset({
+    "tigge_step024_v1_near_peak",
+    "tigge_step024_v1_overnight_snapshot",
+    "tigge_partial_legacy",
+})
 
 
 @dataclass
@@ -93,6 +113,7 @@ class RebuildStats:
     snapshots_no_observation: int = 0
     snapshots_unit_rejected: int = 0
     snapshots_processed: int = 0
+    refused: bool = False
     pairs_written: int = 0
     decision_groups_written: int = 0
     pre_delete_canonical_pairs: int = 0
@@ -109,6 +130,7 @@ class RebuildStats:
             "snapshots_no_observation": self.snapshots_no_observation,
             "snapshots_unit_rejected": self.snapshots_unit_rejected,
             "snapshots_processed": self.snapshots_processed,
+            "refused": self.refused,
             "pairs_written": self.pairs_written,
             "decision_groups_written": self.decision_groups_written,
             "pre_delete_canonical_pairs": self.pre_delete_canonical_pairs,
@@ -134,13 +156,16 @@ def _fetch_eligible_snapshots(
     report the 'no matching observation' count separately from 'matched but
     unit-rejected'.
     """
-    params: tuple = ()
-    where = "WHERE authority = 'VERIFIED' AND members_json IS NOT NULL"
+    params: tuple = (MIN_TRAINING_DATE,)
+    where = (
+        "WHERE authority = 'VERIFIED' AND members_json IS NOT NULL "
+        "AND target_date >= ?"
+    )
     if city_filter:
         where += " AND city = ?"
-        params = (city_filter,)
+        params = (MIN_TRAINING_DATE, city_filter)
     sql = f"""
-        SELECT snapshot_id, city, target_date, lead_hours,
+        SELECT snapshot_id, city, target_date, issue_time, lead_hours,
                available_at, members_json, data_version
         FROM ensemble_snapshots
         {where}
@@ -258,6 +283,7 @@ def _process_snapshot(
 
     grid = grid_for_city(city)
     bins = grid.as_bins()
+    validate_bin_topology(bins)
     sem = SettlementSemantics.for_city(city)
     try:
         settlement_value = sem.assert_settlement_value(
@@ -267,6 +293,17 @@ def _process_snapshot(
     except Exception as e:
         stats.snapshots_unit_rejected += 1
         print(f"  SETTLEMENT-REJECT {city.name}/{target_date}: {e}")
+        return
+
+    # Second-line unit provenance: anchor the plausibility check to the
+    # verified observation so °C-in-°F (and vice-versa) cannot slip past
+    # the univariate median check. Both checks together make cross-unit
+    # contamination unconstructable in the rebuild path.
+    try:
+        validate_members_vs_observation(member_maxes, city, settlement_value)
+    except UnitProvenanceError as e:
+        stats.snapshots_unit_rejected += 1
+        print(f"  UNIT-VS-OBS-REJECT {city.name}/{target_date}: {e}")
         return
 
     p_raw_vec = p_raw_vector_from_maxes(
@@ -282,6 +319,12 @@ def _process_snapshot(
     season = season_from_date(target_date, lat=city.lat)
     lead_days = float(snapshot["lead_hours"]) / 24.0
     available_at = snapshot["available_at"]
+    decision_group_id = compute_id(
+        city.name,
+        target_date,
+        snapshot["issue_time"],
+        str(snapshot["data_version"] or ""),
+    )
 
     pairs_this_snapshot = 0
     for b, p in zip(bins, p_raw_vec):
@@ -298,6 +341,7 @@ def _process_snapshot(
             cluster=city.cluster,
             forecast_available_at=available_at,
             settlement_value=settlement_value,
+            decision_group_id=decision_group_id,
             bin_source=CANONICAL_BIN_SOURCE,
             # VERIFIED is safe because both inputs were VERIFIED (enforced
             # by the WHERE clauses at fetch time). refit_platt.py filters
@@ -355,8 +399,8 @@ def rebuild(
     unaudited_ids: list[int] = []
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
-        dv = (snap["data_version"] or "").lower()
-        if any(dv.startswith(p) for p in _UNAUDITED_DATA_VERSION_PREFIXES):
+        dv = (snap["data_version"] or "")
+        if dv in _UNAUDITED_DATA_VERSIONS:
             unaudited_ids.append(snap["snapshot_id"])
             if not allow_unaudited_ensemble:
                 continue
@@ -369,6 +413,7 @@ def rebuild(
     print(f"  unaudited (tigge_step*, tigge_partial_*): {stats.snapshots_unaudited}")
     print(f"  eligible for rebuild: {stats.snapshots_eligible}")
     if stats.snapshots_unaudited > 0 and not allow_unaudited_ensemble:
+        stats.refused = True
         print()
         print(
             "REFUSING: matched snapshots contain partial/unaudited TIGGE data.\n"
@@ -401,6 +446,12 @@ def rebuild(
             "--no-dry-run requires --force for the destructive delete path. "
             "Re-run with both flags if you really want to rebuild."
         )
+    if not eligible:
+        stats.refused = True
+        raise RuntimeError(
+            "Refusing live canonical rebuild: no eligible snapshots would replace "
+            "the existing canonical_v1 slice."
+        )
 
     # --- Phase 3: atomic rebuild ------------------------------------------
     conn.execute("SAVEPOINT canonical_rebuild")
@@ -428,6 +479,52 @@ def rebuild(
                 )
         if missing_city_count:
             print(f"  WARN: {missing_city_count} snapshots had unknown city, skipped")
+
+        # Hard-failure categories: these are *bugs*, not data holes, so if
+        # any snapshot hits them we roll back the whole rebuild.
+        #   - missing_city_count:        cities.json drift vs ensemble_snapshots
+        #   - snapshots_unit_rejected:   validate_members_unit_plausible raised
+        #                                 (contaminated members_json)
+        # Soft-skip category (NOT a failure):
+        #   - snapshots_no_observation:  expected data hole (no matching
+        #                                 verified observation for that
+        #                                 (city, target_date) — normal for
+        #                                 partial backfills, stale HKO
+        #                                 coverage, or cities without any
+        #                                 observation source yet).
+        hard_failures = missing_city_count + stats.snapshots_unit_rejected
+        if hard_failures:
+            stats.refused = True
+            raise RuntimeError(
+                f"Refusing live canonical rebuild: {hard_failures} snapshots "
+                f"hit hard-failure categories "
+                f"(missing_city={missing_city_count}, "
+                f"unit_rejected={stats.snapshots_unit_rejected}); "
+                f"rolling back existing canonical_v1 slice."
+            )
+
+        # Safety net: if *most* eligible snapshots had no matching observation,
+        # that's no longer a data hole, it's a broken JOIN. Refuse rather than
+        # silently produce a degenerate calibration.
+        no_obs_ratio = (
+            stats.snapshots_no_observation / max(len(eligible), 1)
+        )
+        if no_obs_ratio > 0.30:
+            stats.refused = True
+            raise RuntimeError(
+                f"Refusing live canonical rebuild: "
+                f"{stats.snapshots_no_observation}/{len(eligible)} "
+                f"({no_obs_ratio:.1%}) of eligible snapshots had no matching "
+                f"VERIFIED observation. Expected <30%. Rolling back. "
+                f"Check WU/HKO backfill coverage before retrying."
+            )
+
+        if stats.pairs_written == 0:
+            stats.refused = True
+            raise RuntimeError(
+                "Refusing live canonical rebuild: zero calibration pairs were "
+                "written; rolling back existing canonical_v1 slice."
+            )
 
         # Decision group materialization (mirrors generate_calibration_pairs.py)
         groups = build_decision_groups(conn)
@@ -558,6 +655,8 @@ def main() -> int:
     finally:
         conn.close()
 
+    if stats.refused:
+        return 1
     return 0 if stats.snapshots_scanned >= 0 else 1
 
 
