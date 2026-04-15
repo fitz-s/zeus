@@ -40,9 +40,9 @@ Role: single live control-entry surface for the repo.
 | Phase 1 | K1+K2 | 39 | ✅ Complete | `96b70a8`, `f6f612e` |
 | Phase 2 | K4+K5 | 13 | ✅ Complete | `4abbeb7` |
 | Phase 3 | K6+K7 | 10 | ✅ Complete | `f6092ca` |
-| Phase 4 | K3+K8 | 13 | ⏳ Next | — |
+| Phase 4 | K3+K8 | 13 | ✅ Complete | `3e35808`, `f6eaa72` |
 
-62 of 75 bugs addressed (implemented or confirmed pre-fixed). Remaining: K3 (数学与语义统一, 6 bugs) + K8 (审计/可観測/可復盤, 7 bugs).
+75 of 75 bugs addressed (implemented, confirmed pre-fixed, or confirmed false positive). Audit complete.
 
 ## Boundaries
 
