@@ -121,6 +121,19 @@ files:
   src/contracts/decision_evidence.py: {zone: K0_frozen_kernel, authority_role: typed_decision_contract, why: "Bundles decision evidence for symmetric entry/exit reasoning."}
   src/contracts/edge_context.py: {zone: K0_frozen_kernel, authority_role: typed_probability_contract, why: "Carries edge provenance across strategy/execution seams."}
   src/contracts/epistemic_context.py: {zone: K0_frozen_kernel, authority_role: uncertainty_contract, why: "Carries uncertainty context so raw confidence is not treated as certainty."}
+  src/contracts/ensemble_snapshot_provenance.py:
+    zone: K0_frozen_kernel
+    authority_role: ensemble_snapshot_quarantine_contract
+    hazards: [TRANSITIONAL_DO_NOT_DEEPEN]
+    why: >
+      Defines the refuse-list for ensemble_snapshots.data_version before
+      live or backfill writes, and partitions quarantined rows on read so
+      legacy TIGGE point-forecast rows cannot enter calibration as if they
+      matched the live local-day-maximum physical quantity.
+    write_routes: [script_repair_write]
+    upstream: [scripts/rebuild_calibration_pairs_canonical.py, src/signal/ensemble_signal.py, src/engine/evaluator.py]
+    downstream: [scripts/ingest_grib_to_snapshots.py, src/calibration/store.py, tests/test_calibration_bins_canonical.py]
+    gates: ["pytest -q tests/test_calibration_bins_canonical.py tests/test_replay_time_provenance.py"]
   src/contracts/exceptions.py: {zone: K0_frozen_kernel, authority_role: contract_exception_surface, why: "Defines semantic contract violation exceptions."}
   src/contracts/execution_intent.py: {zone: K0_frozen_kernel, authority_role: execution_intent_contract, why: "Separates intent semantics from order mechanics."}
   src/contracts/execution_price.py: {zone: K0_frozen_kernel, authority_role: typed_price_contract, why: "Prevents native/held side and fee-treatment price confusion."}

@@ -28,6 +28,15 @@ categories:
     - tests/test_fdr.py
     - tests/test_gate_decision.py
     - tests/test_ingestion_guard.py
+    - tests/test_k1_review_fixes.py
+    - tests/test_k1_slice_d.py
+    - tests/test_k2_slice_e.py
+    - tests/test_k2_slice_f.py
+    - tests/test_k2_slice_g.py
+    - tests/test_k4_slice_i.py
+    - tests/test_k4_slice_j.py
+    - tests/test_k5_slice_k.py
+    - tests/test_k5_slice_l.py
     - tests/test_k2_live_ingestion_relationships.py
     - tests/test_instrument_invariants.py
     - tests/test_kelly_cascade_bounds.py
@@ -46,6 +55,7 @@ categories:
     - tests/test_runtime_guards.py
     - tests/test_semantic_linter.py
     - tests/test_structural_linter.py
+    - tests/test_supervisor_contracts.py
     - tests/test_temperature.py
     - tests/test_topology_doctor.py
     - tests/test_truth_surface_health.py
@@ -205,14 +215,6 @@ law_gate:
       - state/zeus_backtest.db
 
 high_sensitivity_skips:
-  tests/test_config.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Config loading is a live-mode boundary; remaining paper-mode skip must stay explicit until removed or replaced.
-    skip_count: 1
-    reason_patterns:
-      - "Phase2: paper mode removed"
-    sunset: Resolve in live-only config cleanup packet.
   tests/test_cross_module_invariants.py:
     owner: topology-program
     packet: Packet 5
