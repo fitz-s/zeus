@@ -3833,7 +3833,7 @@ def query_control_override_state(
             if entries_paused:
                 reason = str(row["reason"] or "")
                 issued_by = str(row["issued_by"] or "")
-                if issued_by.startswith("auto:auto_pause:"):
+                if issued_by.startswith("auto:"):
                     entries_pause_source = "auto_exception"
                     entries_pause_reason = issued_by.removeprefix("auto:")
                 else:

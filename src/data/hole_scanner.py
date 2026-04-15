@@ -89,13 +89,14 @@ SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
 def _source_applies_to_city(data_source: str, city: City) -> bool:
     """Return True if this data_source is the one Zeus uses for this city.
 
-    For observations, the split is WU (45 cities) vs HKO (Hong Kong only).
-    For every other table, all 46 cities share the same source.
+    For observations, the split is derived from ``city.settlement_source_type``:
+    WU-sourced cities use ``wu_icao_history``; HKO-sourced cities use
+    ``hko_daily_api``.  For every other table, all cities share the same source.
     """
     if data_source == "wu_icao_history":
-        return city.name != "Hong Kong"
+        return city.settlement_source_type != "hko"
     if data_source == "hko_daily_api":
-        return city.name == "Hong Kong"
+        return city.settlement_source_type == "hko"
     return True
 
 
