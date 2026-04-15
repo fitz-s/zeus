@@ -93,7 +93,7 @@ These are NOT unblocked by post-download work; they're small targeted cleanups t
 | **#42** | H — `Bin` ±inf + `to_json_safe/from_json_safe` | `src/types/market.py` | IMPLEMENTED in refit-preflight repair with staged `None`/±inf compatibility and JSON sentinels. |
 | **#43** | I — `validate_bin_topology` helper | `src/types/market.py` | PARTIAL/HELPER IMPLEMENTED in refit-preflight repair: helper rejects gaps, overlaps, missing shoulders, and universal open-open market topology; live evaluator entry gate wiring remains pending. |
 | **#45** | B — `load_cities` metadata validation | `src/config.py:load_cities` | DEFERRED. Validate that every city in `config/cities.json` has the required `cluster` / `wu_station` / `settlement_unit` / `timezone` / `lat` / `lon`. Currently partial. |
-| **#51** | Test file prune — remove R2, R3.3, R4.2, R5.2, R6 from legacy relationship tests | `tests/test_*_relationships.py` | DEFERRED. These are obsolete tests from earlier iterations of the calibration contract, superseded by the K2 24-test relationship suite (`test_k2_live_ingestion_relationships.py`). Confirm supersession then prune. |
+| **#51** | Test file prune — remove dead relationship tests | `tests/test_cross_module_relationships.py` | DONE. R4 (_load_baselines_from_risk_history removed) and R5 (positions.json decoupled) deleted. R2 RETAINED (detects live orphan positions bug). R3 RETAINED (Phase 2 re-enablement). R6 RETAINED (active fill-status regression guard). K2 coverage is ORTHOGONAL (weather ETL), NOT superseding (trade lifecycle). |
 
 ---
 
