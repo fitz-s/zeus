@@ -14,24 +14,30 @@ Role: single live control-entry surface for the repo.
 
 - Branch: `data-improve`
 - Program: Zeus Topology Compiler and Recurrence-Proof Program
-- Active packet: Packet 3 — Mesh Repair and Authority Normalization
+- Active packet: Packet 3 — Mesh Repair and Authority Normalization (acceptance criteria appear met; needs explicit closeout)
 - Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`
 - Active sidecars:
-  - `docs/operations/task_2026-04-14_topology_context_efficiency/` — topology context-pack, artifact lifecycle, and work-record evidence
+  - `docs/operations/task_2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE (2026-04-15). Closeout checklist pending (archive, lessons extraction, AGENTS.md removal).
 - Active backlog:
-  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — remaining repair backlog after non-DB small-package loop
-  - `docs/operations/task_2026-04-14_session_backlog.md` — calibration-refactor session backlog snapshot
+  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
+  - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
 - Active checklist/evidence:
-  - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — active data-improvement audit checklist used by agents
-  - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record
+  - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
+  - `docs/operations/task_2026-04-14_topology_context_efficiency/work_log.md` — topology context-efficiency work record (20 entries, current as of 2026-04-15)
 - Next packet: Packet 4 — source file rationale mapping, unless Packet 3 leaves a blocking mesh issue
+
+## Runtime
+
+- Sequential backfill PID 49371 running (`backfill_wu_daily_all.py --all --missing-only --days 834`)
+- Waiter process PID 50114 (`post_sequential_fillback.sh`) polls every 60s, kicks off HKO + hole scanner on completion
+- Post-backfill unlocks: Task #63 (ETL cascade, 11 steps), Task #61 (TIGGE transfer, 41K rows), historical forecasts recovery (171K rows)
 
 ## Recent Packet State
 
 - Packet 0 closed as a read-only topology inventory baseline.
 - Packet 1 closed the WMO half-up executable rounding law and recurrence gates.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
-- Packet 3 is repairing the docs mesh surfaced by topology strict mode.
+- Packet 3 acceptance criteria appear met; explicit closeout not yet recorded.
 
 ## 75-Bug Audit Progress (data-improve branch)
 

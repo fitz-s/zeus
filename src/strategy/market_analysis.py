@@ -100,16 +100,6 @@ class MarketAnalysis:
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
         self._rng = np.random.default_rng(rng_seed)
 
-    def _posterior_with_bootstrapped_bin(self, bin_idx: int, p_cal_boot: float) -> np.ndarray:
-        p_cal_boot_vector = np.array(self.p_cal, dtype=float)
-        p_cal_boot_vector[bin_idx] = p_cal_boot
-        return compute_posterior(
-            p_cal_boot_vector,
-            self.p_market,
-            self._alpha,
-            bins=self.bins,
-        )
-
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
 
