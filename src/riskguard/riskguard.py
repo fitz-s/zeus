@@ -57,8 +57,8 @@ def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
     try:
         return load_portfolio(), "working_state_metadata"
     except Exception:
-        logger.warning("RiskGuard capital metadata fallback to settings.capital_base_usd", exc_info=True)
-        return PortfolioState(bankroll=float(settings.capital_base_usd)), "settings_capital_base_fallback"
+        logger.error("RiskGuard capital metadata load FAILED — refusing to fall back to settings", exc_info=True)
+        raise
 
 
 def _portfolio_position_from_loader_row(row: dict) -> Position:
@@ -241,8 +241,9 @@ def _trailing_loss_snapshot(
     if status != "ok" or reference is None:
         return {
             "loss": 0.0,
-            "level": RiskLevel.YELLOW,
-            "status": status,
+            "level": RiskLevel.RED,
+            "degraded": True,
+            "status": f"degraded:{status}",
             "source": str(reference_info["source"]),
             "reference": None,
         }
@@ -256,6 +257,7 @@ def _trailing_loss_snapshot(
     return {
         "loss": loss,
         "level": level,
+        "degraded": False,
         "status": status,
         "source": str(reference_info["source"]),
         "reference": reference,

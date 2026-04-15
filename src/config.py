@@ -148,7 +148,10 @@ def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
         return float(city_row[preferred_key])
     if fallback_key in city_row and city_row[fallback_key] is not None:
         return float(city_row[fallback_key])
-    return 12.0
+    raise ValueError(
+        f"No diurnal amplitude ('{preferred_key}' or '{fallback_key}') "
+        f"in city config for {city_row.get('name', '?')}"
+    )
 
 
 def load_cities(path: Optional[Path] = None) -> list[City]:

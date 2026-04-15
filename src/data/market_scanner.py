@@ -210,7 +210,12 @@ def _parse_event(
             if hours_to_resolution < min_hours:
                 return None
         except (ValueError, TypeError):
-            hours_to_resolution = 24.0  # Default if unparseable
+            logger.warning(
+                "Unparseable endDate %r for event %s — skipping market",
+                end_str,
+                event.get("id") or event.get("slug"),
+            )
+            return None
     else:
         hours_to_resolution = 24.0
 
@@ -404,9 +409,15 @@ def _extract_outcomes(event: dict) -> list[dict]:
             try:
                 prices = json.loads(prices)
             except (json.JSONDecodeError, TypeError):
-                prices = [0.5, 0.5]
-        yes_price = float(prices[0]) if len(prices) > 0 else 0.5
-        no_price = float(prices[1]) if len(prices) > 1 else 0.5
+                logger.warning("outcomePrices parse failed for market %s, skipping",
+                               market.get("questionID", "?"))
+                continue
+        if len(prices) < 2:
+            logger.warning("outcomePrices has < 2 elements for market %s, skipping",
+                           market.get("questionID", "?"))
+            continue
+        yes_price = float(prices[0])
+        no_price = float(prices[1])
         if _labels_swapped:
             yes_price, no_price = no_price, yes_price
 

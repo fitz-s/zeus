@@ -143,5 +143,7 @@ def polymarket_fee(price: float, fee_rate: float = 0.05) -> float:
             f"polymarket_fee requires finite inputs, got price={price}, fee_rate={fee_rate}"
         )
     if price <= 0.0 or price >= 1.0:
-        return 0.0
+        raise ValueError(
+            f"polymarket_fee requires price in (0, 1), got {price}"
+        )
     return fee_rate * price * (1.0 - price)

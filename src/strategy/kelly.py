@@ -99,5 +99,14 @@ def dynamic_kelly_mult(
 
     # INV-05 / §P9.7: cascade floor — multiplier must never reach zero or NaN
     if not (m == m):  # NaN check: NaN != NaN
-        return 0.001
-    return max(0.001, m)
+        raise ValueError(
+            f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "
+            f"lead_days={lead_days}, rolling_win_rate_20={rolling_win_rate_20}, "
+            f"portfolio_heat={portfolio_heat}, drawdown_pct={drawdown_pct})"
+        )
+    if m <= 0.0:
+        raise ValueError(
+            f"dynamic_kelly_mult collapsed to {m} — all sizing gates triggered, "
+            f"refusing to fabricate a floor value"
+        )
+    return m

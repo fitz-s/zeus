@@ -78,8 +78,8 @@ class ProvenanceRecord:
 # YAML loader
 # ---------------------------------------------------------------------------
 
-def _load_registry(yaml_path: Path) -> dict[str, ProvenanceRecord]:
-    """Load provenance_registry.yaml and return a dict keyed by constant_name."""
+def _load_registry(yaml_path: Path) -> tuple[dict[str, ProvenanceRecord], bool]:
+    """Load provenance_registry.yaml and return (registry_dict, degraded_flag)."""
     try:
         import yaml  # pyyaml
     except ImportError:
@@ -87,22 +87,22 @@ def _load_registry(yaml_path: Path) -> dict[str, ProvenanceRecord]:
             "PyYAML not available. ProvenanceRegistry will be empty. "
             "Install pyyaml to enable INV-13 enforcement."
         )
-        return {}
+        return {}, True
 
     if not yaml_path.exists():
-        logger.warning(
+        logger.error(
             "provenance_registry.yaml not found at %s. "
             "INV-13 enforcement is disabled until the file exists.",
             yaml_path,
         )
-        return {}
+        return {}, True
 
     with open(yaml_path) as f:
         raw = yaml.safe_load(f)
 
     if not raw or "constants" not in raw:
-        logger.warning("provenance_registry.yaml has no 'constants' key; registry is empty.")
-        return {}
+        logger.error("provenance_registry.yaml has no 'constants' key; registry is empty.")
+        return {}, True
 
     registry: dict[str, ProvenanceRecord] = {}
     for entry in raw["constants"]:
@@ -120,7 +120,7 @@ def _load_registry(yaml_path: Path) -> dict[str, ProvenanceRecord]:
         registry[record.constant_name] = record
 
     logger.info("ProvenanceRegistry loaded %d records", len(registry))
-    return registry
+    return registry, False
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +186,14 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
     if not requires_provenance:
         return None
 
+    if REGISTRY_DEGRADED:
+        logger.error(
+            "INV-13: provenance registry failed to load — governance disabled. "
+            "Constant '%s' cannot be validated.",
+            constant_name,
+        )
+        return None
+
     record = REGISTRY.get(constant_name)
     if record is not None:
         return record
@@ -216,7 +224,9 @@ _DEFAULT_YAML = (
     / "provenance_registry.yaml"
 )
 
-REGISTRY: dict[str, ProvenanceRecord] = _load_registry(_DEFAULT_YAML)
+_REGISTRY_LOAD_RESULT = _load_registry(_DEFAULT_YAML)
+REGISTRY: dict[str, ProvenanceRecord] = _REGISTRY_LOAD_RESULT[0]
+REGISTRY_DEGRADED: bool = _REGISTRY_LOAD_RESULT[1]
 
 
 # ---------------------------------------------------------------------------

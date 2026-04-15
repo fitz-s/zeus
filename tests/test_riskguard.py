@@ -776,11 +776,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "insufficient_history"
-        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_status"] == "degraded:insufficient_history"
+        assert details["daily_loss_level"] == RiskLevel.RED.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -815,11 +815,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "inconsistent_history"
-        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_status"] == "degraded:inconsistent_history"
+        assert details["daily_loss_level"] == RiskLevel.RED.value
         assert details["daily_loss_reference"] is None
 
     def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
@@ -846,10 +846,10 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "no_reference_row"
+        assert details["daily_loss_status"] == "degraded:no_reference_row"
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -895,7 +895,7 @@ class TestRiskGuardTrailingLossSemantics:
         details = json.loads(row["details_json"])
 
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "inconsistent_history"
+        assert details["daily_loss_status"] == "degraded:inconsistent_history"
         assert details["daily_loss_reference"] is None
 
     def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
@@ -1120,8 +1120,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["execution_quality_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "tighten_risk" in details["recommended_controls"]
@@ -1159,8 +1159,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "review_strategy_gates" in details["recommended_controls"]
@@ -1384,8 +1384,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["strategy_tracker_error"] == "tracker unavailable"
         assert details["recommended_strategy_gates"] == []

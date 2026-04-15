@@ -1252,12 +1252,27 @@ def evaluate_candidate(
             risk_throttle *= 0.5
             decision_validations.append("global_heat_throttled_50pct")
 
-        km = dynamic_kelly_mult(
-            base=settings["sizing"]["kelly_multiplier"],
-            ci_width=edge.ci_upper - edge.ci_lower,
-            lead_days=lead_days_for_calibration,
-            portfolio_heat=current_heat,
-        )
+        try:
+            km = dynamic_kelly_mult(
+                base=settings["sizing"]["kelly_multiplier"],
+                ci_width=edge.ci_upper - edge.ci_lower,
+                lead_days=lead_days_for_calibration,
+                portfolio_heat=current_heat,
+            )
+        except ValueError as exc:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIZING_ERROR",
+                rejection_reasons=[str(exc)],
+                selected_method=selected_method,
+                applied_validations=list(decision_validations),
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
         if policy.gated or policy.exit_only:
             reason = "POLICY_EXIT_ONLY" if policy.exit_only else "POLICY_GATED"
             if policy.sources:
@@ -1297,15 +1312,30 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        size = _size_at_execution_price_boundary(
-            p_posterior=edge.p_posterior,
-            entry_price=edge.entry_price,
-            fee_rate=fee_rate,
-            sizing_bankroll=sizing_bankroll,
-            kelly_multiplier=km * risk_throttle,
-            safety_cap_usd=settings["live_safety_cap_usd"],
-            feature_flags=settings.feature_flags,
-        )
+        try:
+            size = _size_at_execution_price_boundary(
+                p_posterior=edge.p_posterior,
+                entry_price=edge.entry_price,
+                fee_rate=fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=km * risk_throttle,
+                safety_cap_usd=settings["live_safety_cap_usd"],
+                feature_flags=settings.feature_flags,
+            )
+        except ValueError as exc:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIZING_ERROR",
+                rejection_reasons=[str(exc)],
+                selected_method=selected_method,
+                applied_validations=list(decision_validations),
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
         if policy.allocation_multiplier != 1.0:
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")

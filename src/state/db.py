@@ -3788,7 +3788,7 @@ def _query_transitional_position_hints(
             trade_ids,
         ).fetchall()
     else:
-        return {}
+        logger.warning("position_events table missing expected columns"); return {}
     hints: dict[str, dict] = {}
     for row in rows:
         trade_id = str(row["trade_key"] or "")

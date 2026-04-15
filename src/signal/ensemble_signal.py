@@ -259,10 +259,11 @@ class EnsembleSignal:
         try:
             from src.config import settings
             if settings.bias_correction_enabled:
-                self.member_maxes = self._apply_bias_correction(
+                corrected, applied = self._apply_bias_correction(
                     self.member_maxes, city, target_date
                 )
-                self.bias_corrected = True
+                self.member_maxes = corrected
+                self.bias_corrected = applied
         except Exception:
             pass  # Config access failure → no correction, safe fallback
         
@@ -286,11 +287,13 @@ class EnsembleSignal:
     @staticmethod
     def _apply_bias_correction(
         maxes: np.ndarray, city: City, target_date: date
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, bool]:
         """Apply per-city×season ECMWF bias correction to member maxes.
 
         model_bias.bias = mean(forecast - actual). Positive = model too warm.
         Subtract bias × discount_factor from member maxes.
+
+        Returns (corrected_maxes, applied) where applied=False if correction failed.
 
         INVARIANT: If this runs for live signals, ALL calibration_pairs must
         also have been computed with bias correction. The cross-module test
@@ -320,7 +323,7 @@ class EnsembleSignal:
                     city.name, season, row["bias"], discount,
                     correction, row["n_samples"],
                 )
-                return maxes - correction
+                return maxes - correction, True
 
         except Exception as e:
             import logging
@@ -328,7 +331,7 @@ class EnsembleSignal:
                 "Bias correction failed for %s: %s", city.name, e
             )
 
-        return maxes
+        return maxes, False
 
     @staticmethod
     def _select_hours_for_date(

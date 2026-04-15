@@ -144,7 +144,10 @@ class PolymarketClient:
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
-        side_const = BUY if side == "BUY" else SELL
+        _SIDE_MAP = {"BUY": BUY, "SELL": SELL}
+        if side not in _SIDE_MAP:
+            raise ValueError(f"place_limit_order requires side='BUY' or 'SELL', got {side!r}")
+        side_const = _SIDE_MAP[side]
         order_args = OrderArgs(
             price=price, size=size, side=side_const, token_id=token_id
         )
@@ -182,70 +185,62 @@ class PolymarketClient:
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
         try:
-            try:
-                from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client.clob_types import OpenOrderParams
 
-                result = self._clob_client.get_orders(OpenOrderParams()) or []
-            except (ImportError, TypeError):
-                result = self._clob_client.get_orders() or []
+            result = self._clob_client.get_orders(OpenOrderParams()) or []
+        except (ImportError, TypeError):
+            result = self._clob_client.get_orders() or []
 
-            if isinstance(result, dict):
-                result = result.get("data", []) or []
-            return list(result)
-        except Exception as exc:
-            logger.warning("Open-order fetch failed: %s", exc)
-            return []
+        if isinstance(result, dict):
+            result = result.get("data", []) or []
+        return list(result)
 
     def get_positions_from_api(self) -> Optional[list[dict]]:
         """Fetch authoritative live positions from Polymarket's data API."""
-        try:
-            creds = _resolve_credentials()
-            address = creds.get("funder_address", "")
-            if not address:
-                raise RuntimeError("Missing funder_address for position fetch")
+        creds = _resolve_credentials()
+        address = creds.get("funder_address", "")
+        if not address:
+            raise RuntimeError("Missing funder_address for position fetch")
 
-            resp = httpx.get(
-                f"{DATA_API_BASE}/positions",
-                params={"user": address, "sizeThreshold": "0.01"},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            raw = resp.json()
-            if isinstance(raw, dict):
-                raw = raw.get("data", []) or []
+        resp = httpx.get(
+            f"{DATA_API_BASE}/positions",
+            params={"user": address, "sizeThreshold": "0.01"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        if isinstance(raw, dict):
+            raw = raw.get("data", []) or []
 
-            positions: list[dict] = []
-            for item in raw:
-                token_id = item.get("asset", "") or item.get("token_id", "")
-                if not token_id:
-                    continue
-                try:
-                    size = float(item.get("size", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                if size < 0.01:
-                    continue
+        positions: list[dict] = []
+        for item in raw:
+            token_id = item.get("asset", "") or item.get("token_id", "")
+            if not token_id:
+                continue
+            try:
+                size = float(item.get("size", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if size < 0.01:
+                continue
 
-                avg_price = float(item.get("avgPrice", 0) or item.get("avg_price", 0) or 0)
-                initial_value = float(item.get("initialValue", 0) or 0)
-                positions.append({
-                    "token_id": token_id,
-                    "condition_id": item.get("conditionId", "") or item.get("condition_id", ""),
-                    "size": round(size, 4),
-                    "avg_price": round(avg_price, 6),
-                    "cost": round(initial_value, 4) if initial_value > 0 else round(size * avg_price, 4),
-                    "side": item.get("outcome", "") or item.get("side", ""),
-                    "current_value": round(float(item.get("currentValue", 0) or 0), 4),
-                    "cash_pnl": round(float(item.get("cashPnl", 0) or 0), 4),
-                    "cur_price": round(float(item.get("curPrice", 0) or 0), 6),
-                    "redeemable": bool(item.get("redeemable", False)),
-                    "title": item.get("title", ""),
-                    "end_date": item.get("endDate", ""),
-                })
-            return positions
-        except Exception as exc:
-            logger.warning("Live position fetch failed: %s", exc)
-            return None
+            avg_price = float(item.get("avgPrice", 0) or item.get("avg_price", 0) or 0)
+            initial_value = float(item.get("initialValue", 0) or 0)
+            positions.append({
+                "token_id": token_id,
+                "condition_id": item.get("conditionId", "") or item.get("condition_id", ""),
+                "size": round(size, 4),
+                "avg_price": round(avg_price, 6),
+                "cost": round(initial_value, 4) if initial_value > 0 else round(size * avg_price, 4),
+                "side": item.get("outcome", "") or item.get("side", ""),
+                "current_value": round(float(item.get("currentValue", 0) or 0), 4),
+                "cash_pnl": round(float(item.get("cashPnl", 0) or 0), 4),
+                "cur_price": round(float(item.get("curPrice", 0) or 0), 6),
+                "redeemable": bool(item.get("redeemable", False)),
+                "title": item.get("title", ""),
+                "end_date": item.get("endDate", ""),
+            })
+        return positions
 
     def get_balance(self) -> float:
         """Get USDC balance."""

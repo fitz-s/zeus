@@ -104,13 +104,9 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 
 def run_chain_sync(portfolio, clob, conn=None, *, deps):
-    try:
-        api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
-    except Exception as exc:
-        deps.logger.warning("Chain sync fetch failed: %s", exc)
-        return {"skipped": "chain_api_unavailable"}, False
+    api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     if api_positions is None:
-        return {"skipped": "chain_api_unavailable"}, False
+        raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
     return deps.reconcile_with_chain(portfolio, api_positions, conn=conn), True
 
 

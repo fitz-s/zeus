@@ -186,7 +186,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     summary["trades"] += pending_updates["entered"]
     summary["pending_voids"] = pending_updates["voided"]
 
-    chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
+    try:
+        chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
+    except Exception as exc:
+        logger.error("Chain sync FAILED — entries will be blocked: %s", exc)
+        chain_stats, chain_ready = {"error": str(exc)}, False
     if chain_stats:
         summary["chain_sync"] = chain_stats
         if chain_stats.get("synced") or chain_stats.get("voided") or chain_stats.get("quarantined") or chain_stats.get("updated"):
@@ -199,7 +203,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["quarantine_expired"] = q_expired
         portfolio_dirty = True
 
-    stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob)
+    try:
+        stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob)
+    except Exception as exc:
+        logger.warning("Orphan open-order cleanup failed — continuing cycle: %s", exc)
+        stale_cancelled = 0
     if stale_cancelled:
         summary["stale_orders_cancelled"] = stale_cancelled
 

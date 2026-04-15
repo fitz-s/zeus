@@ -414,9 +414,18 @@ def build_day0_temporal_context(
     observation_time=None,
     observation_source: str = "",
 ) -> Day0TemporalContext | None:
-    """Single entry point for Day0 time semantics."""
+    """Single entry point for Day0 time semantics.
+
+    Returns None only when solar data unavailable (SolarLookupFailed)
+    or observation date doesn't match target (ObservationDateMismatch).
+    Callers wrapped in try/except will get the specific exception type.
+    """
     solar_day = get_solar_day(city_name, target_date)
     if solar_day is None:
+        logger.warning(
+            "Day0 solar lookup failed for %s %s — no solar data available",
+            city_name, target_date,
+        )
         return None
 
     observation_instant = _parse_runtime_observation_instant(

@@ -159,9 +159,11 @@ class TestFeeIncludedInEdgeCalculation:
         # Symmetric at tails
         assert abs(polymarket_fee(0.10) - 0.0045) < 1e-10
         assert abs(polymarket_fee(0.90) - 0.0045) < 1e-10
-        # Boundary: fee at extremes approaches 0
-        assert polymarket_fee(0.0) == 0.0
-        assert polymarket_fee(1.0) == 0.0
+        # Boundary: fee at extremes raises ValueError (fail-close)
+        with pytest.raises(ValueError, match="price in \\(0, 1\\)"):
+            polymarket_fee(0.0)
+        with pytest.raises(ValueError, match="price in \\(0, 1\\)"):
+            polymarket_fee(1.0)
         # Must NOT be flat 5%
         assert polymarket_fee(0.90) < 0.01, (
             "Fee at p=0.90 must be << 5%. Got {:.4f}".format(polymarket_fee(0.90))
