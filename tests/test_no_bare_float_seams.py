@@ -48,6 +48,18 @@ class TestExecutionPriceConstruction:
         with pytest.raises(ValueError):
             ExecutionPrice(value=-0.01, price_type="vwmp", fee_deducted=True, currency="probability_units")
 
+    def test_nan_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("nan"), price_type="vwmp", fee_deducted=True, currency="probability_units")
+
+    def test_inf_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("inf"), price_type="ask", fee_deducted=True, currency="probability_units")
+
+    def test_neg_inf_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("-inf"), price_type="bid", fee_deducted=False, currency="usd")
+
     def test_probability_units_over_one_raises(self):
         with pytest.raises(ValueError):
             ExecutionPrice(value=1.01, price_type="ask", fee_deducted=True, currency="probability_units")

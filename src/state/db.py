@@ -316,8 +316,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
             n_pair_rows INTEGER NOT NULL,
             n_positive_rows INTEGER NOT NULL,
-            recorded_at TEXT NOT NULL,
-            UNIQUE(city, target_date, forecast_available_at, lead_days)
+            recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
             ON calibration_decision_group(cluster, season, lead_days);
@@ -1007,44 +1006,145 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         conn.close()
 
 
+_CALIBRATION_DECISION_GROUP_DDL = """
+CREATE TABLE calibration_decision_group (
+    group_id TEXT PRIMARY KEY,
+    city TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    forecast_available_at TEXT NOT NULL,
+    cluster TEXT NOT NULL,
+    season TEXT NOT NULL,
+    lead_days REAL NOT NULL,
+    settlement_value REAL,
+    winning_range_label TEXT,
+    bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+    n_pair_rows INTEGER NOT NULL,
+    n_positive_rows INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL
+)
+"""
+
+_CALIBRATION_DECISION_GROUP_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
+ON calibration_decision_group(cluster, season, lead_days)
+"""
+
+
 def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> None:
-    """Recreate derived calibration groups if the legacy unique key lacks lead_days."""
+    """Migrate calibration groups if the legacy unique key lacks lead_days."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'calibration_decision_group'"
     ).fetchone()
-    create_sql = str(row[0] if row and row[0] else "")
-    if "UNIQUE(city, target_date, forecast_available_at, lead_days)" in create_sql:
-        return
-    if not create_sql:
+    if row is None:
         return
 
-    # This table is a derived projection from calibration_pairs. Keeping the
-    # legacy unique key would collapse multi-step TIGGE samples into one group.
-    conn.execute("DROP TABLE IF EXISTS calibration_decision_group")
-    conn.execute(
-        """
-        CREATE TABLE calibration_decision_group (
-            group_id TEXT PRIMARY KEY,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            forecast_available_at TEXT NOT NULL,
-            cluster TEXT NOT NULL,
-            season TEXT NOT NULL,
-            lead_days REAL NOT NULL,
-            settlement_value REAL,
-            winning_range_label TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            n_pair_rows INTEGER NOT NULL,
-            n_positive_rows INTEGER NOT NULL,
-            recorded_at TEXT NOT NULL,
-            UNIQUE(city, target_date, forecast_available_at, lead_days)
+    needs_migration = False
+    for idx in conn.execute("PRAGMA index_list(calibration_decision_group)").fetchall():
+        is_unique = bool(idx[2])
+        if not is_unique:
+            continue
+        idx_name = idx[1]
+        cols = [
+            col[2]
+            for col in conn.execute(f"PRAGMA index_info({idx_name})").fetchall()
+        ]
+        if cols in (
+            ["city", "target_date", "forecast_available_at"],
+            ["city", "target_date", "forecast_available_at", "lead_days"],
+        ):
+            needs_migration = True
+    if not needs_migration:
+        return
+
+    required_columns = {
+        "group_id",
+        "city",
+        "target_date",
+        "forecast_available_at",
+        "cluster",
+        "season",
+        "lead_days",
+        "settlement_value",
+        "winning_range_label",
+        "bias_corrected",
+        "n_pair_rows",
+        "n_positive_rows",
+        "recorded_at",
+    }
+    existing_columns = {
+        col[1] for col in conn.execute("PRAGMA table_info(calibration_decision_group)")
+    }
+    missing = sorted(required_columns - existing_columns)
+    n_existing = conn.execute(
+        "SELECT COUNT(*) FROM calibration_decision_group"
+    ).fetchone()[0]
+    if missing and n_existing:
+        raise sqlite3.OperationalError(
+            "Cannot migrate calibration_decision_group lead_days key: "
+            f"non-empty legacy table is missing required columns {missing}"
         )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket "
-        "ON calibration_decision_group(cluster, season, lead_days)"
-    )
+    if missing:
+        conn.execute("DROP TABLE IF EXISTS calibration_decision_group")
+        conn.execute(_CALIBRATION_DECISION_GROUP_DDL)
+        conn.execute(_CALIBRATION_DECISION_GROUP_INDEX_DDL)
+        return
+
+    legacy_name = "calibration_decision_group__legacy_lead_key"
+    conn.execute("SAVEPOINT calibration_decision_group_lead_key_migration")
+    try:
+        legacy_count = n_existing
+        conn.execute(f"DROP TABLE IF EXISTS {legacy_name}")
+        conn.execute(f"ALTER TABLE calibration_decision_group RENAME TO {legacy_name}")
+        conn.execute(_CALIBRATION_DECISION_GROUP_DDL)
+        conn.execute(
+            f"""
+            INSERT INTO calibration_decision_group (
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            )
+            SELECT
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            FROM {legacy_name}
+            """
+        )
+        conn.execute(_CALIBRATION_DECISION_GROUP_INDEX_DDL)
+        new_count = conn.execute(
+            "SELECT COUNT(*) FROM calibration_decision_group"
+        ).fetchone()[0]
+        if new_count != legacy_count:
+            raise sqlite3.IntegrityError(
+                "calibration_decision_group migration row-count mismatch: "
+                f"{legacy_count} legacy rows, {new_count} copied rows"
+            )
+        conn.execute(f"DROP TABLE {legacy_name}")
+        conn.execute("RELEASE SAVEPOINT calibration_decision_group_lead_key_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT calibration_decision_group_lead_key_migration")
+        conn.execute("RELEASE SAVEPOINT calibration_decision_group_lead_key_migration")
+        raise
 
 
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
@@ -3596,8 +3696,14 @@ def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
 
 
 def _parse_boolish_text(raw: str) -> bool:
+    # K1/#71: removed "gate" — action keyword, not boolean literal.
+    # Same rationale as _parse_boolish in policy.py.
     text = str(raw).strip().lower()
-    return text in {"1", "true", "yes", "on", "enabled", "gate"}
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError(f"unsupported boolish value in DB: {raw!r}")
 
 
 def _latest_trade_decision_status_by_trade_id(

@@ -345,25 +345,6 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
     )
 
 
-def _is_settlement_sensitive_monitor(pos, *, hours_to_settlement, time_context_unavailable: bool = False) -> bool:
-    state = _position_state_value(pos)
-    if state == "day0_window":
-        return True
-    if time_context_unavailable:
-        return state in {"entered", "holding"}
-    return hours_to_settlement is not None and float(hours_to_settlement) <= 6.0
-
-
-def _record_monitor_chain_missing(summary: dict, pos, reason: str) -> None:
-    position_id = str(getattr(pos, "trade_id", "") or "")
-    summary["monitor_chain_missing"] = int(summary.get("monitor_chain_missing", 0) or 0) + 1
-    summary.setdefault("monitor_chain_missing_positions", []).append(position_id)
-    summary.setdefault("monitor_chain_missing_reasons", []).append({
-        "position_id": position_id,
-        "reason": reason,
-    })
-
-
 def _execution_stub(candidate, decision, result, city, mode, *, deps):
     edge_source = decision.edge_source or deps._classify_edge_source(mode, decision.edge)
     strategy_key = _resolve_strategy_key(decision)
@@ -504,22 +485,22 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
             continue
 
-        hours_to_settlement = None
-        time_context_unavailable = False
-        monitor_phase = "time_context"
-        monitor_result_recorded = False
+        # K1/#49: belt-and-suspenders guard — quarantine placeholders must not
+        # reach monitor_refresh where cities_by_name lookup would fail.
+        if getattr(pos, 'is_quarantine_placeholder', False):
+            logger.warning("Quarantine placeholder %s reached monitor loop — skipping", pos.trade_id)
+            summary["monitor_skipped_quarantine_placeholder"] = summary.get("monitor_skipped_quarantine_placeholder", 0) + 1
+            continue
+
         try:
             city = deps.cities_by_name.get(pos.city)
+            hours_to_settlement = None
             if city is not None:
-                try:
-                    hours_to_settlement = lead_hours_to_target(
-                        pos.target_date,
-                        city.timezone,
-                        deps._utcnow(),
-                    )
-                except Exception:
-                    time_context_unavailable = True
-                    raise
+                hours_to_settlement = lead_hours_to_target(
+                    pos.target_date,
+                    city.timezone,
+                    deps._utcnow(),
+                )
                 if (hours_to_settlement <= 6.0
                         and pos.state in {"entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
@@ -542,12 +523,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                                 pos.trade_id,
                                 exc,
                             )
-            else:
-                time_context_unavailable = True
 
-            monitor_phase = "refresh"
             edge_ctx = refresh_position(conn, clob, pos)
-            monitor_phase = "exit_context"
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -556,7 +533,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
-            monitor_phase = "evaluate"
             exit_decision = pos.evaluate_exit(exit_context)
             should_exit = exit_decision.should_exit
             exit_reason = exit_decision.reason
@@ -567,16 +543,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     pos.trade_id,
                     exit_reason,
                 )
-                if _is_settlement_sensitive_monitor(
-                    pos,
-                    hours_to_settlement=hours_to_settlement,
-                    time_context_unavailable=time_context_unavailable,
-                ):
-                    _record_monitor_chain_missing(
-                        summary,
-                        pos,
-                        f"incomplete_exit_context:{exit_reason}",
-                    )
 
             artifact.add_monitor_result(
                 deps.MonitorResult(
@@ -588,11 +554,9 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     neg_edge_count=pos.neg_edge_count,
                 )
             )
-            monitor_result_recorded = True
             summary["monitors"] += 1
 
             if should_exit:
-                monitor_phase = "execution"
                 pos.exit_trigger = exit_decision.trigger or exit_reason
                 pos.exit_reason = exit_reason
                 pos.exit_divergence_score = edge_ctx.divergence_score
@@ -616,29 +580,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 summary["exits"] += 1
                 portfolio_dirty = True
         except Exception as e:
-            summary["monitor_failed"] = int(summary.get("monitor_failed", 0) or 0) + 1
-            if (
-                not monitor_result_recorded
-                and monitor_phase in {"time_context", "refresh", "exit_context", "evaluate"}
-                and _is_settlement_sensitive_monitor(
-                    pos,
-                    hours_to_settlement=hours_to_settlement,
-                    time_context_unavailable=time_context_unavailable,
-                )
-            ):
-                reason_prefix = "refresh" if monitor_phase == "refresh" else monitor_phase
-                reason = f"{reason_prefix}_failed:{e.__class__.__name__}"
-                _record_monitor_chain_missing(summary, pos, reason)
-                artifact.add_monitor_result(
-                    deps.MonitorResult(
-                        position_id=pos.trade_id,
-                        fresh_prob=pos.last_monitor_prob or pos.p_posterior,
-                        fresh_edge=pos.last_monitor_edge,
-                        should_exit=False,
-                        exit_reason=f"MONITOR_CHAIN_MISSING:{reason}",
-                        neg_edge_count=pos.neg_edge_count,
-                    )
-                )
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e)
 
     return portfolio_dirty, tracker_dirty

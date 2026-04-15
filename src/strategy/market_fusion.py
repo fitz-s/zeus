@@ -96,11 +96,6 @@ def compute_alpha(
     - D3: tail bin scaling (applied in compute_posterior, not here)
     - Lead days (short → +0.05, long → -0.05)
 
-    DEPRECATED: per-city α override via alpha_overrides table.
-    D1 analysis showed MAE→α mapping has r=+0.032 (no signal).
-    Override lookup kept for manual experimentation but table is empty
-    and no longer auto-populated by the weekly cycle.
-
     ensemble_spread must be a TemperatureDelta. This is a hard rule:
     spread thresholds are unit-aware and must not silently fall back to bare floats.
     """
@@ -120,12 +115,9 @@ def compute_alpha(
             "Wrap raw spreads with the city settlement unit first."
         )
 
-    # Per-city override lookup (DEPRECATED — kept for manual experiments only)
-    # Was part of the dynamic-α per-city approach. alpha_overrides has 0 rows.
-    # Do NOT auto-populate this table; per-decision adjustments are superior.
-    base = _get_alpha_override(city_name, season)
-    if base is None:
-        base = BASE_ALPHA_BY_LEVEL[calibration_level]
+    # K1/#5: deprecated alpha override removed — alpha_overrides table had 0 rows
+    # and per-decision adjustments (below) are the correct alpha mechanism.
+    base = BASE_ALPHA_BY_LEVEL[calibration_level]
     a = base
 
     # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
@@ -163,54 +155,6 @@ def compute_alpha(
         evidence_basis="D1 resolution: conservative blending weight, not pure Brier minimizer",
         ci_bound=0.05,
     )
-
-
-# Cache to avoid repeated DB lookups within a cycle
-_alpha_override_cache: dict[tuple[str, str], float | None] = {}
-_alpha_cache_ts: float = 0.0
-
-
-def _get_alpha_override(city_name: str, season: str) -> float | None:
-    """Look up per-city alpha override. Returns None if no override exists."""
-    import time
-    global _alpha_override_cache, _alpha_cache_ts
-
-    if not city_name or not season:
-        return None
-
-    # Cache for 300s to avoid DB thrashing during a cycle
-    now = time.time()
-    if now - _alpha_cache_ts > 300:
-        _alpha_override_cache.clear()
-        _alpha_cache_ts = now
-
-    key = (city_name, season)
-    if key in _alpha_override_cache:
-        return _alpha_override_cache[key]
-
-    try:
-        from src.state.db import get_world_connection
-        conn = get_world_connection()
-        row = conn.execute(
-            "SELECT alpha FROM alpha_overrides "
-            "WHERE city = ? AND season = ? AND source = 'validated_optimal'",
-            (city_name, season),
-        ).fetchone()
-        conn.close()
-
-        result = float(row["alpha"]) if row else None
-        _alpha_override_cache[key] = result
-
-        if result is not None:
-            import logging
-            logging.getLogger(__name__).info(
-                "Using validated α=%.3f for %s/%s", result, city_name, season,
-            )
-        return result
-
-    except Exception:
-        _alpha_override_cache[key] = None
-        return None
 
 
 def compute_posterior(
@@ -260,7 +204,12 @@ def compute_posterior(
 
 def alpha_for_bin(alpha: float, bin) -> float:
     """Return the effective alpha for one bin, including tail scaling."""
-    is_tail = (hasattr(bin, 'low') and bin.low is None) or (hasattr(bin, 'high') and bin.high is None)
+    is_tail = bool(getattr(bin, "is_shoulder", False))
+    if not is_tail:
+        is_tail = (
+            (hasattr(bin, 'low') and bin.low is None)
+            or (hasattr(bin, 'high') and bin.high is None)
+        )
     if not is_tail and hasattr(bin, 'label'):
         label = bin.label.lower()
         is_tail = 'or below' in label or 'or higher' in label or 'or above' in label

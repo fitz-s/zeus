@@ -21,7 +21,6 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
-from src.contracts.hold_value import HoldValue
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
@@ -99,6 +98,7 @@ class ExitContext:
         elif not self.fresh_prob_is_fresh and not self.day0_active:
             # Day0 positions waive fresh_prob_is_fresh requirement
             missing.append("fresh_prob_is_fresh")
+            missing.append("fresh_prob_is_fresh")
         if not self._is_finite(self.current_market_price):
             missing.append("current_market_price")
         elif not self.current_market_price_is_fresh:
@@ -117,26 +117,9 @@ ADMIN_EXITS = frozenset({
     "SETTLED_UNKNOWN_DIRECTION", "EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
 })
 
-
-def _buy_yes_degraded_best_bid_proxy(current_market_price: float) -> float:
-    """Conservative buy-yes sell proxy when fresh market price exists but bid is absent."""
-    return max(0.01, min(0.99, float(current_market_price) - 0.01))
-
-
-def _declared_zero_cost_hold_value(shares: float, current_p_posterior: float) -> HoldValue:
-    return HoldValue.compute(
-        gross_value=float(shares) * float(current_p_posterior),
-        fee_cost=0.0,
-        time_cost=0.0,
-    )
-
-
-def _append_hold_value_audit(applied: list[str]) -> None:
-    applied.extend([
-        "hold_value_contract",
-        "hold_cost_fee_declared_zero",
-        "hold_cost_time_declared_zero",
-    ])
+# K1/#49: Sentinel for quarantine placeholder fields — downstream code must
+# check `pos.is_quarantine_placeholder` instead of comparing city == "UNKNOWN".
+QUARANTINE_SENTINEL = "QUARANTINE_UNRESOLVED"
 
 
 @dataclass
@@ -289,6 +272,13 @@ class Position:
             return 0.0
         return self.effective_shares * self.last_monitor_market_price - self.effective_cost_basis_usd
 
+    @property
+    def is_quarantine_placeholder(self) -> bool:
+        """K1/#49: True when this position is a chain-only quarantine stub with
+        unresolved market metadata.  Downstream code must NOT participate these
+        in lifecycle, risk, or monitor logic."""
+        return self.city == QUARANTINE_SENTINEL
+
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
@@ -345,21 +335,12 @@ class Position:
                     applied=applied,
                 )
             else:
-                best_bid = exit_context.best_bid
-                day0_applied = applied
-                if best_bid is None:
-                    best_bid = _buy_yes_degraded_best_bid_proxy(float(exit_context.current_market_price))
-                    day0_applied = [
-                        *applied,
-                        "best_bid_proxy_from_current_market_price",
-                        "best_bid_proxy_tick_discount",
-                    ]
                 day0_decision = self._buy_yes_exit(
                     forward_edge,
                     current_p_posterior=float(exit_context.fresh_prob),
-                    best_bid=best_bid,
+                    best_bid=exit_context.best_bid,
                     day0_active=True,
-                    applied=day0_applied,
+                    applied=applied,
                 )
             if day0_decision.should_exit:
                 return day0_decision
@@ -469,21 +450,12 @@ class Position:
                 applied=applied,
             )
         else:
-            best_bid = exit_context.best_bid
-            buy_yes_applied = applied
-            if best_bid is None:
-                best_bid = _buy_yes_degraded_best_bid_proxy(float(exit_context.current_market_price))
-                buy_yes_applied = [
-                    *applied,
-                    "best_bid_proxy_from_current_market_price",
-                    "best_bid_proxy_tick_discount",
-                ]
             return self._buy_yes_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=best_bid,
+                best_bid=exit_context.best_bid,
                 day0_active=bool(exit_context.day0_active),
-                applied=buy_yes_applied,
+                applied=applied,
             )
 
     def _buy_yes_exit(
@@ -512,9 +484,7 @@ class Position:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
-            hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
-            _append_hold_value_audit(applied)
-            if shares * best_bid <= hold_value.net_value:
+            if shares * best_bid <= shares * current_p_posterior:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -554,9 +524,7 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
-            _append_hold_value_audit(applied)
-            if shares * best_bid <= hold_value.net_value:
+            if shares * best_bid <= shares * current_p_posterior:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -594,9 +562,7 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
-                _append_hold_value_audit(applied)
-                if shares * current_market_price <= hold_value.net_value:
+                if shares * current_market_price <= shares * current_p_posterior:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -642,9 +608,7 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                hold_value = _declared_zero_cost_hold_value(shares, current_p_posterior)
-                _append_hold_value_audit(applied)
-                if shares * current_market_price <= hold_value.net_value:
+                if shares * current_market_price <= shares * current_p_posterior:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -897,10 +861,10 @@ def _chain_only_quarantine_position_from_row(row: dict) -> Position:
     return Position(
         trade_id=f"quarantine_{token_id[:8]}",
         market_id=condition_id,
-        city="UNKNOWN",
+        city=QUARANTINE_SENTINEL,
         cluster="Other",
-        target_date="UNKNOWN",
-        bin_label="UNKNOWN",
+        target_date=QUARANTINE_SENTINEL,
+        bin_label=QUARANTINE_SENTINEL,
         direction="unknown",
         size_usd=cost,
         entry_price=avg_price,

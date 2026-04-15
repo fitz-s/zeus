@@ -15,6 +15,21 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 
+class SupervisorContractError(ValueError):
+    """Raised when a supervisor API contract field violates its invariant."""
+    pass
+
+
+def _check_env(obj: object) -> None:
+    env = getattr(obj, "env", "")
+    if not env:
+        raise SupervisorContractError(
+            f"{type(obj).__name__}.env must not be empty — "
+            "every supervisor object must declare its environment "
+            "(e.g. 'live', 'paper', 'test')"
+        )
+
+
 @dataclass
 class Observation:
     """A fact Venus observed about Zeus's runtime state."""
@@ -30,6 +45,9 @@ class Observation:
     source: str = "zeus_runtime"
     provenance_ref: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _check_env(self)
+
 
 @dataclass
 class BeliefMismatch:
@@ -41,6 +59,9 @@ class BeliefMismatch:
     severity: Literal["WARN", "CRITICAL"] = "WARN"
     env: str = ""
     source: str = "venus"
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -54,6 +75,9 @@ class Gap:
     proposed_antibody: Optional[str] = None
     env: str = ""
     source: str = "venus"
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -69,6 +93,9 @@ class Proposal:
     risk_scope: Literal["paper_only", "live_path", "docs_only"] = "paper_only"
     env: str = ""
     source: str = "venus"
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -89,6 +116,9 @@ class SupervisorCommand:
     env: str = ""
     source: str = "venus"
 
+    def __post_init__(self) -> None:
+        _check_env(self)
+
 
 @dataclass
 class ChangeOutcome:
@@ -100,6 +130,9 @@ class ChangeOutcome:
     notes: str = ""
     env: str = ""
     source: str = "venus"
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -126,3 +159,6 @@ class Antibody:
     recurrence_class: str
     deployed_at: str = ""
     env: str = ""
+
+    def __post_init__(self) -> None:
+        _check_env(self)

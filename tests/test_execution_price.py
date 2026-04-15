@@ -76,6 +76,26 @@ class TestWithTakerFee:
         expected = 0.50 + 0.03 * 0.50 * 0.50
         assert adjusted.value == pytest.approx(expected)
 
+    def test_polymarket_fee_rejects_nan(self):
+        """polymarket_fee must reject NaN price."""
+        with pytest.raises(ValueError, match="finite"):
+            polymarket_fee(float("nan"))
+
+    def test_polymarket_fee_rejects_inf(self):
+        """polymarket_fee must reject infinite price."""
+        with pytest.raises(ValueError, match="finite"):
+            polymarket_fee(float("inf"))
+
+    def test_polymarket_fee_rejects_nan_fee_rate(self):
+        """polymarket_fee must reject NaN fee_rate."""
+        with pytest.raises(ValueError, match="finite"):
+            polymarket_fee(0.5, fee_rate=float("nan"))
+
+    def test_polymarket_fee_rejects_inf_fee_rate(self):
+        """polymarket_fee must reject infinite fee_rate."""
+        with pytest.raises(ValueError, match="finite"):
+            polymarket_fee(0.5, fee_rate=float("inf"))
+
 
 class TestSchemaPacket:
     def test_schema_packet_returns_dict(self):

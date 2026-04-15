@@ -25,7 +25,7 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
     """
     from src.config import settings
 
-    bias_enabled = settings._data.get("bias_correction_enabled", False)
+    bias_enabled = settings.bias_correction_enabled
     if not bias_enabled:
         pytest.skip("bias_correction_enabled = false. No invariant to check.")
 
@@ -70,7 +70,7 @@ def test_model_bias_table_not_empty_if_bias_enabled():
     """If bias correction is enabled, model_bias table must have data."""
     from src.config import settings
 
-    bias_enabled = settings._data.get("bias_correction_enabled", False)
+    bias_enabled = settings.bias_correction_enabled
     if not bias_enabled:
         pytest.skip("bias_correction_enabled = false.")
 
@@ -89,7 +89,7 @@ def test_platt_models_consistent_with_bias_flag():
     on bias-corrected calibration pairs."""
     from src.config import settings
 
-    bias_enabled = settings._data.get("bias_correction_enabled", False)
+    bias_enabled = settings.bias_correction_enabled
     if not bias_enabled:
         pytest.skip("bias_correction_enabled = false.")
 

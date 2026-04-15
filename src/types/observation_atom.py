@@ -29,9 +29,11 @@ Part of K1 packet. See .omc/plans/k1-freeze.md section 5.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone as dt_timezone
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class IngestionRejected(ValueError):
@@ -107,8 +109,55 @@ class ObservationAtom:
                 f"{self.city}/{self.target_date}: validation_pass=True requires "
                 f"authority='VERIFIED', got 'UNVERIFIED'"
             )
+        if self.authority == "QUARANTINED" and self.validation_pass:
+            raise IngestionRejected(
+                f"{self.city}/{self.target_date}: validation_pass=True cannot "
+                "be paired with authority='QUARANTINED'"
+            )
+        if not math.isfinite(float(self.value)):
+            raise IngestionRejected(f"{self.city}/{self.target_date}: value is not finite")
+        if not math.isfinite(float(self.raw_value)):
+            raise IngestionRejected(f"{self.city}/{self.target_date}: raw_value is not finite")
         # Month range guard
         if not 1 <= self.month <= 12:
             raise IngestionRejected(
                 f"{self.city}: month={self.month} out of range [1, 12]"
             )
+        for field_name, value in (
+            ("fetch_utc", self.fetch_utc),
+            ("collection_window_start_utc", self.collection_window_start_utc),
+            ("collection_window_end_utc", self.collection_window_end_utc),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise IngestionRejected(f"{self.city}: {field_name} must be timezone-aware UTC")
+            if value.utcoffset() != dt_timezone.utc.utcoffset(value):
+                raise IngestionRejected(f"{self.city}: {field_name} must be UTC")
+        if self.collection_window_start_utc > self.collection_window_end_utc:
+            raise IngestionRejected(
+                f"{self.city}/{self.target_date}: collection window start "
+                "must be <= end"
+            )
+        if self.local_time.date() != self.target_date:
+            raise IngestionRejected(
+                f"{self.city}: local_time date {self.local_time.date()} "
+                f"does not match target_date {self.target_date}"
+            )
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise IngestionRejected(
+                f"{self.city}: unknown timezone {self.timezone!r}"
+            ) from exc
+        # local_time should be tz-aware and consistent with declared timezone
+        if self.local_time.tzinfo is not None:
+            local_tz_name = getattr(self.local_time.tzinfo, "key", None)
+            if local_tz_name is None:
+                raise IngestionRejected(
+                    f"{self.city}: local_time has tzinfo but not a ZoneInfo — "
+                    "cannot verify timezone consistency"
+                )
+            if local_tz_name != self.timezone:
+                raise IngestionRejected(
+                    f"{self.city}: local_time timezone {local_tz_name!r} "
+                    f"does not match declared timezone {self.timezone!r}"
+                )

@@ -177,7 +177,7 @@ def analyze_etl_freshness(conn: sqlite3.Connection) -> str:
 def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
     try:
         from src.config import settings
-        bias_enabled = settings._data.get("bias_correction_enabled", False)
+        bias_enabled = settings.bias_correction_enabled
     except Exception:
         bias_enabled = False
 

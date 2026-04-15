@@ -66,8 +66,8 @@ def dynamic_kelly_mult(
     Reduces base multiplier based on uncertainty and risk state.
     All adjustments are multiplicative (cumulative).
     """
-    # C1/INV-13: provenance check — default no-op until registry validation complete
-    require_provenance("kelly_mult", requires_provenance=False)
+    # C1/INV-13: provenance check — kelly_mult is registered in provenance_registry.yaml
+    require_provenance("kelly_mult")
 
     m = base
 

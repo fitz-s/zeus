@@ -20,7 +20,7 @@ from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     rescue_pending_runtime_state,
 )
-from src.state.portfolio import INACTIVE_RUNTIME_STATES, Position, PortfolioState, void_position
+from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
 
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
@@ -466,8 +466,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             quarantine_pos = Position(
                 trade_id=f"quarantine_{tid[:8]}",
                 market_id=chain.condition_id,
-                city="UNKNOWN", cluster="Other",
-                target_date="UNKNOWN", bin_label="UNKNOWN",
+                city=QUARANTINE_SENTINEL, cluster="Other",
+                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
                 direction="unknown",
                 size_usd=chain.cost or (chain.size * chain.avg_price),
                 entry_price=chain.avg_price,

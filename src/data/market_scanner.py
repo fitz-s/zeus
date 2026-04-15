@@ -374,6 +374,30 @@ def _extract_outcomes(event: dict) -> list[dict]:
         yes_token = clob_tokens[0]
         no_token = clob_tokens[1]
 
+        # K1/#43: Validate token→outcome label mapping instead of assuming
+        # positional order.  Polymarket markets carry an "outcomes" list
+        # (e.g. ["Yes", "No"]) whose indices correspond to clobTokenIds.
+        outcome_labels = market.get("outcomes", "[]")
+        if isinstance(outcome_labels, str):
+            try:
+                outcome_labels = json.loads(outcome_labels)
+            except (json.JSONDecodeError, TypeError):
+                outcome_labels = []
+        if len(outcome_labels) >= 2:
+            label_0 = str(outcome_labels[0]).strip().lower()
+            label_1 = str(outcome_labels[1]).strip().lower()
+            if label_0 == "no" and label_1 == "yes":
+                # Tokens are reversed vs our assumption — swap.
+                yes_token, no_token = no_token, yes_token
+                _labels_swapped = True
+            elif label_0 != "yes" or label_1 != "no":
+                # Unrecognised outcome labels — skip this market.
+                continue
+            else:
+                _labels_swapped = False
+        else:
+            _labels_swapped = False
+
         # Parse prices — may be JSON string or list
         prices = market.get("outcomePrices", "[]")
         if isinstance(prices, str):
@@ -383,6 +407,8 @@ def _extract_outcomes(event: dict) -> list[dict]:
                 prices = [0.5, 0.5]
         yes_price = float(prices[0]) if len(prices) > 0 else 0.5
         no_price = float(prices[1]) if len(prices) > 1 else 0.5
+        if _labels_swapped:
+            yes_price, no_price = no_price, yes_price
 
         # Parse range from question text
         range_low, range_high = _parse_temp_range(question)

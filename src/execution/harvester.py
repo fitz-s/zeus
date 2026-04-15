@@ -18,6 +18,7 @@ import httpx
 
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
+from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import round_wmo_half_up_value
@@ -53,7 +54,7 @@ def _get_canonical_exit_flag() -> bool:
     """Read CANONICAL_EXIT_PATH feature flag from settings."""
     try:
         from src.config import settings
-        return settings._data.get("feature_flags", {}).get("CANONICAL_EXIT_PATH", False)
+        return settings.feature_flags.get("CANONICAL_EXIT_PATH", False)
     except Exception:
         return False
 
@@ -324,7 +325,9 @@ def run_harvester() -> dict:
                     all_labels,
                     context["p_raw_vector"],
                     lead_days=context["lead_days"],
+                    forecast_issue_time=context["issue_time"],
                     forecast_available_at=context["available_at"],
+                    source_model_version=context["source_model_version"],
                 )
             total_pairs += event_pairs
             if event_pairs > 0:
@@ -524,7 +527,8 @@ def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
     """Get the decision-time snapshot payload needed for calibration capture."""
     row = conn.execute(
         """
-        SELECT p_raw_json, lead_hours, available_at
+        SELECT p_raw_json, lead_hours, issue_time, available_at,
+               model_version, data_version
         FROM ensemble_snapshots
         WHERE snapshot_id = ?
         LIMIT 1
@@ -533,11 +537,16 @@ def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
     ).fetchone()
     if row is None or not row["p_raw_json"]:
         return None
+    source_model_version = row["data_version"] or row["model_version"]
+    if not source_model_version:
+        return None
     try:
         return {
             "p_raw_vector": json.loads(row["p_raw_json"]),
             "lead_days": float(row["lead_hours"]) / 24.0,
+            "issue_time": row["issue_time"],
             "available_at": row["available_at"],
+            "source_model_version": source_model_version,
         }
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -699,7 +708,9 @@ def harvest_settlement(
     bin_labels: list[str],
     p_raw_vector: Optional[list[float]] = None,
     lead_days: float = 3.0,
+    forecast_issue_time: Optional[str] = None,
     forecast_available_at: Optional[str] = None,
+    source_model_version: Optional[str] = None,
     settlement_value: Optional[float] = None,
 ) -> int:
     """Generate calibration pairs from a settled market.
@@ -709,6 +720,11 @@ def harvest_settlement(
     """
     season = season_from_date(target_date, lat=city.lat)
     now = forecast_available_at or datetime.now(timezone.utc).isoformat()
+    issue_time = forecast_issue_time or now
+    if p_raw_vector and not source_model_version:
+        raise ValueError(
+            "source_model_version is required when harvesting calibration pairs"
+        )
 
     count = 0
     for i, label in enumerate(bin_labels):
@@ -725,6 +741,12 @@ def harvest_settlement(
             forecast_available_at=now,
             settlement_value=(round_wmo_half_up_value(float(settlement_value))
                               if settlement_value is not None else None),
+            decision_group_id=compute_id(
+                city.name,
+                target_date,
+                issue_time,
+                source_model_version or "",
+            ),
         )
         count += 1
 

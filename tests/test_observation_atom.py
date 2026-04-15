@@ -98,6 +98,75 @@ def test_atom_refuses_unverified_with_validation_pass():
         ObservationAtom(**kwargs)
 
 
+def test_atom_refuses_quarantined_with_validation_pass():
+    kwargs = _valid_atom_kwargs(authority="QUARANTINED", validation_pass=True)
+    with pytest.raises(IngestionRejected, match="QUARANTINED"):
+        ObservationAtom(**kwargs)
+
+
+def test_atom_refuses_nonfinite_values():
+    with pytest.raises(IngestionRejected, match="value is not finite"):
+        ObservationAtom(**_valid_atom_kwargs(value=float("nan")))
+    with pytest.raises(IngestionRejected, match="raw_value is not finite"):
+        ObservationAtom(**_valid_atom_kwargs(raw_value=float("inf")))
+
+
+def test_atom_refuses_inverted_collection_window():
+    with pytest.raises(IngestionRejected, match="collection window start"):
+        ObservationAtom(**_valid_atom_kwargs(
+            collection_window_start_utc=DEFAULT_WINDOW_END,
+            collection_window_end_utc=DEFAULT_WINDOW_START,
+        ))
+
+
+def test_atom_requires_utc_provenance_times():
+    naive = datetime(2026, 1, 15, 12, 0, 0)
+    with pytest.raises(IngestionRejected, match="fetch_utc must be timezone-aware UTC"):
+        ObservationAtom(**_valid_atom_kwargs(fetch_utc=naive))
+
+
+def test_atom_local_time_date_must_match_target_date():
+    with pytest.raises(IngestionRejected, match="does not match target_date"):
+        ObservationAtom(**_valid_atom_kwargs(
+            local_time=datetime(2026, 1, 16, 13, 0, 0),
+        ))
+
+
+def test_atom_requires_known_timezone():
+    with pytest.raises(IngestionRejected, match="unknown timezone"):
+        ObservationAtom(**_valid_atom_kwargs(timezone="Not/AZone"))
+
+
+def test_atom_rejects_local_time_tz_mismatch():
+    """local_time with a different ZoneInfo than declared timezone must be rejected."""
+    wrong_tz_local = datetime(2026, 1, 15, 13, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    with pytest.raises(IngestionRejected, match="does not match declared timezone"):
+        ObservationAtom(**_valid_atom_kwargs(
+            local_time=wrong_tz_local,
+            timezone="Europe/Paris",
+        ))
+
+
+def test_atom_accepts_local_time_matching_tz():
+    """local_time with matching ZoneInfo should construct successfully."""
+    matching_local = datetime(2026, 1, 15, 13, 0, 0, tzinfo=ZoneInfo("Europe/Paris"))
+    atom = ObservationAtom(**_valid_atom_kwargs(
+        local_time=matching_local,
+        timezone="Europe/Paris",
+    ))
+    assert atom.timezone == "Europe/Paris"
+
+
+def test_atom_rejects_fixed_offset_tz_on_local_time():
+    """local_time with a fixed-offset timezone (not ZoneInfo) must be rejected."""
+    fixed_offset_local = datetime(2026, 1, 15, 13, 0, 0, tzinfo=timezone(timedelta(hours=1)))
+    with pytest.raises(IngestionRejected, match="not a ZoneInfo"):
+        ObservationAtom(**_valid_atom_kwargs(
+            local_time=fixed_offset_local,
+            timezone="Europe/Paris",
+        ))
+
+
 # ---------------------------------------------------------------------------
 # Test 3
 # ---------------------------------------------------------------------------

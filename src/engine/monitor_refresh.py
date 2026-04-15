@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 import numpy as np
 
-from src.calibration.manager import get_calibrator
+from src.calibration.manager import get_calibrator, season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.config import cities_by_name, day0_n_mc, edge_n_bootstrap, ensemble_n_mc
 from src.contracts import (
@@ -163,13 +163,33 @@ def _refresh_ens_member_counting(
         except Exception:
             pass  # Malformed timestamp → fall back to 48h
 
+    # K1/#68: verify calibration authority before computing alpha.
+    # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
+    _authority_verified = False
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_d, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            logger.warning(
+                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
+                len(_unverified_pairs), city.name, _cal_season,
+            )
+            _set_monitor_probability_fresh(position, False)
+            applied.append("authority_gate_blocked")
+            return position.p_posterior, applied
+        _authority_verified = True
+
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ens.spread(),
         model_agreement="AGREE",
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
-        authority_verified=True,
+        authority_verified=_authority_verified,
     ).value_for_consumer("ev")
 
     # Persistence anomaly check: if ENS predicts a historically rare
@@ -324,13 +344,32 @@ def _refresh_day0_observation(
         except Exception:
             pass
 
+    # K1/#68: verify calibration authority before computing alpha.
+    _authority_verified = False
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_d, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            logger.warning(
+                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
+                len(_unverified_pairs), city.name, _cal_season,
+            )
+            _set_monitor_probability_fresh(position, False)
+            applied.append("authority_gate_blocked")
+            return position.p_posterior, applied
+        _authority_verified = True
+
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ensemble_spread,
         model_agreement="AGREE",
         lead_days=0.0,
         hours_since_open=hours_since_open,
-        authority_verified=True,
+        authority_verified=_authority_verified,
     ).value_for_consumer("ev")
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market

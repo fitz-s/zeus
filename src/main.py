@@ -275,25 +275,13 @@ def _etl_recalibrate():
             except Exception as e:
                 results[script] = f"ERROR: {e}"
 
-    # 3. TIGGE direct calibration — pair ENS snapshots with settlement_value
-    try:
-        r = subprocess.run(
-            [venv_python, str(scripts_dir / "etl_tigge_direct_calibration.py")],
-            capture_output=True, text=True, timeout=300,
-        )
-        results["tigge_direct_cal"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
-    except Exception as e:
-        results["tigge_direct_cal"] = f"ERROR: {e}"
+    # 3. Calibration pairs are produced by the post-fillback canonical cascade.
+    # Do not run legacy/direct TIGGE pair generators here; refit consumes only
+    # already-certified canonical pairs.
+    results["calibration_pairs"] = "SKIP: run rebuild_calibration_pairs_canonical post-fillback"
 
-    # 4. Platt refit — critical for calibration accuracy (D5)
-    try:
-        r = subprocess.run(
-            [venv_python, str(scripts_dir / "refit_platt.py")],
-            capture_output=True, text=True, timeout=300,
-        )
-        results["platt_refit"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
-    except Exception as e:
-        results["platt_refit"] = f"ERROR: {e}"
+    # 4. Platt refit is explicit-only after the canonical post-fillback cascade.
+    results["platt_refit"] = "SKIP: run explicit post-fillback canonical refit"
 
     # 5. Replay audit snapshot — track system performance trend
     try:
@@ -385,7 +373,7 @@ def _startup_data_health_check(conn):
     """
     try:
         # 1. Bias correction reminder
-        bias_enabled = settings._data.get("bias_correction_enabled", False)
+        bias_enabled = settings.bias_correction_enabled
         bias_data = conn.execute(
             "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
         ).fetchone()[0]

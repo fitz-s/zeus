@@ -295,11 +295,11 @@ def test_rebuild_settlements_only_writes_verified_rows(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: rebuild_calibration only produces pairs from VERIFIED observations
+# Test 4: canonical rebuild only produces pairs from VERIFIED observations
 # ---------------------------------------------------------------------------
 
 def test_rebuild_calibration_requires_verified_observations(tmp_path):
-    """Property: rebuild_calibration skips snapshots with no VERIFIED settlement."""
+    """Property: canonical calibration rebuild skips snapshots with no VERIFIED observation."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -313,25 +313,30 @@ def test_rebuild_calibration_requires_verified_observations(tmp_path):
     # Seed VERIFIED snapshots for NYC
     _seed_ensemble_snapshots(conn, city="NYC", authority="VERIFIED", n=3)
 
-    # Seed only 2 VERIFIED settlements (1 snapshot has no settlement)
-    _seed_settlements(conn, city="NYC", authority="VERIFIED", n=2)
+    # Seed only 2 VERIFIED observations (1 snapshot has no observation)
+    _seed_observations(conn, city="NYC", authority="VERIFIED", n=2)
     conn.commit()
     conn.close()
 
-    from scripts.rebuild_calibration import rebuild_calibration
+    from scripts.rebuild_calibration_pairs_canonical import rebuild
     conn2 = sqlite3.connect(str(db_path))
     conn2.row_factory = sqlite3.Row
-    summary = rebuild_calibration(conn2, dry_run=False, city_filter="NYC")
+    summary = rebuild(
+        conn2,
+        dry_run=False,
+        force=True,
+        city_filter="NYC",
+        n_mc=10,
+        allow_unaudited_ensemble=True,
+    )
     conn2.commit()
 
     # 3 snapshots processed; 1 skipped (no settlement for day 3)
-    assert summary["rows_processed"] == 3
-    assert summary["rows_skipped"] == 1
+    assert summary.snapshots_processed == 2
+    assert summary.snapshots_no_observation == 1
 
     # All written pairs have authority='VERIFIED'
-    pairs = conn2.execute(
-        "SELECT authority FROM calibration_pairs WHERE city='NYC'"
-    ).fetchall()
+    pairs = conn2.execute("SELECT authority FROM calibration_pairs WHERE city='NYC'").fetchall()
     conn2.close()
     assert all(r["authority"] == "VERIFIED" for r in pairs), (
         "All rebuilt calibration_pairs must have authority='VERIFIED'"
@@ -717,3 +722,23 @@ def test_store_returns_empty_on_missing_authority_column():
     result_unverified = get_pairs_for_bucket(conn, cluster="NYC", season="JJA", authority_filter="UNVERIFIED")
     assert result_verified == [], f"Pre-migration VERIFIED request must return empty, got {result_verified}"
     assert result_unverified == [], f"Pre-migration UNVERIFIED request must return empty, got {result_unverified}"
+
+
+# ==================== K1/#68 Relationship Test ====================
+
+def test_compute_alpha_authority_violation_produces_structured_rejection():
+    """K1/#68 relationship: when authority_verified=False, compute_alpha raises
+    AuthorityViolation, and the evaluator must produce EdgeDecision with
+    rejection_stage=AUTHORITY_GATE (not an unstructured exception)."""
+    from src.strategy.market_fusion import compute_alpha, AuthorityViolation
+    from src.types.temperature import TemperatureDelta
+
+    with pytest.raises(AuthorityViolation):
+        compute_alpha(
+            calibration_level="linear",
+            ensemble_spread=TemperatureDelta(2.0, "F"),
+            model_agreement="AGREE",
+            lead_days=3,
+            hours_since_open=24.0,
+            authority_verified=False,
+        )

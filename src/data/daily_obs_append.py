@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -170,6 +171,26 @@ CITY_STATIONS: dict[str, tuple[str, str, str]] = {
 WU_SOURCE = "wu_icao_history"
 
 
+@dataclass(frozen=True)
+class WuDailyFetchResult:
+    """Structured WU fetch result.
+
+    `payload` is populated only when the HTTP response was usable.  A
+    `failure_reason` means the upstream request or response was not trustworthy
+    enough to interpret as business-empty data.
+    """
+
+    payload: dict[str, tuple[float, float]]
+    failure_reason: str | None = None
+    retryable: bool = False
+    auth_failed: bool = False
+    error: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.failure_reason is not None
+
+
 def _fetch_wu_icao_daily_highs_lows(
     icao: str,
     cc: str,
@@ -177,13 +198,14 @@ def _fetch_wu_icao_daily_highs_lows(
     end_date: date,
     unit: str,
     timezone_name: str,
-) -> dict[str, tuple[float, float]]:
+) -> WuDailyFetchResult:
     """Fetch local-date (high, low) from the WU ICAO history endpoint.
 
-    Returns {ISO_date_str: (high, low)} with both values in the requested
-    unit. Local-date bucketing converts the UTC epoch into the city's
-    timezone before grouping, so a fetch crossing a UTC midnight still
-    attributes each observation to the right local day.
+    Returns a structured result.  On success, `payload` is
+    {ISO_date_str: (high, low)} with both values in the requested unit.
+    Local-date bucketing converts the UTC epoch into the city's timezone
+    before grouping, so a fetch crossing a UTC midnight still attributes each
+    observation to the right local day.
     """
     if not WU_API_KEY:
         raise RuntimeError(
@@ -206,12 +228,48 @@ def _fetch_wu_icao_daily_highs_lows(
             timeout=30,
             headers=WU_HEADERS,
         )
+        if resp.status_code in (401, 403):
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.AUTH_ERROR,
+                retryable=False,
+                auth_failed=True,
+                error=f"HTTP {resp.status_code}",
+            )
+        if resp.status_code == 429:
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.HTTP_429,
+                retryable=True,
+                error="HTTP 429",
+            )
+        if 500 <= resp.status_code <= 599:
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.HTTP_5XX,
+                retryable=True,
+                error=f"HTTP {resp.status_code}",
+            )
         if resp.status_code != 200:
-            return {}
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.NETWORK_ERROR,
+                retryable=True,
+                error=f"HTTP {resp.status_code}",
+            )
 
-        observations = resp.json().get("observations", [])
+        try:
+            body = resp.json()
+        except ValueError as e:
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.PARSE_ERROR,
+                retryable=True,
+                error=f"json parse failed: {e}",
+            )
+        observations = body.get("observations", [])
         if not observations:
-            return {}
+            return WuDailyFetchResult(payload={})
 
         tz = ZoneInfo(timezone_name)
         highs: dict[str, float] = {}
@@ -229,11 +287,19 @@ def _fetch_wu_icao_daily_highs_lows(
             highs[key] = max(highs.get(key, float("-inf")), t)
             lows[key] = min(lows.get(key, float("inf")), t)
 
-        return {
+        payload = {
             key: (high, lows[key])
             for key, high in highs.items()
             if high != float("-inf") and lows[key] != float("inf")
         }
+        if not payload:
+            return WuDailyFetchResult(
+                payload={},
+                failure_reason=CoverageReason.PARSE_ERROR,
+                retryable=True,
+                error="WU response had observations but no usable temp/valid_time_gmt pairs",
+            )
+        return WuDailyFetchResult(payload=payload)
     except Exception as e:
         # S3 fix: warning not debug — programmer errors (KeyError on
         # response shape, attribute errors) should surface in production
@@ -245,7 +311,12 @@ def _fetch_wu_icao_daily_highs_lows(
             "WU ICAO fetch raised %s for %s:%s %s..%s: %s",
             type(e).__name__, icao, cc, start_date, end_date, e,
         )
-        return {}
+        return WuDailyFetchResult(
+            payload={},
+            failure_reason=CoverageReason.NETWORK_ERROR,
+            retryable=True,
+            error=f"{type(e).__name__}: {e}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +434,7 @@ def _write_atom_with_coverage(
     try:
         conn.execute(
             """
-            INSERT OR REPLACE INTO observations (
+            INSERT INTO observations (
                 city, target_date, source, high_temp, low_temp, unit, station_id, fetched_at,
                 raw_value, raw_unit, target_unit, value_type,
                 fetch_utc, local_time, collection_window_start_utc, collection_window_end_utc,
@@ -382,12 +453,39 @@ def _write_atom_with_coverage(
                 ?, ?,
                 ?, ?
             )
+            ON CONFLICT(city, target_date, source) DO UPDATE SET
+                high_temp = excluded.high_temp,
+                low_temp = excluded.low_temp,
+                unit = excluded.unit,
+                station_id = excluded.station_id,
+                fetched_at = excluded.fetched_at,
+                raw_value = excluded.raw_value,
+                raw_unit = excluded.raw_unit,
+                target_unit = excluded.target_unit,
+                value_type = excluded.value_type,
+                fetch_utc = excluded.fetch_utc,
+                local_time = excluded.local_time,
+                collection_window_start_utc = excluded.collection_window_start_utc,
+                collection_window_end_utc = excluded.collection_window_end_utc,
+                timezone = excluded.timezone,
+                utc_offset_minutes = excluded.utc_offset_minutes,
+                dst_active = excluded.dst_active,
+                is_ambiguous_local_hour = excluded.is_ambiguous_local_hour,
+                is_missing_local_hour = excluded.is_missing_local_hour,
+                hemisphere = excluded.hemisphere,
+                season = excluded.season,
+                month = excluded.month,
+                rebuild_run_id = excluded.rebuild_run_id,
+                data_source_version = excluded.data_source_version,
+                authority = excluded.authority,
+                provenance_metadata = excluded.provenance_metadata
             """,
             (
                 atom_high.city, atom_high.target_date.isoformat(), atom_high.source,
                 atom_high.value, atom_low.value, atom_high.target_unit,
                 atom_high.station_id, atom_high.fetch_utc.isoformat(),
-                atom_high.raw_value, atom_high.raw_unit, atom_high.target_unit, atom_high.value_type,
+                atom_high.raw_value, atom_high.raw_unit,
+                atom_high.target_unit, atom_high.value_type,
                 atom_high.fetch_utc.isoformat(), atom_high.local_time.isoformat(),
                 atom_high.collection_window_start_utc.isoformat(),
                 atom_high.collection_window_end_utc.isoformat(),
@@ -429,10 +527,11 @@ def _build_atom_pair(
 ) -> tuple[ObservationAtom, ObservationAtom]:
     """Build a (high_atom, low_atom) pair with full K1-C provenance fields.
 
-    Shared by WU and HKO write paths. Applies IngestionGuard layers 1, 2,
-    4, 5 (Layer 3 deleted) to the HIGH value, and an internal
-    `low <= high` sanity check. Raises IngestionRejected if validation
-    fails — caller must catch and record FAILED in data_coverage.
+    Shared by WU and HKO write paths. Applies IngestionGuard layers 1, 4,
+    5 (Layers 2 and 3 removed — Layer 2 skipped because TIGGE-derived
+    p01/p99 under-represent observation tails; Layer 3 deleted). Raises
+    IngestionRejected if validation fails — caller must catch and record
+    FAILED in data_coverage.
     """
     city_cfg = cities_by_name.get(city_name)
     if city_cfg is None:
@@ -471,11 +570,11 @@ def _build_atom_pair(
     # Layer 1 — unit consistency + Earth records on BOTH values.
     _GUARD.check_unit_consistency(
         city=city_name, raw_value=high_val, raw_unit=raw_unit,
-        declared_unit=city_cfg.settlement_unit,
+        declared_unit=city_cfg.settlement_unit, target_date=target_d,
     )
     _GUARD.check_unit_consistency(
         city=city_name, raw_value=low_val, raw_unit=raw_unit,
-        declared_unit=city_cfg.settlement_unit,
+        declared_unit=city_cfg.settlement_unit, target_date=target_d,
     )
     # Layer 2 (physical_bounds) is skipped here for the same reason as in
     # the WU backfill: TIGGE-derived p01/p99 systematically under-represent
@@ -571,13 +670,18 @@ def append_wu_city(
     # WU historical supports date ranges natively. Fetch the bounding
     # window [min..max] in one call, then filter to requested dates.
     start_d, end_d = dates[0], dates[-1]
-    highs_lows = _fetch_wu_icao_daily_highs_lows(
+    fetch_result = _fetch_wu_icao_daily_highs_lows(
         icao, cc, start_d, end_d, unit, city_cfg.timezone,
     )
-    if not highs_lows:
-        # API returned empty — treat every requested date as FAILED with
-        # a retry embargo, so the scanner retries later.
+    if fetch_result.failed:
+        reason = fetch_result.failure_reason or CoverageReason.NETWORK_ERROR
         stats["fetch_errors"] = len(dates)
+        embargo_hours = 24 if fetch_result.auth_failed else 1
+        logger.warning(
+            "WU fetch failed for %s %s..%s reason=%s retryable=%s error=%s",
+            city_name, start_d, end_d, reason, fetch_result.retryable,
+            fetch_result.error,
+        )
         for target_d in dates:
             record_failed(
                 conn,
@@ -585,8 +689,27 @@ def append_wu_city(
                 city=city_name,
                 data_source=WU_SOURCE,
                 target_date=target_d,
-                reason=CoverageReason.NETWORK_ERROR,
-                retry_after=_retry_embargo(hours=1),
+                reason=reason,
+                retry_after=_retry_embargo(hours=embargo_hours),
+            )
+        conn.commit()
+        return stats
+
+    highs_lows = fetch_result.payload
+    if not highs_lows:
+        # API returned a usable 200 response but no published observations.
+        # Keep this separate from transport/auth/parse failures so the
+        # coverage ledger preserves upstream meaning.
+        stats["missing_from_api"] = len(dates)
+        for target_d in dates:
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=WU_SOURCE,
+                target_date=target_d,
+                reason=CoverageReason.SOURCE_NOT_PUBLISHED_YET,
+                retry_after=_retry_embargo(hours=6),
             )
         conn.commit()
         return stats

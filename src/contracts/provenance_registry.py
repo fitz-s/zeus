@@ -167,7 +167,7 @@ def _is_bypass_active(constant_name: str) -> bool:
 # Runtime check function
 # ---------------------------------------------------------------------------
 
-def require_provenance(constant_name: str, requires_provenance: bool = True) -> ProvenanceRecord:
+def require_provenance(constant_name: str, requires_provenance: bool = True) -> Optional[ProvenanceRecord]:
     """Assert that constant_name is registered in REGISTRY.
 
     Use this at any cascade entry point where a hardcoded constant is consumed.
@@ -180,10 +180,11 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
             flagged as outside the provenance requirement).
 
     Returns:
-        The ProvenanceRecord for the constant.
+        The ProvenanceRecord for the constant, or None if the check was skipped
+        or an emergency bypass is active.
     """
     if not requires_provenance:
-        return None  # type: ignore[return-value]
+        return None
 
     record = REGISTRY.get(constant_name)
     if record is not None:
@@ -194,7 +195,7 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
             "INV-13: constant '%s' not in REGISTRY but emergency bypass is active.",
             constant_name,
         )
-        return None  # type: ignore[return-value]
+        return None
 
     raise UnregisteredConstantError(
         f"Constant '{constant_name}' is not registered in provenance_registry.yaml "

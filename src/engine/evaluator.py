@@ -54,7 +54,7 @@ from src.state.db import log_selection_family_fact, log_selection_hypothesis_fac
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.strategy.market_analysis import MarketAnalysis
-from src.strategy.market_fusion import compute_alpha, vwmp
+from src.strategy.market_fusion import AuthorityViolation, compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
 from src.types import Bin, BinEdge
 from src.types.temperature import TemperatureDelta
@@ -795,6 +795,7 @@ def evaluate_candidate(
     # get_pairs_for_bucket defaults to authority='VERIFIED', so this check catches
     # any situation where UNVERIFIED rows are present (belt-and-suspenders).
     # Guard: skip if conn is None/unavailable (test stubs that don't provide a real DB).
+    _authority_verified = False  # K1/#68: track whether gate actually ran and passed
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_date, lat=city.lat)
@@ -818,6 +819,7 @@ def evaluate_candidate(
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
             )]
+        _authority_verified = True  # K1/#68: gate ran and no UNVERIFIED rows found
     cal, cal_level = get_calibrator(conn, city, target_date)
     if cal is not None:
         p_cal = calibrate_and_normalize(
@@ -984,6 +986,8 @@ def evaluate_candidate(
 
     # Compute alpha — UNION resolution: K4.5 authority_verified gate (worktree)
     # + consumer-target gating with AlphaTargetMismatchError handling (data-improve).
+    # K1/#68: authority_verified now tracks whether the gate actually ran and passed,
+    # instead of being hardcoded True.
     try:
         alpha = compute_alpha(
             calibration_level=cal_level,
@@ -991,7 +995,7 @@ def evaluate_candidate(
             model_agreement=agreement,
             lead_days=lead_days_for_calibration,
             hours_since_open=candidate.hours_since_open,
-            authority_verified=True,
+            authority_verified=_authority_verified,
         ).value_for_consumer("ev")
     except AlphaTargetMismatchError as exc:
         return [EdgeDecision(
@@ -1002,6 +1006,21 @@ def evaluate_candidate(
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "alpha_target_contract"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            p_market=p_market,
+            agreement=agreement,
+        )]
+    except AuthorityViolation as exc:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="AUTHORITY_GATE",
+            rejection_reasons=[f"AUTHORITY_VIOLATION:{exc}"],
+            availability_status="DATA_STALE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "authority_contract"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
@@ -1285,7 +1304,7 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=km * risk_throttle,
             safety_cap_usd=settings["live_safety_cap_usd"],
-            feature_flags=settings._data.get("feature_flags", {}),
+            feature_flags=settings.feature_flags,
         )
         if policy.allocation_multiplier != 1.0:
             size *= policy.allocation_multiplier

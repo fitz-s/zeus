@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import math
 import sqlite3
 from typing import Any
@@ -10,6 +11,18 @@ from src.control.control_plane import (
     get_edge_threshold_multiplier,
     is_entries_paused,
 )
+
+logger = logging.getLogger(__name__)
+
+# K1/#69: Explicit override precedence — higher number wins.
+# When a higher-priority source locks a field, lower-priority sources
+# are skipped and logged.  This table is the single source of truth;
+# the if-chain in resolve_strategy_policy is the IMPLEMENTATION of this table.
+OVERRIDE_PRECEDENCE = {
+    "hard_safety": 3,   # system-level controls (pause_entries, tighten_risk)
+    "manual_override": 2,   # human-issued control_overrides rows
+    "risk_action": 1,   # automated risk_actions rows
+}
 
 
 @dataclass(frozen=True)
@@ -56,21 +69,25 @@ def resolve_strategy_policy(
         action_type = str(row["action_type"])
         if action_type == "gate":
             if "gated" in locked_fields:
+                logger.info("policy: manual_override gate skipped — field locked by higher-priority source")
                 continue
             gated = _parse_boolish(row["value"])
             locked_fields.add("gated")
         elif action_type == "allocation_multiplier":
             if "allocation_multiplier" in locked_fields:
+                logger.info("policy: manual_override allocation_multiplier skipped — field locked by higher-priority source")
                 continue
             allocation_multiplier = _parse_multiplier(row["value"], action_type)
             locked_fields.add("allocation_multiplier")
         elif action_type == "threshold_multiplier":
             if "threshold_multiplier" in locked_fields:
+                logger.info("policy: manual_override threshold_multiplier skipped — field locked by higher-priority source")
                 continue
             threshold_multiplier = _parse_multiplier(row["value"], action_type)
             locked_fields.add("threshold_multiplier")
         elif action_type == "exit_only":
             if "exit_only" in locked_fields:
+                logger.info("policy: manual_override exit_only skipped — field locked by higher-priority source")
                 continue
             exit_only = _parse_boolish(row["value"])
             locked_fields.add("exit_only")
@@ -82,21 +99,25 @@ def resolve_strategy_policy(
         action_type = str(row["action_type"])
         if action_type == "gate":
             if "gated" in locked_fields:
+                logger.info("policy: risk_action gate skipped — field locked by higher-priority source")
                 continue
             gated = _parse_boolish(row["value"])
             locked_fields.add("gated")
         elif action_type == "allocation_multiplier":
             if "allocation_multiplier" in locked_fields:
+                logger.info("policy: risk_action allocation_multiplier skipped — field locked by higher-priority source")
                 continue
             allocation_multiplier = _parse_multiplier(row["value"], action_type)
             locked_fields.add("allocation_multiplier")
         elif action_type == "threshold_multiplier":
             if "threshold_multiplier" in locked_fields:
+                logger.info("policy: risk_action threshold_multiplier skipped — field locked by higher-priority source")
                 continue
             threshold_multiplier = _parse_multiplier(row["value"], action_type)
             locked_fields.add("threshold_multiplier")
         elif action_type == "exit_only":
             if "exit_only" in locked_fields:
+                logger.info("policy: risk_action exit_only skipped — field locked by higher-priority source")
                 continue
             exit_only = _parse_boolish(row["value"])
             locked_fields.add("exit_only")
@@ -203,11 +224,18 @@ def _query_rows(
 
 
 def _select_rows(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """K1/#71: first-in wins per action_type; log discarded duplicates."""
     chosen: dict[str, sqlite3.Row] = {}
     for row in rows:
         action_type = str(row["action_type"])
         if action_type not in chosen:
             chosen[action_type] = row
+        else:
+            row_id = row.get("override_id") or row.get("action_id") or "?"
+            logger.warning(
+                "policy: duplicate %s (row %s) discarded — first-in wins",
+                action_type, row_id,
+            )
     return list(chosen.values())
 
 
@@ -217,9 +245,11 @@ def _parse_boolish(raw: Any) -> bool:
     if isinstance(raw, (int, float)):
         return bool(raw)
     text = str(raw).strip().lower()
-    if text in {"1", "true", "yes", "on", "enabled", "gate"}:
+    # K1/#71: removed "gate"/"ungate" — these are action keywords, not boolean
+    # literals. Treating them as booleans loses semantic intent.
+    if text in {"1", "true", "yes", "on", "enabled"}:
         return True
-    if text in {"0", "false", "no", "off", "disabled", "ungate"}:
+    if text in {"0", "false", "no", "off", "disabled"}:
         return False
     raise ValueError(f"unsupported boolish policy value: {raw!r}")
 

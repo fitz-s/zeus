@@ -109,11 +109,11 @@ def test_city_without_explicit_cluster_is_rejected(tmp_path):
 
 def test_calibration_manager_cluster_taxonomy_matches_config():
     manager_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src/calibration/manager.py").read_text()
-    etl_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/etl_tigge_calibration.py").read_text()
+    refit_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/refit_platt.py").read_text()
 
     assert tuple(calibration_clusters()) == tuple(ALL_CLUSTERS)
     assert "calibration_clusters()" in manager_source
-    assert "calibration_clusters()" in etl_source
+    assert "cluster, season" in refit_source
 
 
 def test_calibration_thresholds_are_single_sourced_from_settings():
@@ -366,8 +366,14 @@ def test_settlement_semantics_matches_city_metadata():
         assert sem.measurement_unit == city.settlement_unit
         assert sem.finalization_time == "12:00:00Z"
 
-        if "wunderground.com" in city.settlement_source:
+        if city.settlement_source_type == "wu_icao":
             assert sem.resolution_source == f"WU_{city.wu_station}"
         else:
-            # Non-WU sources use station code directly
-            assert sem.resolution_source == city.wu_station
+            # Non-WU sources use source_type prefix
+            assert sem.resolution_source == f"{city.settlement_source_type}_{city.wu_station}"
+
+
+def test_validate_cities_config_no_warnings():
+    from src.config import validate_cities_config
+    warnings = validate_cities_config()
+    assert warnings == [], f"City config validation warnings: {warnings}"

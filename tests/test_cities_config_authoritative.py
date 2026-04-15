@@ -42,7 +42,7 @@ def test_every_city_has_all_critical_fields():
         assert city.cluster, f"{name}: empty cluster"
         assert city.country_code, f"{name}: empty country_code"
         assert 10 <= city.historical_peak_hour <= 20, f"{name}: historical_peak_hour={city.historical_peak_hour}"
-        assert city.settlement_source_type in ("wu_icao", "hko"), f"{name}: {city.settlement_source_type!r}"
+        assert city.settlement_source_type in ("wu_icao", "hko", "noaa", "cwa_station"), f"{name}: {city.settlement_source_type!r}"
         assert city.aliases, f"{name}: empty aliases"
         assert city.slug_names, f"{name}: empty slug_names"
 
@@ -233,11 +233,13 @@ def test_hong_kong_is_hko_source_type():
     assert hk.settlement_source_type == "hko"
 
 
-def test_all_non_hk_cities_are_wu_icao():
+def test_all_non_special_cities_are_wu_icao():
+    special_types = {"Hong Kong": "hko", "Istanbul": "noaa", "Moscow": "noaa", "Taipei": "cwa_station"}
     for name, city in cities_by_name.items():
-        if name == "Hong Kong":
-            continue
-        assert city.settlement_source_type == "wu_icao", f"{name}: {city.settlement_source_type}"
+        if name in special_types:
+            assert city.settlement_source_type == special_types[name], f"{name}: expected {special_types[name]!r}, got {city.settlement_source_type!r}"
+        else:
+            assert city.settlement_source_type == "wu_icao", f"{name}: {city.settlement_source_type}"
 
 
 # ==================== Route-to-bucket smoke test ====================
