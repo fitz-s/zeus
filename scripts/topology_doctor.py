@@ -33,6 +33,7 @@ DATA_REBUILD_TOPOLOGY_PATH = ROOT / "architecture" / "data_rebuild_topology.yaml
 HISTORY_LORE_PATH = ROOT / "architecture" / "history_lore.yaml"
 CONTEXT_BUDGET_PATH = ROOT / "architecture" / "context_budget.yaml"
 ARTIFACT_LIFECYCLE_PATH = ROOT / "architecture" / "artifact_lifecycle.yaml"
+CHANGE_RECEIPT_SCHEMA_PATH = ROOT / "architecture" / "change_receipt_schema.yaml"
 CONTEXT_PACK_PROFILES_PATH = ROOT / "architecture" / "context_pack_profiles.yaml"
 CODE_IDIOMS_PATH = ROOT / "architecture" / "code_idioms.yaml"
 RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
@@ -112,6 +113,10 @@ def load_context_budget() -> dict[str, Any]:
 
 def load_artifact_lifecycle() -> dict[str, Any]:
     return _load_yaml(ARTIFACT_LIFECYCLE_PATH)
+
+
+def load_change_receipt_schema() -> dict[str, Any]:
+    return _load_yaml(CHANGE_RECEIPT_SCHEMA_PATH)
 
 
 def load_context_pack_profiles() -> dict[str, Any]:
@@ -709,6 +714,55 @@ def run_work_record(
     record_path: str | None = None,
 ) -> StrictResult:
     return _artifact_checks().run_work_record(sys.modules[__name__], changed_files, record_path)
+
+
+def _receipt_checks():
+    try:
+        from scripts import topology_doctor_receipt_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_receipt_checks
+
+    return topology_doctor_receipt_checks
+
+
+def _receipt_path_matches_any(path: str, patterns: list[str]) -> bool:
+    return _receipt_checks().path_matches_any(path, patterns)
+
+
+def _effective_receipt_changed_files(changed_files: list[str] | None = None) -> list[str]:
+    return _receipt_checks().effective_changed_files(sys.modules[__name__], changed_files)
+
+
+def run_change_receipts(
+    changed_files: list[str] | None = None,
+    receipt_path: str | None = None,
+) -> StrictResult:
+    return _receipt_checks().run_change_receipts(sys.modules[__name__], changed_files, receipt_path)
+
+
+def _closeout_checks():
+    try:
+        from scripts import topology_doctor_closeout
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_closeout
+
+    return topology_doctor_closeout
+
+
+def run_closeout(
+    *,
+    changed_files: list[str] | None = None,
+    plan_evidence: str | None = None,
+    work_record_path: str | None = None,
+    receipt_path: str | None = None,
+) -> dict[str, Any]:
+    return _closeout_checks().run_closeout(
+        sys.modules[__name__],
+        changed_files=changed_files,
+        plan_evidence=plan_evidence,
+        work_record_path=work_record_path,
+        receipt_path=receipt_path,
+    )
 
 
 

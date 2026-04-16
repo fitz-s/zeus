@@ -1,0 +1,62 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Topology Enforcement Hardening Phase 3"
+  purpose: >
+    Route/change receipts turn high-risk navigation protocol into a
+    machine-checkable closeout contract. They record the route source, allowed
+    write scope, forbidden scope, and evidence tied to a concrete diff.
+
+required_fields:
+  - task
+  - packet
+  - route_source
+  - route_evidence
+  - required_law
+  - allowed_files
+  - forbidden_files
+  - changed_files
+  - tests_evidence
+
+allowed_route_sources:
+  - navigation
+  - digest
+  - packet
+  - ralplan
+  - manual_packet
+  - current_state
+  - closeout
+
+approved_receipt_globs:
+  - docs/operations/task_????-??-??_*/receipt.json
+
+high_risk_required_patterns:
+  - architecture/**
+  - docs/authority/**
+  - src/state/**
+  - src/control/**
+  - src/supervisor_api/**
+  - scripts/**
+  - docs/operations/current_state.md
+
+required_law_by_pattern:
+  - pattern: architecture/**
+    requires_any: [architecture/AGENTS.md]
+  - pattern: docs/authority/**
+    requires_any: [docs/authority/AGENTS.md]
+  - pattern: src/state/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: src/control/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: src/supervisor_api/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: scripts/**
+    requires_any: [architecture/script_manifest.yaml]
+  - pattern: docs/operations/current_state.md
+    requires_any: [docs/operations/AGENTS.md, architecture/topology.yaml]
+
+notes:
+  - Receipts are required for high-risk closeout surfaces, not for every repo change.
+  - Allowed/forbidden file lists may use glob patterns.
+  - Receipt changed_files must match the closeout diff exactly; stale or partial receipts fail.
+  - route_evidence must point to a real plan/current-state/packet artifact that explains the chosen route.

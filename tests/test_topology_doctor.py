@@ -136,6 +136,7 @@ def test_cli_json_parity_for_compiled_topology_shape():
         "artifact_roles",
         "broken_visible_routes",
         "unclassified_docs_artifacts",
+        "telemetry",
     }.issubset(payload)
 
 
@@ -152,6 +153,22 @@ def test_cli_json_parity_for_map_maintenance_command():
         "ok": result.ok,
         "issues": [topology_doctor.asdict(issue) for issue in result.issues],
     }
+
+
+def test_cli_json_parity_for_closeout_command(monkeypatch):
+    payload = {
+        "ok": True,
+        "authority_status": "generated_closeout_not_authority",
+        "changed_files": ["docs/README.md"],
+        "selected_lanes": {"docs": True},
+        "lanes": {"docs": {"ok": True, "issue_count": 0, "blocking_count": 0, "warning_count": 0, "issues": []}},
+        "telemetry": {"dark_write_target_count": 0, "broken_visible_route_count": 0, "unclassified_docs_artifact_count": 0},
+        "blocking_issues": [],
+        "warning_issues": [],
+    }
+    monkeypatch.setattr(topology_doctor, "run_closeout", lambda **kwargs: payload)
+
+    assert run_cli_json(["closeout", "--json"]) == payload
 
 
 def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):
@@ -184,6 +201,19 @@ def test_docs_mode_rejects_non_md_artifact_outside_artifact_subroot(monkeypatch)
     issues = topology_doctor._check_hidden_docs(topology)
 
     assert any(issue.code == "docs_non_markdown_artifact" for issue in issues)
+
+
+def test_docs_mode_allows_registered_reports_json(monkeypatch):
+    topology = topology_doctor.load_topology()
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/reports/diagnostic_snapshot.json"],
+    )
+
+    issues = topology_doctor._check_hidden_docs(topology)
+
+    assert issues == []
 
 
 def test_docs_mode_excluded_roots_drive_space_path_exemption(monkeypatch):
@@ -573,6 +603,26 @@ def test_map_maintenance_requires_docs_mesh_for_top_level_artifact(monkeypatch):
 
     assert not result.ok
     assert any("docs/README.md" in issue.message for issue in result.issues)
+
+
+def test_map_maintenance_requires_reports_registry_for_new_report(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/reports/AGENTS.md"])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "docs/reports/new_report.md":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(
+        ["docs/reports/new_report.md"],
+        mode="closeout",
+    )
+
+    assert not result.ok
+    assert any("docs/reports/AGENTS.md" in issue.message for issue in result.issues)
+    assert all("docs/README.md" not in issue.message for issue in result.issues)
 
 
 def test_map_maintenance_does_not_require_registry_for_plain_modification(monkeypatch):
@@ -1499,6 +1549,184 @@ def test_work_record_exempts_archived_packets():
     assert_topology_ok(result)
 
 
+def test_change_receipt_requires_receipt_for_high_risk_script_change(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/topology_doctor.py": "modified"},
+    )
+    result = topology_doctor.run_change_receipts(["scripts/topology_doctor.py"], None)
+
+    assert not result.ok
+    assert any(issue.code == "change_receipt_required" for issue in result.issues)
+
+
+def test_change_receipt_accepts_matching_high_risk_receipt(tmp_path, monkeypatch):
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "docs" / "operations" / "task_2026-04-15_test").mkdir(parents=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# root\n", encoding="utf-8")
+    (tmp_path / "architecture" / "AGENTS.md").write_text("# architecture\n", encoding="utf-8")
+    (tmp_path / "architecture" / "script_manifest.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (tmp_path / "scripts" / "topology_doctor.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_topology_doctor.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    (tmp_path / "docs" / "operations" / "task_2026-04-15_test" / "work_log.md").write_text(
+        "Date: 2026-04-15\nVerification: ok\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "architecture" / "change_receipt_schema.yaml").write_text(
+        "schema_version: 1\n"
+        "required_fields: [task, packet, route_source, route_evidence, required_law, allowed_files, forbidden_files, changed_files, tests_evidence]\n"
+        "allowed_route_sources: [ralplan]\n"
+        "approved_receipt_globs:\n"
+        "  - 'docs/operations/task_????-??-??_*/receipt.json'\n"
+        "high_risk_required_patterns:\n"
+        "  - 'scripts/**'\n",
+        encoding="utf-8",
+    )
+    receipt_path = tmp_path / "docs" / "operations" / "task_2026-04-15_test" / "receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "task": "closeout",
+                "packet": "task_2026-04-15_test",
+                "route_source": "ralplan",
+                "route_evidence": ["docs/operations/task_2026-04-15_test/work_log.md"],
+                "required_law": ["AGENTS.md", "architecture/script_manifest.yaml"],
+                "allowed_files": ["scripts/**"],
+                "forbidden_files": ["src/**"],
+                "changed_files": ["scripts/topology_doctor.py"],
+                "tests_evidence": [
+                    "tests/test_topology_doctor.py",
+                    "docs/operations/task_2026-04-15_test/work_log.md",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "CHANGE_RECEIPT_SCHEMA_PATH", tmp_path / "architecture" / "change_receipt_schema.yaml")
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/topology_doctor.py": "modified"},
+    )
+    result = topology_doctor.run_change_receipts(
+        ["scripts/topology_doctor.py"],
+        "docs/operations/task_2026-04-15_test/receipt.json",
+    )
+
+    assert_topology_ok(result)
+
+
+def test_change_receipt_rejects_changed_file_outside_allowed_scope(tmp_path, monkeypatch):
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "docs" / "operations" / "task_2026-04-15_test").mkdir(parents=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "architecture" / "change_receipt_schema.yaml").write_text(
+        "schema_version: 1\n"
+        "required_fields: [task, packet, route_source, route_evidence, required_law, allowed_files, forbidden_files, changed_files, tests_evidence]\n"
+        "allowed_route_sources: [ralplan]\n"
+        "approved_receipt_globs:\n"
+        "  - 'docs/operations/task_????-??-??_*/receipt.json'\n"
+        "high_risk_required_patterns:\n"
+        "  - 'scripts/**'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text("# root\n", encoding="utf-8")
+    (tmp_path / "docs" / "operations" / "task_2026-04-15_test" / "work_log.md").write_text(
+        "Date: 2026-04-15\nVerification: ok\n",
+        encoding="utf-8",
+    )
+    receipt_path = tmp_path / "docs" / "operations" / "task_2026-04-15_test" / "receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "task": "closeout",
+                "packet": "task_2026-04-15_test",
+                "route_source": "ralplan",
+                "route_evidence": ["docs/operations/task_2026-04-15_test/work_log.md"],
+                "required_law": ["AGENTS.md"],
+                "allowed_files": ["docs/**"],
+                "forbidden_files": ["src/**"],
+                "changed_files": ["scripts/topology_doctor.py"],
+                "tests_evidence": ["docs/operations/task_2026-04-15_test/work_log.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "CHANGE_RECEIPT_SCHEMA_PATH", tmp_path / "architecture" / "change_receipt_schema.yaml")
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/topology_doctor.py": "modified"},
+    )
+    result = topology_doctor.run_change_receipts(
+        ["scripts/topology_doctor.py"],
+        "docs/operations/task_2026-04-15_test/receipt.json",
+    )
+
+    assert not result.ok
+    assert any(issue.code == "change_receipt_file_out_of_scope" for issue in result.issues)
+
+
+def test_change_receipt_requires_route_evidence_and_law_coverage(tmp_path, monkeypatch):
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "docs" / "operations" / "task_2026-04-15_test").mkdir(parents=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "architecture" / "change_receipt_schema.yaml").write_text(
+        "schema_version: 1\n"
+        "required_fields: [task, packet, route_source, route_evidence, required_law, allowed_files, forbidden_files, changed_files, tests_evidence]\n"
+        "allowed_route_sources: [ralplan]\n"
+        "approved_receipt_globs:\n"
+        "  - 'docs/operations/task_????-??-??_*/receipt.json'\n"
+        "high_risk_required_patterns:\n"
+        "  - 'scripts/**'\n"
+        "required_law_by_pattern:\n"
+        "  - pattern: 'scripts/**'\n"
+        "    requires_any: ['architecture/script_manifest.yaml']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text("# root\n", encoding="utf-8")
+    receipt_path = tmp_path / "docs" / "operations" / "task_2026-04-15_test" / "receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "task": "closeout",
+                "packet": "task_2026-04-15_test",
+                "route_source": "ralplan",
+                "route_evidence": ["docs/operations/task_2026-04-15_test/missing.md"],
+                "required_law": ["AGENTS.md"],
+                "allowed_files": ["scripts/**"],
+                "forbidden_files": ["src/**"],
+                "changed_files": ["scripts/topology_doctor.py"],
+                "tests_evidence": ["AGENTS.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "CHANGE_RECEIPT_SCHEMA_PATH", tmp_path / "architecture" / "change_receipt_schema.yaml")
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/topology_doctor.py": "modified"},
+    )
+    result = topology_doctor.run_change_receipts(
+        ["scripts/topology_doctor.py"],
+        "docs/operations/task_2026-04-15_test/receipt.json",
+    )
+
+    assert not result.ok
+    assert any(issue.code == "change_receipt_route_evidence_missing" for issue in result.issues)
+    assert any(issue.code == "change_receipt_inadequate_law_coverage" for issue in result.issues)
+
+
 def test_context_budget_mode_checks_digest_card_budget(monkeypatch):
     budget = {
         "file_budgets": [],
@@ -1519,6 +1747,127 @@ def test_context_budget_mode_checks_digest_card_budget(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "context_budget_digest_card_over" for issue in result.issues)
+
+
+def test_closeout_compiles_selected_lanes(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {
+            "scripts/topology_doctor.py": "modified",
+            "docs/README.md": "modified",
+            "architecture/context_budget.yaml": "modified",
+        },
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_source", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_tests", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_scripts", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_data_rebuild", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {
+            "telemetry": {
+                "dark_write_target_count": 0,
+                "broken_visible_route_count": 0,
+                "unclassified_docs_artifact_count": 0,
+            }
+        },
+    )
+
+    payload = topology_doctor.run_closeout(
+        changed_files=[
+            "scripts/topology_doctor.py",
+            "docs/README.md",
+            "architecture/context_budget.yaml",
+        ],
+        plan_evidence="docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md",
+        work_record_path="docs/operations/task_2026-04-15_topology_enforcement_hardening/work_log.md",
+        receipt_path="docs/operations/task_2026-04-15_topology_enforcement_hardening/receipt.json",
+    )
+
+    assert payload["ok"] is True
+    assert payload["selected_lanes"]["docs"] is True
+    assert payload["selected_lanes"]["scripts"] is True
+    assert payload["selected_lanes"]["context_budget"] is True
+    assert "change_receipts" in payload["lanes"]
+    assert payload["telemetry"]["dark_write_target_count"] == 0
+
+
+def test_closeout_filters_repo_global_lane_noise(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="docs_unregistered_subtree",
+                path="docs/other_surface",
+                message="unrelated docs issue",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"docs/README.md": "modified"},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["docs/README.md"])
+
+    assert payload["ok"] is True
+    assert payload["lanes"]["docs"]["issue_count"] == 0
+
+
+def test_closeout_prefers_staged_files_when_changed_files_omitted(monkeypatch):
+    from scripts import topology_doctor_closeout
+
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    monkeypatch.setattr(
+        topology_doctor_closeout,
+        "staged_changed_files",
+        lambda api: ["docs/README.md"],
+    )
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {path: "modified" for path in files},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout()
+
+    assert payload["changed_files"] == ["docs/README.md"]
 
 
 def test_generic_digest_includes_effective_source_rationale_for_core_file():

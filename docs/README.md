@@ -15,8 +15,9 @@ context loading fast — agents follow links, not directories.
 |-----------|---------|-------|
 | `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 7 |
 | `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, math specification notes | 8 |
-| `operations/` | Live control-entry pointer + current work packets | 4 |
+| `operations/` | Live control-entry pointer + current work packets | 5 |
 | `runbooks/` | Operator runbooks | 2 |
+| `reports/` | Generated diagnostic reports from declared writers only; evidence only and not a default route | 1 |
 | `to-do-list/` | Active checklist workbooks and audit queues, never authority | 1 |
 | `artifacts/` | Active evidence artifacts and inventories, never authority | 1 |
 | `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |

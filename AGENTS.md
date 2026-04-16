@@ -162,6 +162,10 @@ the boundary is not understood.
 
 Before closeout, non-trivial repo-changing work updates a short work record;
 check with `python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>`.
+High-risk closeout also carries a machine-readable route receipt; check with
+`python scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path <receipt>`
+or use the compiled
+`python scripts/topology_doctor.py closeout --changed-files <files> --plan-evidence <plan> --work-record-path <record> --receipt-path <receipt>`.
 
 Git safety is summarized by lore card `UNCOMMITTED_AGENT_EDIT_LOSS`: never run
 destructive git commands or overwrite others' dirty work without explicit human

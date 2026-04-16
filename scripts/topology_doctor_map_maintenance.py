@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatch
+import glob
+import re
 from typing import Any
 
 
@@ -61,6 +62,10 @@ def map_maintenance_changes(api: Any, changed_files: list[str]) -> dict[str, str
     return {path: git_changes.get(path, api._change_kind(path, tracked)) for path in changed_files}
 
 
+def path_glob_matches(path: str, pattern: str) -> bool:
+    return re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+
+
 def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: str = "advisory") -> Any:
     if not api.MAP_MAINTENANCE_PATH.exists():
         return api.StrictResult(
@@ -113,7 +118,7 @@ def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: 
         for rule in manifest.get("rules") or []:
             if kind not in (rule.get("on_change") or []):
                 continue
-            if not any(fnmatch(path, pattern) for pattern in rule.get("path_globs") or []):
+            if not any(path_glob_matches(path, pattern) for pattern in rule.get("path_globs") or []):
                 continue
             for companion in rule.get("required_companions") or []:
                 if companion not in changed_set:
