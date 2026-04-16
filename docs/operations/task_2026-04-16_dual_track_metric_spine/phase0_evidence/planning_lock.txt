@@ -1,0 +1,19 @@
+Command:
+  python scripts/topology_doctor.py --planning-lock \
+    --changed-files \
+      AGENTS.md \
+      docs/authority/zeus_current_architecture.md \
+      docs/authority/zeus_dual_track_architecture.md \
+      docs/operations/data_rebuild_plan.md \
+      docs/operations/current_state.md \
+      docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md \
+      docs/operations/task_2026-04-16_dual_track_metric_spine/AGENTS.md \
+      docs/operations/task_2026-04-16_dual_track_metric_spine/work_log.md \
+    --plan-evidence docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md
+
+Result:
+  topology check ok
+
+Date: 2026-04-16
+Scope: Phase 0 documentation constitution (dual-track + death-trap law).
+  No source, schema, script, test, or machine-manifest edits.

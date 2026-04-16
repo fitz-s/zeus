@@ -97,6 +97,75 @@ Fix only the blocking defects (D1 WMO rounding, D3 schema idempotence, D15 inges
 
 ---
 
+## 0.6 Dual-track refactor overlay (2026-04-16)
+
+This rebuild plan is now subordinate to the Dual-Track Metric Spine Refactor
+(`docs/authority/zeus_dual_track_architecture.md`,
+`docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`). The
+letter-coded changes (A-N) remain in force for the high track, but the
+canonical product and eligibility grammar below apply to both tracks.
+
+### 0.6.1 Canonical dual-track products
+
+The rebuild now targets two canonical extracted products that share one
+local-calendar-day geometry:
+
+- `tigge_mx2t6_local_calendar_day_max_v1` (high)
+- `tigge_mn2t6_local_calendar_day_min_v1` (low)
+
+The legacy `peak_window` target may remain as diagnostic evidence but is no
+longer the final training geometry for Zeus. Any reference to "daily max" as
+the system default must be read as "high track only".
+
+### 0.6.2 Snapshot eligibility gates
+
+A snapshot row is eligible for canonical training import only when **all**
+of the following hold:
+
+1. `temperature_metric` is explicit
+2. `physical_quantity` matches the metric family
+3. `observation_field` matches the metric family
+4. `data_version` is on the canonical allowlist
+5. `training_allowed = true`
+6. `causality_status = 'OK'`
+
+Additional low-track rule:
+
+7. Boundary-ambiguous low snapshots are excluded from training
+   (`training_allowed = false`, `causality_status = REJECTED_BOUNDARY_AMBIGUOUS`).
+
+### 0.6.3 Separation law
+
+High and low rows must not mix in any of the following surfaces:
+
+- calibration pairs
+- Platt fitting
+- bin lookup for replay-compatible `p_raw`
+- settlement rebuild identity
+
+The rebuild is not complete until all four separation points are enforced at
+the DB layer (World DB v2), not merely observed in code review.
+
+### 0.6.4 Phase ordering
+
+- Phase 4 of the refactor re-canonicalizes **high** onto
+  `tigge_mx2t6_local_calendar_day_max_v1` **before** any low write lands in
+  World DB v2.
+- Phase 5 stands up the **low** historical lane under its own raw archive,
+  status log, and coverage report.
+- Boundary quarantine, `training_allowed`, and `causality_status` fields are
+  DB contracts, not code-side comments.
+
+### 0.6.5 What this overlay does not change
+
+- The WMO half-up rounding law and the `decision_group` independence
+  invariant continue to govern every rounding and sampling site.
+- Logit-safe ε, bootstrap resampling, and n_eff policy for Platt remain
+  owned by this plan.
+- Nothing in this overlay loosens any guardrail defined in §3.
+
+---
+
 ## 1. Why we collect data
 
 Three user-stated reasons. The whole plan is in service of these.

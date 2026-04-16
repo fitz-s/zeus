@@ -272,3 +272,173 @@ Read these when their domain applies:
 - `docs/reference/zeus_domain_model.md` — probability chain and settlement semantics
 - `docs/operations/current_state.md` — current branch / packet truth
 - `docs/known_gaps.md` — present-tense runtime blockers
+- `docs/authority/zeus_dual_track_architecture.md` — metric identity, World DB v2, death-trap remediation law, Gate A–F grammar
+
+---
+
+## 13. Metric identity law
+
+Every temperature-market family must carry a typed identity:
+
+- `temperature_metric` ∈ {`high`, `low`}
+- `physical_quantity`
+- `observation_field` ∈ {`high_temp`, `low_temp`}
+- `data_version`
+
+This identity is row truth and model truth, not optional metadata. Bare
+`"high"` / `"low"` strings are legal only at serialization boundaries.
+
+A valid dual-track architecture must represent, on the same `(city,
+target_date)`, two distinct legitimate temperature truths: the daily high
+settlement truth and the daily low settlement truth. Any table whose unique
+key conflates them is structurally incomplete (SD-2).
+
+High and low rows must not mix in calibration pairs, Platt fitting, bin lookup
+for replay `p_raw`, or settlement rebuild identity.
+
+Full law and World DB v2 outline: `docs/authority/zeus_dual_track_architecture.md`.
+
+---
+
+## 14. Runtime-only fallback doctrine
+
+Forecast rows lacking canonical cycle identity (e.g. missing reliable
+`issue_time`) may feed runtime degrade paths, but they are never canonical
+training evidence. Eligibility is a DB gate (`training_allowed = false`), not
+a comment. Fallback utility does not imply training eligibility.
+
+---
+
+## 15. Daily low causality doctrine
+
+`temperature_metric=low` carries a stricter Day0 causality law than
+`temperature_metric=high`. For positive-offset cities, a Day0 local low may
+already be partly or fully historical by ECMWF 00Z; such slots must be
+represented explicitly as:
+
+```
+N/A_CAUSAL_DAY_ALREADY_STARTED
+```
+
+This is a feature, not a coverage bug. Runtime code must not route such slots
+through a historical forecast Platt lookup; low Day0 flows through a nowcast
+path driven by `low_so_far`, `current_temp`, `hours_remaining`, and remaining
+forecast hours. Missing `low_so_far` is a clean reject, not a silent degrade
+to the high path.
+
+---
+
+## 16. Truth commit ordering law (DT#1)
+
+DB authority writes must COMMIT before any derived JSON export is updated.
+
+- A runtime that writes `save_portfolio()` (or any other JSON export) before
+  the corresponding `store_artifact()` / `conn.commit()` returns is a §16
+  violation.
+- Recovery contract: DB wins. JSON is treated as a stale export on startup and
+  is rebuilt from DB projection.
+- Cycle runners must serialize authority writes: event append → projection fold
+  → DB commit → derived export. No derived export may race the commit.
+
+Enforcement intent: structural helper that owns this ordering, plus a test
+that fails on JSON-before-commit patterns in cycle-level code.
+
+---
+
+## 17. Risk force-exit law (extends INV-05)
+
+§6 risk behavior is tightened for `RED`:
+
+| Level | Required behavior |
+|------|-------------------|
+| `GREEN` | Normal operation |
+| `YELLOW` | No new entries |
+| `ORANGE` | No new entries; exit only at favorable prices |
+| `RED` | Cancel all pending; **sweep active positions toward exit**; no entry-block-only scope |
+
+A "force_exit_review" implementation that only blocks new entries is
+advisory-only and therefore forbidden under INV-05. `RED` is a truth claim
+about system integrity, not a throttle; the exit sweep runs even when it is
+more destructive than `ORANGE` behavior.
+
+---
+
+## 18. FDR family canonicalization law (DT#3)
+
+`make_family_id()` must resolve to a single canonical family grammar across
+every call site. `strategy_key` is either always part of the family key or
+never part of it; per-path drift (some call sites passing `strategy_key=""`
+while others pass the real key) is forbidden.
+
+Rationale: an unstable family key silently resets the false-discovery budget
+and allows the same market/time window to be re-tested until a signal
+happens to cross.
+
+Enforcement intent: one choke-point helper; a test that asserts every call
+site delegates to it.
+
+---
+
+## 19. Chain-truth three-state law (DT#4)
+
+Chain reconciliation state is three-valued:
+
+- `CHAIN_SYNCED` — positions match a fresh chain truth.
+- `CHAIN_EMPTY` — positions are known absent (chain truth is fresh and empty).
+- `CHAIN_UNKNOWN` — chain truth is unavailable (API incomplete, stale, paginated
+  failure, permission denied, or otherwise un-authoritative).
+
+`CHAIN_UNKNOWN` is a first-class state, not a special case of `CHAIN_EMPTY`.
+Void decisions require `CHAIN_EMPTY`; they must never fire from
+`CHAIN_UNKNOWN`. An existing "stale guard" is a partial implementation of this
+law; the state machine must be made explicit.
+
+---
+
+## 20. Kelly executable-price law (elevates INV-13)
+
+INV-13 is elevated from aspirational to in-scope for the dual-track refactor.
+
+Sizing inputs at the Kelly boundary must describe an executable price
+distribution, not a single static `entry_price`. At minimum:
+
+- best bid / ask and top-of-book size
+- fill probability at intended order size
+- queue-priority and adverse-selection hazards
+
+A bare `entry_price: float` passed to `kelly_size()` at a cross-layer seam is
+a §20 / INV-13 violation. Backtests may assume simplified execution only if
+they cross-check against live fill evidence.
+
+---
+
+## 21. Graceful degradation law (DT#6)
+
+When `load_portfolio()` (or any other authority-loss path) detects that DB
+truth is not authoritative, the process must not raise a `RuntimeError` that
+kills the entire cycle.
+
+Legal behavior:
+
+- disable new-entry paths
+- keep monitor / exit / reconciliation paths running in read-only or
+  best-known-state mode
+- surface the degraded state explicitly to the operator
+
+Fail-closed is mandatory for new-risk creation; it is not permission to blind
+the monitor/exit lane of a live-only single-daemon system.
+
+---
+
+## 22. Boundary-day settlement policy (DT#7)
+
+Near the integer settlement boundary, where station drift, DST transitions,
+source revisions, or observation lag can flip an outcome, the system must:
+
+- reduce leverage on boundary-candidate positions
+- isolate oracle penalty for the affected city
+- refuse to treat boundary-ambiguous forecasts as confirmatory signal
+
+This is a policy-level settlement law that applies across risk, Day0, and
+activation phases. It coexists with the WMO half-up rounding rule; rounding
+correctness does not by itself make a boundary-day trade safe.

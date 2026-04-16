@@ -22,9 +22,11 @@ Discovery modes shape that cycle: `opening_hunt` finds fresh markets,
 near-settlement observation-heavy decisions. The mode index is
 `architecture/runtime_modes.yaml`.
 
-The core probability chain is:
+The core probability chain is **dual-track** (see `docs/authority/zeus_dual_track_architecture.md`). The legacy single-track description below is **high track only**:
 
 `51 ENS members -> per-member daily max -> sensor/noise + settlement rounding -> P_raw -> Platt calibration -> market_fusion.py Bayesian blend (P_cal ⊗ P_market -> P_posterior) -> edge + bootstrap CI -> FDR -> Kelly sizing`.
+
+The low track shares local-calendar-day geometry with the high track but has its own physical quantity (`mn2t6_local_calendar_day_min`), its own `observation_field` (`low_temp`), its own Day0 causality law, and its own calibration family. Never describe Zeus as a single-track daily-high system.
 
 The main runtime path is:
 
@@ -53,6 +55,23 @@ Zeus trades temperature bins on Polymarket. Bin structure is city/unit-specific:
 
 Derived JSON, CSV, backtest DBs, status summaries, strategy trackers, and
 archives are never canonical truth unless a typed authority path says so.
+
+## Dual-Track Forecast Truth
+
+Canonical historical forecast truth is a dual-track system:
+
+- **High track** — `temperature_metric=high`, `physical_quantity=mx2t6_local_calendar_day_max`, `data_version=tigge_mx2t6_local_calendar_day_max_v1`.
+- **Low track** — `temperature_metric=low`, `physical_quantity=mn2t6_local_calendar_day_min`, `data_version=tigge_mn2t6_local_calendar_day_min_v1`.
+
+The two tracks share local-calendar-day time geometry and share nothing else. On the same `(city, target_date)` two distinct legitimate temperature truths must be representable. Any table, model, or runtime class that conflates them is structurally incomplete. Full law is in `docs/authority/zeus_dual_track_architecture.md`.
+
+### Snapshot import law
+
+Canonical snapshot rows must carry `temperature_metric`, `physical_quantity`, `observation_field`, `data_version`, `training_allowed`, and `causality_status`. Rows missing a usable `issue_time` may still serve runtime degrade paths but are not canonical training evidence.
+
+### Daily low Day0 law
+
+Daily low Day0 is not a mirror image of daily high Day0. Slots marked `N/A_CAUSAL_DAY_ALREADY_STARTED` must not route through a historical forecast Platt lookup; they go through a nowcast path driven by `low_so_far`, `current_temp`, `hours_remaining`, and remaining forecast hours. Missing `low_so_far` is a clean reject, not a silent degrade to high path.
 
 ## Why The Rules Exist
 
@@ -123,6 +142,12 @@ When delegating to a zero-context subagent, include the `topology_doctor --navig
 - Lifecycle transitions belong to lifecycle authority; do not invent phase strings.
 - `strategy_key` is the governance identity; do not create a competing key.
 - Venus/OpenClaw are external boundary surfaces. Zeus exposes typed contracts outward.
+- `MetricIdentity` is mandatory for every temperature-market family; bare `"high"` / `"low"` strings are allowed only at serialization boundaries.
+- High and low rows must not mix in calibration pairs, Platt fitting, bin lookup for replay `p_raw`, or settlement rebuild identity.
+- DB authority commits must precede derived JSON export writes; on recovery DB wins and JSON is rebuilt.
+- RED risk must cancel pending AND sweep active positions; advisory-only RED is forbidden (extends INV-05).
+- Chain-truth state is three-valued: `CHAIN_SYNCED`, `CHAIN_EMPTY`, `CHAIN_UNKNOWN`. Void decisions require `CHAIN_EMPTY`.
+- Authority-loss must degrade the monitor/exit lane to read-only rather than kill the entire cycle (DT#6).
 
 Representative lore cards: `WMO_ROUNDING_BANKER_FAILURE`,
 `DIAGNOSTIC_BACKTEST_NON_PROMOTION`,
@@ -164,6 +189,12 @@ DB truth contracts, or supervisor contracts.
 - Add fallback defaults where exact attribution exists or should exist.
 - Rewrite broad authority surfaces in one unbounded patch.
 - Hide uncertainty under polished prose.
+- Open daily-low live trading before Gate F of `zeus_dual_track_architecture.md`.
+- Write a daily-low row on the legacy `settlements` (non-v2) table.
+- Route a `causality_status != 'OK'` Day0 slot through a historical Platt lookup.
+- Mix high and low rows in any single Platt model, bin lookup, or calibration family.
+- Call `kelly_size()` with a bare static `entry_price` at a cross-layer seam (INV-13 / DT#5).
+- Write a JSON export before the corresponding DB commit returns (DT#1).
 
 ## Work Discipline
 

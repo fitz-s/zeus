@@ -13,9 +13,12 @@ Role: single live control-entry surface for the repo.
 ## Active Work
 
 - Branch: `data-improve`
-- Program: Zeus Topology Compiler and Recurrence-Proof Program
-- Active packet: Topology Enforcement Hardening
-- Primary packet file: `docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md`
+- **Parallel programs (owned by different agents)**:
+  1. Zeus Topology Compiler and Recurrence-Proof Program — active packet `Topology Enforcement Hardening`, handled by a separate agent; do not edit its files.
+  2. Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16, governance + architecture refactor owning metric identity, World DB v2, death-trap remediation law, and low-track activation. Handled by the current agent.
+- Topology program packet file: `docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md`
+- Dual-Track refactor packet file: `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
+- Dual-Track authority file: `docs/authority/zeus_dual_track_architecture.md`
 - Archived:
   - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
 - Active sidecars:
