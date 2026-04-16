@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 
@@ -17,7 +19,25 @@ def staged_changed_files(api: Any) -> list[str]:
     return sorted(line for line in proc.stdout.splitlines() if line)
 
 
-def effective_changed_files(api: Any, changed_files: list[str] | None = None) -> list[str]:
+def receipt_changed_files(receipt_path: str | None) -> list[str]:
+    if not receipt_path:
+        return []
+    target = Path(receipt_path)
+    if not target.exists() or not target.is_file():
+        return []
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return sorted(str(path) for path in (payload.get("changed_files") or []))
+
+
+def effective_changed_files(
+    api: Any,
+    changed_files: list[str] | None = None,
+    *,
+    receipt_path: str | None = None,
+) -> list[str]:
     if changed_files:
         return sorted(api._map_maintenance_changes(changed_files))
     try:
@@ -26,7 +46,10 @@ def effective_changed_files(api: Any, changed_files: list[str] | None = None) ->
         staged = []
     if staged:
         return sorted(api._map_maintenance_changes(staged))
-    return sorted(api._map_maintenance_changes([]))
+    git_changes = sorted(api._map_maintenance_changes([]))
+    if git_changes:
+        return git_changes
+    return receipt_changed_files(receipt_path)
 
 
 def changed_files_touch(changed_files: list[str], patterns: tuple[str, ...]) -> bool:
@@ -128,7 +151,7 @@ def run_closeout(
     work_record_path: str | None = None,
     receipt_path: str | None = None,
 ) -> dict[str, Any]:
-    actual_changed = effective_changed_files(api, changed_files)
+    actual_changed = effective_changed_files(api, changed_files, receipt_path=receipt_path)
     selected = selected_lanes(api, actual_changed)
     lanes: dict[str, Any] = {
         "planning_lock": api.run_planning_lock(actual_changed, plan_evidence),

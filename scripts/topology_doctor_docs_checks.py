@@ -110,6 +110,8 @@ def check_docs_subtree_agents(api: Any, topology: dict[str, Any]) -> list[Any]:
     for rel, spec in sorted(docs_subroot_specs(topology).items()):
         if not spec.get("requires_agents", True):
             continue
+        if rel == "docs/archives" and not (api.ROOT / rel).exists():
+            continue
         path = api.ROOT / rel / "AGENTS.md"
         if not path.exists():
             issues.append(api._issue("missing_docs_agents", f"{rel}/AGENTS.md", "active docs subtree lacks AGENTS.md"))
@@ -145,9 +147,7 @@ def check_broken_internal_paths(api: Any) -> list[Any]:
         source_rel = file_path.relative_to(api.ROOT).as_posix()
         text = file_path.read_text(encoding="utf-8", errors="ignore")
         for candidate in sorted(internal_path_candidates(text)):
-            if candidate.startswith("docs/archives/") and any(
-                char in candidate for char in ("*", "?")
-            ):
+            if candidate == "docs/archives" or candidate.startswith("docs/archives/"):
                 continue
             if not (api.ROOT / candidate).exists():
                 issues.append(

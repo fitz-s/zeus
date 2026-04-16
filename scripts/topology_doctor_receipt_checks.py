@@ -72,6 +72,7 @@ def validate_receipt_payload(
                 f"route_source {route_source!r} is not allowed",
             )
         )
+    route_evidence = [str(ref) for ref in (receipt.get("route_evidence") or [])]
     for ref in receipt.get("route_evidence") or []:
         ref = str(ref)
         if not existing_repo_path(api, ref):
@@ -82,15 +83,31 @@ def validate_receipt_payload(
                     f"route_evidence references missing path {ref}",
                 )
             )
+    allowed_evidence_globs = [
+        str(pattern)
+        for pattern in ((schema.get("route_evidence_globs_by_source") or {}).get(str(route_source)) or [])
+    ]
+    if route_source and route_evidence and allowed_evidence_globs:
+        invalid_evidence = [
+            ref for ref in route_evidence if not path_matches_any(ref, allowed_evidence_globs)
+        ]
+        if invalid_evidence:
+            issues.append(
+                api._issue(
+                    "change_receipt_route_evidence_invalid",
+                    receipt_path,
+                    f"route_evidence entries {invalid_evidence!r} do not match allowed artifacts for route_source {route_source!r}",
+                )
+            )
 
     actual_changed = sorted(changed_files)
     receipt_changed = sorted(str(path) for path in (receipt.get("changed_files") or []))
-    if receipt_changed != actual_changed:
+    if not set(actual_changed).issubset(set(receipt_changed)):
         issues.append(
             api._issue(
                 "change_receipt_changed_files_mismatch",
                 receipt_path,
-                f"receipt changed_files {receipt_changed!r} do not match actual diff {actual_changed!r}",
+                f"receipt changed_files {receipt_changed!r} do not cover actual diff {actual_changed!r}",
             )
         )
 

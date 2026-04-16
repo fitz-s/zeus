@@ -114,6 +114,7 @@ strict_issue_codes:
   - change_receipt_required_field_missing
   - change_receipt_invalid_route_source
   - change_receipt_route_evidence_missing
+  - change_receipt_route_evidence_invalid
   - change_receipt_law_target_missing
   - change_receipt_evidence_target_missing
   - change_receipt_changed_files_mismatch
