@@ -97,6 +97,12 @@ rules:
     required_companions:
       - docs/runbooks/AGENTS.md
     rationale: runbooks are operator routing surfaces and need local registry updates.
+  - id: report_doc_registry
+    path_globs: ["docs/reports/*"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/reports/AGENTS.md
+    rationale: tracked report artifacts need an explicit local registry entry so active evidence does not become a hidden branch.
   - id: docs_artifact_registry
     path_globs: ["docs/artifacts/*"]
     on_change: [added, deleted]

@@ -216,6 +216,18 @@ def run_context_budget(api: Any) -> Any:
             continue
         if len(expected_reads) > soft_limit:
             issues.append(api._warning("context_budget_route_over", f"default_read_path.route_budgets.{route}", f"{len(expected_reads)} expected reads exceeds soft limit {soft_limit}"))
+
+    evidence_budget = budget.get("evidence_surface_budgets") or {}
+    for idx, spec in enumerate(evidence_budget.get("surfaces") or []):
+        path = str(spec.get("path") or f"evidence_surface_budgets.surfaces[{idx}]")
+        expected_extensions = spec.get("expected_extensions")
+        if not path or path.endswith(f"[{idx}]"):
+            issues.append(api._warning("context_budget_invalid_value", path, "evidence surface budget missing path"))
+            continue
+        if not (api.ROOT / path).exists():
+            issues.append(api._warning("context_budget_invalid_value", path, "evidence surface budget path does not exist"))
+        if not isinstance(expected_extensions, list) or not expected_extensions:
+            issues.append(api._warning("context_budget_invalid_value", path, "expected_extensions must be a non-empty list"))
     blocking = [issue for issue in issues if issue.severity == "error"]
     return api.StrictResult(ok=not blocking, issues=issues)
 

@@ -114,6 +114,12 @@ classification_rules:
     artifact_class: generated_evidence
     lifecycle: active
     destination_rule: Keep binary/non-md evidence and checklist workbooks explicit and non-authoritative.
+  - id: active_docs_reports
+    path_globs:
+      - docs/reports/*
+    artifact_class: generated_evidence
+    lifecycle: active
+    destination_rule: Keep active generated reports explicit and non-authoritative; archive historical reports under docs/archives/reports/.
   - id: active_work_log
     path_globs:
       - docs/operations/task_????-??-??_*/work_log.md

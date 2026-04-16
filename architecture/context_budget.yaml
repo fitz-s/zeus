@@ -36,7 +36,7 @@ file_budgets:
       into digest-routed lore or scoped references.
   - path: workspace_map.md
     role: directory_router_only
-    max_lines: 120
+    max_lines: 140
     enforcement: advisory
     diet_target: >
       Keep the workspace map as directory-level routing. Avoid duplicating
@@ -117,3 +117,25 @@ default_read_path:
     navigation set, not a ban on necessary authority reads. If a task needs more
     than the relevant ceiling, expand context and keep the reason tied to the
     task boundary, truth owner, downstream behavior, or verification scope.
+
+evidence_surface_budgets:
+  rule: >
+    These are telemetry baselines for evidence/report surfaces, not hard
+    blocking limits. They exist to show growth and extension drift before those
+    surfaces turn into shadow planners or hidden authority branches.
+  surfaces:
+    - path: docs/reports
+      role: active_generated_reports
+      enforcement: advisory
+      expected_extensions: [".md", ".json", ".csv"]
+      budget_basis: current_repo_snapshot_plus_human_review
+    - path: docs/artifacts
+      role: active_evidence_artifacts
+      enforcement: advisory
+      expected_extensions: [".md", ".xlsx", ".csv", ".json"]
+      budget_basis: current_repo_snapshot_plus_human_review
+    - path: docs/to-do-list
+      role: active_checklists
+      enforcement: advisory
+      expected_extensions: [".xlsx", ".csv", ".json"]
+      budget_basis: current_repo_snapshot_plus_human_review

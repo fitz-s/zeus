@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +13,8 @@ from typing import Any
 COMPILED_TOPOLOGY_SOURCE_MANIFESTS = [
     "architecture/topology.yaml",
     "architecture/artifact_lifecycle.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/change_receipt_schema.yaml",
     "architecture/source_rationale.yaml",
     "architecture/test_topology.yaml",
     "architecture/script_manifest.yaml",
@@ -308,11 +311,13 @@ def run_core_maps(api: Any) -> Any:
 def build_compiled_topology(api: Any) -> dict[str, Any]:
     topology = api.load_topology()
     lifecycle = api.load_artifact_lifecycle()
+    context_budget = api.load_context_budget()
     source_manifests = [
         {"path": path, "exists": (api.ROOT / path).exists()}
         for path in COMPILED_TOPOLOGY_SOURCE_MANIFESTS
     ]
     docs_subroots = topology.get("docs_subroots") or []
+    docs_subroot_paths = {str(item.get("path") or "") for item in docs_subroots}
     reviewer_visible = [
         {
             "path": item.get("path"),
@@ -362,6 +367,60 @@ def build_compiled_topology(api: Any) -> dict[str, Any]:
         for issue in api._check_hidden_docs(topology)
         if issue.code in {"docs_unregistered_subtree", "docs_non_markdown_artifact"}
     ]
+    dark_write_targets: list[dict[str, Any]] = []
+    script_manifest = api.load_script_manifest().get("scripts") or {}
+    for script_name, spec in script_manifest.items():
+        for target in spec.get("write_targets") or []:
+            target = str(target)
+            if not target.startswith("docs/"):
+                continue
+            if any(target == root or target.startswith(f"{root}/") or target.startswith(f"{root}/*") for root in docs_subroot_paths):
+                continue
+            dark_write_targets.append(
+                {
+                    "script": script_name,
+                    "target": target,
+                    "reason": "script manifest writes to docs path outside declared docs_subroots",
+                }
+            )
+
+    visible_files = set(api._git_visible_files())
+    evidence_surface_specs = ((context_budget.get("evidence_surface_budgets") or {}).get("surfaces") or [])
+    evidence_surface_telemetry = []
+    for spec in evidence_surface_specs:
+        rel = str(spec.get("path") or "")
+        if not rel:
+            continue
+        files = sorted(
+            path
+            for path in visible_files
+            if path.startswith(f"{rel}/")
+            and (api.ROOT / path).exists()
+            and (api.ROOT / path).is_file()
+            and (api.ROOT / path).name not in {"AGENTS.md", "README.md"}
+        )
+        total_bytes = sum((api.ROOT / path).stat().st_size for path in files)
+        extension_counts = Counter((api.ROOT / path).suffix or "<none>" for path in files)
+        expected_extensions = [str(value) for value in spec.get("expected_extensions") or []]
+        unexpected_extensions = [
+            ext
+            for ext in sorted(extension_counts)
+            if expected_extensions and ext not in expected_extensions
+        ]
+        evidence_surface_telemetry.append(
+            {
+                "path": rel,
+                "role": spec.get("role"),
+                "enforcement": spec.get("enforcement", "advisory"),
+                "budget_basis": spec.get("budget_basis", "provisional_snapshot"),
+                "file_count": len(files),
+                "total_bytes": total_bytes,
+                "largest_file_bytes": max(((api.ROOT / path).stat().st_size for path in files), default=0),
+                "expected_extensions": expected_extensions,
+                "extension_counts": dict(sorted(extension_counts.items())),
+                "unexpected_extensions": unexpected_extensions,
+            }
+        )
     return {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "authority_status": "derived_not_authority",
@@ -378,4 +437,11 @@ def build_compiled_topology(api: Any) -> dict[str, Any]:
         "artifact_roles": artifact_roles,
         "broken_visible_routes": broken_visible,
         "unclassified_docs_artifacts": unclassified_docs_artifacts,
+        "telemetry": {
+            "dark_write_targets": dark_write_targets,
+            "dark_write_target_count": len(dark_write_targets),
+            "broken_visible_route_count": len(broken_visible),
+            "unclassified_docs_artifact_count": len(unclassified_docs_artifacts),
+            "evidence_surfaces": evidence_surface_telemetry,
+        },
     }

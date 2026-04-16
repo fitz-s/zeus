@@ -26,6 +26,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--context-budget", action="store_true", help="Run context budget checks")
     parser.add_argument("--artifact-lifecycle", action="store_true", help="Run artifact lifecycle/classification checks")
     parser.add_argument("--work-record", action="store_true", help="Check that repo-changing work has a short work record")
+    parser.add_argument("--change-receipts", action="store_true", help="Check high-risk route/change receipts")
     parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
@@ -51,6 +52,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path for --planning-lock")
     parser.add_argument("--work-record-path", default=None, help="Work record path for --work-record")
+    parser.add_argument("--receipt-path", default=None, help="Receipt path for --change-receipts")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     parser.add_argument("--summary-only", action="store_true", help="Emit issue counts by code instead of full issue list")
     parser.add_argument("--task", default="", help="Task string for --navigation")
@@ -80,6 +82,14 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
 
     compiled_topology = sub.add_parser("compiled-topology", help="Emit derived compiled topology read model")
     compiled_topology.add_argument("--json", action="store_true", help="Emit JSON")
+
+    closeout = sub.add_parser("closeout", help="Emit compiled closeout result for a scoped change set")
+    closeout.add_argument("--changed-files", nargs="*", default=[], help="Files in the closeout scope; omitted prefers staged files, else uses git status")
+    closeout.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path")
+    closeout.add_argument("--work-record-path", default=None, help="Work record path")
+    closeout.add_argument("--receipt-path", default=None, help="Receipt path")
+    closeout.add_argument("--json", action="store_true", help="Emit JSON")
+    closeout.add_argument("--summary-only", action="store_true", help="Emit compact lane summary")
 
     context_pack = sub.add_parser("context-pack", help="Emit task-shaped agent context packet")
     context_pack.add_argument("--pack-type", default="auto", choices=["auto", "package_review", "debug"], help="Context-pack profile")
@@ -165,6 +175,10 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         result = api.run_work_record(args.changed_files, args.work_record_path)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
+    if args.change_receipts:
+        result = api.run_change_receipts(args.changed_files, args.receipt_path)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
     if args.map_maintenance:
         result = api.run_map_maintenance(args.changed_files, mode=args.map_maintenance_mode)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
@@ -218,6 +232,48 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
     if args.command == "compiled-topology":
         render_payload(api, api.build_compiled_topology(), as_json=args.json)
         return 0
+    if args.command == "closeout":
+        payload = api.run_closeout(
+            changed_files=args.changed_files,
+            plan_evidence=args.plan_evidence,
+            work_record_path=args.work_record_path,
+            receipt_path=args.receipt_path,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        elif args.summary_only:
+            status = "closeout ok" if payload["ok"] else "closeout failed"
+            print(status)
+            print(f"changed_files: {len(payload['changed_files'])}")
+            for lane, summary in payload["lanes"].items():
+                state = "ok" if summary["ok"] else "fail"
+                print(
+                    f"- {lane}: {state} "
+                    f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                )
+            telemetry = payload.get("telemetry") or {}
+            print(
+                f"telemetry: dark_write_targets={telemetry.get('dark_write_target_count', 0)}, "
+                f"broken_visible_routes={telemetry.get('broken_visible_route_count', 0)}, "
+                f"unclassified_docs_artifacts={telemetry.get('unclassified_docs_artifact_count', 0)}"
+            )
+        else:
+            print("closeout ok" if payload["ok"] else "closeout failed")
+            print("changed_files:")
+            for path in payload["changed_files"]:
+                print(f"- {path}")
+            print("lanes:")
+            for lane, summary in payload["lanes"].items():
+                state = "ok" if summary["ok"] else "fail"
+                print(
+                    f"- {lane}: {state} "
+                    f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                )
+                for issue in summary["issues"]:
+                    print(
+                        f"  - [{issue['severity']}:{issue['code']}] {issue['path']}: {issue['message']}"
+                    )
+        return 0 if payload["ok"] else 1
     if args.command == "context-pack":
         try:
             payload = api.build_context_pack(args.pack_type, task=args.task, files=args.files)

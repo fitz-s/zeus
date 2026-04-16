@@ -106,6 +106,20 @@ strict_issue_codes:
   - work_record_invalid_path
   - work_record_field_missing
   - work_record_git_status_failed
+  - change_receipt_schema_missing
+  - change_receipt_required
+  - change_receipt_missing
+  - change_receipt_invalid_path
+  - change_receipt_invalid_json
+  - change_receipt_required_field_missing
+  - change_receipt_invalid_route_source
+  - change_receipt_route_evidence_missing
+  - change_receipt_law_target_missing
+  - change_receipt_evidence_target_missing
+  - change_receipt_changed_files_mismatch
+  - change_receipt_file_out_of_scope
+  - change_receipt_forbidden_file
+  - change_receipt_inadequate_law_coverage
   - context_pack_profiles_manifest_missing
   - context_pack_profile_duplicate_id
   - context_pack_profile_required_field_missing

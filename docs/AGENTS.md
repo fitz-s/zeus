@@ -20,6 +20,7 @@ Read `README.md` in this directory for the docs index with full folder descripti
 | `reference/` | Domain model, repo orientation, data inventory, quantitative research → `reference/AGENTS.md` |
 | `operations/` | Live control-entry pointer + active work packets → `operations/AGENTS.md` |
 | `runbooks/` | Operator runbooks → `runbooks/AGENTS.md` |
+| `reports/` | Generated diagnostic reports from declared writers only; evidence only → `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks and audit queues; not authority → `to-do-list/AGENTS.md` |
 | `artifacts/` | Active evidence artifacts and workbooks; not authority → `artifacts/AGENTS.md` |
 | `archives/` | Historical only — never active authority → `archives/AGENTS.md` |
@@ -27,5 +28,6 @@ Read `README.md` in this directory for the docs index with full folder descripti
 ## Rules
 
 - New active docs go in `authority/`, `reference/`, `operations/`, `runbooks/`, `to-do-list/`, or `artifacts/` — never directly in `docs/`
+- Generated diagnostic reports from declared writers may go in `reports/`; it is not a general authoring surface
 - `known_gaps.md` is the exception (top-level because it spans all zones)
 - Everything that is no longer active law → `archives/`
