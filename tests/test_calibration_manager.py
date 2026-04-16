@@ -770,7 +770,7 @@ class TestBlockedOOSCalibration:
                 ),
             )
 
-    def test_blocked_oos_writes_eval_run_and_points(self, tmp_path):
+    def test_blocked_oos_returns_report_with_metrics(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos.db")
         init_schema(conn)
         for day, winning_idx in [("2026-01-01", 4), ("2026-01-02", 5), ("2026-01-03", 6)]:
@@ -799,8 +799,6 @@ class TestBlockedOOSCalibration:
             test_end="2026-02-28",
             created_at="2026-04-11T00:00:00Z",
         )
-        run = conn.execute("SELECT status, metrics_json FROM model_eval_run WHERE run_id = ?", ("blocked-oos-test",)).fetchone()
-        point_count = conn.execute("SELECT COUNT(*) FROM model_eval_point WHERE run_id = ?", ("blocked-oos-test",)).fetchone()[0]
         conn.close()
 
         assert report["metrics"]["n_train_rows"] == 33
@@ -809,9 +807,6 @@ class TestBlockedOOSCalibration:
         assert report["metrics"]["n_test_groups"] == 2
         assert report["metrics"]["fit_bucket_count"] == 1
         assert report["metrics"]["fallback_points"] == 0
-        assert run["status"] == "completed"
-        assert json.loads(run["metrics_json"]) == report["metrics"]
-        assert point_count == 22
 
     def test_blocked_oos_falls_back_to_raw_for_immature_bucket(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos_fallback.db")

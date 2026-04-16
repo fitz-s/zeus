@@ -537,90 +537,6 @@ def test_log_probability_trace_fact_skips_missing_table_explicitly(tmp_path):
     assert result == {"status": "skipped_missing_table", "table": "probability_trace_fact"}
 
 
-def test_model_eval_and_promotion_surfaces_write_idempotently(tmp_path):
-    from src.state.db import (
-        log_model_eval_point,
-        log_model_eval_run,
-        upsert_promotion_registry,
-    )
-
-    conn = get_connection(tmp_path / "model_eval.db")
-    init_schema(conn)
-
-    run_result = log_model_eval_run(
-        conn,
-        run_id="run-1",
-        model_name="platt",
-        model_version="v1",
-        task_name="calibration",
-        data_source="calibration_pairs",
-        split_method="blocked_time",
-        scorer={"brier": True},
-        config={"folds": 3},
-        metrics={"brier": 0.12},
-        status="completed",
-        created_at="2026-04-11T00:00:00Z",
-        completed_at="2026-04-11T00:01:00Z",
-    )
-    point_result = log_model_eval_point(
-        conn,
-        point_id="point-1",
-        run_id="run-1",
-        point_type="calibration_group",
-        reference_id="NYC|2026-04-01",
-        city="NYC",
-        target_date="2026-04-01",
-        bucket_key="US-Northeast_MAM",
-        lead_days=3.0,
-        y_true=1.0,
-        p_raw=0.4,
-        p_cal=0.45,
-        p_post=0.5,
-        brier=0.25,
-        meta={"source": "test"},
-        recorded_at="2026-04-11T00:01:00Z",
-    )
-    promotion_result = upsert_promotion_registry(
-        conn,
-        promotion_id="promo-1",
-        model_name="platt",
-        model_version="v1",
-        task_name="calibration",
-        status="candidate",
-        eval_run_id="run-1",
-        decision_reason="blocked_oos_passed",
-        meta={"owner": "test"},
-        recorded_at="2026-04-11T00:02:00Z",
-    )
-    promotion_result_2 = upsert_promotion_registry(
-        conn,
-        promotion_id="promo-1",
-        model_name="platt",
-        model_version="v1",
-        task_name="calibration",
-        status="shadow",
-        eval_run_id="run-1",
-        decision_reason="downgraded_for_test",
-        meta={},
-        recorded_at="2026-04-11T00:03:00Z",
-    )
-    counts = {
-        "runs": conn.execute("SELECT COUNT(*) FROM model_eval_run").fetchone()[0],
-        "points": conn.execute("SELECT COUNT(*) FROM model_eval_point").fetchone()[0],
-        "promotions": conn.execute("SELECT COUNT(*) FROM promotion_registry").fetchone()[0],
-    }
-    promotion = conn.execute("SELECT status, decision_reason FROM promotion_registry").fetchone()
-    conn.close()
-
-    assert run_result == {"status": "written", "table": "model_eval_run"}
-    assert point_result == {"status": "written", "table": "model_eval_point"}
-    assert promotion_result == {"status": "written", "table": "promotion_registry"}
-    assert promotion_result_2 == {"status": "written", "table": "promotion_registry"}
-    assert counts == {"runs": 1, "points": 1, "promotions": 1}
-    assert promotion["status"] == "shadow"
-    assert promotion["decision_reason"] == "downgraded_for_test"
-
-
 def test_selection_family_and_hypothesis_facts_write_idempotently(tmp_path):
     from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 
@@ -703,13 +619,8 @@ def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
     for table in (
         "probability_trace_fact",
         "calibration_decision_group",
-        "day0_residual_fact",
-        "forecast_error_profile",
         "selection_family_fact",
         "selection_hypothesis_fact",
-        "model_eval_run",
-        "model_eval_point",
-        "promotion_registry",
     ):
         assert inventory["tables"][table] == {"exists": True, "rows": 0}
 

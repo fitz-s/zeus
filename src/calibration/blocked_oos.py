@@ -1,10 +1,9 @@
 # Shadow-only: outputs are additive facts, not live blockers
 """Blocked out-of-sample calibration evaluation.
 
-This module turns `model_eval_run` / `model_eval_point` from inert schema into a
-behavior-neutral reporting surface. It fits Platt models on an earlier target
-date block and evaluates them on a later target date block without changing the
-active calibration routing.
+Shadow-only evaluation surface. Fits Platt models on an earlier target date
+block and evaluates them on a later target date block without changing the
+active calibration routing. Metrics are returned in the report dict only.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import numpy as np
 from src.calibration.manager import bucket_key, maturity_level, regularization_for_level
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.store import infer_bin_width_from_label
-from src.state.db import log_model_eval_point, log_model_eval_run
 
 EPS = 1e-6
 
@@ -156,14 +154,12 @@ def evaluate_blocked_oos_calibration(
     run_id: str | None = None,
     model_name: str = "extended_platt",
     model_version: str = "blocked_oos_v1",
-    write: bool = True,
+    write: bool = True,  # retained for API compat; no longer writes to DB
     created_at: str | None = None,
 ) -> dict:
-    """Fit on one date block, evaluate on a later date block, and optionally log.
+    """Fit on one date block, evaluate on a later date block.
 
-    Returns a compact report with aggregate metrics. If `write=True`, the same
-    report is stored in `model_eval_run`, with one `model_eval_point` per test
-    calibration-pair row.
+    Returns a compact report with aggregate metrics.
     """
     created_at = created_at or datetime.now(timezone.utc).isoformat()
     run_id = run_id or _stable_run_id(
@@ -179,26 +175,6 @@ def evaluate_blocked_oos_calibration(
     for row in train_rows:
         by_bucket.setdefault(row.bucket_key, []).append(row)
     models = {bucket: _fit_bucket(rows) for bucket, rows in by_bucket.items()}
-
-    if write:
-        log_model_eval_run(
-            conn,
-            run_id=run_id,
-            model_name=model_name,
-            model_version=model_version,
-            task_name="calibration",
-            data_source="calibration_pairs",
-            split_method="blocked_time",
-            train_start=train_start,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
-            scorer={"brier": True, "log_loss": True},
-            config={"grouping": "cluster_season", "fallback": "p_raw"},
-            metrics={},
-            status="running",
-            created_at=created_at,
-        )
 
     brier_raw: list[float] = []
     brier_calibrated: list[float] = []
@@ -218,31 +194,6 @@ def evaluate_blocked_oos_calibration(
         brier_calibrated.append(calibrated_brier)
         log_loss_raw.append(raw_log_loss)
         log_loss_calibrated.append(calibrated_log_loss)
-        if write:
-            log_model_eval_point(
-                conn,
-                point_id=f"{run_id}:pair:{row.pair_id}",
-                run_id=run_id,
-                point_type="calibration_group",
-                reference_id=f"{row.group_id}|{row.range_label}",
-                city=row.city,
-                target_date=row.target_date,
-                bucket_key=row.bucket_key,
-                lead_days=row.lead_days,
-                y_true=float(row.outcome),
-                p_raw=row.p_raw,
-                p_cal=p_cal,
-                brier=calibrated_brier,
-                log_loss=calibrated_log_loss,
-                meta={
-                    "calibration_pair_id": row.pair_id,
-                    "calibration_source": source,
-                    "raw_brier": raw_brier,
-                    "raw_log_loss": raw_log_loss,
-                    "range_label": row.range_label,
-                },
-                recorded_at=created_at,
-            )
 
     metrics = {
         "n_train_rows": len(train_rows),
@@ -272,26 +223,6 @@ def evaluate_blocked_oos_calibration(
         "test_end": test_end,
         "metrics": metrics,
     }
-    if write:
-        log_model_eval_run(
-            conn,
-            run_id=run_id,
-            model_name=model_name,
-            model_version=model_version,
-            task_name="calibration",
-            data_source="calibration_pairs",
-            split_method="blocked_time",
-            train_start=train_start,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
-            scorer={"brier": True, "log_loss": True},
-            config={"grouping": "cluster_season", "fallback": "p_raw"},
-            metrics=metrics,
-            status="completed",
-            created_at=created_at,
-            completed_at=created_at,
-        )
     return report
 
 
