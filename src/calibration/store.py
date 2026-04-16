@@ -14,12 +14,20 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection
+
+if TYPE_CHECKING:
+    from src.types.metric_identity import MetricIdentity
+
+# INV-15: sources whose rows are canonical training data.
+# All other sources produce runtime-only observations; training_allowed is
+# forced to False regardless of what the caller passes.
+_TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:
@@ -97,6 +105,78 @@ def add_calibration_pair(
     """, (city, target_date, range_label, p_raw, outcome, lead_days,
           season, cluster, forecast_available_at, settlement_value,
           decision_group_id, int(bool(bias_corrected)), bin_source, authority))
+
+
+def _resolve_training_allowed(source: str, data_version: str, requested: bool) -> bool:
+    """INV-15: enforce source whitelist on training_allowed.
+
+    Two-signal check: both data_version prefix AND explicit source (if provided)
+    must be whitelisted. If either is non-whitelisted, training_allowed is forced
+    to False. The whitelist covers canonical TIGGE and ecmwf_ens sources only.
+    """
+    # Check data_version prefix
+    dv_ok = any(data_version.startswith(s) for s in _TRAINING_ALLOWED_SOURCES) if data_version else False
+    # Check explicit source (empty string = not provided, skip check)
+    src_ok = (source in _TRAINING_ALLOWED_SOURCES) if source else True
+    if not (dv_ok and src_ok):
+        return False
+    return requested
+
+
+def add_calibration_pair_v2(
+    conn: sqlite3.Connection,
+    city: str,
+    target_date: str,
+    range_label: str,
+    p_raw: float,
+    outcome: int,
+    lead_days: float,
+    season: str,
+    cluster: str,
+    forecast_available_at: str,
+    *,
+    metric_identity: "MetricIdentity",
+    training_allowed: bool,
+    data_version: str,
+    source: str = "",
+    settlement_value: Optional[float] = None,
+    decision_group_id: Optional[str] = None,
+    bias_corrected: bool = False,
+    bin_source: str = "canonical_v1",
+    authority: str = "VERIFIED",
+    causality_status: str = "OK",
+    snapshot_id: Optional[int] = None,
+) -> None:
+    """Insert a calibration pair into calibration_pairs_v2.
+
+    Requires metric_identity (4A.3 — no legacy default). INV-15: training_allowed
+    is silently forced to False if source is not in the canonical whitelist
+    (tigge, ecmwf_ens). Pass source= explicitly from the ingest path.
+    """
+    if settlement_value is not None:
+        settlement_value = round_wmo_half_up_value(float(settlement_value))
+    if decision_group_id is None or not str(decision_group_id).strip():
+        raise ValueError(
+            "decision_group_id is required; use "
+            "src.calibration.decision_group.compute_id() to generate it"
+        )
+    effective_training_allowed = _resolve_training_allowed(source, data_version, training_allowed)
+    conn.execute("""
+        INSERT INTO calibration_pairs_v2
+        (city, target_date, temperature_metric, observation_field, range_label,
+         p_raw, outcome, lead_days, season, cluster, forecast_available_at,
+         settlement_value, decision_group_id, bias_corrected, authority,
+         bin_source, data_version, training_allowed, causality_status, snapshot_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        city, target_date,
+        metric_identity.temperature_metric,
+        metric_identity.observation_field,
+        range_label, p_raw, outcome, lead_days, season, cluster,
+        forecast_available_at, settlement_value, decision_group_id,
+        int(bool(bias_corrected)), authority, bin_source, data_version,
+        int(effective_training_allowed), causality_status, snapshot_id,
+    ))
 
 
 def _has_authority_column(conn: sqlite3.Connection) -> bool:
@@ -264,6 +344,49 @@ def save_platt_model(
         bucket_key, A, B, C,
         json.dumps(bootstrap_params),
         n_samples, brier_insample, now, input_space, authority
+    ))
+
+
+def save_platt_model_v2(
+    conn: sqlite3.Connection,
+    *,
+    metric_identity: "MetricIdentity",
+    cluster: str,
+    season: str,
+    data_version: str,
+    param_A: float,
+    param_B: float,
+    bootstrap_params: list,
+    n_samples: int,
+    param_C: float = 0.0,
+    brier_insample: Optional[float] = None,
+    input_space: str = "raw_probability",
+    authority: str = "VERIFIED",
+) -> None:
+    """Save a fitted Platt model to platt_models_v2.
+
+    Requires metric_identity (4A.4 — no legacy default). Derives model_key
+    from (temperature_metric, cluster, season, data_version, input_space).
+    Uses INSERT OR REPLACE on model_key.
+    """
+    model_key = (
+        f"{metric_identity.temperature_metric}:{cluster}:{season}"
+        f":{data_version}:{input_space}"
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("""
+        INSERT INTO platt_models_v2
+        (model_key, temperature_metric, cluster, season, data_version,
+         input_space, param_A, param_B, param_C, bootstrap_params_json,
+         n_samples, brier_insample, fitted_at, is_active, authority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    """, (
+        model_key,
+        metric_identity.temperature_metric,
+        cluster, season, data_version, input_space,
+        param_A, param_B, param_C,
+        json.dumps(bootstrap_params),
+        n_samples, brier_insample, now, authority,
     ))
 
 

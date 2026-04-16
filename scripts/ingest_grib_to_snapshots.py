@@ -14,10 +14,10 @@ call::
     )
     assert_data_version_allowed(data_version, context="ingest_grib_to_snapshots")
 
-Allowed data_version values (2026-04-14):
+Allowed data_version values (Phase 4+):
 
-- ``tigge_mx2t6_local_peak_window_max_v1`` (per the mx2t6 redownload plan at
-  ``/Users/leofitz/.openclaw/workspace-venus/51 source data/TIGGE_MX2T6_LOCALMAX_REDOWNLOAD_PLAN.md``)
+- ``tigge_mx2t6_local_calendar_day_max_v1`` (high track canonical, Phase 4)
+- ``tigge_mn2t6_local_calendar_day_min_v1`` (low track canonical, Phase 5)
 - Any new tag that is NOT caught by
   ``src/contracts/ensemble_snapshot_provenance.QUARANTINED_DATA_VERSION_PREFIXES``
 
@@ -25,11 +25,13 @@ Forbidden families (caught by the guard):
 
 - ``tigge_step024_v1_near_peak`` / ``tigge_step024_v1_overnight_snapshot``
   (old partial ingest, wrong physical quantity)
+- ``tigge_mx2t6_local_peak_window_max_v1`` (NOW QUARANTINED — peak-window
+  semantics ≠ local-calendar-day; superseded by calendar_day_max_v1)
 - ``tigge_step*`` / ``tigge_param167*`` / ``tigge_2t_instant*`` (blanket
   prefix refusal of any 2t-instant point-forecast variant)
 
 The guard raises ``DataVersionQuarantinedError`` — do not catch it. The
-error message tells operators to use the mx2t6 replacement tag.
+error message tells operators to use the canonical replacement tag.
 """
 
 from __future__ import annotations

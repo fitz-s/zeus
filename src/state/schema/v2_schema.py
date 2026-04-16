@@ -156,6 +156,16 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
                 ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
         """)
+        # 4A.2: members_unit / members_precision — idempotent ADD COLUMN
+        for alter_sql in [
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
         # ----------------------------------------------------------------
         # calibration_pairs_v2

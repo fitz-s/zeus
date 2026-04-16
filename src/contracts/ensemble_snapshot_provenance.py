@@ -21,8 +21,11 @@ inputs at inference time produces a systematic train/infer geometry
 mismatch that neither density normalization nor Platt's ``C*lead_days``
 term can repair. The replacement archive is ``param=121.128`` / ``mx2t6``
 (``stepType=max``, 6-hour sliding windows) composited into per-member
-**local peak-window max**, tagged in DB as
-``tigge_mx2t6_local_peak_window_max_v1``.
+**local calendar-day max**, tagged in DB as
+``tigge_mx2t6_local_calendar_day_max_v1`` (Phase 4 canonical).
+The intermediate ``tigge_mx2t6_local_peak_window_max_v1`` tag (peak-window
+semantics, now superseded) is also quarantined — it is a different physical
+quantity than the local-calendar-day product the live path requires.
 
 Until that replacement lands, the old ``param_167`` variants must be
 kept out of every live calibration path — not just filtered at read
@@ -73,6 +76,8 @@ QUARANTINED_DATA_VERSIONS: frozenset[str] = frozenset({
     "tigge_step024_v1_near_peak",
     "tigge_step024_v1_overnight_snapshot",
     "tigge_partial_legacy",
+    # peak_window ≠ local_calendar_day: different physical quantity, superseded by Phase 4
+    "tigge_mx2t6_local_peak_window_max_v1",
 })
 
 
@@ -115,10 +120,43 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
         raise DataVersionQuarantinedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
             f"is quarantined per src/contracts/ensemble_snapshot_provenance.py. "
-            f"The quarantine exists because param_167 point forecasts do not "
-            f"match the local-day maximum physical quantity the live path "
-            f"consumes. Use tigge_mx2t6_local_peak_window_max_v1 (or the "
-            f"current replacement tag) instead.{ctx}"
+            f"Quarantine covers: param_167 point forecasts (wrong physical quantity), "
+            f"peak-window max (superseded by local-calendar-day semantics). "
+            f"Use tigge_mx2t6_local_calendar_day_max_v1 (high track canonical, "
+            f"Phase 4+) instead.{ctx}"
+        )
+
+
+_VALID_MEMBERS_UNITS: frozenset[str] = frozenset({"degC", "degF"})
+
+
+class MembersUnitInvalidError(ValueError):
+    """Raised when members_unit is missing or not a valid temperature unit.
+
+    Kelvin ("K") is explicitly rejected — ECMWF GRIB delivers members in
+    Kelvin but the Zeus pipeline stores and compares in degC. Silent Kelvin
+    storage would bias every downstream Platt evaluation by +273.
+    """
+
+
+def validate_members_unit(members_unit: str | None, *, context: str = "") -> None:
+    """Raise MembersUnitInvalidError if members_unit is not valid.
+
+    Valid values: "degC", "degF". Rejects None, empty string, and "K".
+    Call from every writer of ensemble_snapshots_v2 before INSERT.
+    """
+    ctx = f" (context={context})" if context else ""
+    if not members_unit:
+        raise MembersUnitInvalidError(
+            f"ensemble_snapshots_v2 write refused: members_unit is missing or "
+            f"empty. Must be one of {sorted(_VALID_MEMBERS_UNITS)}.{ctx}"
+        )
+    if members_unit not in _VALID_MEMBERS_UNITS:
+        raise MembersUnitInvalidError(
+            f"ensemble_snapshots_v2 write refused: members_unit={members_unit!r} "
+            f"is not a valid temperature unit. Must be one of "
+            f"{sorted(_VALID_MEMBERS_UNITS)}. Note: 'K' (Kelvin) is rejected "
+            f"— convert GRIB Kelvin to degC before storing.{ctx}"
         )
 
 

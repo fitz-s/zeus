@@ -288,6 +288,18 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                         ),
                     )
 
+    def test_ensemble_snapshots_v2_has_members_unit_and_precision(self):
+        """4A.2: ensemble_snapshots_v2 must have members_unit and members_precision columns."""
+        conn = _apply_and_get_conn()
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
+        }
+        self.assertIn("members_unit", columns,
+                      msg="ensemble_snapshots_v2 missing members_unit (4A.2 schema migration)")
+        self.assertIn("members_precision", columns,
+                      msg="ensemble_snapshots_v2 missing members_precision (4A.2 schema migration)")
+
     def test_v2_unique_key_rejects_duplicate_metric(self):
         """Inserting a second row with identical (city, target_date, temperature_metric, ...)
         raises sqlite3.IntegrityError.
