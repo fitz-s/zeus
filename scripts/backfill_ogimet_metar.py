@@ -114,6 +114,20 @@ OGIMET_TARGETS: dict[str, OgimetTarget] = {
         unit="C",
         source_tag="ogimet_metar_llbg",
     ),
+    "Cape Town": OgimetTarget(
+        city_name="Cape Town",
+        station="FACT",
+        kind="metar",
+        unit="C",
+        source_tag="ogimet_metar_fact",
+    ),
+    "Lucknow": OgimetTarget(
+        city_name="Lucknow",
+        station="VILK",
+        kind="metar",
+        unit="C",
+        source_tag="ogimet_metar_vilk",
+    ),
 }
 
 
