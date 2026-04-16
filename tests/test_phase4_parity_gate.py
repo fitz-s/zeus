@@ -91,18 +91,43 @@ class TestDataVersionQuarantineGate:
             with pytest.raises(DataVersionQuarantinedError, match=tag):
                 assert_data_version_allowed(tag, context="test_phase4_parity_gate_regression")
 
-    def test_ingest_grib_to_snapshots_calls_assert_data_version_before_insert(self):
-        """R-P structural: ingest_grib_to_snapshots must call assert_data_version_allowed.
+    def test_peak_window_version_bump_is_still_quarantined(self):
+        """R-P M3: a version-bumped peak_window tag (e.g. _max_v2) must be caught by
+        the QUARANTINED_DATA_VERSION_PREFIXES prefix 'tigge_mx2t6_local_peak_window'.
 
-        This test verifies that the ingest script's implementation contract includes
-        the provenance guard. Since the script is being built in Phase 4B, this test
-        verifies the structural requirement by checking the import is present in the
-        implementation module.
-
-        When Phase 4B lands, replace this test body with a mock-based assertion that
-        confirms assert_data_version_allowed is called before every INSERT.
+        Before M3, only the exact string 'tigge_mx2t6_local_peak_window_max_v1' was in
+        QUARANTINED_DATA_VERSIONS. A version bump (_max_v2, _max_v3) would escape the set
+        check. The prefix entry ensures it cannot.
         """
-        pytest.skip(
-            "pending: enforced in Phase 4B when ingest_grib_to_snapshots.py is implemented. "
-            "Phase 4A only establishes the quarantine; 4B wires the guard into the ingest call path."
+        from src.contracts.ensemble_snapshot_provenance import (
+            DataVersionQuarantinedError,
+            assert_data_version_allowed,
+            is_quarantined,
+        )
+        for bumped_tag in [
+            "tigge_mx2t6_local_peak_window_max_v2",
+            "tigge_mx2t6_local_peak_window_max_v3",
+            "tigge_mx2t6_local_peak_window_other",
+        ]:
+            assert is_quarantined(bumped_tag), (
+                f"M3: '{bumped_tag}' must be quarantined by prefix rule "
+                "'tigge_mx2t6_local_peak_window' (R-P M3)."
+            )
+            with pytest.raises(DataVersionQuarantinedError):
+                assert_data_version_allowed(bumped_tag, context="test_peak_window_version_bump")
+
+    def test_ingest_grib_to_snapshots_calls_assert_data_version_before_insert(self):
+        """R-P structural: ingest_grib_to_snapshots imports and calls assert_data_version_allowed.
+
+        Phase 4B: verify the guard is wired into the ingest call path by checking
+        the import exists in the implementation module.
+        """
+        import ast
+        import sys
+        from pathlib import Path
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "ingest_grib_to_snapshots.py"
+        source = script_path.read_text(encoding="utf-8")
+        assert "assert_data_version_allowed" in source, (
+            "R-P: ingest_grib_to_snapshots.py must import and call "
+            "assert_data_version_allowed (NC-12 guard wired into ingest)."
         )

@@ -114,10 +114,13 @@ def _resolve_training_allowed(source: str, data_version: str, requested: bool) -
     must be whitelisted. If either is non-whitelisted, training_allowed is forced
     to False. The whitelist covers canonical TIGGE and ecmwf_ens sources only.
     """
-    # Check data_version prefix
-    dv_ok = any(data_version.startswith(s) for s in _TRAINING_ALLOWED_SOURCES) if data_version else False
+    # Normalize: strip whitespace and lowercase so "TIGGE_" or " tigge_..." don't bypass.
+    dv_norm = (data_version or "").strip().lower()
+    src_norm = (source or "").strip().lower()
+    # Check data_version prefix against lowercase whitelist entries
+    dv_ok = any(dv_norm.startswith(s) for s in _TRAINING_ALLOWED_SOURCES) if dv_norm else False
     # Check explicit source (empty string = not provided, skip check)
-    src_ok = (source in _TRAINING_ALLOWED_SOURCES) if source else True
+    src_ok = (src_norm in _TRAINING_ALLOWED_SOURCES) if src_norm else True
     if not (dv_ok and src_ok):
         return False
     return requested
@@ -388,6 +391,33 @@ def save_platt_model_v2(
         json.dumps(bootstrap_params),
         n_samples, brier_insample, now, authority,
     ))
+
+
+def deactivate_model_v2(
+    conn: sqlite3.Connection,
+    *,
+    metric_identity: "MetricIdentity",
+    cluster: str,
+    season: str,
+    data_version: str,
+    input_space: str = "raw_probability",
+) -> int:
+    """Delete the existing platt_models_v2 row for a bucket before refit.
+
+    Returns the number of rows deleted (0 or 1). Called by refit_platt_v2.py
+    before save_platt_model_v2. Deletion (not soft-deactivation) is required
+    because UNIQUE(model_key) means the old row must be removed before the
+    new INSERT can succeed with the same key.
+    """
+    model_key = (
+        f"{metric_identity.temperature_metric}:{cluster}:{season}"
+        f":{data_version}:{input_space}"
+    )
+    result = conn.execute(
+        "DELETE FROM platt_models_v2 WHERE model_key = ?",
+        (model_key,),
+    )
+    return result.rowcount
 
 
 def load_platt_model(

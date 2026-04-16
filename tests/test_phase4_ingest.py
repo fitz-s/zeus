@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -249,3 +251,111 @@ class TestMembersJsonKelvinGuard:
         """R-O complement: members_unit='degC' must pass without error."""
         from src.contracts.ensemble_snapshot_provenance import validate_members_unit
         validate_members_unit("degC")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1 fix: integration test calling ingest_json_file with a real temp file
+# ---------------------------------------------------------------------------
+
+class TestIngestJsonFileIntegration:
+    """MAJOR-1: R-L integration — actually calls ingest_json_file() with a temp JSON
+    file so that a silent DROP of a mandatory INSERT field fails this test.
+
+    The earlier TestIngestGribWritesFullProvenanceFields only proves the SQL schema
+    accepts the 7 fields via direct INSERT. This class proves the ingest code path
+    itself writes all 7 fields correctly.
+    """
+
+    def _make_conn(self) -> sqlite3.Connection:
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+        conn = sqlite3.connect(":memory:")
+        conn.execute("PRAGMA foreign_keys = ON")
+        init_schema(conn)
+        apply_v2_schema(conn)
+        return conn
+
+    def _write_extracted_json(self, tmp_path: Path, *, unit: str = "C") -> Path:
+        """Write a minimal valid extracted JSON matching tigge_local_calendar_day_extract output."""
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        payload = {
+            "data_version": HIGH_LOCALDAY_MAX.data_version,
+            "physical_quantity": HIGH_LOCALDAY_MAX.physical_quantity,
+            "param": "121.128",
+            "short_name": "mx2t6",
+            "step_type": "max",
+            "city": "NYC",
+            "unit": unit,
+            "manifest_sha256": "abc123def456",
+            "issue_time_utc": "2026-04-14T00:00:00+00:00",
+            "target_date_local": "2026-04-16",
+            "lead_day": 2,
+            "timezone": "America/New_York",
+            "nearest_grid_lat": 40.7,
+            "nearest_grid_lon": -74.0,
+            "nearest_grid_distance_km": 5.2,
+            "training_allowed": True,
+            "members": [{"member": i, "value_native_unit": 22.0 + i * 0.1} for i in range(51)],
+        }
+        path = tmp_path / "extracted.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_ingest_json_file_writes_all_7_provenance_fields(self):
+        """MAJOR-1/R-L: ingest_json_file must populate all 7 Phase 2 provenance fields.
+
+        A refactor silently dropping manifest_hash, causality_status, boundary_ambiguous,
+        etc. from the INSERT params would fail here — unlike the schema-only tests above.
+        """
+        from scripts.ingest_grib_to_snapshots import ingest_json_file
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = self._make_conn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_extracted_json(Path(tmpdir))
+            status = ingest_json_file(
+                conn, path,
+                metric=HIGH_LOCALDAY_MAX,
+                model_version="ecmwf_ens",
+                overwrite=False,
+            )
+
+        assert status == "written", f"Expected 'written', got {status!r}"
+        row = conn.execute(
+            "SELECT temperature_metric, physical_quantity, observation_field, data_version, "
+            "training_allowed, causality_status, boundary_ambiguous, manifest_hash, "
+            "provenance_json, members_unit FROM ensemble_snapshots_v2"
+        ).fetchone()
+        assert row is not None, "No row written by ingest_json_file (MAJOR-1)"
+        (temp_metric, phys_qty, obs_field, dv, ta, cs, ba, mh, pj, mu) = row
+        assert temp_metric == "high", f"temperature_metric={temp_metric!r}"
+        assert phys_qty == "mx2t6_local_calendar_day_max", f"physical_quantity={phys_qty!r}"
+        assert obs_field == "high_temp", f"observation_field={obs_field!r}"
+        assert dv == "tigge_mx2t6_local_calendar_day_max_v1", f"data_version={dv!r}"
+        assert ta in (0, 1), f"training_allowed={ta!r}"
+        assert cs and cs.strip(), f"causality_status is empty: {cs!r}"
+        assert ba in (0, 1), f"boundary_ambiguous={ba!r}"
+        assert mh and len(mh) > 8, f"manifest_hash too short: {mh!r}"
+        assert pj and json.loads(pj), f"provenance_json is empty: {pj!r}"
+        assert mu in ("degC", "degF"), f"members_unit={mu!r}"
+
+    def test_ingest_json_file_rejects_kelvin_unit_via_json(self):
+        """MAJOR-1/R-O: if extracted JSON has unit='K', ingest_json_file must raise.
+
+        The Kelvin guard fires inside ingest_json_file before INSERT. A refactor that
+        removes validate_members_unit from the call path would fail this test.
+        """
+        from scripts.ingest_grib_to_snapshots import ingest_json_file
+        from src.contracts.ensemble_snapshot_provenance import MembersUnitInvalidError
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = self._make_conn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_extracted_json(Path(tmpdir), unit="K")
+            with pytest.raises((MembersUnitInvalidError, ValueError)):
+                ingest_json_file(
+                    conn, path,
+                    metric=HIGH_LOCALDAY_MAX,
+                    model_version="ecmwf_ens",
+                    overwrite=False,
+                )
