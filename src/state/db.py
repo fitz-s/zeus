@@ -124,37 +124,6 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "admin_closed": "admin_closed",
 }
 
-_CONTROL_HISTORY_DDL = """
-        CREATE TABLE IF NOT EXISTS control_overrides_history (
-            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            override_id TEXT NOT NULL,
-            target_type TEXT NOT NULL,
-            target_key TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            value TEXT NOT NULL,
-            issued_by TEXT NOT NULL,
-            issued_at TEXT NOT NULL,
-            effective_until TEXT,
-            reason TEXT NOT NULL,
-            precedence INTEGER NOT NULL,
-            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-"""
-
-_TOKEN_SUPPRESSION_HISTORY_DDL = """
-        CREATE TABLE IF NOT EXISTS token_suppression_history (
-            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_id TEXT NOT NULL,
-            condition_id TEXT,
-            suppression_reason TEXT NOT NULL,
-            source_module TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-"""
-
 
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
@@ -668,17 +637,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, season, source)
         );
 
-        -- Token price history with market timing
-        CREATE TABLE IF NOT EXISTS market_price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_slug TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            price REAL NOT NULL,
-            recorded_at TEXT NOT NULL,
-            hours_since_open REAL,
-            hours_to_resolution REAL,
-            UNIQUE(token_id, recorded_at)
-        );
 
         -- DST-safe hourly observation timeline
         CREATE TABLE IF NOT EXISTS observation_instants (
@@ -807,29 +765,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_forecasts_city_date
             ON forecasts(city, target_date);
 
-        -- Historical forecast values (5 NWP models)
-        CREATE TABLE IF NOT EXISTS historical_forecasts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            source TEXT NOT NULL,
-            forecast_high REAL NOT NULL,
-            temp_unit TEXT NOT NULL,
-            lead_days INTEGER,
-            available_at TEXT,
-            UNIQUE(city, target_date, source, lead_days)
-        );
 
-        -- Model skill summary per city×season
-        CREATE TABLE IF NOT EXISTS model_skill (
-            city TEXT NOT NULL,
-            season TEXT NOT NULL,
-            source TEXT NOT NULL,
-            mae REAL NOT NULL,
-            bias REAL NOT NULL,
-            n_samples INTEGER NOT NULL,
-            UNIQUE(city, season, source)
-        );
 
         -- Day-over-day temperature persistence
         CREATE TABLE IF NOT EXISTS temp_persistence (
@@ -902,31 +838,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
 );
 
-        -- Replay engine results
-        CREATE TABLE IF NOT EXISTS replay_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            replay_run_id TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            settlement_value REAL,
-            winning_bin TEXT,
-            replay_direction TEXT,
-            replay_edge REAL,
-            replay_p_posterior REAL,
-            replay_size_usd REAL,
-            replay_should_trade INTEGER,
-            replay_rejection_stage TEXT,
-            actual_direction TEXT,
-            actual_edge REAL,
-            actual_should_trade INTEGER,
-            replay_pnl REAL,
-            actual_pnl REAL,
-            overrides_json TEXT,
-            timestamp TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_replay_run
-            ON replay_results(replay_run_id);
     """)
     
     # Safe Schema evolution for phase 3 attribution
@@ -3562,26 +3473,6 @@ def upsert_control_override(
             precedence,
         ),
     )
-    conn.execute(
-        """
-        INSERT INTO control_overrides_history (
-            override_id, target_type, target_key, action_type, value,
-            issued_by, issued_at, effective_until, reason, precedence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            override_id,
-            target_type,
-            target_key,
-            action_type,
-            value,
-            issued_by,
-            issued_at,
-            effective_until,
-            reason,
-            precedence,
-        ),
-    )
     return {"status": "written", "table": "control_overrides", "override_id": override_id}
 
 
@@ -3657,23 +3548,6 @@ def record_token_suppression(
             normalized_source,
             now,
             now,
-            evidence_json,
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO token_suppression_history (
-            token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            normalized_token,
-            condition_id,
-            normalized_reason,
-            normalized_source,
-            created_at,
-            updated_at,
             evidence_json,
         ),
     )
