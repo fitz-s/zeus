@@ -1,4 +1,4 @@
-"""K2 live daily-observation appender (WU ICAO + HKO).
+"""K2 live daily-observation appender (WU ICAO + HKO + Ogimet METAR/SYNOP).
 
 Replaces the broken `src/data/wu_daily_collector.py` for live ingestion of
 daily high/low temperatures into the `observations` table. Handles the two
@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -61,6 +62,7 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
+import requests
 
 from src.calibration.manager import season_from_date
 from src.config import cities_by_name
@@ -936,6 +938,234 @@ def append_hko_months(
 
 
 # ---------------------------------------------------------------------------
+# Ogimet METAR client (Istanbul, Moscow — cities where WU API rejects)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _OgimetTarget:
+    city_name: str
+    station: str              # ICAO (METAR) or WMO block (SYNOP)
+    kind: str                 # "metar" | "synop"
+    source_tag: str           # value written to observations.source column
+
+
+#: Cities whose Polymarket settlement source is NOAA weather.gov but
+#: have no programmatic NOAA API — we fetch the same underlying METAR
+#: stream via Ogimet (free, unauthenticated).
+OGIMET_CITIES: dict[str, _OgimetTarget] = {
+    "Istanbul": _OgimetTarget(
+        city_name="Istanbul", station="LTFM", kind="metar",
+        source_tag="ogimet_metar_ltfm",
+    ),
+    "Moscow": _OgimetTarget(
+        city_name="Moscow", station="UUWW", kind="metar",
+        source_tag="ogimet_metar_uuww",
+    ),
+}
+
+_OGIMET_METAR_URL = "https://www.ogimet.com/cgi-bin/getmetar"
+_OGIMET_SYNOP_URL = "https://www.ogimet.com/cgi-bin/getsynop"
+_OGIMET_HEADERS = {"User-Agent": "zeus-ogimet-live/1.0 (research; contact via repo)"}
+_OGIMET_RETRY_COUNT = 2
+_OGIMET_RETRY_BACKOFF_SEC = 5.0
+
+# METAR temp/dewpoint group: "10/08", "M05/M08"
+_METAR_TEMP_RE = re.compile(r"\s(M?\d{1,2})/(M?\d{1,2})\s")
+
+
+def _parse_metar_temp(metar_body: str) -> float | None:
+    m = _METAR_TEMP_RE.search(" " + metar_body + " ")
+    if not m:
+        return None
+    raw = m.group(1)
+    negative = raw.startswith("M")
+    try:
+        v = int(raw[1:] if negative else raw)
+    except ValueError:
+        return None
+    return float(-v if negative else v)
+
+
+def _fetch_ogimet_day(
+    target: _OgimetTarget,
+    target_date: date,
+    tz: ZoneInfo,
+) -> tuple[float, float, int, datetime, datetime] | None:
+    """Fetch one local day of METAR reports and return (high, low, count, first_utc, last_utc).
+
+    Returns None on fetch failure or if no usable reports are found.
+    """
+    # Expand to full UTC window covering the local day
+    local_start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, tzinfo=tz)
+    local_end = datetime(target_date.year, target_date.month, target_date.day, 23, 59, tzinfo=tz)
+    begin_utc = local_start.astimezone(timezone.utc)
+    end_utc = local_end.astimezone(timezone.utc)
+
+    url = _OGIMET_METAR_URL if target.kind == "metar" else _OGIMET_SYNOP_URL
+    params = {
+        "icao" if target.kind == "metar" else "block": target.station,
+        "begin": begin_utc.strftime("%Y%m%d%H%M"),
+        "end": end_utc.strftime("%Y%m%d%H%M"),
+    }
+
+    body = ""
+    for attempt in range(_OGIMET_RETRY_COUNT + 1):
+        try:
+            resp = requests.get(url, params=params, headers=_OGIMET_HEADERS, timeout=45)
+            if resp.status_code == 200:
+                body = resp.text
+                break
+            logger.warning(
+                "Ogimet %s %s HTTP %d (attempt %d/%d)",
+                target.station, target_date, resp.status_code,
+                attempt + 1, _OGIMET_RETRY_COUNT + 1,
+            )
+        except requests.RequestException as e:
+            logger.warning(
+                "Ogimet %s %s %s (attempt %d/%d)",
+                target.station, target_date, e,
+                attempt + 1, _OGIMET_RETRY_COUNT + 1,
+            )
+        if attempt < _OGIMET_RETRY_COUNT:
+            time.sleep(_OGIMET_RETRY_BACKOFF_SEC * (attempt + 1))
+
+    if not body:
+        return None
+
+    # Parse METAR CSV lines: ICAO,YYYY,MM,DD,HH,MI,<body>
+    temps: list[float] = []
+    first_utc: datetime | None = None
+    last_utc: datetime | None = None
+    for line in body.splitlines():
+        parts = line.split(",", 6)
+        if len(parts) < 7:
+            continue
+        try:
+            year, month, day, hour, minute = map(int, parts[1:6])
+            obs_utc = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        temp = _parse_metar_temp(parts[6])
+        if temp is None:
+            continue
+        # Only keep reports that fall in the target local day
+        obs_local = obs_utc.astimezone(tz).date()
+        if obs_local != target_date:
+            continue
+        temps.append(temp)
+        if first_utc is None or obs_utc < first_utc:
+            first_utc = obs_utc
+        if last_utc is None or obs_utc > last_utc:
+            last_utc = obs_utc
+
+    if not temps or first_utc is None or last_utc is None:
+        return None
+
+    return max(temps), min(temps), len(temps), first_utc, last_utc
+
+
+def append_ogimet_city(
+    city_name: str,
+    target_dates: list[date],
+    conn,
+    *,
+    rebuild_run_id: str | None = None,
+) -> dict:
+    """Fetch and write Ogimet METAR observations for a non-WU city."""
+    target = OGIMET_CITIES.get(city_name)
+    if target is None:
+        logger.warning("append_ogimet_city: %s not in OGIMET_CITIES", city_name)
+        return {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+
+    city_cfg = cities_by_name.get(city_name)
+    if city_cfg is None:
+        logger.warning("append_ogimet_city: %s not in cities.json", city_name)
+        return {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+
+    if rebuild_run_id is None:
+        rebuild_run_id = f"ogimet_live_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    tz = ZoneInfo(city_cfg.timezone)
+    stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+
+    for target_d in target_dates:
+        result = _fetch_ogimet_day(target, target_d, tz)
+        if result is None:
+            stats["fetch_errors"] += 1
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=target.source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=2),
+            )
+            continue
+
+        high_val, low_val, report_count, first_utc, last_utc = result
+        provenance = {
+            "station": target.station,
+            "kind": target.kind,
+            "upstream": "ogimet",
+            "report_count": report_count,
+            "window_first_utc": first_utc.isoformat(),
+            "window_last_utc": last_utc.isoformat(),
+        }
+
+        try:
+            atom_high, atom_low = _build_atom_pair(
+                city_name=city_name,
+                target_d=target_d,
+                high_val=high_val,
+                low_val=low_val,
+                raw_unit="C",
+                target_unit=city_cfg.settlement_unit,
+                station_id=target.station,
+                source=target.source_tag,
+                rebuild_run_id=rebuild_run_id,
+                data_source_version="ogimet_live_v1",
+                api_endpoint=f"{_OGIMET_METAR_URL}?icao={target.station}",
+                provenance=provenance,
+                fetch_utc=datetime.now(timezone.utc),
+            )
+        except IngestionRejected as e:
+            stats["guard_rejected"] += 1
+            logger.warning("Ogimet guard dropped %s/%s: %s", city_name, target_d, e)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=target.source_tag,
+                target_date=target_d,
+                reason=CoverageReason.GUARD_REJECTED,
+                retry_after=_retry_embargo(hours=24),
+            )
+            continue
+
+        try:
+            _write_atom_with_coverage(conn, atom_high, atom_low, data_source=target.source_tag)
+            stats["inserted"] += 1
+        except Exception as e:
+            logger.error("Ogimet insert failed %s/%s: %s", city_name, target_d, e)
+            record_failed(
+                conn,
+                data_table=DataTable.OBSERVATIONS,
+                city=city_name,
+                data_source=target.source_tag,
+                target_date=target_d,
+                reason=CoverageReason.NETWORK_ERROR,
+                retry_after=_retry_embargo(hours=1),
+            )
+
+        # Be polite to ogimet — 1 second between per-day requests
+        time.sleep(1.0)
+
+    conn.commit()
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Public: daemon entrypoints (tick + catch-up)
 # ---------------------------------------------------------------------------
 
@@ -1010,7 +1240,24 @@ def daily_tick(
         months.append((prior_y, prior_m))
         hko_stats = append_hko_months(months, conn, rebuild_run_id=rebuild_run_id)
 
-    return {"wu": wu_totals, "hko": hko_stats}
+    # Ogimet refresh: once per day at UTC hour 6. Istanbul (UTC+3) and
+    # Moscow (UTC+3) have their previous local day completed by then.
+    ogimet_stats = None
+    if now_utc.hour == 6:
+        ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+        for city_name, target in OGIMET_CITIES.items():
+            city_cfg = cities_by_name.get(city_name)
+            if city_cfg is None:
+                continue
+            local_today = now_utc.astimezone(ZoneInfo(city_cfg.timezone)).date()
+            local_yesterday = local_today - timedelta(days=1)
+            stats = append_ogimet_city(
+                city_name, [local_yesterday], conn, rebuild_run_id=rebuild_run_id,
+            )
+            for k in ogimet_stats:
+                ogimet_stats[k] += stats.get(k, 0)
+
+    return {"wu": wu_totals, "hko": hko_stats, "ogimet": ogimet_stats}
 
 
 def catch_up_missing(
@@ -1037,6 +1284,8 @@ def catch_up_missing(
 
     wu_by_city: dict[str, list[date]] = {}
     hko_months: set[tuple[int, int]] = set()
+    ogimet_by_city: dict[str, list[date]] = {}
+    ogimet_sources = {t.source_tag for t in OGIMET_CITIES.values()}
     for r in rows:
         target = date.fromisoformat(r["target_date"])
         if target < cutoff:
@@ -1045,9 +1294,12 @@ def catch_up_missing(
             wu_by_city.setdefault(r["city"], []).append(target)
         elif r["data_source"] == HKO_SOURCE:
             hko_months.add((target.year, target.month))
+        elif r["data_source"] in ogimet_sources:
+            ogimet_by_city.setdefault(r["city"], []).append(target)
 
     totals = {"wu_cities_touched": 0, "wu_inserted": 0, "wu_guard_rejected": 0,
-              "hko_months_touched": 0, "hko_inserted": 0, "hko_incomplete": 0}
+              "hko_months_touched": 0, "hko_inserted": 0, "hko_incomplete": 0,
+              "ogimet_cities_touched": 0, "ogimet_inserted": 0, "ogimet_guard_rejected": 0}
 
     for i, (city_name, dates) in enumerate(wu_by_city.items()):
         if i >= max_cities:
@@ -1062,5 +1314,11 @@ def catch_up_missing(
         totals["hko_months_touched"] = len(hko_months)
         totals["hko_inserted"] = stats["inserted"]
         totals["hko_incomplete"] = stats["incomplete"]
+
+    for city_name, dates in ogimet_by_city.items():
+        stats = append_ogimet_city(city_name, dates, conn, rebuild_run_id=rebuild_run_id)
+        totals["ogimet_cities_touched"] += 1
+        totals["ogimet_inserted"] += stats["inserted"]
+        totals["ogimet_guard_rejected"] += stats["guard_rejected"]
 
     return totals
