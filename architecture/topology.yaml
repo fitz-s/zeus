@@ -472,7 +472,7 @@ core_map_profiles:
     nodes:
       - id: settlement_semantics
         file: src/contracts/settlement_semantics.py
-        required_claims: [WMO_HALF_UP_FORMULA]
+        required_claims: [WMO_HALF_UP_FORMULA, ORACLE_TRUNCATION_RULE]
       - id: ensemble_signal
         file: src/signal/ensemble_signal.py
       - id: evaluator
@@ -490,6 +490,9 @@ core_map_profiles:
       - id: kelly
         file: src/strategy/kelly.py
         required_claims: [EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY]
+      - id: oracle_penalty
+        file: src/strategy/oracle_penalty.py
+        required_claims: [ORACLE_PENALTY_THRESHOLD]
     edges:
       - {from: settlement_semantics, to: ensemble_signal, required: true, proof: {kind: import_or_call, path: src/signal/ensemble_signal.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
       - {from: ensemble_signal, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.signal.ensemble_signal, symbol: EnsembleSignal}}
@@ -499,6 +502,9 @@ core_map_profiles:
       - {from: market_analysis, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_analysis, symbol: MarketAnalysis}}
       - {from: fdr_filter, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.fdr_filter, symbol: fdr_filter}}
       - {from: kelly, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.kelly, symbol: dynamic_kelly_mult}}
+      - {from: settlement_semantics, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
+      - {from: settlement_semantics, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
+      - {from: oracle_penalty, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.oracle_penalty, symbol: get_oracle_info}}
 
 digest_profiles:
   - id: "change settlement rounding"
@@ -506,6 +512,9 @@ digest_profiles:
       - "settlement rounding"
       - "wmo"
       - "rounding"
+      - "oracle_truncate"
+      - "oracle"
+      - "hko"
     required_law:
       - "WMO asymmetric half-up: floor(x + 0.5)"
       - "SettlementSemantics is the canonical rounding law."
@@ -515,6 +524,8 @@ digest_profiles:
       - "tests/test_instrument_invariants.py"
       - "state/assumptions.json"
       - "config/reality_contracts/data.yaml"
+      - "src/strategy/oracle_penalty.py"
+      - "data/oracle_error_rates.json"
     forbidden_files:
       - "state/*.db"
       - "docs/archives/**"

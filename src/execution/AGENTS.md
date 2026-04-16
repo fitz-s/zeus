@@ -34,3 +34,9 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 - Using market orders instead of limits → guaranteed adverse fill
 - Treating exit as local close (modifying lifecycle directly) → violates INV-01
 - Not recording execution facts → learning pipeline has no fill data
+
+## Settlement Truth Writes (harvester.py)
+
+`_write_settlement_truth()` writes `winning_bin` and `settled_at` to `settlements` table
+after Gamma API confirms a market settled. Uses UPSERT (UPDATE then INSERT if no match).
+`settlement_source_type` mapped from config lowercase to DB uppercase via `_SOURCE_TYPE_MAP`.

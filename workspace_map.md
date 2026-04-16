@@ -38,6 +38,7 @@ plan.
 | `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
 | `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |
 | `state/` | Runtime DB/cache artifacts, mostly gitignored | classify before treating as truth |
+| `data/` | Oracle error rates, PM settlement truth JSON | `data/oracle_error_rates.json` |
 
 ## Source Packages
 
