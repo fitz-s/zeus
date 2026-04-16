@@ -2747,6 +2747,7 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
             pnl=1.5,
         ),
     ])
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
     portfolio = PortfolioState(bankroll=150.0)
@@ -2801,6 +2802,7 @@ def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch
             strategy="opening_inertia",
         ),
     ])
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
     def _fake_get_connection(path=None):
@@ -2857,6 +2859,7 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
             pnl=-5.0,
         )
     ])
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
     def _fake_get_connection(path=None):
@@ -2982,6 +2985,7 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
             settled_at="2026-04-01T23:00:00Z",
         )
     ])
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
     def _fake_get_connection(path=None):
@@ -3395,6 +3399,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
             settled_at="2026-04-01T23:00:00Z",
         )
     ])
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
     event = {

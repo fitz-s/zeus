@@ -22,6 +22,7 @@ from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candida
 from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level, get_force_exit_review
+from src.state.canonical_write import commit_then_export
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.db import get_trade_connection_with_world, record_token_suppression
 
@@ -299,25 +300,43 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             if entries_blocked_reason == "near_max_exposure":
                 summary["near_max_exposure"] = True
 
-    if portfolio_dirty or summary["trades"] > 0 or summary["exits"] > 0:
-        save_portfolio(portfolio)
-    if tracker_dirty:
-        save_tracker(tracker)
-
     artifact.completed_at = _utcnow().isoformat()
+
+    # DT#1 / INV-17: DB commit FIRST, then JSON exports in order.
+    # commit_then_export handles rollback-on-db-failure and
+    # log-but-continue-on-json-failure.
+    portfolio_should_save = portfolio_dirty or summary["trades"] > 0 or summary["exits"] > 0
+    # Mutable container so closures can read the committed artifact_id.
+    _artifact_id_box: list = [None]
+
+    def _db_op() -> "int | None":
+        aid = store_artifact(conn, artifact)
+        _artifact_id_box[0] = aid
+        return aid
+
+    def _export_portfolio() -> None:
+        if portfolio_should_save:
+            save_portfolio(portfolio, last_committed_artifact_id=_artifact_id_box[0])
+
+    def _export_tracker() -> None:
+        if tracker_dirty:
+            save_tracker(tracker)
+
+    def _export_status() -> None:
+        from src.observability.status_summary import write_status
+        write_status(summary)
+
     try:
-        store_artifact(conn, artifact)
+        commit_then_export(
+            conn,
+            db_op=_db_op,
+            json_exports=[_export_portfolio, _export_tracker, _export_status],
+        )
     except Exception as e:
         logger.warning("Decision chain recording failed: %s", e)
 
     conn.close()
     summary["completed_at"] = _utcnow().isoformat()
-
-    try:
-        from src.observability.status_summary import write_status
-        write_status(summary)
-    except Exception as e:
-        logger.warning("Status summary write failed: %s", e)
 
     logger.info(
         "Cycle %s: %d monitors, %d exits, %d candidates, %d trades",

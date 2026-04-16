@@ -191,19 +191,27 @@ class SettlementRecord:
     contract_version: str = LEGACY_SETTLEMENT_CONTRACT_VERSION
 
 
-def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> None:
-    """Store cycle artifact to decision_log table."""
+def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None":
+    """Store cycle artifact to decision_log table.
+
+    Returns the inserted row's decision_log.id (for DT#1 / INV-17 tracking),
+    or None if the id cannot be determined.
+
+    NOTE (DT#1): Does NOT commit internally. The caller owns the commit.
+    When called via commit_then_export(), commit_then_export() issues conn.commit()
+    after this returns. Standalone callers (e.g. scripts) must commit explicitly.
+    """
     from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
     env = env or _get_mode()
-    conn.execute("""
+    cursor = conn.execute("""
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         artifact.mode, artifact.started_at, artifact.completed_at,
         json.dumps(asdict(artifact), default=str), now, env,
     ))
-    conn.commit()
+    return cursor.lastrowid
 
 
 def store_settlement_records(
@@ -243,7 +251,8 @@ def store_settlement_records(
         """,
         ("settlement", now, now, json.dumps(artifact, default=str), now, env),
     )
-    conn.commit()
+    # NOTE (DT#1): No internal commit. Caller owns the commit.
+    # Standalone callers (harvester, tests) must conn.commit() after this returns.
 
 
 def query_settlement_records(

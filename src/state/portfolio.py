@@ -1025,8 +1025,17 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     )
 
 
-def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
-    """Atomic write: write to tmp, then os.replace(). Spec: atomic write pattern."""
+def save_portfolio(
+    state: PortfolioState,
+    path: Optional[Path] = None,
+    *,
+    last_committed_artifact_id: Optional[int] = None,
+) -> None:
+    """Atomic write: write to tmp, then os.replace(). Spec: atomic write pattern.
+
+    last_committed_artifact_id: when provided, written into the JSON payload
+    as "last_committed_artifact_id" for DT#1 / INV-17 stale-detection (D5).
+    """
     path = path or POSITIONS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1051,6 +1060,8 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "recent_exits": state.recent_exits,
         "ignored_tokens": state.ignored_tokens,
     }
+    if last_committed_artifact_id is not None:
+        data["last_committed_artifact_id"] = last_committed_artifact_id
     data = annotate_truth_payload(data, path, mode=get_mode(), generated_at=state.updated_at)
 
     # Atomic write pattern per OpenClaw conventions
@@ -1302,6 +1313,10 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
             from src.state.db import get_connection, log_trade_exit
             conn = get_connection()
             log_trade_exit(conn, pos)
+            # INFO(DT#1): This commit is exempt from the commit_then_export
+            # choke point. The exit audit row is itself the authoritative
+            # record of the exit event, not a derived export. Durability
+            # must survive a subsequent cycle crash or JSON write failure.
             conn.commit()
             conn.close()
         except Exception as e:

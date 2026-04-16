@@ -180,6 +180,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
 
     artifact.completed_at = datetime.now(timezone.utc).isoformat()
     store_artifact(conn, artifact)
+    conn.commit()  # Fix B: store_artifact no longer commits internally; caller must commit.
     conn.close()
     return summary
 

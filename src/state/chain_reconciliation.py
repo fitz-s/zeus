@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
+from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     rescue_pending_runtime_state,
@@ -43,6 +44,11 @@ class ChainPositionView:
     Built once per cycle from chain API. All downstream code reads from this
     snapshot, never from live API calls mid-cycle. Prevents inconsistent reads
     when chain state changes during a cycle.
+
+    Fix D (Option 4b): The `state: ChainState` field has been removed.
+    Classification is a per-reconcile-call fact computed by classify_chain_state()
+    inside reconcile(), not something cached on the view. No external caller
+    outside reconcile() was found to read a `.state` field on this view.
     """
     positions: tuple  # tuple of ChainPosition (frozen requires immutable)
     fetched_at: str = ""
@@ -268,6 +274,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         "src.state.chain_reconciliation_audit"
                     )
                 )
+                # INFO(DT#1): This commit is exempt from the commit_then_export
+                # choke point. The CHAIN_RESCUE_AUDIT row is itself the
+                # authoritative observability record (not a derived export),
+                # and durability must survive a subsequent cycle crash.
                 conn.commit()
             except Exception as e:
                 logger.error(f"Failed to durability-log rescue event: {e}")
@@ -329,50 +339,29 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 f"chain-only quarantine fact write failed for {token_id}: {result}"
             )
 
-    # Count non-pending local positions for incomplete-response guard
-    active_local = sum(
-        1 for p in portfolio.positions
-        if p.state != "pending_tracked"
-        and p.state not in INACTIVE_RUNTIME_STATES
-        and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
+    # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
+    # reconcile() is only called when the chain API responded (cycle_runtime.py
+    # raises if api_positions is None). Treat the call timestamp as fetched_at.
+    # Fix E: fetched_at=now is correct here — reconcile() is only called after
+    # the chain API returns a non-None response, so the fetch itself is fresh.
+    # CHAIN_UNKNOWN reachability inside reconcile is exclusively via the
+    # empty-chain-with-recent-local-verified branch of classify_chain_state.
+    chain_state: ChainState = classify_chain_state(
+        fetched_at=now,  # API responded (non-None) — use current timestamp
+        chain_positions=chain_positions,
+        portfolio=portfolio,
     )
-    # P14 fix: bound the skip_voiding window. After 6h of stale chain_verified_at,
-    # treat chain-empty as legitimate (position was settled/redeemed on-chain).
-    _STALE_GUARD_SECONDS = 6 * 3600
-    _truly_active = 0
-    _stale_skipped = 0
-    _now_utc = datetime.now(timezone.utc)
-    for p in portfolio.positions:
-        if p.state == "pending_tracked" or p.state in INACTIVE_RUNTIME_STATES:
-            continue
-        if not (p.token_id if p.direction == "buy_yes" else p.no_token_id):
-            continue
-        verified = getattr(p, "chain_verified_at", "")
-        if verified and len(chain_positions) == 0:
-            try:
-                vt = datetime.fromisoformat(verified.replace("Z", "+00:00")) if isinstance(verified, str) else verified
-                if (_now_utc - vt).total_seconds() > _STALE_GUARD_SECONDS:
-                    _stale_skipped += 1
-                    continue  # stale — don't count toward skip_voiding
-            except (ValueError, TypeError):
-                logger.warning("Unparseable chain_verified_at=%r for position %s — treating as active", verified, getattr(p, 'market_id', 'unknown'))
-        _truly_active += 1
-
-    skip_voiding = _truly_active > 0 and len(chain_positions) == 0
-    if _stale_skipped > 0:
+    if chain_state == ChainState.CHAIN_UNKNOWN:
         logger.warning(
-            "P14 STALE GUARD: %d position(s) chain_verified_at older than 6h with "
-            "chain returning empty — excluded from skip_voiding guard",
-            _stale_skipped,
+            "INCOMPLETE CHAIN RESPONSE: classify_chain_state=CHAIN_UNKNOWN. "
+            "Skipping Rule 2 (void) to prevent false PHANTOM kills.",
         )
-    if skip_voiding:
-        logger.warning(
-            "INCOMPLETE CHAIN RESPONSE: 0 chain positions but %d local active "
-            "(%d stale excluded). Skipping Rule 2 (void) to prevent false PHANTOM kills.",
-            _truly_active,
-            _stale_skipped,
+        stats["skipped_void_incomplete_api"] = sum(
+            1 for p in portfolio.positions
+            if p.state != "pending_tracked"
+            and p.state not in INACTIVE_RUNTIME_STATES
+            and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
         )
-        stats["skipped_void_incomplete_api"] = _truly_active
 
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -448,7 +437,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         if chain is None:
-            if skip_voiding:
+            if chain_state == ChainState.CHAIN_UNKNOWN:
                 continue  # Don't void — API response is suspect
             if (
                 getattr(pos, "entry_fill_verified", False)
