@@ -1,10 +1,9 @@
 {
   "task": "topology_enforcement_hardening",
   "packet": "task_2026-04-15_topology_enforcement_hardening",
-  "route_source": "ralplan",
+  "route_source": "packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md",
-    "docs/operations/current_state.md"
+    "docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md"
   ],
   "required_law": [
     "AGENTS.md",

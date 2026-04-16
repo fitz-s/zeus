@@ -300,7 +300,12 @@ class MarketAnalysis:
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
                     if is_wnd:
-                        p_input = p_raw_all[j] / bb.width if bb.width is not None and bb.width > 0 else p_raw_all[j]
+                        if bb.width is None or bb.width <= 0:
+                            raise ValueError(
+                                f"Bin width must be defined and >0 for width-normalized density. "
+                                f"Open/shoulder bins must not use WND input space. Bin: {bb}"
+                            )
+                        p_input = p_raw_all[j] / bb.width
                     z = A * logit_safe(p_input) + B * self._lead_days + C
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:

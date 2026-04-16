@@ -2784,7 +2784,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
             getattr(pos, "decision_snapshot_id", None) or None,
             getattr(pos, "calibration_version", "") or None,
-            getattr(pos, "p_raw", None), getattr(pos, "p_cal", None), pos.edge, 0.0, 0.0, 0.0,
+            getattr(pos, "p_raw", None), getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
             status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
             getattr(pos, "trade_id", ""),
             getattr(pos, "order_id", ""),

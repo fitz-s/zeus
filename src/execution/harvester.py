@@ -428,8 +428,9 @@ def _find_winning_bin(event: dict) -> tuple[Optional[str], Optional[str]]:
     """Determine which bin won from a settled event.
 
     Returns: (winning_label, winning_range) or (None, None)
-    Primary: market["winningOutcome"] == "Yes"
-    Fallback: outcomePrices[0] >= 0.95
+    Authority: market["winningOutcome"] == "Yes" only.
+    Price-based fallback (outcomePrices >= 0.95) has been removed —
+    price signals are not settlement authority.
     """
     for market in event.get("markets", []):
         winning = market.get("winningOutcome", "").lower()

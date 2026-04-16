@@ -1237,3 +1237,114 @@ Settlement backfill queries Zeus DB (`zeus-world.db` or `zeus-shared.db`) `settl
 | ECMWF accounts | 3 (triple-shard parallel) |
 | Date delay compliance | T-3 days (≥72h old) |
 | Boundary quarantine warn | >20% per city |
+
+---
+
+## 21. Additional Pathologies (P8–P16)
+
+Beyond the 6 structural pathologies (§14) and 7 contamination vectors (§15), deep audit reveals 9 more:
+
+### P8. `fill_tracker.py` — Triple Silent Exception Swallow (CRITICAL)
+
+Lines 137, 176, 214: Three `except Exception: pass` blocks silently swallow failures in:
+1. `_maybe_update_trade_lifecycle` — DB lifecycle write
+2. `_maybe_emit_canonical_entry_fill` — canonical event emission
+3. `_maybe_log_execution_fill` — execution telemetry
+
+**Impact:** If DB write fails, in-memory position shows "filled" but DB shows "pending_entry". `chain_reconciliation` may void or duplicate. `position_current` and `position_events` desync from JSON portfolio — the exact split-brain the canonical event system was designed to prevent.
+
+### P9. `monitor_refresh.py` — Hardcoded `model_agreement="AGREE"` (HIGH)
+
+Lines 176, 382: Both refresh paths hardcode `model_agreement="AGREE"` when calling `compute_alpha()`. The entry path in `evaluator.py` performs real GFS crosscheck and may produce `SOFT_DISAGREE` (α-0.10) or `CONFLICT` (α-0.20). During monitoring, the system systematically overweights model trust, inflating α, delaying exits that should fire on CONFLICT.
+
+### P10. `executor.py` — New `PolymarketClient()` per order (MEDIUM)
+
+Lines 281, 365: Creates fresh `PolymarketClient()` on every entry/exit order. Each construction spawns a subprocess to read macOS Keychain (~100ms latency). On hot exit path (backoff retry, day0 settlement rush), this adds latency and subprocess failure risk.
+
+### P11. `harvester.py` — Portfolio Save Before DB Commit (HIGH)
+
+Lines 213-217: `save_portfolio()` BEFORE `conn.commit()`. If crash between portfolio save and DB commit: JSON says positions settled, DB says active. Calibration pairs from this run lost. Commit should happen BEFORE `save_portfolio()`.
+
+### P12. `main.py` — `_cycle_lock` with no timeout/watchdog (MEDIUM)
+
+Lines 30-38: If a cycle hangs (CLOB timeout, infinite retry), ALL subsequent cycles skip silently forever. No watchdog, no max duration, no alert. Heartbeat writer still runs, so daemon appears alive.
+
+### P13. `ensemble_client.py` — Unbounded Module-Level Cache (MEDIUM)
+
+Line 28: `_ENSEMBLE_CACHE: dict = {}` with no size bound or eviction. Over multi-day daemon run: 51 cities × models × past_days → unbounded memory growth. TTL check (15min) prevents stale reads but never evicts.
+
+### P14. `chain_reconciliation.py` — Phantom Position Persistence (CRITICAL)
+
+Lines 339-350: `skip_voiding` guard fires on API outage but ALSO fires when all positions are genuinely redeemed on-chain. Phantom positions persist forever, blocking new entries, consuming risk limits, creating stale monitor cycles.
+
+### P15. `portfolio.py` — Duplicate authority field check (LOW)
+
+Lines 109-110: `missing.append("fresh_prob_is_fresh")` appears twice. Cosmetic but breaks audit dedup.
+
+### P16. `harvester.py` — Settlement value uses `round()` not WMO (MEDIUM)
+
+Line 684: `round(float(settlement_value))` uses Python banker's rounding, not `round_wmo_half_up_value()` which exists in `settlement_semantics.py`. Currently safe (precision=1.0) but will silently corrupt with sub-degree resolution.
+
+---
+
+## 22. Anti-Pattern Inventory
+
+### Silent Exception Swallowing (7 critical instances)
+
+| File | Line | Context | Severity |
+|------|------|---------|----------|
+| fill_tracker.py | 137 | Trade lifecycle DB write | Critical |
+| fill_tracker.py | 176 | Canonical entry-fill write | Critical |
+| fill_tracker.py | 214 | Execution telemetry write | High |
+| control_plane.py | 130 | Auto-pause DB persist fallback | Medium |
+| ensemble_signal.py | 283 | Bias correction config | Low |
+| monitor_refresh.py | 163 | Timestamp parse fallback to 48h | Medium |
+| monitor_refresh.py | 354 | Day0 timestamp parse | Medium |
+
+### SQL Injection: NONE. All queries use parameterized `?` placeholders.
+### Hardcoded Credentials: NONE. All via macOS Keychain.
+### Thread Safety: `_ENSEMBLE_CACHE` (P13) is the only significant concern.
+
+---
+
+## 23. Test Coverage Gaps
+
+### Critical Paths with ZERO Tests
+
+| File | LOC | Risk | Test? |
+|------|-----|------|-------|
+| ledger.py | ~100 | Event sourcing core | NO |
+| projection.py | ~100 | UPSERT projection | NO |
+| fill_tracker.py | ~350 | Fill verification | NO |
+| lifecycle_events.py | ~200 | Canonical event builder | NO |
+| lifecycle_manager.py | ~200 | State machine FSM | NO |
+| polymarket_client.py | ~250 | CLOB order placement | NO |
+| chain_reconciliation.py | 589 | Chain truth reconciliation | NO |
+| cycle_runtime.py | 1197 | All runtime helpers | NO |
+
+The **canonical event system** (ledger + projection + lifecycle_events + lifecycle_manager) is the architectural foundation for position truth — and has ZERO test coverage.
+
+---
+
+## 24. Time Bombs
+
+### TB-1. DST Transition in `hours_since_open`
+`monitor_refresh.py` L159-163: If `entered_at` stored without timezone (legacy positions), assumes UTC. Wrong assumption shifts α by ±0.15.
+
+### TB-2. Season Flip Mid-Position
+Position entered March 19 (DJF) settling March 21 (MAM) uses different calibration buckets for entry vs settlement. `monitor_refresh` recomputes season, may apply DJF Platt model to MAM settlement.
+
+### TB-3. Gamma API Pagination Gap
+`harvester.py` `_fetch_settled_events()` uses offset-based pagination. Events inserted/deleted between page fetches → duplicates or gaps. No dedup by event ID.
+
+### TB-4. Year Boundary Lead Days
+For UTC+13 cities (Auckland), `lead_days_to_date_start` at year boundary can produce off-by-one. "2027-01-01" target at "2026-12-31 23:00 UTC" → lead≈0, but local date is already Jan 1.
+
+### TB-5. `smoke_test_portfolio_cap_usd` Never Removed
+`cycle_runner.py` L230-243: Comment says "Remove after first full lifecycle observed." Permanent entry blocker if cap is reached and nobody remembers it exists.
+
+### TB-6. Harvester Hourly vs Real-Time Settlement
+Harvester runs every 1 hour. Position settling at minute 1 won't be processed for up to 59 minutes. During this window, `monitor_refresh` still runs on the settled position, potentially triggering exits on a position that no longer exists on-chain.
+
+### TB-7. APScheduler `max_instances=1` Drops Cycles
+`max_instances=1` + `coalesce=True`: if cycle takes longer than interval, next invocation silently dropped. For `day0_capture` at 15-min intervals with 15-min order timeouts, this is a guaranteed drop pattern.
