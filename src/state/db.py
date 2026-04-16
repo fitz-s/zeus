@@ -124,18 +124,6 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "admin_closed": "admin_closed",
 }
 
-_RUNTIME_STATE_ORDER = {
-    "pending_tracked": 0,
-    "entered": 1,
-    "day0_window": 2,
-    "pending_exit": 3,
-    "economically_closed": 4,
-    "settled": 5,
-    "voided": 5,
-    "quarantined": 5,
-    "admin_closed": 5,
-}
-
 _CONTROL_HISTORY_DDL = """
         CREATE TABLE IF NOT EXISTS control_overrides_history (
             history_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,17 +155,6 @@ _TOKEN_SUPPRESSION_HISTORY_DDL = """
         );
 """
 
-# Maximum timestamp drift (in seconds) from dual-write that is treated as a
-# same-transaction shadow rather than a genuine stale signal.
-_DUAL_WRITE_TOLERANCE_SECS = 1.0
-
-
-def _is_semantic_advance(current_runtime: str, legacy_state: str) -> bool:
-    cur_ord = _RUNTIME_STATE_ORDER.get(current_runtime, -1)
-    leg_ord = _RUNTIME_STATE_ORDER.get(legacy_state, -1)
-    if leg_ord < 0:
-        return True
-    return leg_ord > cur_ord
 
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
@@ -1291,96 +1268,12 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def _canonical_position_surface_available(conn: sqlite3.Connection) -> bool:
-    event_columns = _table_columns(conn, "position_events")
-    current_columns = _table_columns(conn, "position_current")
-    return (
-        bool(event_columns)
-        and bool(current_columns)
-        and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        and set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns)
-    )
 
 
-def _missing_canonical_position_tables(conn: sqlite3.Connection) -> list[str]:
-    missing: list[str] = []
-    if not _table_exists(conn, "position_events"):
-        missing.append("position_events")
-    if not _table_exists(conn, "position_current"):
-        missing.append("position_current")
-    return missing
 
 
-def _DELETED_backfill_open_legacy_paper_positions(*args, **kwargs):
-    """DELETED in Phase 2: completed migration artifact that only processed paper positions.
-    Original: 87 lines at db.py:994-1081. Callers: scripts/backfill_open_positions_canonical.py (dead script),
-    tests/test_architecture_contracts.py (dead test). Both need cleanup."""
-    raise RuntimeError("backfill_open_legacy_paper_positions deleted in Phase 2 — paper migration is complete")
 
 
-# Keep the old name as an alias so imports don't crash at module load time
-backfill_open_legacy_paper_positions = _DELETED_backfill_open_legacy_paper_positions
-
-
-def record_shadow_attribution_trade(
-    conn: sqlite3.Connection,
-    trade_id: str,
-    market_id: str,
-    bin_label: str,
-    direction: str,
-    size_usd: float,
-    price: float,
-    p_raw: float,
-    p_posterior: float,
-    edge: float,
-    edge_source: str,
-    timestamp: str,
-    settlement_json: str = "",
-    epistemic_json: str = "",
-    edge_context_json: str = "",
-    # New Phase 3 Variables passed when completing loops
-    intended_size_usd: float = 0.0,
-    filled_price: float = 0.0,
-    settlement_prob: float = 0.0,
-    final_pnl_usd: float = 0.0,
-    is_early_exit: bool = False
-) -> None:
-    """Phase 3 Shadow Attribution: Persist truly split advantage metrics."""
-    
-    # Mathematical Splitting calculations
-    # 1. execution_slippage: intended vs filled price
-    slippage_usd = 0.0
-    if filled_price > 0 and price > 0:
-        slippage_usd = (size_usd / price) * filled_price - size_usd
-        
-    # 2. entry_alpha: actual theoretical expected jump vs market immediately
-    entry_alpha_usd = size_usd * edge
-    
-    # 3. exit_timing: did we secure value or get stopped false?
-    exit_timing_usd = final_pnl_usd if is_early_exit else 0.0
-    
-    # 4. risk_throttling: capital shielded from saturation
-    throttling_usd = (intended_size_usd - size_usd) * edge
-    
-    # 5. settlement_edge: the pure outcome movement
-    settlement_edge_usd = final_pnl_usd if not is_early_exit else 0.0
-
-    conn.execute("""
-        INSERT INTO trade_decisions (
-            market_id, bin_label, direction, size_usd, price, timestamp, 
-            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, 
-            status, edge_source, 
-            settlement_semantics_json, epistemic_context_json, edge_context_json,
-            entry_alpha_usd, execution_slippage_usd, exit_timing_usd, risk_throttling_usd, settlement_edge_usd
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        market_id, bin_label, direction, size_usd, price, timestamp,
-        p_raw, p_posterior, edge, 0.0, 0.0, 0.0,
-        "filled", edge_source,
-        settlement_json, epistemic_json, edge_context_json,
-        entry_alpha_usd, slippage_usd, exit_timing_usd, throttling_usd, settlement_edge_usd
-    ))
 
 
 
@@ -2781,7 +2674,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
         env = getattr(pos, "env", "live")
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
-            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
+            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.now(timezone.utc).isoformat(),
             getattr(pos, "decision_snapshot_id", None) or None,
             getattr(pos, "calibration_version", "") or None,
             getattr(pos, "p_raw", None), getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
@@ -2925,18 +2818,6 @@ def _coerce_settlement_int(value) -> Optional[int]:
         return None
 
 
-def _canonical_position_settled_payload(pos, *, winning_bin: str, won: bool, outcome: int) -> dict:
-    return {
-        "contract_version": CANONICAL_POSITION_SETTLED_CONTRACT_VERSION,
-        "winning_bin": winning_bin,
-        "position_bin": getattr(pos, "bin_label", ""),
-        "won": bool(won),
-        "outcome": int(outcome),
-        "p_posterior": getattr(pos, "p_posterior", None),
-        "exit_price": getattr(pos, "exit_price", None),
-        "pnl": getattr(pos, "pnl", None),
-        "exit_reason": getattr(pos, "exit_reason", ""),
-    }
 
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
@@ -3963,67 +3844,8 @@ def _parse_boolish_text(raw: str) -> bool:
     raise ValueError(f"unsupported boolish value in DB: {raw!r}")
 
 
-def _latest_trade_decision_status_by_trade_id(
-    conn: sqlite3.Connection,
-    trade_ids: list[str],
-) -> dict[str, str]:
-    if not trade_ids or not _table_exists(conn, "trade_decisions"):
-        return {}
-    placeholders = ", ".join("?" for _ in trade_ids)
-
-    def _query_latest_status_rows(target_conn: sqlite3.Connection) -> dict[str, str]:
-        rows = target_conn.execute(
-            f"""
-            WITH latest AS (
-                SELECT runtime_trade_id, MAX(trade_id) AS latest_trade_id
-                FROM trade_decisions
-                WHERE runtime_trade_id IN ({placeholders})
-                  AND runtime_trade_id IS NOT NULL
-                GROUP BY runtime_trade_id
-            )
-            SELECT td.runtime_trade_id, td.status
-            FROM latest
-            JOIN trade_decisions td ON td.trade_id = latest.latest_trade_id
-            """,
-            trade_ids,
-        ).fetchall()
-        return {
-            str(row["runtime_trade_id"] or ""): str(row["status"] or "")
-            for row in rows
-            if str(row["runtime_trade_id"] or "")
-        }
-
-    statuses = _query_latest_status_rows(conn)
-    try:
-        db_list = conn.execute("PRAGMA database_list").fetchall()
-        main_path = next((str(row[2]) for row in db_list if row[1] == "main"), "")
-    except sqlite3.OperationalError:
-        main_path = ""
-
-    if ZEUS_DB_PATH.exists() and str(ZEUS_DB_PATH) != main_path:
-        legacy_conn = sqlite3.connect(str(ZEUS_DB_PATH))
-        legacy_conn.row_factory = sqlite3.Row
-        try:
-            if _table_exists(legacy_conn, "trade_decisions"):
-                legacy_statuses = _query_latest_status_rows(legacy_conn)
-                for trade_id, legacy_status in legacy_statuses.items():
-                    if statuses.get(trade_id) not in TERMINAL_TRADE_DECISION_STATUSES and legacy_status in TERMINAL_TRADE_DECISION_STATUSES:
-                        statuses[trade_id] = legacy_status
-        finally:
-            legacy_conn.close()
-
-    return statuses
 
 
-def _terminal_runtime_state_for_trade_decision_status(status: str) -> str | None:
-    normalized = str(status or "").strip().lower()
-    if normalized == "exited":
-        return "economically_closed"
-    if normalized in {"settled", "voided", "admin_closed"}:
-        return normalized
-    if normalized == "unresolved_ghost":
-        return "admin_closed"
-    return None
 
 
 def _query_transitional_position_hints(
