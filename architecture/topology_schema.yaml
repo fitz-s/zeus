@@ -67,6 +67,10 @@ strict_issue_codes:
   - operations_current_state_missing_anchor
   - operations_current_state_path_missing
   - operations_current_state_unregistered_surface
+  - operations_task_unregistered
+  - progress_handoff_path_violation
+  - runtime_plan_inventory_missing
+  - runtime_plan_artifact_unindexed
   - config_agents_volatile_fact
   - unclassified_root_artifact
   - unclassified_state_surface

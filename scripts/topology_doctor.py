@@ -260,8 +260,20 @@ def _check_hidden_docs(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _docs_checks().check_hidden_docs(sys.modules[__name__], topology)
 
 
+def _check_progress_handoff_paths() -> list[TopologyIssue]:
+    return _docs_checks().check_progress_handoff_paths(sys.modules[__name__])
+
+
 def _check_docs_subtree_agents(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _docs_checks().check_docs_subtree_agents(sys.modules[__name__], topology)
+
+
+def _check_operations_task_folders(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_operations_task_folders(sys.modules[__name__], topology)
+
+
+def _check_runtime_plan_inventory(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_runtime_plan_inventory(sys.modules[__name__], topology)
 
 
 def _internal_path_candidates(text: str) -> set[str]:

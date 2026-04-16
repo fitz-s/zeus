@@ -21,6 +21,8 @@ CONFIG_AGENTS_VOLATILE_FACT_PATTERNS = (
     re.compile(r"\bnon[-_]wu_icao cities\s*\(\d{4}-\d{2}-\d{2}\)", re.IGNORECASE),
 )
 
+PROGRESS_HANDOFF_PATTERN = re.compile(r"(progress|handoff|work[_-]?log|closeout)", re.IGNORECASE)
+
 
 def docs_mode_excluded_roots(api: Any, topology: dict[str, Any]) -> list[Path]:
     roots = []
@@ -105,6 +107,31 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
     return issues
 
 
+def check_progress_handoff_paths(api: Any) -> list[Any]:
+    issues: list[Any] = []
+    for rel in api._git_visible_files():
+        if not rel.startswith("docs/") or not rel.endswith(".md"):
+            continue
+        if rel.startswith("docs/archives/"):
+            continue
+        name = Path(rel).name
+        if not PROGRESS_HANDOFF_PATTERN.search(name):
+            continue
+        allowed = (
+            rel.startswith("docs/operations/task_")
+            or rel in {"docs/operations/current_state.md"}
+        )
+        if not allowed:
+            issues.append(
+                api._issue(
+                    "progress_handoff_path_violation",
+                    rel,
+                    "progress/handoff/work-log files must live inside a task folder, current_state, or archives",
+                )
+            )
+    return issues
+
+
 def check_docs_subtree_agents(api: Any, topology: dict[str, Any]) -> list[Any]:
     issues = []
     for rel, spec in sorted(docs_subroot_specs(topology).items()):
@@ -115,6 +142,99 @@ def check_docs_subtree_agents(api: Any, topology: dict[str, Any]) -> list[Any]:
         path = api.ROOT / rel / "AGENTS.md"
         if not path.exists():
             issues.append(api._issue("missing_docs_agents", f"{rel}/AGENTS.md", "active docs subtree lacks AGENTS.md"))
+    return issues
+
+
+def operation_task_dirs(api: Any) -> set[str]:
+    root = api.ROOT / "docs" / "operations"
+    dirs: set[str] = set()
+    if not root.exists():
+        return dirs
+    for path in root.glob("task_*"):
+        if path.is_dir():
+            dirs.add(path.relative_to(api.ROOT).as_posix())
+    return dirs
+
+
+def check_operations_task_folders(api: Any, topology: dict[str, Any]) -> list[Any]:
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+    agents = api.ROOT / "docs" / "operations" / "AGENTS.md"
+    registered = api._registry_entries(agents, include_directory_tokens=True) if agents.exists() else set()
+    current_state = api.ROOT / "docs" / "operations" / "current_state.md"
+    current_text = current_state.read_text(encoding="utf-8", errors="ignore") if current_state.exists() else ""
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+        registered_here = (
+            name in registered
+            or f"{name}/" in registered
+            or rel in registered
+            or f"{rel}/" in registered
+        )
+        referenced = rel in current_text or f"{rel}/" in current_text or f"{rel}/plan.md" in current_text
+        if not registered_here or not referenced:
+            missing = []
+            if not registered_here:
+                missing.append("docs/operations/AGENTS.md")
+            if not referenced:
+                missing.append("docs/operations/current_state.md")
+            issues.append(
+                api._issue(
+                    "operations_task_unregistered",
+                    rel,
+                    f"operation task folder is not registered/referenced by {', '.join(missing)}",
+                )
+            )
+    return issues
+
+
+def runtime_plan_paths(api: Any, topology: dict[str, Any]) -> list[str]:
+    spec = topology.get("runtime_artifact_inventory") or {}
+    patterns = [str(pattern) for pattern in spec.get("runtime_plan_globs") or []]
+    paths: set[str] = set()
+    for pattern in patterns:
+        for path in api.ROOT.glob(pattern):
+            if path.is_file() and path.name != ".DS_Store":
+                paths.add(path.relative_to(api.ROOT).as_posix())
+    return sorted(paths)
+
+
+def check_runtime_plan_inventory(api: Any, topology: dict[str, Any]) -> list[Any]:
+    runtime_paths = runtime_plan_paths(api, topology)
+    if not runtime_paths:
+        return []
+    spec = topology.get("runtime_artifact_inventory") or {}
+    inventory_rel = str(spec.get("path") or "")
+    if not inventory_rel:
+        return [
+            api._issue(
+                "runtime_plan_inventory_missing",
+                "architecture/topology.yaml:runtime_artifact_inventory",
+                "runtime plan artifacts exist but no inventory path is declared",
+            )
+        ]
+    inventory = api.ROOT / inventory_rel
+    if not inventory.exists():
+        return [
+            api._issue(
+                "runtime_plan_inventory_missing",
+                inventory_rel,
+                "runtime plan artifacts exist but inventory file is missing",
+            )
+        ]
+    text = inventory.read_text(encoding="utf-8", errors="ignore")
+    issues: list[Any] = []
+    for rel in runtime_paths:
+        if rel not in text:
+            issues.append(
+                api._issue(
+                    "runtime_plan_artifact_unindexed",
+                    rel,
+                    f"runtime planning artifact is not listed in {inventory_rel}",
+                )
+            )
     return issues
 
 
@@ -258,4 +378,6 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
                     f"operations surface is in current_state but not docs/operations/AGENTS.md registry: {surface}",
                 )
             )
+    issues.extend(check_operations_task_folders(api, topology))
+    issues.extend(check_runtime_plan_inventory(api, topology))
     return issues

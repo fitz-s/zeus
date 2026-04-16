@@ -232,6 +232,8 @@ def check_shadow_authority_references(api: Any) -> list[Any]:
             rel = path.relative_to(api.ROOT).as_posix()
             if rel.startswith("docs/archives/"):
                 continue
+            if rel == "docs/operations/runtime_artifact_inventory.md":
+                continue
             for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                 lower = line.lower()
                 if (".omx/" in line or ".claude/worktrees/" in line) and (
@@ -293,6 +295,7 @@ def run_docs(api: Any) -> Any:
     ]
     issues.extend(api._check_reference_authority(topology))
     issues.extend(api._check_hidden_docs(topology))
+    issues.extend(api._check_progress_handoff_paths())
     issues.extend(api._check_docs_subtree_agents(topology))
     issues.extend(api._check_broken_internal_paths())
     issues.extend(api._check_active_operations_registry(topology))
