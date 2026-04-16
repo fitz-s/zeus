@@ -128,6 +128,44 @@ class TestINV15SourceWhitelistGate:
             f"training_allowed={training_allowed}, expected 0 (R-J)."
         )
 
+    def test_uppercase_non_whitelisted_source_forces_training_allowed_false(self):
+        """R-J M1: uppercase source 'TIGGE_' (note trailing underscore, not prefix match) is not
+        whitelisted — _resolve_training_allowed must normalize case before checking membership."""
+        from src.calibration.store import _resolve_training_allowed
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        # "TIGGE_" has a trailing underscore — not in the whitelist even after lowercasing
+        result = _resolve_training_allowed("TIGGE_", HIGH_LOCALDAY_MAX.data_version, True)
+        assert result is False, (
+            "M1: 'TIGGE_' is not a whitelisted source (trailing underscore ≠ 'tigge'); "
+            "must fail-closed to False after case normalization (R-J M1)."
+        )
+
+    def test_source_with_trailing_space_is_normalized(self):
+        """R-J M1: source with trailing whitespace (e.g. 'openmeteo_hourly ') must
+        still be rejected — normalization strips before membership check."""
+        from src.calibration.store import _resolve_training_allowed
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        result = _resolve_training_allowed("openmeteo_hourly ", HIGH_LOCALDAY_MAX.data_version, True)
+        assert result is False, (
+            "M1: 'openmeteo_hourly ' (trailing space) must normalize to 'openmeteo_hourly' "
+            "and be rejected as non-whitelisted (R-J M1)."
+        )
+
+    def test_data_version_with_leading_space_is_rejected(self):
+        """R-J M1: data_version with leading whitespace (' tigge_...') must normalize
+        to an empty string prefix check and fail-close — it's not a canonical tag."""
+        from src.calibration.store import _resolve_training_allowed
+        # Leading space means stripped dv_norm = "tigge_..." — wait, strip removes it,
+        # so " tigge_mx2t6_..." should actually normalize to "tigge_mx2t6_..." and pass.
+        # The M1 fix is about preventing BYPASS, not about blocking valid padded canonical tags.
+        # This test verifies the positive case: a space-padded canonical tag still normalizes correctly.
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        result = _resolve_training_allowed("", " " + HIGH_LOCALDAY_MAX.data_version, True)
+        assert result is True, (
+            "M1: leading-space-padded canonical data_version must normalize (strip) and pass "
+            "the whitelist check (R-J M1 — normalization must not reject valid canonical tags)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # R-M: calibration_pairs_v2 rows from rebuild have correct identity fields

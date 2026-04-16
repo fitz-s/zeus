@@ -89,9 +89,10 @@ QUARANTINED_DATA_VERSIONS: frozenset[str] = frozenset({
 # replacement ``tigge_mx2t6_*`` family is intentionally NOT in the
 # quarantine list.
 QUARANTINED_DATA_VERSION_PREFIXES: tuple[str, ...] = (
-    "tigge_step",       # any tigge_step*_v*
-    "tigge_param167",   # any tigge_param167*
-    "tigge_2t_instant", # any hand-tagged point-forecast variant
+    "tigge_step",                    # any tigge_step*_v*
+    "tigge_param167",                # any tigge_param167*
+    "tigge_2t_instant",              # any hand-tagged point-forecast variant
+    "tigge_mx2t6_local_peak_window", # peak-window ≠ calendar-day; version bumps must not escape
 )
 
 
