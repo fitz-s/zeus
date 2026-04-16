@@ -1,10 +1,10 @@
 # Zeus AGENTS
 
-Zeus is a live-only, position-managed weather-probability trading runtime on
+Zeus is a weather-probability trading runtime on
 Polymarket. It converts ECMWF ensemble forecasts and Weather Underground
 settlement observations into calibrated probabilities, selects statistically
 defensible edges, sizes positions, executes orders, manages exits/settlement,
-and exposes typed state to Venus/OpenClaw.
+and exposes typed state to OpenClaw.
 
 This file is the first read for a zero-context agent. Its job is to give the
 durable mental model and operating contract, not to be the full manual. Use
@@ -230,3 +230,67 @@ Conditional, not default:
 - `docs/known_gaps.md` for active operational blockers.
 - `docs/reference/statistical_methodology.md` and `docs/reference/zeus_math_spec.md` for deep math facts.
 - `docs/archives/**` only when routed by a specific investigation.
+
+## Oracle Penalty System
+
+Zeus applies per-city oracle error rate penalties to Kelly sizing. The system
+detects discrepancies between WU/HKO/NOAA API observations and PM settlement
+outcomes.
+
+### Data Flow
+
+```
+oracle_snapshot_listener.py (cron 10:00 UTC)
+    → raw/oracle_shadow_snapshots/{city}/{date}.json
+bridge_oracle_to_calibration.py
+    → data/oracle_error_rates.json
+oracle_penalty.py
+    → Kelly multiplier: OK(1.0) / INCIDENTAL(1.0) / CAUTION(1-rate) / BLACKLIST(0.0)
+evaluator.py
+    → ORACLE_BLACKLISTED gate + penalty_multiplier on km
+```
+
+### Blacklisted Cities
+
+| City | Error Rate | Status |
+|------|-----------|--------|
+| Shenzhen | 40% | BLACKLIST — no trading |
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `src/strategy/oracle_penalty.py` | Load error rates, classify, compute penalty multiplier |
+| `data/oracle_error_rates.json` | Per-city error rates with status |
+| `scripts/oracle_snapshot_listener.py` | Daily WU/HKO capture at settlement window |
+| `scripts/bridge_oracle_to_calibration.py` | Compare snapshots vs PM, update error rates |
+
+## Settlement Truth Pipeline
+
+Harvester now writes `winning_bin` to the `settlements` table when PM markets
+settle. Previously only `calibration_pairs` and `position_stage_events` were
+written.
+
+```
+Gamma API → _fetch_settled_events() → _find_winning_bin()
+    → _write_settlement_truth() → settlements table (winning_bin, market_slug, settled_at)
+```
+
+`settlement_value` (precise temperature) comes from `observations` table via
+`daily_obs_append.py`, not from PM.
+
+## round_fn Injection (SettlementSemantics Polymorphism)
+
+All MC simulation `_settle()` callsites use `round_fn` from
+`SettlementSemantics.for_city(city).round_values` instead of hardcoded
+`round_wmo_half_up_values`. This ensures HKO cities use `oracle_truncate`
+(floor) while 49 WU cities use `wmo_half_up` (floor(x+0.5)).
+
+### Threaded callsites
+
+| File | Constructor | round_fn source |
+|------|------------|-----------------|
+| `src/engine/evaluator.py` | `Day0Signal(round_fn=...)` | `settlement_semantics.round_values` |
+| `src/engine/evaluator.py` | `MarketAnalysis(round_fn=...)` | `settlement_semantics.round_values` |
+| `src/engine/replay.py` | `MarketAnalysis(round_fn=...)` | `SettlementSemantics.for_city(city).round_values` |
+| `src/engine/monitor_refresh.py` | `round_wmo_half_up_value` | Intentional WMO fallback (directional delta only) |
