@@ -1642,6 +1642,7 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
             )
         ],
     )
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
 
     rows = query_authoritative_settlement_rows(conn, limit=10)
     conn.close()

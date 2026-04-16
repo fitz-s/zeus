@@ -4925,6 +4925,7 @@ def test_learning_summary_separates_no_data_from_no_edge(tmp_path):
         )
     )
     store_artifact(conn, artifact, env="paper")
+    conn.commit()  # Fix B: store_artifact no longer commits internally; caller must commit.
 
     summary = query_learning_surface_summary(conn, env="paper")
     conn.close()

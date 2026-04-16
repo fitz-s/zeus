@@ -37,6 +37,7 @@ from src.state.db import (
     query_settlement_events,
     record_token_suppression,
 )
+from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
     PortfolioState,
     compute_settlement_close,
@@ -377,13 +378,28 @@ def run_harvester() -> dict:
             legacy_settlement_records_skipped,
         )
 
-    trade_conn.commit()
-    shared_conn.commit()
+    # DT#1 / INV-17: DB commits FIRST, then JSON exports.
+    # harvester has no artifact row, so db_op returns None.
+    _portfolio_settled = positions_settled > 0
+    _tracker_dirty = tracker_dirty
 
-    if positions_settled > 0:
-        save_portfolio(portfolio)
-    if tracker_dirty:
-        save_tracker(tracker)
+    def _db_op_trade() -> None:
+        trade_conn.commit()
+        shared_conn.commit()
+
+    def _export_portfolio_h() -> None:
+        if _portfolio_settled:
+            save_portfolio(portfolio)
+
+    def _export_tracker_h() -> None:
+        if _tracker_dirty:
+            save_tracker(tracker)
+
+    commit_then_export(
+        trade_conn,
+        db_op=_db_op_trade,
+        json_exports=[_export_portfolio_h, _export_tracker_h],
+    )
 
     trade_conn.close()
     shared_conn.close()

@@ -245,19 +245,7 @@ def _etl_recalibrate():
 
     results = {}
 
-    # 1. Refresh Rainstorm-derived source tables before downstream ETL consumes them.
-    migration_script = scripts_dir / "migrate_rainstorm_full.py"
-    if migration_script.exists():
-        try:
-            r = subprocess.run(
-                [venv_python, str(migration_script)],
-                capture_output=True, text=True, timeout=300,
-            )
-            results["migrate_rainstorm_full"] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
-        except Exception as e:
-            results["migrate_rainstorm_full"] = f"ERROR: {e}"
-
-    # 2. Refresh ETL tables (diurnal curves, persistence, observations)
+    # 1. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
         "etl_observation_instants.py",
         "etl_diurnal_curves.py",

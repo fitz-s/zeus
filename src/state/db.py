@@ -833,6 +833,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
 
     _ensure_runtime_bootstrap_support_tables(conn)
 
+    # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
+    from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
+    _apply_v2_schema(conn)
+
     if own_conn:
         conn.commit()
         conn.close()
