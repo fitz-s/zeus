@@ -28,7 +28,7 @@ maintenance_cadence:
 file_budgets:
   - path: AGENTS.md
     role: boot_context_and_contract
-    max_lines: 220
+    max_lines: 240
     enforcement: advisory
     diet_target: >
       Keep root AGENTS as a first-read Zeus mental model plus boot contract.
