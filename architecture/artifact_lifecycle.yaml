@@ -50,6 +50,7 @@ record_contract:
   approved_record_globs:
     - docs/operations/task_????-??-??_*/work_log.md
     - docs/operations/task_????-??-??_*.md
+    - docs/operations/runtime_artifact_inventory.md
     - .omx/context/**/*.md
   exempt_path_globs:
     - docs/archives/**
@@ -95,6 +96,7 @@ artifact_classes:
     active_paths:
       - state/
       - .omx/
+      - .omc/
     archive_paths:
       - not_archived
     record_required: false

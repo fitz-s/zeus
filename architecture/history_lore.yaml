@@ -491,6 +491,67 @@ cards:
       In a dirty worktree, never reset/restore/stash-pop; protect user and
       agent edits and serialize overlapping writes.
 
+  - id: POST_CLOSE_CONTROL_SURFACE_MISMATCH
+    status: active_law
+    severity: high
+    sources:
+      - .omx/artifacts/user-p4-2-postclose-review-20260404T010500Z.md
+      - .omx/notepad.md
+      - docs/operations/current_state.md
+      - docs/operations/runtime_artifact_inventory.md
+    failure_mode: >
+      A packet's code and tests are complete, but active control surfaces still
+      point at stale packet state or omit the post-close verifier evidence,
+      causing the next agent to freeze or execute from a false state.
+    trigger_context:
+      - packet closeout
+      - post-close critic or verifier review
+      - current_state updates
+      - operations packet archival
+      - context compaction handoff
+    wrong_moves:
+      - mark a packet complete before pre-close and post-close reviews finish
+      - freeze the next packet while current_state still says review pending
+      - leave completed packet work logs under docs/operations as active evidence
+      - rely on .omx/.omc runtime state instead of repo-facing current_state
+    correct_rule: >
+      Closeout is not complete until code, tests, current_state, operations
+      registry, archive pointers, and post-close review evidence agree. If
+      those surfaces disagree, block the next packet freeze.
+    antibodies:
+      code: []
+      tests:
+        - tests/test_topology_doctor.py
+      gates:
+        - python scripts/topology_doctor.py --docs
+        - python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>
+      docs:
+        - docs/operations/current_state.md
+        - docs/operations/runtime_artifact_inventory.md
+    residual_risk: >
+      Runtime-only review artifacts under .omx/.omc can still be deleted
+      locally; durable conclusions must be mirrored into current_state,
+      manifests, lore, or archive pointers before the next packet starts.
+    invalidation_condition: >
+      Only a stronger machine receipt/archive system that validates review
+      evidence and current_state parity can replace this closeout rule.
+    routing:
+      task_terms: [closeout, post-close, current_state, verifier, critic, handoff, archive, packet complete]
+      file_patterns:
+        - docs/operations/**
+        - .omx/artifacts/*postclose*
+        - .omx/context/*closeout*
+        - .omc/plans/*.md
+    downstream_blast_radius:
+      - docs/operations/current_state.md
+      - docs/operations/AGENTS.md
+      - architecture/artifact_lifecycle.yaml
+      - scripts/topology_doctor_docs_checks.py
+    zero_context_digest: >
+      Packet code green is not enough; freeze the next packet only after
+      current_state, operations registry, archive pointers, and post-close
+      review evidence agree.
+
   - id: FDR_CANDIDATE_FAMILY_NOT_WHOLE_CYCLE
     status: active_law
     severity: high

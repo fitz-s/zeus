@@ -289,6 +289,84 @@ def test_docs_mode_rejects_current_state_unregistered_surface(monkeypatch, tmp_p
     assert any(issue.code == "operations_current_state_unregistered_surface" for issue in issues)
 
 
+def test_docs_mode_rejects_unregistered_operation_task_folder(tmp_path, monkeypatch):
+    root = tmp_path
+    task_dir = root / "docs" / "operations" / "task_2099-01-01_unlisted"
+    task_dir.mkdir(parents=True)
+    (task_dir / "work_log.md").write_text("Date: 2099-01-01\n", encoding="utf-8")
+    agents = root / "docs" / "operations" / "AGENTS.md"
+    agents.write_text(
+        "# docs/operations AGENTS\n\n## File registry\n\n| File | Purpose |\n|---|---|\n| `current_state.md` | pointer |\n",
+        encoding="utf-8",
+    )
+    current = root / "docs" / "operations" / "current_state.md"
+    current.write_text(
+        "- Primary packet file: `docs/operations/current_state.md`\n"
+        "- Active backlog:\n"
+        "- Active checklist/evidence:\n"
+        "- Next packet: none\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+
+    issues = topology_doctor._check_operations_task_folders({})
+
+    assert any(issue.code == "operations_task_unregistered" for issue in issues)
+
+
+def test_docs_mode_requires_runtime_plan_inventory(tmp_path, monkeypatch):
+    root = tmp_path
+    (root / ".omc" / "plans").mkdir(parents=True)
+    (root / ".omc" / "plans" / "open-questions.md").write_text("# questions\n", encoding="utf-8")
+    topology = {
+        "runtime_artifact_inventory": {
+            "path": "docs/operations/runtime_artifact_inventory.md",
+            "runtime_plan_globs": [".omc/plans/*.md"],
+        }
+    }
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+
+    issues = topology_doctor._check_runtime_plan_inventory(topology)
+
+    assert any(issue.code == "runtime_plan_inventory_missing" for issue in issues)
+
+
+def test_docs_mode_rejects_unindexed_runtime_plan_artifact(tmp_path, monkeypatch):
+    root = tmp_path
+    (root / ".omx" / "plans").mkdir(parents=True)
+    (root / ".omx" / "plans" / "hidden-plan.md").write_text("# plan\n", encoding="utf-8")
+    inventory = root / "docs" / "operations" / "runtime_artifact_inventory.md"
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text("No hidden plan here.\n", encoding="utf-8")
+    topology = {
+        "runtime_artifact_inventory": {
+            "path": "docs/operations/runtime_artifact_inventory.md",
+            "runtime_plan_globs": [".omx/plans/*.md"],
+        }
+    }
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+
+    issues = topology_doctor._check_runtime_plan_inventory(topology)
+
+    assert any(issue.code == "runtime_plan_artifact_unindexed" for issue in issues)
+
+
+def test_docs_mode_rejects_progress_handoff_outside_allowed_paths(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: [
+            "docs/reference/team_handoff.md",
+            "docs/operations/task_2099-01-01_good/team_handoff.md",
+        ],
+    )
+
+    issues = topology_doctor._check_progress_handoff_paths()
+
+    assert any(issue.code == "progress_handoff_path_violation" for issue in issues)
+    assert all(issue.path != "docs/operations/task_2099-01-01_good/team_handoff.md" for issue in issues)
+
+
 def test_current_state_operation_paths_accept_markdown_and_bare_paths():
     text = (
         "- Primary packet file: [packet](docs/operations/task_2026-04-13_topology_compiler_program.md)\n"

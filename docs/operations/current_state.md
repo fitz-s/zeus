@@ -19,14 +19,17 @@ Role: single live control-entry surface for the repo.
 - Archived:
   - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
   - `docs/archives/work_packets/branches/data-improve/topology/2026-04-15_topology_enforcement_hardening/` — topology enforcement hardening COMPLETE, merged to `data-improve`, branch-diff closeout verified, archived 2026-04-16
+  - `docs/archives/work_packets/branches/data-improve/live_reorientation/2026-04-11_phase1live/` — stale Phase 1 live-only plan moved out of active operations on 2026-04-16
+  - `docs/archives/work_packets/branches/data-improve/math_semantics/2026-04-16_k6_k7_k8_math_semantics/` — completed K6/K7/K8 remediation work log moved out of active operations on 2026-04-16
 - Active backlog:
   - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
   - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
   - `docs/operations/data_rebuild_plan.md` — upstream data rebuild plan (v2.2, scope: collect+store code prep while TIGGE completes)
 - Stale/deferred:
-  - `docs/operations/phase1live_2026-04-11_plan.md` — Phase 1 Live Daemon Maturity plan (IN PROGRESS since 2026-04-11, no updates since creation; conceptual authority only)
+  - Phase 1 live-only plan is archived; do not use it as an active control surface.
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
+  - `docs/operations/runtime_artifact_inventory.md` — `.omx/.omc` planning artifact inventory and disposition guide
 - Next packet: Continue the Dual-Track Metric Spine Refactor unless a higher-priority governance break supersedes it.
 
 ## Runtime

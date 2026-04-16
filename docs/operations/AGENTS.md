@@ -12,7 +12,7 @@ Live control surface — current state pointer, active work packets. This is whe
 | `task_2026-04-14_session_backlog.md` | End-of-session backlog snapshot from the calibration-refactor session (df13308/45745ba/854cf5d/ed13310); groups open tasks by unblocking condition |
 | `task_2026-04-16_dual_track_metric_spine/` | Active dual-track metric spine refactor packet and evidence |
 | `data_rebuild_plan.md` | Active upstream data-rebuild plan; do not execute from topology packets |
-| `phase1live_2026-04-11_plan.md` | Phase 1 Live-Only Reorientation master plan; supporting runtime notes are not repo authority |
+| `runtime_artifact_inventory.md` | Repo-facing inventory for `.omx/.omc` planning artifacts that must not live only in ignored runtime state |
 
 ## Packet lifecycle
 
@@ -31,3 +31,4 @@ Don't accumulate dead packets here. The live surface must reflect only what's ac
 - Archive completed work packets under `docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/`
 - Use `trees/<tree-name>/` instead of `branches/<branch>/` only when a package is tied to a persistent git worktree rather than a normal branch
 - Keep complete solution packages atomic; do not split their internal `docs/`, `src/`, `scripts/`, `migrations/`, or `tests/` folders across archive categories
+- Runtime-local `.omx/.omc` planning artifacts must either be listed in `runtime_artifact_inventory.md` or mirrored into a packet folder before they are treated as durable work evidence

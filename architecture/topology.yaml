@@ -115,6 +115,12 @@ coverage_roots:
     zone: runtime_state
     authority_role: scratch_artifact
     forbidden_misread: OMX state is session/runtime context, not repo authority.
+  - path: ".omc"
+    status: scratch
+    scope: runtime
+    zone: runtime_state
+    authority_role: scratch_artifact
+    forbidden_misread: OMC state is session/runtime context, not repo authority.
   - path: ".claude/worktrees"
     status: shadow
     scope: shadow
@@ -434,6 +440,16 @@ active_operations_registry:
   surface_prefix: docs/operations/
   required_anchors:
     - docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx
+
+runtime_artifact_inventory:
+  path: docs/operations/runtime_artifact_inventory.md
+  runtime_plan_globs:
+    - .omx/plans/*.md
+    - .omc/plans/*.md
+  rule: >
+    Runtime-local planning artifacts are ignored and not authority. When they
+    contain planning/progress knowledge, this inventory must list the path and
+    disposition so agents do not need to rediscover hidden context.
 
 docs_subroots:
   - path: "docs/authority"
