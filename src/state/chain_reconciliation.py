@@ -336,16 +336,43 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         and p.state not in INACTIVE_RUNTIME_STATES
         and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
     )
-    # If chain returned 0 positions but we have active local positions,
-    # the API response is likely incomplete. Skip voiding.
-    skip_voiding = active_local > 0 and len(chain_positions) == 0
+    # P14 fix: bound the skip_voiding window. After 6h of stale chain_verified_at,
+    # treat chain-empty as legitimate (position was settled/redeemed on-chain).
+    _STALE_GUARD_SECONDS = 6 * 3600
+    _truly_active = 0
+    _stale_skipped = 0
+    _now_utc = datetime.now(timezone.utc)
+    for p in portfolio.positions:
+        if p.state == "pending_tracked" or p.state in INACTIVE_RUNTIME_STATES:
+            continue
+        if not (p.token_id if p.direction == "buy_yes" else p.no_token_id):
+            continue
+        verified = getattr(p, "chain_verified_at", "")
+        if verified and len(chain_positions) == 0:
+            try:
+                vt = datetime.fromisoformat(verified.replace("Z", "+00:00")) if isinstance(verified, str) else verified
+                if (_now_utc - vt).total_seconds() > _STALE_GUARD_SECONDS:
+                    _stale_skipped += 1
+                    continue  # stale — don't count toward skip_voiding
+            except (ValueError, TypeError):
+                pass
+        _truly_active += 1
+
+    skip_voiding = _truly_active > 0 and len(chain_positions) == 0
+    if _stale_skipped > 0:
+        logger.warning(
+            "P14 STALE GUARD: %d position(s) chain_verified_at older than 6h with "
+            "chain returning empty — excluded from skip_voiding guard",
+            _stale_skipped,
+        )
     if skip_voiding:
         logger.warning(
-            "INCOMPLETE CHAIN RESPONSE: 0 chain positions but %d local active. "
-            "Skipping Rule 2 (void) to prevent false PHANTOM kills.",
-            active_local,
+            "INCOMPLETE CHAIN RESPONSE: 0 chain positions but %d local active "
+            "(%d stale excluded). Skipping Rule 2 (void) to prevent false PHANTOM kills.",
+            _truly_active,
+            _stale_skipped,
         )
-        stats["skipped_void_incomplete_api"] = active_local
+        stats["skipped_void_incomplete_api"] = _truly_active
 
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
