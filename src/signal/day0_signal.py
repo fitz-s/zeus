@@ -121,8 +121,11 @@ class Day0Signal:
 
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
-        if n_mc is None:
+        if not n_mc:
             n_mc = day0_n_mc()
+
+        if len(self.ens_remaining) == 0:
+            raise ValueError("ens_remaining cannot be empty; requires explicit degraded path")
 
         n_bins = len(bins)
         n_members = len(self.ens_remaining)
@@ -173,7 +176,7 @@ class Day0Signal:
             p = p / total
         return p
 
-    def expected_high(self) -> float:
+    def legacy_upper_envelope_mean(self) -> float:
         """Expected final daily high (mean of max(obs, remaining))."""
         final = np.maximum(self.ens_remaining, self.obs_high)
         return float(np.mean(final))
@@ -217,7 +220,7 @@ class Day0Signal:
 
         Legacy boolean interface. Prefer observation_weight() for continuous blending.
         """
-        return float(np.mean(self.ens_remaining < self.obs_high)) > day0_obs_dominates_threshold()
+        return float(np.mean(self.ens_remaining <= self.obs_high)) > day0_obs_dominates_threshold()
 
     def forecast_context(self) -> dict:
         return {

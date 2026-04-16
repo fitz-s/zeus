@@ -95,7 +95,7 @@ def _entry_bankroll_for_cycle(portfolio: PortfolioState, clob):
     return _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=sys.modules[__name__])
 
 
-def _materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, bankroll_at_entry: float | None = None):
+def _materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, env: str, bankroll_at_entry: float | None = None):
     return _runtime.materialize_position(
         candidate,
         decision,
@@ -104,6 +104,7 @@ def _materialize_position(candidate, decision, result, portfolio, city, mode, *,
         city,
         mode,
         state=state,
+        env=env,
         bankroll_at_entry=bankroll_at_entry,
         deps=sys.modules[__name__],
     )
@@ -117,7 +118,7 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
     return _runtime.execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=sys.modules[__name__])
 
 
-def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime):
+def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime, *, env: str):
     return _runtime.execute_discovery_phase(
         conn,
         clob,
@@ -129,6 +130,7 @@ def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tra
         summary,
         entry_bankroll,
         decision_time,
+        env=env,
         deps=sys.modules[__name__],
     )
 
@@ -174,6 +176,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     conn = get_connection()
     portfolio = load_portfolio()
+    if getattr(portfolio, 'portfolio_loader_degraded', False):
+        raise RuntimeError("Portfolio loader degraded: DB not authoritative. Failsafe subsystem shutdown.")
     clob = PolymarketClient()
     tracker = get_tracker()
     limits = RiskLimits()
@@ -269,8 +273,6 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = f"smoke_test_portfolio_cap_reached({open_cost_basis_usd:.2f}>={float(smoke_test_cap):.2f})"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
-    elif getattr(portfolio, 'portfolio_loader_degraded', False):
-        entries_blocked_reason = "portfolio_loader_degraded"
 
     if has_quarantine:
         summary["portfolio_quarantined"] = True
@@ -280,7 +282,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "entries_paused"
     if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
-            p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
+            p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
             portfolio_dirty = portfolio_dirty or p_dirty
             tracker_dirty = tracker_dirty or t_dirty
         except Exception as exc:

@@ -7,7 +7,8 @@
 
 ## CRITICAL: DST / Timezone
 
-### [OPEN] Historical diurnal aggregates still need DST-safe rebuild cleanup
+### [OPEN — NOT LIVE-CERTIFIED] Historical diurnal aggregates still need DST-safe rebuild cleanup
+**Certification status:** This gap blocks live math certification. The DST historical rebuild has NOT been executed and historical data derived from pre-fix aggregates is NOT certified for promotion. See `architecture/data_rebuild_topology.yaml` → `dst_historical_rebuild`.
 **Location:** `scripts/etl_hourly_observations.py`, `scripts/etl_diurnal_curves.py`, `src/signal/diurnal.py`
 **Problem:** The old London 2025-03-30 hour=1 evidence is stale. ETL/runtime is now partially DST-aware, but historical `diurnal_curves` materializations may still need to be rebuilt from true zone-aware local timestamps.
 **Runtime mismatch:** `get_current_local_hour()` in `diurnal.py` already uses `ZoneInfo` and is DST-aware. The remaining risk is stale pre-fix aggregates/backfill, not the runtime clock itself.
@@ -118,7 +119,14 @@
 
 ### [CLOSED — 2026-04-15] Harvester 不知道 bias correction 是否开启
 **Location:** `src/execution/harvester.py` — `harvest_settlement()` 生成 calibration pairs
-**Resolution:** `harvest_settlement()` now accepts `bias_corrected: Optional[bool]` parameter. When None, reads `settings.bias_correction_enabled`. The value is passed through to `add_calibration_pair()`. Test added in `test_calibration_manager.py::test_bias_corrected_persisted_through_harvest`.
+**Resolution:** Full lineage fix:
+1. `ensemble_snapshots` schema now has `bias_corrected INTEGER` column (code-level migration in `init_schema`)
+2. `_store_snapshot_p_raw()` in evaluator.py persists `ens.bias_corrected` at snapshot-write time (decision-time truth)
+3. `get_snapshot_context()` returns `bias_corrected` from snapshot
+4. Production caller passes snapshot's `bias_corrected` to `harvest_settlement()`
+5. `harvest_settlement()` also accepts explicit `bias_corrected` param; falls back to `settings.bias_correction_enabled` when None (for pre-migration snapshots without the column)
+6. `decision_group_id` computed upfront from `source_model_version` + `forecast_issue_time` (also from snapshot)
+Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fallback_reads_settings`
 
 ### [STALE-UNVERIFIED] Open-Meteo quota contention is workspace-wide, not Zeus-only
 **Location:** Zeus + `51 source data` + Rainstorm-era ingestion loops

@@ -113,10 +113,11 @@ def _pending_order_timed_out(pos: Position, now: datetime) -> bool:
     return deadline is not None and now >= deadline
 
 
-def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> None:
-    """Production wrapper passes deps; standalone tests stay side-effect free."""
+def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> bool:
+    """Production wrapper passes deps; standalone tests stay side-effect free.
+    Returns True on success or no-op, False if DB write fails."""
     if deps is None or not hasattr(deps, "get_connection"):
-        return
+        return True
 
     lifecycle_conn = None
     try:
@@ -125,8 +126,10 @@ def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> None:
         lifecycle_conn = deps.get_connection()
         update_trade_lifecycle(conn=lifecycle_conn, pos=pos)
         lifecycle_conn.commit()
+        return True
     except Exception as exc:
-        logger.warning("Failed to update entry lifecycle for %s: %s", pos.trade_id, exc)
+        logger.error(f"Trade lifecycle DB update failed for {pos.trade_id}: {exc}")
+        return False
     finally:
         if lifecycle_conn is not None:
             try:
@@ -135,14 +138,15 @@ def _maybe_update_trade_lifecycle(pos: Position, deps=None) -> None:
                 pass
 
 
-def _maybe_emit_canonical_entry_fill(pos: Position, deps=None) -> None:
+def _maybe_emit_canonical_entry_fill(pos: Position, deps=None) -> bool:
     """Append the ENTRY_ORDER_FILLED canonical event so position_current
     advances from pending_entry to active. Events 1 and 2 (OPEN_INTENT,
     ORDER_POSTED) were written at order placement; here we only add the
     fill event at the next available sequence_no.
+    Returns True on success or no-op, False if DB write fails.
     """
     if deps is None or not hasattr(deps, "get_connection"):
-        return
+        return True
     fill_conn = None
     try:
         from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
@@ -161,8 +165,10 @@ def _maybe_emit_canonical_entry_fill(pos: Position, deps=None) -> None:
         )
         append_many_and_project(fill_conn, events, projection)
         fill_conn.commit()
+        return True
     except Exception as exc:
-        logger.warning("Canonical entry-fill emit failed for %s: %s", pos.trade_id, exc)
+        logger.error(f"Canonical entry-fill DB update failed for {pos.trade_id}: {exc}")
+        return False
     finally:
         if fill_conn is not None:
             try:
@@ -200,7 +206,7 @@ def _maybe_log_execution_fill(
         )
         telemetry_conn.commit()
     except Exception as exc:
-        logger.warning("Failed to log entry fill telemetry for %s: %s", pos.trade_id, exc)
+        raise RuntimeError(f"Execution telemetry DB update failed for {pos.trade_id}: {exc}") from exc
     finally:
         if telemetry_conn is not None:
             try:
@@ -249,8 +255,11 @@ def _mark_entry_filled(
     pos.chain_state = "local_only"
     pos.entered_at = now.isoformat()
 
-    _maybe_update_trade_lifecycle(pos, deps=deps)
-    _maybe_emit_canonical_entry_fill(pos, deps=deps)
+    lc_ok = _maybe_update_trade_lifecycle(pos, deps=deps)
+    cf_ok = _maybe_emit_canonical_entry_fill(pos, deps=deps)
+    if not lc_ok or not cf_ok:
+        pos.state = "quarantine_fill_failed"
+        
     _maybe_log_execution_fill(
         pos,
         submitted_price=submitted_price,
@@ -280,7 +289,11 @@ def _mark_entry_voided(
         )
         target.exit_reason = reason
         target.admin_exit_reason = reason
-    _maybe_update_trade_lifecycle(target, deps=deps)
+        
+    lc_ok = _maybe_update_trade_lifecycle(target, deps=deps)
+    if not lc_ok:
+        target.state = "quarantine_void_failed"
+        
     return "voided", True, False
 
 
@@ -347,8 +360,11 @@ def _handle_no_order_id(
         pos.order_posted_at = now.isoformat()
         return "still_pending", True, False
 
-    # If it's been pending for too long without an order ID, void it
-    return _mark_entry_voided(portfolio, pos, "UNFILLED_NO_ORDER_ID", deps=deps)
+    # If it's been pending for too long without an order ID, quarantine it
+    # rather than destroying it, since it may have hit the exchange engine.
+    pos.state = "quarantine_no_order_id"
+    _maybe_update_trade_lifecycle(pos, deps=deps)
+    return "still_pending", True, False
 
 
 def _normalize_status(payload) -> str:

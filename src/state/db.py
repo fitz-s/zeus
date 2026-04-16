@@ -136,6 +136,37 @@ _RUNTIME_STATE_ORDER = {
     "admin_closed": 5,
 }
 
+_CONTROL_HISTORY_DDL = """
+        CREATE TABLE IF NOT EXISTS control_overrides_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            override_id TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            issued_by TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            effective_until TEXT,
+            reason TEXT NOT NULL,
+            precedence INTEGER NOT NULL,
+            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+"""
+
+_TOKEN_SUPPRESSION_HISTORY_DDL = """
+        CREATE TABLE IF NOT EXISTS token_suppression_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL,
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+"""
+
 # Maximum timestamp drift (in seconds) from dual-write that is treated as a
 # same-transaction shadow rather than a genuine stale signal.
 _DUAL_WRITE_TOLERANCE_SECS = 1.0
@@ -203,15 +234,21 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             station_id TEXT,
             fetched_at TEXT,
             -- K1 additions: raw value/unit contract
-            raw_value REAL,
-            raw_unit TEXT CHECK (raw_unit IN ('F', 'C', 'K')),
-            target_unit TEXT CHECK (target_unit IN ('F', 'C')),
-            value_type TEXT CHECK (value_type IN ('high', 'low', 'mean')),
+            high_raw_value REAL,
+            high_raw_unit TEXT CHECK (high_raw_unit IN ('F', 'C', 'K')),
+            high_target_unit TEXT CHECK (high_target_unit IN ('F', 'C')),
+            low_raw_value REAL,
+            low_raw_unit TEXT CHECK (low_raw_unit IN ('F', 'C', 'K')),
+            low_target_unit TEXT CHECK (low_target_unit IN ('F', 'C')),
             -- K1 additions: temporal provenance
-            fetch_utc TEXT,
-            local_time TEXT,
-            collection_window_start_utc TEXT,
-            collection_window_end_utc TEXT,
+            high_fetch_utc TEXT,
+            high_local_time TEXT,
+            high_collection_window_start_utc TEXT,
+            high_collection_window_end_utc TEXT,
+            low_fetch_utc TEXT,
+            low_local_time TEXT,
+            low_collection_window_start_utc TEXT,
+            low_collection_window_end_utc TEXT,
             -- K1 additions: DST context
             timezone TEXT,
             utc_offset_minutes INTEGER,
@@ -227,7 +264,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             data_source_version TEXT,
             -- K1 additions: authority + extensibility
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            provenance_metadata TEXT,  -- JSON
+            high_provenance_metadata TEXT,  -- JSON
+            low_provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
         );
 
@@ -270,8 +308,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
-            issue_time TEXT NOT NULL,
-            valid_time TEXT NOT NULL,
+            issue_time TEXT,
+            valid_time TEXT,
             available_at TEXT NOT NULL,
             fetch_time TEXT NOT NULL,
             lead_hours REAL NOT NULL,
@@ -885,7 +923,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ended_at TEXT,
             impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
             details_json TEXT NOT NULL
-        );
+);
 
         -- Replay engine results
         CREATE TABLE IF NOT EXISTS replay_results (
@@ -1088,7 +1126,13 @@ def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> Non
             f"non-empty legacy table is missing required columns {missing}"
         )
     if missing:
-        conn.execute("DROP TABLE IF EXISTS calibration_decision_group")
+        backup_name = "calibration_decision_group__missing_cols_backup"
+        logger.warning(
+            f"Migrating empty calibration_decision_group schema to add {missing}. "
+            f"Backing up existing schema to {backup_name} before rebuilding."
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {backup_name}")
+        conn.execute(f"ALTER TABLE calibration_decision_group RENAME TO {backup_name}")
         conn.execute(_CALIBRATION_DECISION_GROUP_DDL)
         conn.execute(_CALIBRATION_DECISION_GROUP_INDEX_DDL)
         return
@@ -2571,7 +2615,7 @@ def log_outcome_fact(
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = "live"
+    env = getattr(pos, "env", "live")
     status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
@@ -2734,13 +2778,13 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         from datetime import datetime
-        env = "live"
+        env = getattr(pos, "env", "live")
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
             pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
             getattr(pos, "decision_snapshot_id", None) or None,
             getattr(pos, "calibration_version", "") or None,
-            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
+            getattr(pos, "p_raw", None), getattr(pos, "p_cal", None), pos.edge, 0.0, 0.0, 0.0,
             status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
             getattr(pos, "trade_id", ""),
             getattr(pos, "order_id", ""),
@@ -3546,18 +3590,18 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
         positions.append(
             {
                 "trade_id": trade_id,
-                "market_id": str(row["market_id"] or ""),
-                "city": str(row["city"] or ""),
-                "cluster": str(row["cluster"] or ""),
-                "target_date": str(row["target_date"] or ""),
-                "bin_label": str(row["bin_label"] or ""),
-                "direction": str(row["direction"] or "unknown"),
-                "unit": str(row["unit"] or "F"),
-                "size_usd": float(row["size_usd"] or 0.0),
-                "shares": float(row["shares"] or 0.0),
-                "cost_basis_usd": float(row["cost_basis_usd"] or 0.0),
-                "entry_price": float(row["entry_price"] or 0.0),
-                "p_posterior": float(row["p_posterior"] or 0.0),
+                "market_id": row["market_id"],
+                "city": row["city"],
+                "cluster": row["cluster"],
+                "target_date": row["target_date"],
+                "bin_label": row["bin_label"],
+                "direction": row["direction"],
+                "unit": row["unit"],
+                "size_usd": row["size_usd"],
+                "shares": row["shares"],
+                "cost_basis_usd": row["cost_basis_usd"],
+                "entry_price": row["entry_price"],
+                "p_posterior": row["p_posterior"],
                 "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
                 "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
                 "last_monitor_market_price": row["last_monitor_market_price"],
@@ -3623,6 +3667,26 @@ def upsert_control_override(
             effective_until=excluded.effective_until,
             reason=excluded.reason,
             precedence=excluded.precedence
+        """,
+        (
+            override_id,
+            target_type,
+            target_key,
+            action_type,
+            value,
+            issued_by,
+            issued_at,
+            effective_until,
+            reason,
+            precedence,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO control_overrides_history (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             override_id,
@@ -3712,6 +3776,23 @@ def record_token_suppression(
             normalized_source,
             now,
             now,
+            evidence_json,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression_history (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            normalized_token,
+            condition_id,
+            normalized_reason,
+            normalized_source,
+            created_at,
+            updated_at,
             evidence_json,
         ),
     )
@@ -3833,11 +3914,15 @@ def query_control_override_state(
             if entries_paused:
                 reason = str(row["reason"] or "")
                 issued_by = str(row["issued_by"] or "")
-                if issued_by.startswith("auto:auto_pause:"):
+                if issued_by == "system_auto_pause" or issued_by.startswith("auto:"):
                     entries_pause_source = "auto_exception"
-                    entries_pause_reason = issued_by.removeprefix("auto:")
+                    entries_pause_reason = reason if issued_by == "system_auto_pause" else issued_by.replace("auto:", "", 1)
+                elif issued_by == "control_plane":
+                    entries_pause_source = "manual_command"
+                    entries_pause_reason = reason
                 else:
                     entries_pause_source = "manual_command"
+                    entries_pause_reason = f"external:{issued_by}"
             global_gate_seen = True
             continue
         if target_type == "global" and target_key == "entries" and action_type == "threshold_multiplier" and not global_threshold_seen:

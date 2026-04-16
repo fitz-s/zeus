@@ -56,19 +56,15 @@ from src.state.data_coverage import (
     record_written,
 )
 
+from src.data.openmeteo_client import ARCHIVE_URL, fetch as openmeteo_fetch
+
 logger = logging.getLogger(__name__)
 
-OPENMETEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 SOURCE = "openmeteo_archive_hourly"
 CHUNK_DAYS = 90
 SLEEP_BETWEEN_REQUESTS = 1.0
-FETCH_RETRY_COUNT = 2
-FETCH_RETRY_BACKOFF_SEC = 2.0
 
-#: Minimum hours a local_date must have to be marked WRITTEN. DST
-#: spring-forward days have 23 hours; the scanner accepts any day with
-#: ≥20 hours as covered to allow for the occasional Open-Meteo null.
-_MIN_HOURS_PER_DAY_FOR_WRITTEN = 20
+#: The scanner evaluates dynamic limits per Date/Timezone offset.
 
 _GUARD = IngestionGuard()
 
@@ -109,9 +105,9 @@ def _fetch_hourly_chunk(
     offsets for every DST day.
     """
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
-    resp = httpx.get(
-        OPENMETEO_ARCHIVE_URL,
-        params={
+    data = openmeteo_fetch(
+        ARCHIVE_URL,
+        {
             "latitude": city.lat,
             "longitude": city.lon,
             "start_date": start_date.isoformat(),
@@ -120,10 +116,8 @@ def _fetch_hourly_chunk(
             "temperature_unit": temp_unit,
             "timezone": city.timezone,
         },
-        timeout=30.0,
+        endpoint_label="archive_hourly",
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
@@ -131,6 +125,7 @@ def _fetch_hourly_chunk(
 
     tz = ZoneInfo(city.timezone)
     out: list[dict] = []
+    quarantine_count = 0
     for raw_time, temp in zip(times, temps):
         if temp is None:
             continue
@@ -162,24 +157,23 @@ def _fetch_hourly_chunk(
             })
         except (ValueError, AttributeError) as e:
             logger.debug("parse failed %s %s: %s", city.name, raw_time, e)
+            quarantine_count += 1
             continue
+
+    if len(temps) > 0 and quarantine_count > len(temps) * 0.1:
+        raise ValueError(f"Quarantine threshold exceeded for {city.name}: {quarantine_count} failures")
     return out
 
 
 def _fetch_with_retry(
     city: City, start_date: date, end_date: date,
 ) -> tuple[list[dict], str | None]:
-    for attempt in range(FETCH_RETRY_COUNT + 1):
-        try:
-            return _fetch_hourly_chunk(city, start_date, end_date), None
-        except httpx.HTTPError as e:
-            if attempt < FETCH_RETRY_COUNT:
-                time.sleep(FETCH_RETRY_BACKOFF_SEC * (attempt + 1))
-                continue
-            return [], f"http error after {FETCH_RETRY_COUNT + 1} tries: {e}"
-        except Exception as e:
-            return [], f"unexpected error: {type(e).__name__}: {e}"
-    return [], "exhausted retries"
+    try:
+        return _fetch_hourly_chunk(city, start_date, end_date), None
+    except httpx.HTTPError as e:
+        return [], f"network error: {type(e).__name__}: {e}"
+    except Exception as e:
+        raise RuntimeError(f"Unexpected non-network infrastructure error: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -254,14 +248,35 @@ def _write_row(conn, r: dict, rebuild_run_id: str) -> None:
     ))
 
 
+def _expected_hours(target_date_str: str, timezone_name: str) -> int:
+    import pytz
+    tz = pytz.timezone(timezone_name)
+    dt = datetime.fromisoformat(target_date_str)
+    try:
+        start_dt = tz.localize(dt, is_dst=None)
+    except pytz.exceptions.AmbiguousTimeError:
+        start_dt = tz.localize(dt, is_dst=False)
+    except pytz.exceptions.NonExistentTimeError:
+        start_dt = tz.normalize(tz.localize(dt + timedelta(hours=1)))
+        
+    next_day = dt + timedelta(days=1)
+    try:
+        end_dt = tz.localize(next_day, is_dst=None)
+    except pytz.exceptions.AmbiguousTimeError:
+        end_dt = tz.localize(next_day, is_dst=False)
+    except pytz.exceptions.NonExistentTimeError:
+        end_dt = tz.normalize(tz.localize(next_day + timedelta(hours=1)))
+        
+    return int((end_dt - start_dt).total_seconds() / 3600)
+
+
 def _rollup_dates_written(rows: list[dict]) -> dict[str, int]:
     """Count hours written per local_date in this batch.
 
     Used to decide whether each (city, local_date) should be marked
-    WRITTEN in data_coverage. Only dates with ≥ _MIN_HOURS_PER_DAY_FOR_WRITTEN
-    flip to WRITTEN; partial-day rows remain un-flipped and the scanner
-    will pick them up on the next pass.
+    WRITTEN in data_coverage.
     """
+
     counts: dict[str, int] = {}
     for r in rows:
         td = r["target_date"]
@@ -358,10 +373,11 @@ def append_hourly_window(
                 )
 
         # Roll up per-date from written_rows (not kept) and flip to
-        # WRITTEN where the success count hits threshold.
+        # WRITTEN where the success count hits threshold dynamically.
         counts = _rollup_dates_written(written_rows)
         for target_date_str, n_hours in counts.items():
-            if n_hours >= _MIN_HOURS_PER_DAY_FOR_WRITTEN:
+            expected = _expected_hours(target_date_str, city.timezone)
+            if n_hours >= expected:
                 record_written(
                     conn,
                     data_table=DataTable.OBSERVATION_INSTANTS,

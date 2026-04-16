@@ -30,7 +30,7 @@ from src.contracts import (
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
-from src.engine.time_context import lead_days_to_target, lead_hours_to_target
+from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, select_hours_for_target_date
@@ -76,7 +76,7 @@ class MarketCandidate:
     target_date: str
     outcomes: list[dict]
     hours_since_open: float
-    hours_to_resolution: float
+    hours_to_resolution: Optional[float] = None
     temperature_metric: str = "high"
     event_id: str = ""
     slug: str = ""
@@ -219,8 +219,11 @@ def _default_weather_fee_rate() -> float:
         if fee_contract is not None:
             return float(fee_contract.current_value)
     except Exception as exc:
-        logger.warning("FEE_RATE_WEATHER contract unavailable; falling back to 0.05: %s", exc)
-    return 0.05
+        from src.contracts.exceptions import FeeRateUnavailableError
+        logger.warning("FEE_RATE_WEATHER contract unavailable; failing evaluation: %s", exc)
+        raise FeeRateUnavailableError(f"FEE_RATE_WEATHER contract unavailable: {exc}") from exc
+    from src.contracts.exceptions import FeeRateUnavailableError
+    raise FeeRateUnavailableError("FEE_RATE_WEATHER contract not found in economic.yaml")
 
 
 def _fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
@@ -701,7 +704,7 @@ def evaluate_candidate(
         )]
 
     target_d = date.fromisoformat(target_date)
-    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
+    lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
     ens_forecast_days = max(2, int(max(0.0, lead_days)) + 2)
 
     # Fetch ENS
@@ -753,7 +756,7 @@ def evaluate_candidate(
         )]
 
     decision_reference = ens_result.get("fetch_time")
-    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, decision_reference))
+    lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, decision_reference))
 
     if is_day0_mode:
         temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
@@ -832,7 +835,7 @@ def evaluate_candidate(
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate)
     snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
-    _store_snapshot_p_raw(conn, snapshot_id, p_raw)
+    _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
 
     # Calibration
     # K4 authority gate: verify no UNVERIFIED pairs are present for this bucket.
@@ -845,8 +848,19 @@ def evaluate_candidate(
         _cal_season = season_from_date(target_date, lat=city.lat)
         try:
             _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
-        except Exception:
-            _unverified_pairs = []
+        except Exception as e:
+            return [EdgeDecision(
+                decision_id=_generate_decision_id(),
+                tokens=tokens,
+                edge=None,
+                size_usd=0.0,
+                should_trade=False,
+                rejection_reasons=["authority gate failed due to DB query fault"],
+                rejection_stage="AUTHORITY_GATE",
+                availability_status="DATA_UNAVAILABLE",
+                decision_snapshot_id=snapshot_id,
+                selected_method="unknown",
+            )]
         if _unverified_pairs:
             return [EdgeDecision(
                 False,
@@ -881,32 +895,38 @@ def evaluate_candidate(
 
     # Market prices via VWMP
     p_market = np.zeros(len(bins))
+    market_is_complete = True
+    mapped_outcomes = 0
     for i, o in enumerate(outcomes):
         if o["range_low"] is None and o["range_high"] is None:
             continue
         idx = next((j for j, b in enumerate(bins) if b.label == o["title"]), None)
         if idx is None:
+            market_is_complete = False
             continue
         try:
             bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(o["token_id"])
             p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
 
             # Injection Point 7: Data completeness - record microstructure snapshot
-            import datetime as dt
-            from src.state.db import log_microstructure
-            log_microstructure(
-                conn,
-                token_id=o["token_id"],
-                city=city.name,
-                target_date=target_d.isoformat(),
-                range_label=bins[idx].label,
-                price=float(p_market[idx]),
-                volume=float(bid_sz + ask_sz),
-                bid=float(bid),
-                ask=float(ask),
-                spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                source_timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
-            )
+            try:
+                import datetime as dt
+                from src.state.db import log_microstructure
+                log_microstructure(
+                    conn,
+                    token_id=o["token_id"],
+                    city=city.name,
+                    target_date=target_d.isoformat(),
+                    range_label=bins[idx].label,
+                    price=float(p_market[idx]),
+                    volume=float(bid_sz + ask_sz),
+                    bid=float(bid),
+                    ask=float(ask),
+                    spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
+                    source_timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
+                )
+            except Exception as micro_exc:
+                logger.warning("Microstructure log DB insert failed for %s: %s", o["token_id"], micro_exc)
         except Exception as e:
             try:
                 from src.contracts.exceptions import EmptyOrderbookError
@@ -1092,6 +1112,10 @@ def evaluate_candidate(
     )
 
     # Edge detection
+    # Flag missing mapped outcomes against the declared family topology
+    if sum(1 for p in p_market if p > 0.0) < len(bins):
+        market_is_complete = False
+
     analysis = MarketAnalysis(
         p_raw=p_raw,
         p_cal=p_cal,
@@ -1106,6 +1130,7 @@ def evaluate_candidate(
         season=season,
         forecast_source=forecast_source,
         bias_corrected=bool(getattr(ens, "bias_corrected", False)),
+        market_complete=market_is_complete,
         bias_reference=bias_reference,
     )
     if hasattr(analysis, "forecast_context"):
@@ -1504,27 +1529,22 @@ def _snapshot_time_value(value) -> str | None:
     return text or None
 
 
-def _snapshot_issue_time_value(ens_result: dict) -> str:
+def _snapshot_issue_time_value(ens_result: dict) -> Optional[str]:
     issue_time = _snapshot_time_value(ens_result.get("issue_time"))
     if issue_time is not None:
         return issue_time
 
-    fetch_time = _snapshot_time_value(ens_result.get("fetch_time"))
-    if fetch_time is None:
-        return "UNAVAILABLE_UPSTREAM_ISSUE_TIME"
-    return f"UNAVAILABLE_UPSTREAM_ISSUE_TIME(fetch_time={fetch_time})"
+    # Return None instead of synthetic sentinels for missing issue_time
+    return None
 
 
-def _snapshot_valid_time_value(target_date: str, ens_result: dict) -> str:
+def _snapshot_valid_time_value(target_date: str, ens_result: dict) -> Optional[str]:
     valid_time = _snapshot_time_value(ens_result.get("valid_time"))
     if valid_time is not None:
         return valid_time
 
-    first_valid_time = _snapshot_time_value(ens_result.get("first_valid_time"))
-    if first_valid_time is not None:
-        return f"FORECAST_WINDOW_START({first_valid_time})"
-
-    return f"UNSPECIFIED_FORECAST_VALID_TIME(target_date={target_date})"
+    # Return None instead of synthetic sentinels for missing valid_time
+    return None
 
 
 def _ensemble_snapshots_table(conn) -> str:
@@ -1564,7 +1584,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             fetch_time_value,
             max(
                 0.0,
-                lead_hours_to_target(
+                lead_hours_to_date_start(
                     target_date,
                     city.timezone,
                     ens_result.get("fetch_time"),
@@ -1593,8 +1613,8 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         return ""
 
 
-def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray) -> None:
-    """Persist the decision-time p_raw vector onto the snapshot row."""
+def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_corrected: bool = False) -> None:
+    """Persist the decision-time p_raw vector and bias_corrected flag onto the snapshot row."""
 
     if not snapshot_id:
         return
@@ -1604,8 +1624,8 @@ def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray) -> None:
     try:
         snapshots_table = _ensemble_snapshots_table(conn)
         conn.execute(
-            f"UPDATE {snapshots_table} SET p_raw_json = ? WHERE snapshot_id = ?",
-            (json.dumps(p_raw.tolist()), snapshot_id),
+            f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
+            (json.dumps(p_raw.tolist()), int(bias_corrected), snapshot_id),
         )
         conn.commit()
     except Exception as e:

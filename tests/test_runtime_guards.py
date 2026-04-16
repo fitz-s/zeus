@@ -26,7 +26,7 @@ from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
 from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.engine.discovery_mode import DiscoveryMode
-from src.engine.time_context import lead_days_to_target
+from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
@@ -2662,7 +2662,7 @@ def test_partial_stale_policy_uses_degraded_json_fallback():
 
 
 def test_lead_days_use_city_local_reference_time():
-    lead_days = lead_days_to_target(
+    lead_days = lead_days_to_date_start(
         "2026-04-01",
         "Asia/Tokyo",
         datetime(2026, 3, 30, 23, 30, tzinfo=timezone.utc),
@@ -3780,9 +3780,7 @@ def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
     conn.close()
 
     assert row is not None
-    assert row["issue_time"] == (
-        "UNAVAILABLE_UPSTREAM_ISSUE_TIME(fetch_time=2026-01-14T06:05:00+00:00)"
-    )
+    assert row["issue_time"] is None
     assert row["valid_time"] == "FORECAST_WINDOW_START(2026-01-14T05:00:00+00:00)"
     assert row["available_at"] == "2026-01-14T06:05:00+00:00"
     assert row["fetch_time"] == "2026-01-14T06:05:00+00:00"

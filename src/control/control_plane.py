@@ -41,7 +41,11 @@ def _load_control_payload() -> dict:
         with open(CONTROL_PATH) as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as e:
+        logger.error("control_plane.json corrupted (JSONDecodeError)")
+        _set_state("control_plane_fault", True)
+        raise ValueError("Corrupted control_plane.json encountered, treating as fatal fault") from e
+    except OSError:
         return {}
 
 
@@ -106,7 +110,7 @@ def pause_entries(reason_code: str) -> None:
             target_key="entries",
             action_type="gate",
             value="true",
-            issued_by=f"auto:{reason_code}",
+            issued_by="system_auto_pause",
             issued_at=datetime.now(timezone.utc).isoformat(),
             reason=reason_code,
             precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
@@ -115,6 +119,16 @@ def pause_entries(reason_code: str) -> None:
         conn.close()
     except Exception as exc:
         logger.error("Failed to persist auto-pause to DB: %s", exc)
+        _control_state["control_db_fault"] = True
+        try:
+            with open(state_path("auto_pause_failclosed.tombstone"), "w") as f:
+                f.write(reason_code)
+        except OSError:
+            pass
+        try:
+            alert_auto_pause(f"{reason_code}_db_fault")
+        except Exception:
+            pass
 
 
 
@@ -129,13 +143,9 @@ def strategy_gates() -> dict[str, GateDecision]:
         if isinstance(v, dict):
             result[k] = GateDecision.from_dict(v)
         else:
-            # backward compat: bare bool from DB -> GateDecision with UNSPECIFIED reason
-            result[k] = GateDecision(
-                enabled=bool(v),
-                reason_code=ReasonCode.UNSPECIFIED,
-                reason_snapshot={},
-                gated_at="",
-                gated_by="unknown",
+            raise ValueError(
+                f"Legacy bool strategy gate found for {k!r}. "
+                "Must be migrated to a structured GateDecision dict."
             )
     return result
 
@@ -177,16 +187,28 @@ def refresh_control_state() -> None:
         conn = get_world_connection()
         durable_state = query_control_override_state(conn)
     except Exception:
-        durable_state = {"status": "query_error"}
+        durable_state = {
+            "status": "query_error",
+            "entries_paused": True,
+            "edge_threshold_multiplier": float(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER)
+        }
     finally:
         if conn is not None:
             conn.close()
-    if durable_state.get("status") == "ok":
+    if durable_state.get("status") in {"ok", "query_error"}:
         entries_paused = bool(durable_state.get("entries_paused", False))
         edge_threshold_multiplier = float(
             durable_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
         )
         gates = dict(durable_state.get("strategy_gates", {}))
+        
+    try:
+        import os
+        if os.path.exists(state_path("auto_pause_failclosed.tombstone")):
+            entries_paused = True
+    except OSError:
+        pass
+
     for ack in data.get("acks", []):
         if ack.get("status") != "executed":
             continue
@@ -356,6 +378,10 @@ def process_commands() -> list[str]:
     acks = data.get("acks", [])
     if not commands:
         refresh_control_state()
+        return []
+
+    if _control_state.get("control_plane_fault"):
+        logger.error("Control plane fault detected. Halting command processing.")
         return []
 
     processed = []

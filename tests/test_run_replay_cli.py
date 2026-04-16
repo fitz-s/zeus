@@ -705,6 +705,23 @@ def test_replay_market_price_linkage_limitations_distinguish_full_partial_none()
     assert none["pnl_unavailable_reason"] == "market_price_unavailable"
 
 
+def test_replay_limitations_include_missing_parity_dimensions():
+    """ZDM-03: replay summaries must report which parity dimensions are missing."""
+    from src.engine.replay import _missing_parity_dimensions
+
+    # With full linkage → only sizing and selection parity missing
+    missing = _missing_parity_dimensions(full_linkage=True)
+    assert "market_price_linkage" not in missing
+    assert "active_sizing_parity" in missing
+    assert "selection_family_parity" in missing
+    assert len(missing) == 2
+
+    # With no linkage → all three missing
+    missing_all = _missing_parity_dimensions(full_linkage=False)
+    assert "market_price_linkage" in missing_all
+    assert len(missing_all) == 3
+
+
 def test_cli_formats_partial_market_linkage_pnl_as_unavailable():
     summary = SimpleNamespace(
         replay_total_pnl=12.5,

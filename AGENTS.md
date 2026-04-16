@@ -39,6 +39,18 @@ The main truth path is:
 
 `chain/CLOB facts -> canonical DB/events -> projections/status -> derived reports`.
 
+## Market Structure
+
+Zeus trades temperature bins on Polymarket. Bin structure is city/unit-specific:
+
+- **°F cities** (NYC, Chicago): 2°F range bins (e.g. "40-41°F"). `finite_range` contract kind.
+- **°C cities** (London, Paris, Seoul, Shanghai, Tokyo): 1°C point bins (e.g. "10°C"). `point` contract kind.
+- **Shoulder bins**: open-ended (e.g. "≤39°F" or "≥50°F"). `open_shoulder` contract kind. These stay in raw probability space — no width-normalized density.
+- **Settlement**: WMO asymmetric half-up rounding: `floor(x + 0.5)`. Not Python round, not banker rounding.
+- **DST**: NYC, Chicago, London, Paris have DST transitions. Tokyo, Seoul, Shanghai do not. Runtime is DST-aware via `ZoneInfo`; historical aggregates may still contain pre-fix data.
+- **P_raw scale**: differs by bin width. A 2°F range bin captures ~2× the ensemble members of a 1°C point bin. Platt calibration must account for this.
+- **Bin topology invariant**: every market's bin set must cover all integer settlement values exactly once — no gaps, no overlaps.
+
 Derived JSON, CSV, backtest DBs, status summaries, strategy trackers, and
 archives are never canonical truth unless a typed authority path says so.
 

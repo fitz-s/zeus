@@ -52,6 +52,7 @@ class MarketAnalysis:
         bias_corrected: bool | None = None,
         bias_reference: dict | None = None,
         rng_seed: int | None = None,
+        market_complete: bool = True,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -59,6 +60,7 @@ class MarketAnalysis:
         self.p_raw = p_raw
         self.p_cal = p_cal
         self.p_market = p_market
+        self.market_complete = market_complete
         self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
         self.vig = float(p_market.sum())
         self._member_maxes = analysis_member_maxes(
@@ -110,6 +112,7 @@ class MarketAnalysis:
         return {
             "uncertainty": self.sigma_context(),
             "location": self.mean_context(),
+            "market_complete": self.market_complete,
         }
 
     def find_edges(
@@ -150,28 +153,31 @@ class MarketAnalysis:
                     ))
 
             # Buy NO direction: edge on the NO side
-            p_model_no = 1.0 - float(self.p_cal[i])
-            p_market_no = 1.0 - float(self.p_market[i])
-            p_post_no = 1.0 - float(self.p_posterior[i])
-            edge_no = p_post_no - p_market_no
+            # Restricted to binary markets since local `1-p` math on multi-bin
+            # families generates synthetic edges decoupled from native NO-token VWMP
+            if len(self.bins) <= 2:
+                p_model_no = 1.0 - float(self.p_cal[i])
+                p_market_no = 1.0 - float(self.p_market[i])
+                p_post_no = 1.0 - float(self.p_posterior[i])
+                edge_no = p_post_no - p_market_no
 
-            if edge_no > 0:
-                ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
-                if ci_lo > 0:
-                    edges.append(BinEdge(
-                        bin=b,
-                        direction="buy_no",
-                        edge=edge_no,
-                        ci_lower=ci_lo,
-                        ci_upper=ci_hi,
-                        p_model=p_model_no,
-                        p_market=p_market_no,
-                        p_posterior=p_post_no,
-                        entry_price=p_market_no,
-                        p_value=p_val,
-                        vwmp=p_market_no,
-                        forward_edge=edge_no,
-                    ))
+                if edge_no > 0:
+                    ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
+                    if ci_lo > 0:
+                        edges.append(BinEdge(
+                            bin=b,
+                            direction="buy_no",
+                            edge=edge_no,
+                            ci_lower=ci_lo,
+                            ci_upper=ci_hi,
+                            p_model=p_model_no,
+                            p_market=p_market_no,
+                            p_posterior=p_post_no,
+                            entry_price=p_market_no,
+                            p_value=p_val,
+                            vwmp=p_market_no,
+                            forward_edge=edge_no,
+                        ))
 
         return edges
 
@@ -235,7 +241,9 @@ class MarketAnalysis:
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
                     if is_wnd:
-                        p_input = p_raw_all[j] / bb.width if bb.width is not None and bb.width > 0 else p_raw_all[j]
+                        if bb.width is None or bb.width <= 0:
+                            raise ValueError(f"Bin width must be defined and >0 for width-normalized density. Bin: {bb}")
+                        p_input = p_raw_all[j] / bb.width
                     z = A * logit_safe(p_input) + B * self._lead_days + C
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:

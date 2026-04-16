@@ -65,10 +65,10 @@ LONDON = City(
 def _decision_group_id(
     city: str,
     target_date: str,
-    forecast_available_at: str,
+    issue_time: str,
     source_model_version: str = "test_calibration_manager_v1",
 ) -> str:
-    return compute_id(city, target_date, forecast_available_at, source_model_version)
+    return compute_id(city, target_date, issue_time, source_model_version)
 
 
 class TestBucketRouting:
@@ -195,6 +195,7 @@ class TestStoreRoundTrip:
             lead_days=3.0,
             forecast_available_at="2026-01-14T00:00:00Z",
             source_model_version="test_bias_corrected_v1",
+            forecast_issue_time="2026-01-13T12:00:00Z",
             bias_corrected=True,
         )
         conn.commit()
@@ -208,6 +209,13 @@ class TestStoreRoundTrip:
         assert all(row["bias_corrected"] == 1 for row in rows), \
             "All pairs from bias-corrected harvest must have bias_corrected=1"
 
+        # Verify decision_group_id was set on all pairs
+        group_rows = conn.execute(
+            "SELECT decision_group_id FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
+        ).fetchall()
+        assert all(row["decision_group_id"] is not None and row["decision_group_id"] != "" for row in group_rows), \
+            "All pairs must have decision_group_id set at insert time"
+
         # Simulate harvest with bias_corrected=False
         n2 = harvest_settlement(
             conn, city, "2026-01-16",
@@ -217,6 +225,7 @@ class TestStoreRoundTrip:
             lead_days=2.0,
             forecast_available_at="2026-01-15T00:00:00Z",
             source_model_version="test_bias_corrected_v1",
+            forecast_issue_time="2026-01-14T12:00:00Z",
             bias_corrected=False,
         )
         conn.commit()
@@ -228,6 +237,36 @@ class TestStoreRoundTrip:
         assert all(row["bias_corrected"] == 0 for row in rows2), \
             "All pairs from non-bias-corrected harvest must have bias_corrected=0"
 
+        conn.close()
+
+    def test_bias_corrected_fallback_reads_settings(self, tmp_path, monkeypatch):
+        """ZDM-01: when bias_corrected=None, harvest reads settings.bias_correction_enabled."""
+        conn = self._get_test_conn(tmp_path)
+
+        from src.execution.harvester import harvest_settlement
+        from src.config import Settings
+        monkeypatch.setattr(Settings, "bias_correction_enabled", True, raising=True)
+
+        city = NYC
+        n = harvest_settlement(
+            conn, city, "2026-02-01",
+            winning_bin_label="bin_0",
+            bin_labels=[f"bin_{i}" for i in range(3)],
+            p_raw_vector=[0.5, 0.3, 0.2],
+            lead_days=2.0,
+            forecast_available_at="2026-01-31T00:00:00Z",
+            source_model_version="fallback_test_v1",
+            forecast_issue_time="2026-01-30T12:00:00Z",
+            bias_corrected=None,  # should fall back to settings
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-02-01'"
+        ).fetchall()
+        assert len(rows) == 3
+        assert all(row["bias_corrected"] == 1 for row in rows), \
+            "Fallback path should read bias_correction_enabled=True from settings"
         conn.close()
 
 
@@ -281,6 +320,7 @@ class TestDecisionGroupAccounting:
         assert all(group.n_positive_rows == 1 for group in groups)
         assert groups[0].winning_range_label == "bin_3"
         assert health == [{
+            "shadow_only": True,
             "bucket_key": "US-Northeast_DJF",
             "cluster": "US-Northeast",
             "season": "DJF",
@@ -466,6 +506,7 @@ class TestDecisionGroupAccounting:
         conn.close()
 
         assert shadow == [{
+            "shadow_only": True,
             "bucket_key": "US-Northeast_DJF",
             "cluster": "US-Northeast",
             "season": "DJF",
