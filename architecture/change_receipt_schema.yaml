@@ -25,7 +25,27 @@ allowed_route_sources:
   - ralplan
   - manual_packet
   - current_state
-  - closeout
+
+route_evidence_globs_by_source:
+  navigation:
+    - .omx/context/**
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/current_state.md
+  digest:
+    - .omx/context/**
+    - docs/operations/task_????-??-??_*/plan.md
+  packet:
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/task_????-??-??_*.md
+  ralplan:
+    - .omx/plans/**
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/current_state.md
+  manual_packet:
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/task_????-??-??_*.md
+  current_state:
+    - docs/operations/current_state.md
 
 approved_receipt_globs:
   - docs/operations/task_????-??-??_*/receipt.json
