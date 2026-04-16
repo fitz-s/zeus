@@ -371,13 +371,14 @@ def run_harvester() -> dict:
             legacy_settlement_records_skipped,
         )
 
+    trade_conn.commit()
+    shared_conn.commit()
+
     if positions_settled > 0:
         save_portfolio(portfolio)
     if tracker_dirty:
         save_tracker(tracker)
 
-    trade_conn.commit()
-    shared_conn.commit()
     trade_conn.close()
     shared_conn.close()
 
