@@ -108,6 +108,7 @@ categories:
     - tests/test_semantic_snapshot_backfill.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
+    - tests/test_shadow_boundary.py
     - tests/test_wu_scheduler.py
 
   transitional_advisory:
@@ -293,7 +294,7 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Legacy truth-surface skips indicate topology drift, not safe deletion.
-    skip_count: 6
+    skip_count: 5
     reason_patterns:
       - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
     sunset: Resolve with truth-surface cleanup packet.
