@@ -15,11 +15,9 @@
     "architecture/change_receipt_schema.yaml",
     "architecture/context_budget.yaml",
     "architecture/script_manifest.yaml",
-    "architecture/source_rationale.yaml",
     "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
-    ".gitignore",
     "AGENTS.md",
     "architecture/**",
     "docs/**",
@@ -32,7 +30,6 @@
     "state/**"
   ],
   "changed_files": [
-    ".gitignore",
     "AGENTS.md",
     "architecture/AGENTS.md",
     "architecture/artifact_lifecycle.yaml",
@@ -40,7 +37,6 @@
     "architecture/context_budget.yaml",
     "architecture/map_maintenance.yaml",
     "architecture/script_manifest.yaml",
-    "architecture/source_rationale.yaml",
     "architecture/test_topology.yaml",
     "architecture/topology.yaml",
     "architecture/topology_schema.yaml",
@@ -57,6 +53,7 @@
     "scripts/topology_doctor_cli.py",
     "scripts/topology_doctor_closeout.py",
     "scripts/topology_doctor_core_map.py",
+    "scripts/topology_doctor_docs_checks.py",
     "scripts/topology_doctor_map_maintenance.py",
     "scripts/topology_doctor_policy_checks.py",
     "scripts/topology_doctor_receipt_checks.py",
