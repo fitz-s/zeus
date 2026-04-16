@@ -427,7 +427,6 @@ docs_root_allowed_files:
 active_operations_registry:
   current_state: docs/operations/current_state.md
   required_labels:
-    - Topology program packet file
     - Dual-Track refactor packet file
     - Active backlog
     - Active checklist/evidence

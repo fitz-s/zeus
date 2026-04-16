@@ -13,16 +13,12 @@ Role: single live control-entry surface for the repo.
 ## Active Work
 
 - Branch: `data-improve`
-- **Parallel programs (owned by different agents)**:
-  1. Zeus Topology Compiler and Recurrence-Proof Program — active packet `Topology Enforcement Hardening`, handled by a separate agent; do not edit its files.
-  2. Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16, governance + architecture refactor owning metric identity, World DB v2, death-trap remediation law, and low-track activation. Handled by the current agent.
-- Topology program packet file: `docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md`
+- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16, governance + architecture refactor owning metric identity, World DB v2, death-trap remediation law, and low-track activation.
 - Dual-Track refactor packet file: `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
 - Dual-Track authority file: `docs/authority/zeus_dual_track_architecture.md`
 - Archived:
   - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
-- Active sidecars:
-  - `docs/operations/task_2026-04-15_topology_enforcement_hardening/` — active implementation packet for reports surface normalization, closeout compiler, route receipts, and evidence-budget telemetry
+  - `docs/archives/work_packets/branches/data-improve/topology/2026-04-15_topology_enforcement_hardening/` — topology enforcement hardening COMPLETE, merged to `data-improve`, branch-diff closeout verified, archived 2026-04-16
 - Active backlog:
   - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
   - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
@@ -31,8 +27,7 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/phase1live_2026-04-11_plan.md` — Phase 1 Live Daemon Maturity plan (IN PROGRESS since 2026-04-11, no updates since creation; conceptual authority only)
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
-  - `docs/operations/task_2026-04-15_topology_enforcement_hardening/work_log.md` — active topology hardening work record
-- Next packet: Topology enforcement hardening phases 2-4, unless Phase 1 reveals a higher-priority governance break
+- Next packet: Continue the Dual-Track Metric Spine Refactor unless a higher-priority governance break supersedes it.
 
 ## Runtime
 
@@ -68,4 +63,4 @@ Role: single live control-entry surface for the repo.
 
 ## Next Expected Packet
 
-Complete the topology enforcement hardening packet unless a new architecture/governance blocker supersedes it.
+Continue the Dual-Track Metric Spine Refactor unless a new architecture/governance blocker supersedes it.
