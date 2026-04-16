@@ -106,6 +106,7 @@ long_lived_naming:
     semantic_linter.py: established enforcement tool
     topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
     topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
+    topology_doctor_closeout.py: compiled closeout checker-family module imported by topology_doctor.py
     topology_doctor_context_pack.py: context-pack/impact builder-family module imported by topology_doctor.py
     topology_doctor_core_map.py: core-map/compiled-topology builder-family module imported by topology_doctor.py
     topology_doctor_data_rebuild_checks.py: data-rebuild checker-family module imported by topology_doctor.py
@@ -116,6 +117,7 @@ long_lived_naming:
     topology_doctor_policy_checks.py: governance/policy checker-family module imported by topology_doctor.py
     topology_doctor_registry_checks.py: registry/root/docs-strict checker-family module imported by topology_doctor.py
     topology_doctor_reference_checks.py: reference/core-claim checker-family module imported by topology_doctor.py
+    topology_doctor_receipt_checks.py: change-receipt checker-family module imported by topology_doctor.py
     topology_doctor_script_checks.py: script-manifest checker-family module imported by topology_doctor.py
     topology_doctor_source_checks.py: source-rationale/scoped-AGENTS checker-family module imported by topology_doctor.py
     topology_doctor_test_checks.py: test-topology checker-family module imported by topology_doctor.py
@@ -431,6 +433,7 @@ scripts:
   semantic_linter.py: {class: enforcement}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}
+  topology_doctor_closeout.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for compiled closeout lane}
   topology_doctor_context_pack.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for context-pack/impact builder family}
   topology_doctor_core_map.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for core-map/compiled-topology builder family}
   topology_doctor_data_rebuild_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for data-rebuild checker family}
@@ -441,6 +444,7 @@ scripts:
   topology_doctor_policy_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for governance/policy checker family}
   topology_doctor_registry_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for registry/root/docs-strict checker family}
   topology_doctor_reference_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for reference/core-claim checker family}
+  topology_doctor_receipt_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for change-receipt checker family}
   topology_doctor_script_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for script-manifest checker family}
   topology_doctor_source_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for source-rationale/scoped-AGENTS checker family}
   topology_doctor_test_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for test-topology checker family}

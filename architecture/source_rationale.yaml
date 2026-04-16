@@ -180,6 +180,7 @@ files:
   src/data/ingestion_guard.py: {zone: K2_runtime, authority_role: observation_ingestion_gate, why: "Validates ObservationAtom writes across unit, bounds, seasonal, timing, and DST layers.", write_routes: [script_repair_write]}
   src/data/market_scanner.py: {zone: K2_runtime, authority_role: market_discovery, why: "Discovers and parses Polymarket weather markets and bin labels."}
   src/data/observation_client.py: {zone: K2_runtime, authority_role: observation_reader, why: "Reads current observations for day0/monitor logic."}
+  src/data/openmeteo_client.py: {zone: K2_runtime, authority_role: openmeteo_http_boundary, why: "Shared Open-Meteo HTTP client with retry/429 handling and quota tracking so rate-limit behavior stays explicit across fetchers.", downstream: ["src/data/forecasts_append.py", "src/data/hourly_instants_append.py", "src/data/solar_append.py"]}
   src/data/openmeteo_quota.py: {zone: K2_runtime, authority_role: quota_guard, why: "Tracks Open-Meteo rate limits so data gaps are explicit."}
   src/data/polymarket_client.py: {zone: K2_runtime, authority_role: clob_boundary, why: "CLOB market data and order API boundary."}
   src/data/rebuild_validators.py: {zone: K2_runtime, authority_role: rebuild_row_validator, why: "Validates rebuild rows before authority-stamped output atoms are written.", write_routes: [script_repair_write]}

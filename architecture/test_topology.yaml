@@ -310,7 +310,7 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Data-dependent relationship skips include settlement, canonical position, and risk-state topology checks.
-    skip_count: 10
+    skip_count: 11
     reason_patterns:
       - "Canonical position tables not present"
       - "No SETTLEMENT events in chronicle"

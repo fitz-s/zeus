@@ -41,4 +41,8 @@ state/city_settlement_audit.json
 /zeus-world.db-shm
 /zeus-world.db-wal
 
+# Local review / patch scratch artifacts should never become root topology surfaces.
+/k_bugs.json
+/patch_schema.py
+
 .git-commit-msg.tmp

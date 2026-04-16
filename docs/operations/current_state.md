@@ -14,10 +14,12 @@ Role: single live control-entry surface for the repo.
 
 - Branch: `data-improve`
 - Program: Zeus Topology Compiler and Recurrence-Proof Program
-- Active packet: (none — all packets 0-4 closed, `--strict` exits 0; program complete pending user review)
-- Primary packet file: `docs/operations/task_2026-04-13_topology_compiler_program.md`
+- Active packet: Topology Enforcement Hardening
+- Primary packet file: `docs/operations/task_2026-04-15_topology_enforcement_hardening/plan.md`
 - Archived:
   - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
+- Active sidecars:
+  - `docs/operations/task_2026-04-15_topology_enforcement_hardening/` — active implementation packet for reports surface normalization, closeout compiler, route receipts, and evidence-budget telemetry
 - Active backlog:
   - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
   - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
@@ -26,7 +28,8 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/phase1live_2026-04-11_plan.md` — Phase 1 Live Daemon Maturity plan (IN PROGRESS since 2026-04-11, no updates since creation; conceptual authority only)
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
-- Next packet: (program complete — Packets 0-4 all closed)
+  - `docs/operations/task_2026-04-15_topology_enforcement_hardening/work_log.md` — active topology hardening work record
+- Next packet: Topology enforcement hardening phases 2-4, unless Phase 1 reveals a higher-priority governance break
 
 ## Runtime
 
@@ -40,6 +43,7 @@ Role: single live control-entry surface for the repo.
 - Packet 1 closed the WMO half-up executable rounding law and recurrence gates.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
 - Packet 3 closed 2026-04-15 — docs mesh repair and authority normalization complete.
+- Packet 4 closed 2026-04-15 — source file rationale map complete.
 
 ## 75-Bug Audit Progress (data-improve branch)
 
@@ -61,4 +65,4 @@ Role: single live control-entry surface for the repo.
 
 ## Next Expected Packet
 
-Packet 4 should begin source file rationale mapping unless Packet 3 leaves a blocking mesh issue.
+Complete the topology enforcement hardening packet unless a new architecture/governance blocker supersedes it.

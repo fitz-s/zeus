@@ -61,6 +61,12 @@ coverage_roots:
     zone: docs_runbooks
     authority_role: runtime_support
     forbidden_misread: Runbooks guide operators; they do not outrank code or manifests.
+  - path: "docs/reports"
+    status: active
+    scope: scoped
+    zone: docs_reports
+    authority_role: derived_diagnostic
+    forbidden_misread: Generated reports are evidence only and must not be treated as authority.
   - path: "docs/to-do-list"
     status: active
     scope: scoped
@@ -385,6 +391,7 @@ registry_directories:
   - path: "docs/reference"
   - path: "docs/operations"
   - path: "docs/runbooks"
+  - path: "docs/reports"
   - path: "docs/to-do-list"
   - path: "docs/artifacts"
   - path: "docs/archives"
@@ -423,6 +430,11 @@ docs_subroots:
     role: runbook
     requires_agents: true
     allow_non_markdown: false
+  - path: "docs/reports"
+    role: generated_report
+    requires_agents: true
+    allow_non_markdown: true
+    allowed_extensions: [".md", ".json", ".csv"]
   - path: "docs/to-do-list"
     role: checklist_evidence
     requires_agents: true

@@ -79,6 +79,7 @@ Prefer these over hand-maintained prose when they exist:
 | `architecture/artifact_lifecycle.yaml` | Artifact classes and minimum work-record contract |
 | `architecture/context_budget.yaml` | Entry-map budget and maintenance cadence |
 | `architecture/context_pack_profiles.yaml` | Task-shaped generated context-pack profiles |
+| `architecture/change_receipt_schema.yaml` | High-risk route receipt contract and required receipt fields |
 | `architecture/code_idioms.yaml` | Intentional non-obvious code shapes and their owner gates |
 | `architecture/core_claims.yaml` | Proof-backed semantic claims for generated topology views |
 | `architecture/runtime_modes.yaml` | Discovery mode index and shared CycleRunner path |
@@ -105,6 +106,7 @@ Prefer these over hand-maintained prose when they exist:
 ## Do Not Default-Read
 
 - `docs/archives/**` — historical evidence only.
+- `docs/reports/` — generated report sink from declared writers only; not a default route.
 - `.omx/context/**` — micro-logs/evidence breadcrumbs, not governing law.
 - `docs/known_gaps.md` — load only when investigating active blockers.
 - Long math references such as `docs/reference/statistical_methodology.md` and `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
