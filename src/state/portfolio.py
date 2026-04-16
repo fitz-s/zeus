@@ -155,7 +155,7 @@ class Position:
     edge: float = 0.0
     shares: float = 0.0  # size_usd / entry_price
     cost_basis_usd: float = 0.0  # = size_usd
-    bankroll_at_entry: float = 150.0
+    bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
     day0_entered_at: str = ""
     entry_ci_width: float = 0.0
@@ -183,6 +183,7 @@ class Position:
     order_status: str = ""
     order_posted_at: str = ""
     order_timeout_at: str = ""
+    nested_fills: list = field(default_factory=list)
 
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = ChainState.UNKNOWN.value
@@ -741,7 +742,7 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             continue
         filtered = {k: v for k, v in p.items() if k in position_fields}
         if "env" not in p:
-            filtered["env"] = current_mode
+            filtered["env"] = "unknown_env"
         pos = Position(**filtered)
         if not pos.strategy_key and pos.strategy in CANONICAL_STRATEGY_KEYS:
             pos.strategy_key = pos.strategy
@@ -1072,7 +1073,8 @@ def add_position(state: PortfolioState, pos: Position) -> None:
     for existing in state.positions:
         if pos.order_id and existing.order_id and pos.order_id == existing.order_id:
             for field_name, value in asdict(pos).items():
-                setattr(existing, field_name, value)
+                if value not in (None, "", 0, 0.0) or getattr(existing, field_name) in (None, "", 0, 0.0):
+                    setattr(existing, field_name, value)
             return
 
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -1081,14 +1083,15 @@ def add_position(state: PortfolioState, pos: Position) -> None:
             continue
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
-            # Merge: accumulate shares and cost
-            logger.warning("DEDUP: merging duplicate %s %s into existing %s — "
-                           "entry context from new position (entered_at=%s, entry_price=%.4f) is being dropped",
-                           pos.direction, pos.bin_label, existing.trade_id,
-                           getattr(pos, "entered_at", ""), pos.entry_price)
+            # Append-only virtual ledger projection
+            logger.info("DEDUP/LEDGER: appending duplicate %s %s fill into existing %s %s",
+                           pos.direction, pos.bin_label, existing.trade_id, existing.state)
+            existing.nested_fills.append(pos)
             existing.size_usd += pos.size_usd
             existing.shares += pos.effective_shares
             existing.cost_basis_usd += pos.effective_cost_basis_usd
+            if existing.effective_shares > 0:
+                existing.entry_price = existing.effective_cost_basis_usd / existing.effective_shares
             return
     state.positions.append(pos)
 

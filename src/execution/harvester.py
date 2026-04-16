@@ -152,25 +152,27 @@ def _preflight_harvester_stage2_db_shape(trade_conn, shared_conn) -> dict:
     }
 
 
-def _current_phase_in_db(conn, trade_id: str) -> str | None:
+def _current_phase_in_db(conn, trade_id: str) -> dict:
     """Read the authoritative phase from position_current for the given trade.
 
-    Returns None if the row does not exist or the table is missing.
+    Returns a structured status result: {"status": "ok", "phase": str},
+    {"status": "missing"}, or {"status": "error", "reason": str}.
     This is the canonical dedup anchor — stale in-memory pos objects must
     never be used to decide whether a settlement has already been emitted.
     """
     if not trade_id:
-        return None
+        return {"status": "missing"}
     try:
         row = conn.execute(
             "SELECT phase FROM position_current WHERE trade_id = ? LIMIT 1",
             (trade_id,),
         ).fetchone()
-    except Exception:
-        return None
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
     if row is None:
-        return None
-    return str(row["phase"]) if hasattr(row, "keys") else str(row[0])
+        return {"status": "missing"}
+    phase_str = str(row["phase"]) if hasattr(row, "keys") else str(row[0])
+    return {"status": "ok", "phase": phase_str}
 
 
 def _dual_write_canonical_settlement_if_available(
@@ -200,7 +202,15 @@ def _dual_write_canonical_settlement_if_available(
     # pos object may show economically_closed while the DB already reflects
     # settled from an earlier cycle. Refusing re-entry at this layer makes
     # settlement idempotent regardless of the iterator's staleness.
-    db_phase = _current_phase_in_db(conn, trade_id)
+    db_result = _current_phase_in_db(conn, trade_id)
+    if db_result["status"] == "error":
+        logger.error(
+            "Canonical settlement aborted for %s: position_current.phase lookup failed: %s",
+            trade_id, db_result.get("reason"),
+        )
+        return False
+        
+    db_phase = db_result.get("phase")
     if db_phase in _TERMINAL_PHASES:
         logger.info(
             "Canonical settlement dual-write skipped for %s: position_current.phase=%s already terminal",
@@ -425,22 +435,6 @@ def _find_winning_bin(event: dict) -> tuple[Optional[str], Optional[str]]:
         winning = market.get("winningOutcome", "").lower()
 
         if winning == "yes":
-            label = market.get("question") or market.get("groupItemTitle", "")
-            low, high = _parse_temp_range(label)
-            range_str = _format_range(low, high)
-            return label, range_str
-
-        # Fallback: check outcome prices
-        prices_raw = market.get("outcomePrices", "[]")
-        if isinstance(prices_raw, str):
-            try:
-                prices = json.loads(prices_raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-        else:
-            prices = prices_raw
-
-        if prices and len(prices) > 0 and float(prices[0]) >= 0.95:
             label = market.get("question") or market.get("groupItemTitle", "")
             low, high = _parse_temp_range(label)
             range_str = _format_range(low, high)

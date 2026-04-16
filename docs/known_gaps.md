@@ -118,7 +118,14 @@
 
 ### [CLOSED — 2026-04-15] Harvester 不知道 bias correction 是否开启
 **Location:** `src/execution/harvester.py` — `harvest_settlement()` 生成 calibration pairs
-**Resolution:** `harvest_settlement()` now accepts `bias_corrected: Optional[bool]` parameter. When None, reads `settings.bias_correction_enabled`. The value is passed through to `add_calibration_pair()`. Test added in `test_calibration_manager.py::test_bias_corrected_persisted_through_harvest`.
+**Resolution:** Full lineage fix:
+1. `ensemble_snapshots` schema now has `bias_corrected INTEGER` column (code-level migration in `init_schema`)
+2. `_store_snapshot_p_raw()` in evaluator.py persists `ens.bias_corrected` at snapshot-write time (decision-time truth)
+3. `get_snapshot_context()` returns `bias_corrected` from snapshot
+4. Production caller passes snapshot's `bias_corrected` to `harvest_settlement()`
+5. `harvest_settlement()` also accepts explicit `bias_corrected` param; falls back to `settings.bias_correction_enabled` when None (for pre-migration snapshots without the column)
+6. `decision_group_id` computed upfront from `source_model_version` + `forecast_issue_time` (also from snapshot)
+Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fallback_reads_settings`
 
 ### [STALE-UNVERIFIED] Open-Meteo quota contention is workspace-wide, not Zeus-only
 **Location:** Zeus + `51 source data` + Rainstorm-era ingestion loops
