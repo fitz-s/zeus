@@ -1870,6 +1870,36 @@ def test_closeout_prefers_staged_files_when_changed_files_omitted(monkeypatch):
     assert payload["changed_files"] == ["docs/README.md"]
 
 
+def test_closeout_falls_back_to_receipt_when_clean(monkeypatch, tmp_path):
+    from scripts import topology_doctor_closeout
+
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps({"changed_files": ["docs/README.md"]}), encoding="utf-8")
+    monkeypatch.setattr(topology_doctor_closeout, "staged_changed_files", lambda api: [])
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {} if not files else {path: "modified" for path in files},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(receipt_path=str(receipt))
+
+    assert payload["changed_files"] == ["docs/README.md"]
+
+
 def test_generic_digest_includes_effective_source_rationale_for_core_file():
     digest = topology_doctor.build_digest(
         "change lifecycle manager",

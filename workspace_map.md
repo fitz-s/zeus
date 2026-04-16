@@ -33,7 +33,7 @@ plan.
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/to-do-list/` | Active checklist workbooks, not authority | `docs/to-do-list/AGENTS.md` |
 | `docs/artifacts/` | Active evidence artifacts, not authority | `docs/artifacts/AGENTS.md` |
-| `docs/archives/` | Historical evidence only | `docs/archives/AGENTS.md`; work packets group by git lineage |
+| `docs/archives/` | Historical evidence only | local ignored archive route; not reviewer-visible and never default-read |
 | `architecture/` | Machine-checkable authority and topology | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
 | `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |

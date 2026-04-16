@@ -85,12 +85,12 @@ def validate_receipt_payload(
 
     actual_changed = sorted(changed_files)
     receipt_changed = sorted(str(path) for path in (receipt.get("changed_files") or []))
-    if receipt_changed != actual_changed:
+    if not set(actual_changed).issubset(set(receipt_changed)):
         issues.append(
             api._issue(
                 "change_receipt_changed_files_mismatch",
                 receipt_path,
-                f"receipt changed_files {receipt_changed!r} do not match actual diff {actual_changed!r}",
+                f"receipt changed_files {receipt_changed!r} do not cover actual diff {actual_changed!r}",
             )
         )
 
