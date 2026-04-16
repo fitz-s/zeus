@@ -2349,8 +2349,9 @@ def test_core_map_probability_chain_is_proof_backed_and_bounded():
     assert payload["authority_status"] == "generated_view_not_authority"
     assert payload["context_assumption"]["sufficiency"] == "provisional_starting_packet"
     assert "core_map_profile" in payload["context_assumption"]["confidence_basis"]
-    assert len(payload["nodes"]) <= 8
-    assert len(payload["edges"]) <= 8
+    profile = next(item for item in topology_doctor.load_topology()["core_map_profiles"] if item["id"] == "probability-chain")
+    assert len(payload["nodes"]) <= profile["max_nodes"]
+    assert len(payload["edges"]) <= profile["max_edges"]
     assert wmo_fact["claim_id"] == "WMO_HALF_UP_FORMULA"
     assert wmo_fact["confidence"] == "verified_claim"
     assert "floor(x + 0.5)" in wmo_fact["text"]

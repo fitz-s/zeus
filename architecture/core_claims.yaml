@@ -118,3 +118,41 @@ claims:
       - pytest -q tests/test_no_bare_float_seams.py
     invalidation_condition: "Only a market-probability contract packet may change vig treatment order."
     applicable_profiles: [probability-chain]
+
+  - claim_id: ORACLE_TRUNCATION_RULE
+    claim_status: replaced
+    assertion: "HKO/Oracle settlement semantics use oracle_truncate, while WU/default settlement semantics use WMO half-up."
+    source:
+      kind: executable_contract
+      path: src/contracts/settlement_semantics.py
+      locator: SettlementSemantics.for_city
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/settlement_semantics.py
+        locator: oracle_truncate
+      - kind: history_lore
+        path: architecture/history_lore.yaml
+        locator: ORACLE_TRUNCATION_BIAS
+    gates:
+      - python scripts/topology_doctor.py --history-lore
+    invalidation_condition: "Only a settlement semantics packet may alter source-specific rounding law."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: ORACLE_PENALTY_THRESHOLD
+    claim_status: replaced
+    assertion: "Oracle penalty uses <3% incidental, 3-10% caution, and >10% blacklist thresholds from data/oracle_error_rates.json."
+    source:
+      kind: executable_contract
+      path: src/strategy/oracle_penalty.py
+      locator: get_oracle_info
+    proof_targets:
+      - kind: executable_contract
+        path: src/strategy/oracle_penalty.py
+        locator: CAUTION_THRESHOLD
+      - kind: machine_manifest
+        path: architecture/history_lore.yaml
+        locator: ORACLE_TRUNCATION_BIAS
+    gates:
+      - python scripts/topology_doctor.py --history-lore
+    invalidation_condition: "Only an oracle-penalty packet may change oracle error thresholds."
+    applicable_profiles: [probability-chain]

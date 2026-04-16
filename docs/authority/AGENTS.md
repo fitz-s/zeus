@@ -37,6 +37,10 @@ This directory defines how Zeus is architected, changed, delivered, verified, an
 | `zeus_openclaw_venus_delivery_boundary.md` | Boundary law between Zeus, Venus, and OpenClaw |
 | `zeus_live_backtest_shadow_boundary.md` | Live/backtest/shadow boundary law — live may act, backtest may evaluate, shadow may observe |
 | `zeus_data_rebuild_adr.md` | Data rebuild ADR for K1-K4 structural decisions and authority-gate rebuild sequencing |
+| `zeus_dual_track_architecture.md` | Dual-track metric spine architecture for raw/poll-pure calibration separation |
 | `zeus_k4_fix_pack_adr.md` | K4.5 fix-pack ADR recording authority-gate defect repairs |
+| `task_2026-04-15_data_math_delivery_constitution.md` | Packet-scoped delivery constitution for the 2026-04-15 data/math hardening lane |
+| `task_2026-04-15_data_math_boundary_integration_note.md` | Packet-scoped live/backtest/shadow boundary integration note for data/math work |
+| `task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md` | Packet-scoped failure/rollback doctrine for the 2026-04-15 data/math lane |
 
 Historical architecture/design files live in `docs/archives/governance_doc_restructuring/` and are not part of the default authority read path.

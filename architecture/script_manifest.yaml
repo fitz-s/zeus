@@ -89,6 +89,8 @@ long_lived_naming:
     data_completeness_audit.py: legacy word-order exception; keep until renamed
     deep_heartbeat.py: established runtime heartbeat helper
     deprecate_legacy_state_files.py: established repair command name
+    _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
+    bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
     equity_curve.py: established diagnostic report command
     force_lifecycle.py: established repair command name; dangerous and packet-gated
     healthcheck.py: established operator entrypoint
@@ -97,6 +99,7 @@ long_lived_naming:
     live_smoke_test.py: established runtime smoke entrypoint
     nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
     onboard_cities.py: established ETL/operator onboarding entrypoint
+    oracle_snapshot_listener.py: oracle snapshot runtime listener retained under cron/operator naming
     parse_change_log.py: established utility entrypoint
     post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
     resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
@@ -316,6 +319,7 @@ class_defaults:
 
 scripts:
   _verify_isolation.py: {class: stale_deprecated, reason: legacy isolation probe against old DB layout}
+  _build_pm_truth.py: {class: config_writer, write_targets: [data/pm_settlements_full.json], target_db: data/pm_settlements_full.json, external_inputs: [Polymarket Gamma API], apply_flag: implicit, unguarded_write_rationale: "Existing packet-generated builder writes a data artifact directly; output is evidence and must be reviewed before promotion.", promotion_barrier: "Generated PM settlement export is evidence and must not become canonical truth without a dedicated settlement authority packet."}
   _yaml_bootstrap.py: {class: utility}
   analyze_paper_trading.py: {class: diagnostic_report_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/paper_trading_analysis.json, stdout], replacement: run_replay.py, reason: paper-era report}
   antibody_scan.py: {class: diagnostic}
@@ -333,7 +337,6 @@ scripts:
   audit_replay_fidelity.py: {class: diagnostic}
   audit_time_semantics.py: {class: diagnostic}
   automation_analysis.py: {class: diagnostic}
-  audit_polymarket_city_settlement.py: {class: diagnostic_report_writer, write_targets: [state/city_settlement_audit.json, stdout], external_inputs: [Polymarket Gamma API, config/cities.json], required_tests: [tests/test_config.py]}
   backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_ens.py: {class: etl_writer}
@@ -370,7 +373,6 @@ scripts:
   equity_curve.py: {class: diagnostic}
   etl_asos_wu_offset.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_diurnal_curves.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
-  etl_forecast_error_profiles.py: {class: etl_writer}
   etl_forecast_skill_from_forecasts.py: {class: etl_writer}
   etl_historical_forecasts.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_hourly_observations.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
@@ -423,7 +425,6 @@ scripts:
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
   rebuild_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy simplified-p_raw rebuild retired}
   rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
-  rebuild_settlements.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
   refresh_paper_runtime_artifacts.py: {class: repair, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/status_summary-paper.json, state/risk_state-paper.db], apply_flag: implicit, target_db: state/status_summary-paper.json + state/risk_state-paper.db, archive_reason: paper runtime artifacts are obsolete in live-only phase, unguarded_write_rationale: "Paper runtime artifact refresh writes obsolete paper status and paper risk DB rows; manifest marks it dangerous pending archive."}
@@ -455,4 +456,4 @@ scripts:
   venus_sensing_report.py: {class: runtime_support}
   verify_truth_surfaces.py: {class: diagnostic}
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
-  bridge_oracle_to_calibration.py: {class: diagnostic, canonical_command: "python scripts/bridge_oracle_to_calibration.py", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
+  bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}

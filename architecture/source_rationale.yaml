@@ -12,6 +12,7 @@ hazard_badges:
   VENUS_CONTROL_ONLY: External writes must flow through Venus/control contracts.
   TRANSITIONAL_DO_NOT_DEEPEN: Transitional compatibility surface; do not deepen dependency.
   WMO_ROUNDING_LAW: Settlement-aligned values must use WMO half-up.
+  ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
 
 write_routes:
   canonical_position_write:
@@ -211,13 +212,10 @@ files:
 
   src/signal/AGENTS.md: {zone: docs, authority_role: registry, why: "Signal package rules and registry."}
   src/signal/__init__.py: {zone: K3_extension, authority_role: package_marker, why: "Marks signal namespace."}
-  src/signal/day0_residual.py: {zone: K3_extension, authority_role: shadow_day0_fact_model, why: "Defines day0 residual targets/facts for observation learning.", hazards: [DERIVED_ONLY]}
-  src/signal/day0_residual_features.py: {zone: K3_extension, authority_role: shadow_day0_features, why: "Computes point-in-time residual features for day0 learning.", hazards: [DERIVED_ONLY]}
   src/signal/day0_signal.py: {zone: K3_extension, authority_role: day0_probability_signal, why: "Combines observed high floor with residual ENS forecast; uses WMO settlement rounding.", hazards: [WMO_ROUNDING_LAW]}
   src/signal/day0_window.py: {zone: K3_extension, authority_role: day0_mode_gate, why: "Determines when a market should use day0 logic."}
   src/signal/diurnal.py: {zone: K3_extension, authority_role: diurnal_context, why: "Computes diurnal/solar context for day0 signal."}
   src/signal/ensemble_signal.py: {zone: K3_extension, authority_role: p_raw_engine, why: "51-member ensemble Monte Carlo to P_raw; core probability engine.", hazards: [WMO_ROUNDING_LAW]}
-  src/signal/forecast_error_distribution.py: {zone: K3_extension, authority_role: forecast_error_model, why: "Models forecast error distribution for uncertainty reasoning."}
   src/signal/forecast_uncertainty.py: {zone: K3_extension, authority_role: uncertainty_parameters, why: "Centralizes sigma/instrument/quantization uncertainty sources."}
   src/signal/model_agreement.py: {zone: K3_extension, authority_role: model_agreement_signal, why: "Scores agreement between model sources for alpha/decision context."}
 

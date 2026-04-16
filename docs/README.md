@@ -29,6 +29,12 @@ context loading fast — agents follow links, not directories.
 - `authority/zeus_current_architecture.md` — active architecture law (truth surfaces, lifecycle, risk, zones)
 - `authority/zeus_current_delivery.md` — active delivery law (authority order, planning lock, packet routing)
 - `known_gaps.md` — active operational gap register
+- `zeus-architecture-deep-map.md` — generated deep refactor/reference map; evidence only
+- `settlement-source-provenance.md` — settlement source transition provenance evidence
+- `settlement-validation-workflow.md` — settlement validation workflow notes
+- `zeus-pathology-registry.md` — refactor pathology registry
+- `zeus-refactor-plan.md` — incremental refactor plan
+- `zeus-system-constitution.md` — refactor constitution artifact subordinate to active authority
 - `operations/current_state.md` — single live control-entry pointer; current branch / packet truth
 - `runbooks/live-operation.md` — day-to-day live daemon operation runbook
 - `../workspace_map.md` — directory guide and file placement rules (repo root)

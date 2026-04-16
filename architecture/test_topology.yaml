@@ -76,7 +76,6 @@ categories:
     - tests/test_correlation.py
     - tests/test_day0_exit_gate.py
     - tests/test_day0_runtime_observation_context.py
-    - tests/test_day0_signal.py
     - tests/test_day0_window.py
     - tests/test_diurnal.py
     - tests/test_drift.py
@@ -87,7 +86,6 @@ categories:
     - tests/test_executor.py
     - tests/test_exit_authority.py
     - tests/test_force_exit_review.py
-    - tests/test_forecast_uncertainty.py
     - tests/test_healthcheck.py
     - tests/test_kelly.py
     - tests/test_market_analysis.py
@@ -103,11 +101,15 @@ categories:
     - tests/test_k7_slice_o.py
     - tests/test_k8_slice_r.py
     - tests/test_k8_slice_s.py
+    - tests/test_p1_save_order.py
+    - tests/test_p9_model_agreement_alpha.py
+    - tests/test_p14_phantom_persistence.py
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
+    - tests/test_shadow_boundary.py
     - tests/test_wu_scheduler.py
 
   transitional_advisory:
@@ -293,7 +295,7 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Legacy truth-surface skips indicate topology drift, not safe deletion.
-    skip_count: 6
+    skip_count: 5
     reason_patterns:
       - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
     sunset: Resolve with truth-surface cleanup packet.
