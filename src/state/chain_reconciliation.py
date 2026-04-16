@@ -355,7 +355,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     _stale_skipped += 1
                     continue  # stale — don't count toward skip_voiding
             except (ValueError, TypeError):
-                pass
+                logger.warning("Unparseable chain_verified_at=%r for position %s — treating as active", verified, getattr(p, 'market_id', 'unknown'))
         _truly_active += 1
 
     skip_voiding = _truly_active > 0 and len(chain_positions) == 0
