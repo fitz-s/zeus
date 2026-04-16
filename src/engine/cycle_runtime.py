@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.config import get_mode
-from src.engine.time_context import lead_hours_to_target
+from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
@@ -206,7 +206,7 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     }
 
 
-def materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, bankroll_at_entry=None, deps):
+def materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, env: str, bankroll_at_entry=None, deps):
     now = deps._utcnow()
     entry_price = result.fill_price or result.submitted_price or decision.edge.entry_price
     shares = result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0)
@@ -232,7 +232,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         edge=decision.edge.edge,
         shares=shares,
         cost_basis_usd=decision.size_usd,
-        bankroll_at_entry=portfolio.initial_bankroll if bankroll_at_entry is None else bankroll_at_entry,
+        bankroll_at_entry=bankroll_at_entry,
         entered_at=now.isoformat() if state == "entered" else "",
         entry_ci_width=max(0.0, decision.edge.ci_upper - decision.edge.ci_lower),
         unit=city.settlement_unit,
@@ -257,7 +257,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
-        env=get_mode(),
+        env=env,
         temperature_metric=getattr(candidate, "temperature_metric", "high"),
     )
 
@@ -527,7 +527,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
-                hours_to_settlement = lead_hours_to_target(
+                hours_to_settlement = lead_hours_to_settlement_close(
                     pos.target_date,
                     city.timezone,
                     deps._utcnow(),
@@ -639,7 +639,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 try:
                     city = deps.cities_by_name.get(pos.city)
                     if city is not None:
-                        lead_hours_to_target(pos.target_date, city.timezone, deps._utcnow())
+                        lead_hours_to_settlement_close(pos.target_date, city.timezone, deps._utcnow())
                 except Exception:
                     reason_prefix = f"time_context_failed:{e.__class__.__name__}"
             near_settlement = (
@@ -689,7 +689,7 @@ def _availability_status_for_exception(exc: Exception) -> str:
     return "DATA_UNAVAILABLE"
 
 
-def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, deps):
+def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
     portfolio_dirty = False
     tracker_dirty = False
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
@@ -816,7 +816,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if "min_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
-        markets = [m for m in markets if m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+        markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
 
     for market in markets:
         city = market.get("city")
@@ -901,7 +901,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 for trace_decision in decisions:
                     _record_probability_trace(candidate, trace_decision)
                 try:
-                    from src.engine.time_context import lead_hours_to_target
+                    from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
                     from src.state.db import log_shadow_signal
                     first = decisions[0]
                     edges_payload = [
@@ -926,10 +926,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         p_raw_json=json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
                         p_cal_json=json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
                         edges_json=json.dumps(edges_payload),
-                        lead_hours=float(lead_hours_to_target(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                        lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     )
                 except Exception as exc:
-                    deps.logger.warning("telemetry write failed: %s", exc)
+                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc)
+                    summary["degraded"] = True
             for d in decisions:
                 if False:
                     _ = d.calibration
@@ -1087,6 +1088,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             city,
                             mode,
                             state=initial_entry_runtime_state_for_order_status(result.status),
+                            env=env,
                             bankroll_at_entry=entry_bankroll,
                             deps=deps,
                         )

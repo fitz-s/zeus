@@ -23,3 +23,6 @@ class SettlementPrecisionError(ZeusError):
     a contract violation that corrupts calibration training data.
     """
     pass
+
+class FeeRateUnavailableError(Exception):
+    pass

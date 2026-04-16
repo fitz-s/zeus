@@ -104,7 +104,7 @@ def test_full_monitoring_pipeline(monkeypatch):
             market_velocity_1h=-0.10, divergence_score=0.20
         )
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
-    monkeypatch.setattr("src.engine.cycle_runtime.lead_hours_to_target", lambda *args, **kwargs: 12.0)
+    monkeypatch.setattr("src.engine.cycle_runtime.lead_hours_to_date_start", lambda *args, **kwargs: 12.0)
     monkeypatch.setattr("src.execution.exit_lifecycle.place_sell_order", lambda *a, **kw: {"orderID": "fake-order-123"})
     
     # Run the cycle

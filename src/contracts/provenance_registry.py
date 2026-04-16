@@ -97,30 +97,36 @@ def _load_registry(yaml_path: Path) -> tuple[dict[str, ProvenanceRecord], bool]:
         )
         return {}, True
 
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
+    try:
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
 
-    if not raw or "constants" not in raw:
-        logger.error("provenance_registry.yaml has no 'constants' key; registry is empty.")
+        if not raw or "constants" not in raw:
+            logger.error("provenance_registry.yaml has no 'constants' key; registry is empty.")
+            return {}, True
+
+        registry: dict[str, ProvenanceRecord] = {}
+        for entry in raw["constants"]:
+            cb_raw = entry.get("cascade_bound")
+            cascade_bound = tuple(cb_raw) if cb_raw else None
+            record = ProvenanceRecord(
+                constant_name=entry["constant_name"],
+                file_location=entry["file_location"],
+                declared_target=entry["declared_target"],
+                data_basis=entry["data_basis"],
+                validated_at=entry["validated_at"],
+                replacement_criteria=entry["replacement_criteria"],
+                cascade_bound=cascade_bound,  # type: ignore[arg-type]
+            )
+            if record.constant_name in registry:
+                raise ValueError(f"Duplicate provenance constant_name: {record.constant_name}")
+            registry[record.constant_name] = record
+
+        logger.info("ProvenanceRegistry loaded %d records", len(registry))
+        return registry, False
+    except Exception as exc:
+        logger.error("Failed to parse provenance_registry.yaml (%s). Falling back to degraded state.", exc)
         return {}, True
-
-    registry: dict[str, ProvenanceRecord] = {}
-    for entry in raw["constants"]:
-        cb_raw = entry.get("cascade_bound")
-        cascade_bound = tuple(cb_raw) if cb_raw else None
-        record = ProvenanceRecord(
-            constant_name=entry["constant_name"],
-            file_location=entry["file_location"],
-            declared_target=entry["declared_target"],
-            data_basis=entry["data_basis"],
-            validated_at=entry["validated_at"],
-            replacement_criteria=entry["replacement_criteria"],
-            cascade_bound=cascade_bound,  # type: ignore[arg-type]
-        )
-        registry[record.constant_name] = record
-
-    logger.info("ProvenanceRegistry loaded %d records", len(registry))
-    return registry, False
 
 
 # ---------------------------------------------------------------------------
@@ -187,12 +193,10 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
         return None
 
     if REGISTRY_DEGRADED:
-        logger.error(
-            "INV-13: provenance registry failed to load — governance disabled. "
-            "Constant '%s' cannot be validated.",
-            constant_name,
+        raise UnregisteredConstantError(
+            f"INV-13: provenance registry failed to load — governance disabled. "
+            f"Constant '{constant_name}' cannot be validated and fail-close is enforced."
         )
-        return None
 
     record = REGISTRY.get(constant_name)
     if record is not None:

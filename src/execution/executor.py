@@ -57,6 +57,7 @@ class OrderResult:
     external_order_id: Optional[str] = None
     venue_status: Optional[str] = None
     idempotency_key: Optional[str] = None
+    decision_edge: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -104,8 +105,16 @@ def create_execution_intent(
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
                            
-    order_token = token_id if edge.direction == "buy_yes" else no_token_id
-    timeout = MODE_TIMEOUTS.get(mode, 3600)
+    if edge.direction.value == "buy_yes":
+        order_token = token_id
+    elif edge.direction.value == "buy_no":
+        order_token = no_token_id
+    else:
+        raise ValueError(f"Strict token routing failed: unsupported token direction '{edge.direction}'")
+
+    if mode not in MODE_TIMEOUTS:
+        raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
+    timeout = MODE_TIMEOUTS[mode]
     
     return ExecutionIntent(
         direction=Direction(edge.direction),
@@ -120,6 +129,7 @@ def create_execution_intent(
         slice_policy="iceberg" if size_usd > 100 else "single_shot",
         reprice_policy="dynamic_peg" if mode == "day0_capture" else "static",
         liquidity_guard=True,
+        decision_edge=edge.edge,
     )
 
 def execute_intent(
@@ -366,7 +376,7 @@ def _live_order(
                 result.get("orderID")
                 or result.get("orderId")
                 or result.get("id")
-                or trade_id
+                or None
             ),
             timeout_seconds=timeout,
             submitted_price=intent.limit_price,
@@ -379,7 +389,7 @@ def _live_order(
                 price=intent.limit_price,
                 size_usd=float(shares * intent.limit_price),
                 strategy="live_order",
-                edge=float(intent.limit_price - intent.limit_price),
+                edge=float(intent.decision_edge),
                 mode=get_mode(),
             )
         except Exception as exc:

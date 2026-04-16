@@ -302,7 +302,7 @@ def _fetch_wu_icao_daily_highs_lows(
                 error="WU response had observations but no usable temp/valid_time_gmt pairs",
             )
         return WuDailyFetchResult(payload=payload)
-    except Exception as e:
+    except (httpx.HTTPError, httpx.RequestError) as e:
         # S3 fix: warning not debug — programmer errors (KeyError on
         # response shape, attribute errors) should surface in production
         # logs, not disappear silently. The caller downgrades to FAILED
@@ -388,8 +388,6 @@ def _fetch_hko_month_with_retry(
                 time.sleep(HKO_FETCH_RETRY_BACKOFF_SEC * (attempt + 1))
                 continue
             return {}, f"http error after {HKO_FETCH_RETRY_COUNT + 1} tries: {e}"
-        except Exception as e:
-            return {}, f"unexpected error: {type(e).__name__}: {e}"
     return {}, "exhausted retries"
 
 
@@ -438,22 +436,26 @@ def _write_atom_with_coverage(
             """
             INSERT INTO observations (
                 city, target_date, source, high_temp, low_temp, unit, station_id, fetched_at,
-                raw_value, raw_unit, target_unit, value_type,
-                fetch_utc, local_time, collection_window_start_utc, collection_window_end_utc,
+                high_raw_value, high_raw_unit, high_target_unit,
+                low_raw_value, low_raw_unit, low_target_unit,
+                high_fetch_utc, high_local_time, high_collection_window_start_utc, high_collection_window_end_utc,
+                low_fetch_utc, low_local_time, low_collection_window_start_utc, low_collection_window_end_utc,
                 timezone, utc_offset_minutes, dst_active,
                 is_ambiguous_local_hour, is_missing_local_hour,
                 hemisphere, season, month,
                 rebuild_run_id, data_source_version,
-                authority, provenance_metadata
+                authority, high_provenance_metadata, low_provenance_metadata
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?,
                 ?, ?, ?,
                 ?, ?,
-                ?, ?
+                ?, ?, ?
             )
             ON CONFLICT(city, target_date, source) DO UPDATE SET
                 high_temp = excluded.high_temp,
@@ -461,14 +463,20 @@ def _write_atom_with_coverage(
                 unit = excluded.unit,
                 station_id = excluded.station_id,
                 fetched_at = excluded.fetched_at,
-                raw_value = excluded.raw_value,
-                raw_unit = excluded.raw_unit,
-                target_unit = excluded.target_unit,
-                value_type = excluded.value_type,
-                fetch_utc = excluded.fetch_utc,
-                local_time = excluded.local_time,
-                collection_window_start_utc = excluded.collection_window_start_utc,
-                collection_window_end_utc = excluded.collection_window_end_utc,
+                high_raw_value = excluded.high_raw_value,
+                high_raw_unit = excluded.high_raw_unit,
+                high_target_unit = excluded.high_target_unit,
+                low_raw_value = excluded.low_raw_value,
+                low_raw_unit = excluded.low_raw_unit,
+                low_target_unit = excluded.low_target_unit,
+                high_fetch_utc = excluded.high_fetch_utc,
+                high_local_time = excluded.high_local_time,
+                high_collection_window_start_utc = excluded.high_collection_window_start_utc,
+                high_collection_window_end_utc = excluded.high_collection_window_end_utc,
+                low_fetch_utc = excluded.low_fetch_utc,
+                low_local_time = excluded.low_local_time,
+                low_collection_window_start_utc = excluded.low_collection_window_start_utc,
+                low_collection_window_end_utc = excluded.low_collection_window_end_utc,
                 timezone = excluded.timezone,
                 utc_offset_minutes = excluded.utc_offset_minutes,
                 dst_active = excluded.dst_active,
@@ -480,22 +488,27 @@ def _write_atom_with_coverage(
                 rebuild_run_id = excluded.rebuild_run_id,
                 data_source_version = excluded.data_source_version,
                 authority = excluded.authority,
-                provenance_metadata = excluded.provenance_metadata
+                high_provenance_metadata = excluded.high_provenance_metadata,
+                low_provenance_metadata = excluded.low_provenance_metadata
             """,
             (
                 atom_high.city, atom_high.target_date.isoformat(), atom_high.source,
                 atom_high.value, atom_low.value, atom_high.target_unit,
                 atom_high.station_id, atom_high.fetch_utc.isoformat(),
-                atom_high.raw_value, atom_high.raw_unit,
-                atom_high.target_unit, atom_high.value_type,
+                atom_high.raw_value, atom_high.raw_unit, atom_high.target_unit,
+                atom_low.raw_value, atom_low.raw_unit, atom_low.target_unit,
                 atom_high.fetch_utc.isoformat(), atom_high.local_time.isoformat(),
                 atom_high.collection_window_start_utc.isoformat(),
                 atom_high.collection_window_end_utc.isoformat(),
+                atom_low.fetch_utc.isoformat(), atom_low.local_time.isoformat(),
+                atom_low.collection_window_start_utc.isoformat(),
+                atom_low.collection_window_end_utc.isoformat(),
                 atom_high.timezone, atom_high.utc_offset_minutes, int(atom_high.dst_active),
                 int(atom_high.is_ambiguous_local_hour), int(atom_high.is_missing_local_hour),
                 atom_high.hemisphere, atom_high.season, atom_high.month,
                 atom_high.rebuild_run_id, atom_high.data_source_version,
                 atom_high.authority, json.dumps(atom_high.provenance_metadata),
+                json.dumps(atom_low.provenance_metadata),
             ),
         )
         record_written(

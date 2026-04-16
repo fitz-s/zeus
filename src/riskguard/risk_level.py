@@ -5,6 +5,7 @@ from enum import Enum
 
 class RiskLevel(Enum):
     GREEN = "GREEN"
+    DATA_DEGRADED = "DATA_DEGRADED"
     YELLOW = "YELLOW"
     ORANGE = "ORANGE"
     RED = "RED"
@@ -13,6 +14,7 @@ class RiskLevel(Enum):
 # Actions per level
 LEVEL_ACTIONS = {
     RiskLevel.GREEN: "Normal operation",
+    RiskLevel.DATA_DEGRADED: "Data degraded, acting with YELLOW-equivalent safety without declaring loss boundary breach",
     RiskLevel.YELLOW: "No new entries, continue monitoring held positions",
     RiskLevel.ORANGE: "No new entries, exit positions at favorable prices",
     RiskLevel.RED: "Cancel all pending orders, exit all positions immediately",
@@ -23,7 +25,7 @@ def overall_level(*levels: RiskLevel) -> RiskLevel:
     """Compute overall risk level as max of all individual levels."""
     if not levels:
         return RiskLevel.GREEN
-    order = {RiskLevel.GREEN: 0, RiskLevel.YELLOW: 1,
-             RiskLevel.ORANGE: 2, RiskLevel.RED: 3}
+    order = {RiskLevel.GREEN: 0, RiskLevel.DATA_DEGRADED: 1, RiskLevel.YELLOW: 2,
+             RiskLevel.ORANGE: 3, RiskLevel.RED: 4}
     worst = max(levels, key=lambda l: order[l])
     return worst

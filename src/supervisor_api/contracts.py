@@ -115,9 +115,32 @@ class SupervisorCommand:
     note: Optional[str] = None
     env: str = ""
     source: str = "venus"
+    timestamp: str = ""
 
     def __post_init__(self) -> None:
         _check_env(self)
+        if not getattr(self, "source", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.source must not be empty"
+            )
+        if not getattr(self, "reason", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.reason must not be empty"
+            )
+        if not getattr(self, "timestamp", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.timestamp must not be empty"
+            )
+        if self.command == "set_strategy_gate":
+            if not self.strategy or self.enabled is None:
+                raise SupervisorContractError(
+                    "set_strategy_gate requires strategy and enabled flags"
+                )
+        elif self.command == "acknowledge_quarantine_clear":
+            if not self.token_id:
+                raise SupervisorContractError(
+                    "acknowledge_quarantine_clear requires token_id"
+                )
 
 
 @dataclass

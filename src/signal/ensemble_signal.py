@@ -123,11 +123,15 @@ def select_hours_for_target_date(
         for idx, ts in enumerate(times)
         if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
     ]
-    if idxs:
-        return np.array(idxs, dtype=int)
-    raise ValueError(
-        f"No forecast hours map to local target date {target_date} in {tz.key}."
-    )
+    if not idxs:
+        raise ValueError(
+            f"No forecast hours map to local target date {target_date} in {tz.key}."
+        )
+    if len(idxs) < 20:
+        raise ValueError(
+            f"Incomplete hourly slice for local target date {target_date} in {tz.key}: {len(idxs)} hours found."
+        )
+    return np.array(idxs, dtype=int)
 
 
 def member_maxes_for_target_date(
@@ -327,7 +331,7 @@ class EnsembleSignal:
             conn.close()
 
             if row and row["n_samples"] >= 20:
-                discount = row["discount_factor"] if row["discount_factor"] else 0.7
+                discount = row["discount_factor"] if row["discount_factor"] is not None else 0.7
                 correction = row["bias"] * discount
                 import logging
                 logging.getLogger(__name__).info(
@@ -342,6 +346,8 @@ class EnsembleSignal:
             logging.getLogger(__name__).warning(
                 "Bias correction failed for %s: %s", city.name, e
             )
+            # Re-raise explicit database infrastructure fault rather than masking it
+            raise RuntimeError(f"Bias correction database fault for {city.name}: {e}") from e
 
         return maxes, False
 
