@@ -304,8 +304,9 @@ def _automation_analysis_cycle():
     of the automation layer without manual DB queries.
     """
     try:
+        import sys
         import subprocess
-        venv_python = str(Path(__file__).parent.parent / ".venv" / "bin" / "python")
+        venv_python = sys.executable
         script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
         r = subprocess.run(
             [venv_python, str(script)],
@@ -330,6 +331,8 @@ def run_single_cycle():
     logger.info("=== SINGLE CYCLE COMPLETE ===")
 
 
+_heartbeat_fails = 0
+
 def _write_heartbeat() -> None:
     """Write a heartbeat JSON to state/ every 60s so operators can detect silent crashes."""
     from src.config import state_path
@@ -344,8 +347,25 @@ def _write_heartbeat() -> None:
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
+        global _heartbeat_fails
+        _heartbeat_fails = 0
     except Exception as exc:
-        logger.warning("Heartbeat write failed: %s", exc)
+        global _heartbeat_fails
+        _heartbeat_fails += 1
+        logger.error("Heartbeat write failed (%d/3): %s", _heartbeat_fails, exc)
+        try:
+            from src.observability.status_summary import write_status
+            write_status({
+                "daemon_health": "FAULT",
+                "failure_reason": f"heartbeat_write_failed: {exc}"
+            })
+        except Exception:
+            pass
+            
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
+            import os
+            os._exit(1)
 
 
 def _startup_wallet_check(clob=None):

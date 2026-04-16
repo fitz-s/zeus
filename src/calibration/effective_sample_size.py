@@ -8,6 +8,8 @@ any future behavior change can safely move away from pair-row counts.
 
 from __future__ import annotations
 
+SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter evaluator/control gate
+
 import sqlite3
 from dataclasses import dataclass
 
@@ -249,6 +251,7 @@ def summarize_bucket_health(groups: list[CalibrationDecisionGroup]) -> list[dict
         bucket = buckets.setdefault(
             key,
             {
+                "shadow_only": True,
                 "bucket_key": f"{group.cluster}_{group.season}",
                 "cluster": group.cluster,
                 "season": group.season,

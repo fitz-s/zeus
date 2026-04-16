@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
+import os
 import httpx
 
 from src.config import City
@@ -22,7 +23,9 @@ from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger(__name__)
 
-WU_API_KEY = "6532d6454b8aa370768e63d6ba5a832e"
+WU_API_KEY = os.environ.get("WU_API_KEY", "")
+if not WU_API_KEY:
+    raise SystemExit("CRITICAL ERROR: WU_API_KEY environment variable is missing.")
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 
@@ -199,7 +202,7 @@ def _fetch_wu_observation(
         }
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
-        logger.debug("WU observation fetch failed for %s: %s", city.name, e)
+        logger.warning("WU observation fetch failed for %s (%s): %s", city.name, type(e).__name__, e)
         return None
 
 
@@ -336,12 +339,14 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
         season = season_from_date(target_day.isoformat(), lat=city.lat)
 
         conn = get_connection()
-        row = conn.execute(
-            "SELECT offset, std, n_samples FROM asos_wu_offsets "
-            "WHERE city = ? AND season = ?",
-            (city.name, season),
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT offset, std, n_samples FROM asos_wu_offsets "
+                "WHERE city = ? AND season = ?",
+                (city.name, season),
+            ).fetchone()
+        finally:
+            conn.close()
 
         if row and row["n_samples"] >= 10:
             offset_val = row["offset"]
@@ -367,8 +372,12 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
 
     except Exception as e:
         from src.contracts.exceptions import MissingCalibrationError
+        import sqlite3
 
         if isinstance(e, MissingCalibrationError):
             raise
+        if isinstance(e, sqlite3.Error):
+            logger.error("Database infrastructure failure loading ASOS→WU offset for %s: %s", city.name, e)
+            raise RuntimeError(f"Database infrastructure failure: {e}") from e
         logger.warning("Failed to load ASOS→WU offset for %s: %s", city.name, e)
         raise MissingCalibrationError(f"Offset load failed for {city.name}: {e}") from e

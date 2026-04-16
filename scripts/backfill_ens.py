@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.config import cities_by_name, load_cities
 from src.contracts import SettlementSemantics
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
-from src.engine.time_context import lead_hours_to_target
+from src.engine.time_context import lead_hours_to_date_start
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.db import get_world_connection as get_connection, init_schema
 from src.types import Bin
@@ -133,7 +133,7 @@ def backfill_one(conn, city_name: str, target_date_str: str) -> bool:
         target_date_str + "T12:00:00Z",          # valid_time (midday target)
         issue_time_str,                          # available_at = issue_time for backfill
         result["fetch_time"].isoformat(),         # fetch_time
-        float(max(0.0, lead_hours_to_target(target_date, city.timezone, issue_time))),
+        float(max(0.0, lead_hours_to_date_start(target_date, city.timezone, issue_time))),
         json.dumps(ens.member_maxes.tolist()),     # members_json
         p_raw_json,
         float(ens.spread().value if hasattr(ens.spread(), 'value') else ens.spread()),

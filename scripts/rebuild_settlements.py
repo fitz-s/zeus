@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.rebuild_validators import validate_observation_for_settlement
-from src.state.db import get_world_connection, init_schema
+from src.state.db import get_world_connection
 
 
 def _add_authority_columns_if_missing(conn: sqlite3.Connection) -> None:
@@ -58,7 +58,7 @@ def rebuild_settlements(
     if city_filter:
         obs_rows = conn.execute(
             """
-            SELECT city, target_date, high_temp, unit
+            SELECT city, target_date, high_temp, unit, source
             FROM observations
             WHERE authority = 'VERIFIED' AND city = ?
             ORDER BY city, target_date
@@ -68,7 +68,7 @@ def rebuild_settlements(
     else:
         obs_rows = conn.execute(
             """
-            SELECT city, target_date, high_temp, unit
+            SELECT city, target_date, high_temp, unit, source
             FROM observations
             WHERE authority = 'VERIFIED'
             ORDER BY city, target_date
@@ -123,15 +123,19 @@ def rebuild_settlements(
             per_city[city_name]["skipped"] += 1
             continue
 
+        # Derive settlement_source from the observation's actual source
+        obs_source = obs["source"] if "source" in obs.keys() else "unknown"
+        settlement_source = f"{obs_source}_rebuild"
+
         if not dry_run:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO settlements
                 (city, target_date, settlement_value, settlement_source,
                  settled_at, authority)
-                VALUES (?, ?, ?, 'wu_icao_rebuild', ?, 'VERIFIED')
+                VALUES (?, ?, ?, ?, ?, 'VERIFIED')
                 """,
-                (city_name, target_date, settlement_value, now_iso),
+                (city_name, target_date, settlement_value, settlement_source, now_iso),
             )
         rows_written += 1
         per_city[city_name]["written"] += 1
@@ -173,10 +177,8 @@ def main() -> int:
         conn = sqlite3.connect(args.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        init_schema(conn)
     else:
         conn = get_world_connection()
-        init_schema(conn)
 
     mode = "DRY-RUN" if args.dry_run else "LIVE WRITE"
     print(f"\n=== rebuild_settlements [{mode}] ===")

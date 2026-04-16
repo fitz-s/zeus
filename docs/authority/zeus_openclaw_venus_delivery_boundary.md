@@ -40,7 +40,7 @@ Venus can currently:
 
 Current phase limitations:
 - status surfaces are derived from mixed runtime truth
-- canonical `position_current` projection does not yet exist
+- canonical `position_current` projection exists and is used by harvester, riskguard, replay, and status_summary; legacy `position_events_legacy` coherence boundary tests remain skipped pending Phase2 legacy elimination
 - repo audit still assumes external workspace surfaces that were not supplied in this session
 - external host/workspace checks may inform operator confidence, but they do not outrank repo-local authority or become merge/cutover blockers by themselves
 

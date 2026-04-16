@@ -37,9 +37,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
-import httpx
-
 from src.config import City, cities as ALL_CITIES
+from src.data.openmeteo_client import ARCHIVE_URL, fetch as openmeteo_fetch
 from src.state.data_coverage import (
     CoverageReason,
     DataTable,
@@ -49,12 +48,9 @@ from src.state.data_coverage import (
 
 logger = logging.getLogger(__name__)
 
-OPENMETEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 SOURCE = "openmeteo_archive_solar"
 CHUNK_DAYS = 90
 SLEEP_BETWEEN_REQUESTS = 1.0
-FETCH_RETRY_COUNT = 2
-FETCH_RETRY_BACKOFF_SEC = 2.0
 
 
 def _retry_embargo(hours: int = 1) -> datetime:
@@ -78,9 +74,9 @@ def _fetch_solar_chunk(
     the city's local ISO, so the returned `sunrise`/`sunset` strings can
     be parsed straight into DST-aware ZoneInfo datetimes.
     """
-    resp = httpx.get(
-        OPENMETEO_ARCHIVE_URL,
-        params={
+    data = openmeteo_fetch(
+        ARCHIVE_URL,
+        {
             "latitude": city.lat,
             "longitude": city.lon,
             "start_date": start_date.isoformat(),
@@ -88,10 +84,8 @@ def _fetch_solar_chunk(
             "daily": "sunrise,sunset",
             "timezone": city.timezone,
         },
-        timeout=30.0,
+        endpoint_label="archive_solar",
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     daily = data.get("daily", {})
     times = daily.get("time") or []
@@ -143,16 +137,10 @@ def _fetch_solar_chunk(
 def _fetch_with_retry(
     city: City, start_date: date, end_date: date,
 ) -> tuple[list[dict], str | None]:
-    for attempt in range(FETCH_RETRY_COUNT + 1):
-        try:
-            return _fetch_solar_chunk(city, start_date, end_date), None
-        except httpx.HTTPError as e:
-            if attempt < FETCH_RETRY_COUNT:
-                time.sleep(FETCH_RETRY_BACKOFF_SEC * (attempt + 1))
-                continue
-            return [], f"http error after {FETCH_RETRY_COUNT + 1} tries: {e}"
-        except Exception as e:
-            return [], f"unexpected error: {type(e).__name__}: {e}"
+    try:
+        return _fetch_solar_chunk(city, start_date, end_date), None
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
     return [], "exhausted retries"
 
 

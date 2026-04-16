@@ -9,6 +9,8 @@ active calibration routing.
 
 from __future__ import annotations
 
+SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter evaluator/control gate
+
 import hashlib
 import json
 import math
@@ -260,6 +262,7 @@ def evaluate_blocked_oos_calibration(
         "log_loss_calibrated": _mean(log_loss_calibrated),
     }
     report = {
+        "shadow_only": True,
         "run_id": run_id,
         "model_name": model_name,
         "model_version": model_version,
@@ -327,6 +330,7 @@ def recommend_calibration_promotion(
         decision_reason = "blocked_oos_passed"
 
     return {
+        "shadow_only": True,
         "promotion_id": f"promotion:{report.get('run_id')}",
         "model_name": report.get("model_name", "extended_platt"),
         "model_version": report.get("model_version", "blocked_oos_v1"),

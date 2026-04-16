@@ -249,6 +249,28 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             getattr(position, "shares", 0.0),
             getattr(position, "entry_price", 0.0),
         )
+        if conn is not None:
+            import json
+            try:
+                conn.execute(
+                    "INSERT INTO position_events (position_id, sequence_no, event_type, occurred_at, payload, source_module) "
+                    "VALUES (?, (SELECT COALESCE(MAX(sequence_no),0)+1 FROM position_events WHERE position_id=?), ?, ?, ?, ?)",
+                    (
+                        getattr(position, "trade_id", ""),
+                        getattr(position, "trade_id", ""),
+                        "CHAIN_RESCUE_AUDIT",
+                        datetime.now(timezone.utc).isoformat(),
+                        json.dumps({
+                            "chain_state": getattr(position, "chain_state", "?"),
+                            "shares": getattr(position, "shares", 0.0),
+                            "entry_price": getattr(position, "entry_price", 0.0)
+                        }),
+                        "src.state.chain_reconciliation_audit"
+                    )
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to durability-log rescue event: {e}")
 
     def _sync_reconciled_trade_lifecycle(position) -> None:
         if update_trade_lifecycle is None:
@@ -375,7 +397,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 chain_state=getattr(rescued, "chain_state", ""),
             )
             if not rescued.entered_at:
-                rescued.entered_at = now
+                rescued.entered_at = "unknown_entered_at"
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
             _sync_reconciled_trade_lifecycle(rescued)
@@ -446,9 +468,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 ):
                     logger.warning(
                         "SIZE MISMATCH UNRESOLVED: %s — no canonical baseline for correction "
-                        "(local=%.4f, chain=%.4f); tagging and continuing",
+                        "(local=%.4f, chain=%.4f); quarantining position",
                         pos.trade_id, local_shares, chain.size,
                     )
+                    corrected.state = "quarantine_size_mismatch"
                     corrected.chain_state = "size_mismatch_unresolved"
                     corrected.shares = local_shares
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
@@ -479,16 +502,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 tid[-4:],
             )
             quarantine_pos = Position(
-                trade_id=f"quarantine_{tid[:8]}",
-                market_id=chain.condition_id,
-                city=QUARANTINE_SENTINEL, cluster="Other",
-                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
+                trade_id="",
+                market_id="",
+                city=QUARANTINE_SENTINEL, cluster="",
+                target_date="", bin_label="",
                 direction="unknown",
-                size_usd=chain.cost or (chain.size * chain.avg_price),
-                entry_price=chain.avg_price,
-                p_posterior=chain.avg_price,
+                size_usd=0.0,
+                entry_price=0.0,
+                p_posterior=0.0,
                 edge=0.0,
-                entered_at=datetime.now(timezone.utc).isoformat(),
+                entered_at="unknown_entered_at",
                 token_id=tid,
                 state=enter_chain_quarantined_runtime_state(),
                 strategy="",

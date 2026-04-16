@@ -58,7 +58,6 @@ class TestPortfolioTruthSource:
 class TestGhostPositions:
     """Entered trade_decisions with expired target_dates are ghost positions."""
 
-    @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
     def test_no_ghost_positions(self):
         """No trade_decisions with status=entered should have target_date in the past.
 
@@ -96,7 +95,7 @@ class TestGhostPositions:
 class TestSettlementFreshness:
     """Settlement lifecycle must keep pace with the trading cycle."""
 
-    @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
+    @pytest.mark.skip(reason="live DB health check — requires running Zeus instance with settlement data")
     def test_settlement_freshness(self):
         """Latest settlement activity must be within 48h.
 

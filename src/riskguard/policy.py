@@ -66,64 +66,72 @@ def resolve_strategy_policy(
     risk_actions = _select_rows(_load_risk_actions(conn, strategy_key, current_time))
 
     for row in manual_overrides:
-        action_type = str(row["action_type"])
-        if action_type == "gate":
-            if "gated" in locked_fields:
-                logger.info("policy: manual_override gate skipped — field locked by higher-priority source")
+        try:
+            action_type = str(row["action_type"])
+            if action_type == "gate":
+                if "gated" in locked_fields:
+                    logger.info("policy: manual_override gate skipped — field locked by higher-priority source")
+                    continue
+                gated = _parse_boolish(row["value"])
+                locked_fields.add("gated")
+            elif action_type == "allocation_multiplier":
+                if "allocation_multiplier" in locked_fields:
+                    logger.info("policy: manual_override allocation_multiplier skipped — field locked by higher-priority source")
+                    continue
+                allocation_multiplier = _parse_multiplier(row["value"], action_type)
+                locked_fields.add("allocation_multiplier")
+            elif action_type == "threshold_multiplier":
+                if "threshold_multiplier" in locked_fields:
+                    logger.info("policy: manual_override threshold_multiplier skipped — field locked by higher-priority source")
+                    continue
+                threshold_multiplier = _parse_multiplier(row["value"], action_type)
+                locked_fields.add("threshold_multiplier")
+            elif action_type == "exit_only":
+                if "exit_only" in locked_fields:
+                    logger.info("policy: manual_override exit_only skipped — field locked by higher-priority source")
+                    continue
+                exit_only = _parse_boolish(row["value"])
+                locked_fields.add("exit_only")
+            else:
                 continue
-            gated = _parse_boolish(row["value"])
-            locked_fields.add("gated")
-        elif action_type == "allocation_multiplier":
-            if "allocation_multiplier" in locked_fields:
-                logger.info("policy: manual_override allocation_multiplier skipped — field locked by higher-priority source")
-                continue
-            allocation_multiplier = _parse_multiplier(row["value"], action_type)
-            locked_fields.add("allocation_multiplier")
-        elif action_type == "threshold_multiplier":
-            if "threshold_multiplier" in locked_fields:
-                logger.info("policy: manual_override threshold_multiplier skipped — field locked by higher-priority source")
-                continue
-            threshold_multiplier = _parse_multiplier(row["value"], action_type)
-            locked_fields.add("threshold_multiplier")
-        elif action_type == "exit_only":
-            if "exit_only" in locked_fields:
-                logger.info("policy: manual_override exit_only skipped — field locked by higher-priority source")
-                continue
-            exit_only = _parse_boolish(row["value"])
-            locked_fields.add("exit_only")
-        else:
+            sources.append(f"manual_override:{action_type}")
+        except Exception as e:
+            logger.error("policy: bad_row for manual_override %s: %s", row.get('override_id', '?'), e)
             continue
-        sources.append(f"manual_override:{action_type}")
 
     for row in risk_actions:
-        action_type = str(row["action_type"])
-        if action_type == "gate":
-            if "gated" in locked_fields:
-                logger.info("policy: risk_action gate skipped — field locked by higher-priority source")
+        try:
+            action_type = str(row["action_type"])
+            if action_type == "gate":
+                if "gated" in locked_fields:
+                    logger.info("policy: risk_action gate skipped — field locked by higher-priority source")
+                    continue
+                gated = _parse_boolish(row["value"])
+                locked_fields.add("gated")
+            elif action_type == "allocation_multiplier":
+                if "allocation_multiplier" in locked_fields:
+                    logger.info("policy: risk_action allocation_multiplier skipped — field locked by higher-priority source")
+                    continue
+                allocation_multiplier = _parse_multiplier(row["value"], action_type)
+                locked_fields.add("allocation_multiplier")
+            elif action_type == "threshold_multiplier":
+                if "threshold_multiplier" in locked_fields:
+                    logger.info("policy: risk_action threshold_multiplier skipped — field locked by higher-priority source")
+                    continue
+                threshold_multiplier = _parse_multiplier(row["value"], action_type)
+                locked_fields.add("threshold_multiplier")
+            elif action_type == "exit_only":
+                if "exit_only" in locked_fields:
+                    logger.info("policy: risk_action exit_only skipped — field locked by higher-priority source")
+                    continue
+                exit_only = _parse_boolish(row["value"])
+                locked_fields.add("exit_only")
+            else:
                 continue
-            gated = _parse_boolish(row["value"])
-            locked_fields.add("gated")
-        elif action_type == "allocation_multiplier":
-            if "allocation_multiplier" in locked_fields:
-                logger.info("policy: risk_action allocation_multiplier skipped — field locked by higher-priority source")
-                continue
-            allocation_multiplier = _parse_multiplier(row["value"], action_type)
-            locked_fields.add("allocation_multiplier")
-        elif action_type == "threshold_multiplier":
-            if "threshold_multiplier" in locked_fields:
-                logger.info("policy: risk_action threshold_multiplier skipped — field locked by higher-priority source")
-                continue
-            threshold_multiplier = _parse_multiplier(row["value"], action_type)
-            locked_fields.add("threshold_multiplier")
-        elif action_type == "exit_only":
-            if "exit_only" in locked_fields:
-                logger.info("policy: risk_action exit_only skipped — field locked by higher-priority source")
-                continue
-            exit_only = _parse_boolish(row["value"])
-            locked_fields.add("exit_only")
-        else:
+            sources.append(f"risk_action:{action_type}")
+        except Exception as e:
+            logger.error("policy: bad_row for risk_action %s: %s", row.get('action_id', '?'), e)
             continue
-        sources.append(f"risk_action:{action_type}")
 
     return StrategyPolicy(
         strategy_key=strategy_key,

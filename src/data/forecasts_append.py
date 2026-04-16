@@ -42,8 +42,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-import httpx
-
 from src.config import City, cities as ALL_CITIES
 from src.state.data_coverage import (
     CoverageReason,
@@ -71,7 +69,7 @@ def _get_exceptions_config():
     return _EXCEPTIONS_CONFIG
 
 
-PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
+from src.data.openmeteo_client import PREVIOUS_RUNS_URL, fetch as openmeteo_fetch
 
 #: Internal Open-Meteo model name → canonical `forecasts.source` value.
 #: Must stay aligned with scripts/backfill_openmeteo_previous_runs.py —
@@ -86,7 +84,6 @@ MODEL_SOURCE_MAP: dict[str, str] = {
 DEFAULT_MODELS: tuple[str, ...] = tuple(MODEL_SOURCE_MAP)
 DEFAULT_LEADS: tuple[int, ...] = tuple(range(1, 8))
 DEFAULT_CHUNK_DAYS = 90
-MAX_RETRIES = 3
 SLEEP_BETWEEN_REQUESTS = 0.5
 
 # Earth temperature records — duplicated from backfill_openmeteo_previous_runs.py
@@ -145,35 +142,21 @@ def _fetch_previous_runs_chunk(
     """Fetch one Open-Meteo Previous Runs chunk with retry-on-429."""
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
     hourly_vars = [_hourly_variable_for_lead(lead) for lead in leads]
-    params = {
-        "latitude": city.lat,
-        "longitude": city.lon,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "hourly": hourly_vars,
-        "temperature_unit": temp_unit,
-        "timezone": city.timezone,
-        "models": list(models),
-    }
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = httpx.get(PREVIOUS_RUNS_URL, params=params, timeout=60.0)
-        except httpx.HTTPError as exc:
-            if attempt < MAX_RETRIES:
-                time.sleep(5.0 * attempt)
-                continue
-            raise
-        if response.status_code == 429 and attempt < MAX_RETRIES:
-            retry_after = response.headers.get("retry-after")
-            try:
-                sleep_seconds = float(retry_after) if retry_after else 15.0 * attempt
-            except ValueError:
-                sleep_seconds = 15.0 * attempt
-            time.sleep(sleep_seconds)
-            continue
-        response.raise_for_status()
-        return response.json()
-    raise RuntimeError("forecasts fetch exhausted retries")
+    return openmeteo_fetch(
+        PREVIOUS_RUNS_URL,
+        {
+            "latitude": city.lat,
+            "longitude": city.lon,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "hourly": hourly_vars,
+            "temperature_unit": temp_unit,
+            "timezone": city.timezone,
+            "models": list(models),
+        },
+        timeout=60.0,
+        endpoint_label="previous_runs",
+    )
 
 
 @dataclass(frozen=True)
@@ -190,6 +173,8 @@ class ForecastRow:
     temp_unit: str
     retrieved_at: str
     imported_at: str
+    rebuild_run_id: Optional[str] = None
+    data_source_version: Optional[str] = None
 
 
 def _rows_from_payload(
@@ -200,6 +185,8 @@ def _rows_from_payload(
     models: tuple[str, ...],
     retrieved_at: str,
     imported_at: str,
+    rebuild_run_id: str | None = None,
+    data_source_version: str | None = None,
 ) -> tuple[list[ForecastRow], dict[tuple[str, str], int]]:
     """Parse payload into ForecastRow list + per-(source,target_date) row counts.
 
@@ -254,6 +241,8 @@ def _rows_from_payload(
             temp_unit=city.settlement_unit,
             retrieved_at=retrieved_at,
             imported_at=imported_at,
+            rebuild_run_id=rebuild_run_id,
+            data_source_version=data_source_version,
         ))
         covered_days[(source, target_date)] = covered_days.get((source, target_date), 0) + 1
     return rows, covered_days
@@ -268,8 +257,8 @@ _INSERT_SQL = """
 INSERT OR IGNORE INTO forecasts (
     city, target_date, source, forecast_basis_date, forecast_issue_time,
     lead_days, lead_time_hours, forecast_high, forecast_low, temp_unit,
-    retrieved_at, imported_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    retrieved_at, imported_at, rebuild_run_id, data_source_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -283,6 +272,7 @@ def _insert_rows(conn, rows: list[ForecastRow]) -> int:
             r.forecast_issue_time, r.lead_days, r.lead_time_hours,
             r.forecast_high, r.forecast_low, r.temp_unit,
             r.retrieved_at, r.imported_at,
+            r.rebuild_run_id, r.data_source_version,
         )
         for r in rows
     ])
@@ -394,6 +384,7 @@ def append_forecasts_window(
         rows, covered_days = _rows_from_payload(
             city, payload, leads=leads, models=models,
             retrieved_at=retrieved_at, imported_at=retrieved_at,
+            rebuild_run_id=rebuild_run_id,
         )
         stats["fetched_rows"] += len(rows)
         inserted = _insert_rows(conn, rows)

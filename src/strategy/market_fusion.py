@@ -60,18 +60,12 @@ def vwmp(best_bid: float, best_ask: float,
          bid_size: float, ask_size: float) -> float:
     """Volume-Weighted Micro-Price. Spec §4.1.
 
-    If total_size = 0: fall back to mid-price + log warning.
+    If total_size <= 0: raise ValueError("Illiquid market: VWMP total size is 0.")
     Per CLAUDE.md: never use mid-price for edge calculations (VWMP required).
     """
     total = bid_size + ask_size
-    if total == 0:
-        # CLAUDE.md: VWMP with total size = 0 → fall back to mid-price + log
-        import logging
-        logging.getLogger(__name__).warning(
-            "VWMP total_size=0, falling back to mid-price: bid=%.3f ask=%.3f",
-            best_bid, best_ask
-        )
-        return (best_bid + best_ask) / 2.0
+    if total <= 0:
+        raise ValueError("Illiquid market: VWMP total size is 0, cannot fall back to mid-price")
     return (best_bid * ask_size + best_ask * bid_size) / total
 
 
@@ -183,16 +177,18 @@ def compute_posterior(
         raise ValueError("p_market must be non-negative")
     market_total = float(np.sum(p_market))
     if market_total <= 0.0:
-        VigTreatment.from_raw(p_market)
+        raise ValueError(f"Invalid market probability vector sum <= 0: {market_total}")
+        
     positive_components = int(np.count_nonzero(p_market > 0.0))
     looks_complete = positive_components >= min(len(p_market), 2)
     if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
         market = VigTreatment.from_raw(p_market).clean_prices
     else:
-        # Bug #7: sparse monitor vectors have zeros for non-held bins.
-        # Impute p_cal for missing entries to prevent zero-dilution
-        # during normalization (held bin inflated, siblings suppressed).
-        market = np.where(p_market > 0, p_market, p_cal)
+        # Bug #7 [Remediated B086]: sparse monitor vectors have zeros for non-held bins.
+        # We NO LONGER impute p_cal for missing entries. Absent market prices must explicitly
+        # remain absent (np.nan) or raw zeros to avoid diluting semantic completeness flags.
+        market = p_market.copy()
+        
     if bins is not None and len(bins) == len(p_cal):
         alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
         raw = alpha_vec * p_cal + (1.0 - alpha_vec) * market

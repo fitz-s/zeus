@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import get_mode, legacy_state_path, mode_state_path
+from src.config import ACTIVE_MODES, get_mode, legacy_state_path, mode_state_path
 
 
 LEGACY_STATE_FILES = (
@@ -45,8 +45,9 @@ def build_truth_metadata(
 
 def infer_mode_from_path(path: Path) -> str | None:
     stem = path.stem
-    if stem.endswith("-live"):
-        return "live"
+    for mode in ACTIVE_MODES:
+        if stem.endswith(f"-{mode}"):
+            return mode
     return None
 
 
@@ -98,7 +99,7 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return data, truth
 
 
-def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def read_mode_truth_json(filename: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return read_truth_json(mode_state_path(filename))
 
 
@@ -121,7 +122,8 @@ def legacy_tombstone_payload(
                 archived_to=archived_to,
             ),
             "replacement_paths": {
-                "live": str(mode_state_path(filename)),
+                mode: str(mode_state_path(filename, mode=mode))
+                for mode in ACTIVE_MODES
             },
         },
     }
@@ -171,7 +173,7 @@ def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
     return {"path": str(path), "updated": True, "missing": False}
 
 
-def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ("live",)) -> list[dict[str, Any]]:
+def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ACTIVE_MODES) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for mode in modes:
         for filename in LEGACY_STATE_FILES:

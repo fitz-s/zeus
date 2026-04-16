@@ -137,8 +137,14 @@ def _get_active_events() -> list[dict]:
     global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
     now = time.monotonic()
     if _ACTIVE_EVENTS_CACHE is None or (now - _ACTIVE_EVENTS_CACHE_AT) > _ACTIVE_EVENTS_TTL:
-        _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
-        _ACTIVE_EVENTS_CACHE_AT = now
+        try:
+            _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
+            _ACTIVE_EVENTS_CACHE_AT = now
+        except httpx.RequestError as e:
+            logger.error("Active events fetch failed: %s", e)
+            if _ACTIVE_EVENTS_CACHE is not None:
+                return list(_ACTIVE_EVENTS_CACHE)
+            return []
     return list(_ACTIVE_EVENTS_CACHE)
 
 
@@ -150,6 +156,9 @@ def _clear_active_events_cache() -> None:
 
 def _fetch_events_by_tags() -> list[dict]:
     """Fetch events using tag slugs."""
+    network_errors = 0
+    all_events = []
+    seen_ids = set()
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
@@ -177,13 +186,25 @@ def _fetch_events_by_tags() -> list[dict]:
                     break
                 offset += 50
 
-            if events:
-                return events
+            for event in events:
+                event_id = event.get("id") or event.get("slug")
+                if event_id not in seen_ids:
+                    seen_ids.add(event_id)
+                    event["_matched_tags"] = [tag_slug]
+                    all_events.append(event)
+                else:
+                    for ex in all_events:
+                        if (ex.get("id") or ex.get("slug")) == event_id:
+                            ex.setdefault("_matched_tags", []).append(tag_slug)
+                            break
         except httpx.HTTPError as e:
             logger.warning("Tag fetch failed for %s: %s", tag_slug, e)
+            network_errors += 1
             continue
 
-    return []
+    if network_errors == len(TAG_SLUGS):
+        raise httpx.RequestError(f"All {len(TAG_SLUGS)} tag fetches failed due to network errors")
+    return all_events
 
 
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:
@@ -226,7 +247,7 @@ def _parse_event(
         return None
 
     # Parse target date from slug or end date
-    target_date = _parse_target_date(event)
+    target_date = _parse_target_date(event, city)
     if target_date is None:
         return None
 
@@ -246,7 +267,7 @@ def _parse_event(
             )
             return None
     else:
-        hours_to_resolution = 24.0
+        hours_to_resolution = None
 
     # Extract bin structure from markets
     outcomes = _extract_outcomes(event)
@@ -381,8 +402,8 @@ def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None
     return None
 
 
-def _parse_target_date(event: dict) -> Optional[str]:
-    """Extract target date from event slug or end date."""
+def _parse_target_date(event: dict, city: Optional["City"] = None) -> Optional[str]:
+    """Extract target date from event slug or end date. Using city timezone if available."""
     slug = event.get("slug", "")
 
     # Try slug pattern: highest-temperature-in-{city}-on-{month}-{day}-{year}
@@ -396,12 +417,18 @@ def _parse_target_date(event: dict) -> Optional[str]:
         except ValueError:
             pass
 
-    # Fallback: use end date
+    # Fallback: use end date and city timezone
     end_str = event.get("endDate") or event.get("end_date")
     if end_str:
         try:
+            if city and city.timezone:
+                import pytz
+                from datetime import datetime as dt
+                end_dt = dt.fromisoformat(end_str.replace("Z", "+00:00"))
+                tz = pytz.timezone(city.timezone)
+                return end_dt.astimezone(tz).strftime("%Y-%m-%d")
             return end_str[:10]  # YYYY-MM-DD
-        except (IndexError, TypeError):
+        except (IndexError, TypeError, ValueError):
             pass
 
     return None
