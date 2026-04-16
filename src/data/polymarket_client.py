@@ -182,12 +182,16 @@ class PolymarketClient:
                 result = next((o for o in orders if o.get("id") == order_id), None)
             else:
                 logger.warning("Live client has no order-status method")
-                return None
+                return {"status": "MISSING_METHOD"}
+                
+            if result is None:
+                return {"status": "NOT_FOUND"}
+                
             logger.info("Order status: %s → %s", order_id, result.get("status") if result else "missing")
             return result
         except Exception as exc:
             logger.warning("Order status fetch failed for %s: %s", order_id, exc)
-            return None
+            return {"status": "FETCH_ERROR", "reason": str(exc)}
 
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
@@ -232,8 +236,16 @@ class PolymarketClient:
             if size < 0.01:
                 continue
 
-            avg_price = float(item.get("avgPrice", 0) or item.get("avg_price", 0) or 0)
-            initial_value = float(item.get("initialValue", 0) or 0)
+            try:
+                avg_price = float(item.get("avgPrice", 0) or item.get("avg_price", 0) or 0)
+                initial_value = float(item.get("initialValue", 0) or 0)
+                current_value = float(item.get("currentValue", 0) or 0)
+                cash_pnl = float(item.get("cashPnl", 0) or 0)
+                cur_price = float(item.get("curPrice", 0) or 0)
+            except (TypeError, ValueError) as e:
+                logger.warning("Quarantining token %s due to malformed metrics: %s", token_id, e)
+                continue
+
             positions.append({
                 "token_id": token_id,
                 "condition_id": item.get("conditionId", "") or item.get("condition_id", ""),
@@ -241,9 +253,9 @@ class PolymarketClient:
                 "avg_price": round(avg_price, 6),
                 "cost": round(initial_value, 4) if initial_value > 0 else round(size * avg_price, 4),
                 "side": item.get("outcome", "") or item.get("side", ""),
-                "current_value": round(float(item.get("currentValue", 0) or 0), 4),
-                "cash_pnl": round(float(item.get("cashPnl", 0) or 0), 4),
-                "cur_price": round(float(item.get("curPrice", 0) or 0), 6),
+                "current_value": round(current_value, 4),
+                "cash_pnl": round(cash_pnl, 4),
+                "cur_price": round(cur_price, 6),
                 "redeemable": bool(item.get("redeemable", False)),
                 "title": item.get("title", ""),
                 "end_date": item.get("endDate", ""),

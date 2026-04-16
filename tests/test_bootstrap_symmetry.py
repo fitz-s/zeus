@@ -77,7 +77,7 @@ class TestBootstrapContextStashing:
     @patch("src.engine.monitor_refresh.get_calibrator")
     @patch("src.engine.monitor_refresh.fetch_ensemble")
     @patch("src.engine.monitor_refresh.validate_ensemble", return_value=True)
-    @patch("src.engine.monitor_refresh.lead_days_to_target", return_value=3.0)
+    @patch("src.engine.monitor_refresh.lead_days_to_date_start", return_value=3.0)
     @patch("src.engine.monitor_refresh._check_persistence_anomaly", return_value=1.0)
     def test_ens_refresh_stashes_bootstrap_context(
         self, mock_anomaly, mock_lead, mock_validate, mock_fetch_ens,

@@ -27,24 +27,20 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
     """State path — Zeus is live-only.
 
     The mode parameter is accepted for call-site compatibility but MUST be
-    None or 'live'. Any other value logs a warning — there is no multi-mode
-    state isolation. All state files live directly in STATE_DIR.
+    None or 'live'. Any other value raises ValueError immediately.
     """
     if mode is not None and mode != "live":
-        logger.warning(
-            "mode_state_path called with mode=%r — Zeus is live-only. "
-            "Ignoring mode; returning STATE_DIR / %r. "
-            "Remove the mode argument or pass mode=None.",
-            mode, filename,
-        )
+        raise ValueError(f"mode_state_path called with invalid mode={mode!r} — Zeus state paths are live-only.")
     return STATE_DIR / filename
 
+
+ACTIVE_MODES = ("live",)
 
 def get_mode() -> str:
     """Mode accessor. Reads from ZEUS_MODE env var (validated at startup)."""
     mode = os.environ.get("ZEUS_MODE", "live")
-    if mode not in ("live",):
-        raise ValueError(f"ZEUS_MODE={mode!r} is not valid — Zeus is live-only")
+    if mode not in ACTIVE_MODES:
+        raise ValueError(f"ZEUS_MODE={mode!r} is not valid — Zeus is currently restricted to {ACTIVE_MODES}.")
     return mode
 
 
@@ -122,13 +118,17 @@ class Settings:
         for key in required:
             if key not in self._data:
                 raise KeyError(f"Missing required config key: {key}")
+        
+        # Enforce single mode authority
+        if self._data.get("mode") and self._data["mode"] != get_mode():
+            raise ValueError(f"Mode conflict: ZEUS_MODE={get_mode()!r} but settings.json mode={self._data['mode']!r}")
 
     def __getitem__(self, key: str):
         return self._data[key]
 
     @property
     def mode(self) -> str:
-        return self._data["mode"]
+        return get_mode()
 
     @property
     def capital_base_usd(self) -> float:
@@ -244,7 +244,10 @@ cities_by_name: dict[str, City] = {c.name: c for c in cities}
 cities_by_alias: dict[str, City] = {}
 for c in cities:
     for alias in c.aliases:
-        cities_by_alias[alias.lower()] = c
+        alias_lower = alias.lower()
+        if alias_lower in cities_by_alias:
+            raise ValueError(f"Alias conflict: {alias!r} maps to both {cities_by_alias[alias_lower].name!r} and {c.name!r}")
+        cities_by_alias[alias_lower] = c
 
 
 def validate_cities_config(city_list: list[City] | None = None) -> list[str]:

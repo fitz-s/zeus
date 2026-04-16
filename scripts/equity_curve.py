@@ -39,9 +39,9 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 
 def build_equity_curve(mode: str) -> dict:
-    status, status_truth = read_mode_truth_json("status_summary.json", mode=mode)
-    portfolio, portfolio_truth = read_mode_truth_json("positions.json", mode=mode)
-    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json", mode=mode)
+    status, status_truth = read_mode_truth_json("status_summary.json")
+    portfolio, portfolio_truth = read_mode_truth_json("positions.json")
+    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json")
 
     initial = float(status["portfolio"]["initial_bankroll"])
     realized_now = float(status["portfolio"]["realized_pnl"])

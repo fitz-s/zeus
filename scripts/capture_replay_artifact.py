@@ -161,7 +161,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
                 for d in decisions
             ]
             try:
-                from src.engine.time_context import lead_hours_to_target
+                from src.engine.time_context import lead_hours_to_date_start
                 from datetime import date
 
                 log_shadow_signal(
@@ -173,7 +173,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
                     p_raw_json=json.dumps(first.p_raw.tolist() if first.p_raw is not None else []),
                     p_cal_json=json.dumps(first.p_cal.tolist() if first.p_cal is not None else []),
                     edges_json=json.dumps(edges_payload),
-                    lead_hours=float(lead_hours_to_target(date.fromisoformat(candidate.target_date), city.timezone, datetime.fromisoformat(started_at.replace("Z", "+00:00")))),
+                    lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, datetime.fromisoformat(started_at.replace("Z", "+00:00")))),
                 )
             except Exception:
                 pass

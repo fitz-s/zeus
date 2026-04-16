@@ -64,10 +64,7 @@ SOURCE = "openmeteo_archive_hourly"
 CHUNK_DAYS = 90
 SLEEP_BETWEEN_REQUESTS = 1.0
 
-#: Minimum hours a local_date must have to be marked WRITTEN. DST
-#: spring-forward days have 23 hours; the scanner accepts any day with
-#: ≥20 hours as covered to allow for the occasional Open-Meteo null.
-_MIN_HOURS_PER_DAY_FOR_WRITTEN = 20
+#: The scanner evaluates dynamic limits per Date/Timezone offset.
 
 _GUARD = IngestionGuard()
 
@@ -251,14 +248,35 @@ def _write_row(conn, r: dict, rebuild_run_id: str) -> None:
     ))
 
 
+def _expected_hours(target_date_str: str, timezone_name: str) -> int:
+    import pytz
+    tz = pytz.timezone(timezone_name)
+    dt = datetime.fromisoformat(target_date_str)
+    try:
+        start_dt = tz.localize(dt, is_dst=None)
+    except pytz.exceptions.AmbiguousTimeError:
+        start_dt = tz.localize(dt, is_dst=False)
+    except pytz.exceptions.NonExistentTimeError:
+        start_dt = tz.normalize(tz.localize(dt + timedelta(hours=1)))
+        
+    next_day = dt + timedelta(days=1)
+    try:
+        end_dt = tz.localize(next_day, is_dst=None)
+    except pytz.exceptions.AmbiguousTimeError:
+        end_dt = tz.localize(next_day, is_dst=False)
+    except pytz.exceptions.NonExistentTimeError:
+        end_dt = tz.normalize(tz.localize(next_day + timedelta(hours=1)))
+        
+    return int((end_dt - start_dt).total_seconds() / 3600)
+
+
 def _rollup_dates_written(rows: list[dict]) -> dict[str, int]:
     """Count hours written per local_date in this batch.
 
     Used to decide whether each (city, local_date) should be marked
-    WRITTEN in data_coverage. Only dates with ≥ _MIN_HOURS_PER_DAY_FOR_WRITTEN
-    flip to WRITTEN; partial-day rows remain un-flipped and the scanner
-    will pick them up on the next pass.
+    WRITTEN in data_coverage.
     """
+
     counts: dict[str, int] = {}
     for r in rows:
         td = r["target_date"]
@@ -355,10 +373,11 @@ def append_hourly_window(
                 )
 
         # Roll up per-date from written_rows (not kept) and flip to
-        # WRITTEN where the success count hits threshold.
+        # WRITTEN where the success count hits threshold dynamically.
         counts = _rollup_dates_written(written_rows)
         for target_date_str, n_hours in counts.items():
-            if n_hours >= _MIN_HOURS_PER_DAY_FOR_WRITTEN:
+            expected = _expected_hours(target_date_str, city.timezone)
+            if n_hours >= expected:
                 record_written(
                     conn,
                     data_table=DataTable.OBSERVATION_INSTANTS,

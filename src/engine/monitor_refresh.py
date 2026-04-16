@@ -23,7 +23,7 @@ from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
-from src.engine.time_context import lead_days_to_target
+from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_signal import Day0Signal
 from src.signal.day0_window import remaining_member_maxes_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
@@ -99,7 +99,7 @@ def _refresh_ens_member_counting(
 
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
-    requested_lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
+    requested_lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
     if requested_lead_days < 0:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
@@ -108,7 +108,7 @@ def _refresh_ens_member_counting(
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
-    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, ens_result.get("fetch_time")))
+    lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, ens_result.get("fetch_time")))
 
     semantics = SettlementSemantics.for_city(city)
     ens = EnsembleSignal(

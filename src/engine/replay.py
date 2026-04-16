@@ -148,13 +148,24 @@ def _market_price_linkage_limitations(
     }
 
 
+def _missing_parity_dimensions(full_linkage: bool) -> list[str]:
+    """Return names of parity dimensions not satisfied by replay."""
+    return [
+        dim for dim, present in [
+            ("market_price_linkage", full_linkage),
+            ("active_sizing_parity", False),   # replay uses flat $5, not Kelly
+            ("selection_family_parity", False), # replay has no bootstrap/FDR
+        ] if not present
+    ]
+
+
 def _replay_provenance_limitations(outcomes: list[ReplayOutcome]) -> dict:
     decision_reference_source_counts = Counter(
-        outcome.decision_reference_source or "unknown"
+        outcome.decision_reference_source or "UNKNOWN"
         for outcome in outcomes
     )
     hours_since_open_source_counts = Counter(
-        outcome.hours_since_open_source or "unknown"
+        outcome.hours_since_open_source or "UNKNOWN"
         for outcome in outcomes
     )
     fallback_subjects = sum(1 for outcome in outcomes if outcome.hours_since_open_fallback)
@@ -217,12 +228,16 @@ class ReplayContext:
         self.allow_snapshot_only_reference = allow_snapshot_only_reference
         self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
         self._decision_ref_cache: dict[tuple[str, str], Optional[dict]] = {}
-        # Detect whether shared DB is attached (production) or monolithic (tests)
+        import sqlite3
         try:
             self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
             self._sp = "world."  # world DB attached
-        except Exception:
-            self._sp = ""  # monolithic DB (tests)
+        except sqlite3.OperationalError as exc:
+            try:
+                self.conn.execute("SELECT 1 FROM ensemble_snapshots LIMIT 0")
+                self._sp = ""  # monolithic DB (tests)
+            except sqlite3.OperationalError:
+                raise RuntimeError("Replay topology error: ensemble_snapshots neither in world attach nor local main schema.") from exc
 
     def _forecast_rows_for(self, city_name: str, target_date: str) -> list[dict]:
         """Load diagnostic historical forecast rows for a replay fallback."""
@@ -533,13 +548,10 @@ class ReplayContext:
     def get_market_price(self, city_name: str, target_date: str) -> float:
         """Get historical market mid-price from token_price_log.
 
-        Falls back to 0.5 (uninformed prior) if no data.
+        Returns np.nan if no data to explicitly convey historical omission.
         """
-        # token_price_log doesn't have city/target_date directly,
-        # but calibration_pairs has the p_raw at decision time.
-        # Use 0.5 as market price for replay (equivalent to α=1.0 test
-        # where market provides zero information)
-        return 0.5
+        import math
+        return float('nan')
 
     def get_settlement(self, city_name: str, target_date: str) -> Optional[dict]:
         """Get settlement outcome for scoring."""
@@ -624,7 +636,7 @@ def _forecast_reference_id(row) -> str:
     group_id = row["decision_group_id"] if "decision_group_id" in row.keys() else None
     if group_id:
         return str(group_id)
-    available_at = str(row["forecast_available_at"] or "unknown_time")
+    available_at = str(row["forecast_available_at"] or "UNKNOWN")
     lead_days = float(row["lead_days"] or 0.0)
     return f"calibration_pair:{available_at}:lead={lead_days:g}"
 
@@ -1065,7 +1077,7 @@ def _replay_one_settlement(
     decision_ref = ctx.get_decision_reference_for(city.name, target_date)
     if decision_ref is None:
         return None
-    decision_reference_source = str(decision_ref.get("source") or "unknown")
+    decision_reference_source = str(decision_ref.get("source") or "UNKNOWN")
     selected_method = "ens_member_counting"
     if decision_ref.get("source") == "decision_log.trade_cases":
         selected_method = "ens_member_counting"
@@ -1149,7 +1161,7 @@ def _replay_one_settlement(
         alpha = compute_alpha(
             calibration_level=cal_level,
             ensemble_spread=TemperatureDelta(float(snapshot["spread"] or 3.0), city.settlement_unit),
-            model_agreement=decision_ref.get("agreement", "AGREE") or "AGREE",
+            model_agreement=decision_ref.get("agreement", "UNKNOWN") or "UNKNOWN",
             lead_days=lead_days,
             hours_since_open=hours_since_open,
             city_name=city.name,
@@ -1982,18 +1994,25 @@ def run_replay(
         if any("market_price_unavailable" in d.applied_validations for d in outcome.replay_decisions)
     )
 
+    linkage_info = _market_price_linkage_limitations(
+        n_replayed=summary.n_replayed,
+        market_price_linked_subjects=priced_subjects,
+        market_price_unavailable_subjects=unpriced_subjects,
+    )
+    full_linkage = linkage_info.get("market_price_linkage_state") == "full"
+
+    # ZDM-03: explicitly report missing parity dimensions
+    missing_parity = _missing_parity_dimensions(full_linkage)
+
     summary.limitations = {
         "uniform_prior": "diagnostic_edge_ranking_only_when_market_vector_missing",
         "flat_sizing": False,
         "no_bootstrap_fdr": False,
-        **_market_price_linkage_limitations(
-            n_replayed=summary.n_replayed,
-            market_price_linked_subjects=priced_subjects,
-            market_price_unavailable_subjects=unpriced_subjects,
-        ),
+        **linkage_info,
         **_replay_provenance_limitations(summary.outcomes),
         "forecast_rows_fallback": allow_snapshot_only_reference,
         "promotion_authority": False,
+        "missing_parity_dimensions": missing_parity,
     }
 
     # Store results

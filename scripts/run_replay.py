@@ -290,6 +290,16 @@ def main():
     # Authority declaration — always shown
     print(f"\n{'='*80}")
     print("AUTHORITY: APPROXIMATE AUDIT ONLY — not promotion-eligible")
+
+    # ZDM-03: prominently surface market price linkage and missing parity dimensions
+    linkage_state = summary.limitations.get("market_price_linkage_state", "unknown")
+    linked = summary.limitations.get("market_price_linked_subjects", 0)
+    total = summary.n_replayed
+    print(f"  Market price linkage: {linkage_state} ({linked}/{total} subjects)")
+    missing_parity = summary.limitations.get("missing_parity_dimensions", [])
+    if missing_parity:
+        print(f"  Missing parity dimensions ({len(missing_parity)}/3): {', '.join(missing_parity)}")
+
     print("Limitations:")
     for key, value in summary.limitations.items():
         flag = value if not isinstance(value, bool) else ("TRUE" if value else "FALSE")

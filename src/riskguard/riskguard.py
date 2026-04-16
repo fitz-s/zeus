@@ -41,6 +41,7 @@ TRAILING_LOSS_SOURCE_OK = "risk_state_history"
 TRAILING_LOSS_SOURCE_DEGRADED = "no_trustworthy_reference_row"
 TRAILING_LOSS_STATUSES = {
     "ok",
+    "stale_reference",
     "insufficient_history",
     "inconsistent_history",
     "no_reference_row",
@@ -62,17 +63,23 @@ def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
 
 
 def _portfolio_position_from_loader_row(row: dict) -> Position:
+    # B052: Enforce strict canonical fields rather than filling defaults
+    required = ["trade_id", "market_id", "city", "target_date", "direction", "unit", "env", "size_usd"]
+    for req in required:
+        if row.get(req) is None or str(row.get(req)) == "":
+            raise ValueError(f"Canonical loader row missing critical field {req!r}")
+
     return Position(
-        trade_id=str(row.get("trade_id") or ""),
-        market_id=str(row.get("market_id") or ""),
-        city=str(row.get("city") or ""),
+        trade_id=str(row["trade_id"]),
+        market_id=str(row["market_id"]),
+        city=str(row["city"]),
         cluster=str(row.get("cluster") or ""),
-        target_date=str(row.get("target_date") or ""),
+        target_date=str(row["target_date"]),
         bin_label=str(row.get("bin_label") or ""),
-        direction=str(row.get("direction") or "unknown"),
-        unit=str(row.get("unit") or "F"),
-        env=str(row.get("env") or get_mode()),
-        size_usd=float(row.get("size_usd") or 0.0),
+        direction=str(row["direction"]),
+        unit=str(row["unit"]),
+        env=str(row["env"]),
+        size_usd=float(row["size_usd"]),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
         entry_price=float(row.get("entry_price") or 0.0),
@@ -106,10 +113,23 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             f"riskguard requires canonical truth source, got {policy.source!r}: {policy.reason}"
         )
     metadata_state, capital_source = _load_riskguard_capital_metadata()
-    positions = [
-        _portfolio_position_from_loader_row(row)
-        for row in loader_view.get("positions", [])
-    ]
+    positions = []
+    for row in loader_view.get("positions", []):
+        try:
+            positions.append(_portfolio_position_from_loader_row(row))
+        except ValueError as exc:
+            # B052: Quarantine broken rows and escalate to avoid silent masking
+            logger.error("Quarantining invalid canonical portfolio row: %s", exc)
+            raise RuntimeError(f"RiskGuard DB loader fault: {exc}")
+
+    # B053: Dual-source consistency locking
+    metadata_positions = getattr(metadata_state, "positions", [])
+    if len(positions) != len(metadata_positions):
+        logger.warning(
+            "B053 Consistency Mismatch: canonical_db has %d positions vs %d in capital metadata. RiskGuard blending may be stale.",
+            len(positions), len(metadata_positions)
+        )
+
     bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
     portfolio = PortfolioState(
         positions=positions,
@@ -127,7 +147,8 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "fallback_active": False,
         "fallback_reason": "",
         "position_count": len(positions),
-        "capital_source": capital_source,
+        "capital_source": "dual_source_blended",
+        "consistency_lock": "pass" if len(positions) == len(metadata_positions) else "mismatched",
     }
 
 
@@ -173,7 +194,6 @@ def _trailing_loss_reference(
 ) -> dict:
     cutoff_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) - lookback
     cutoff = cutoff_dt.isoformat()
-    window_start = (cutoff_dt - TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE).isoformat()
     total_rows = int(
         risk_conn.execute("SELECT COUNT(*) FROM risk_state").fetchone()[0] or 0
     )
@@ -189,10 +209,10 @@ def _trailing_loss_reference(
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
-          AND checked_at >= ?
         ORDER BY checked_at DESC, id DESC
+        LIMIT 100
         """,
-        (cutoff, window_start),
+        (cutoff,),
     ).fetchall()
     if not candidate_rows:
         return {
@@ -203,8 +223,15 @@ def _trailing_loss_reference(
 
     for row in candidate_rows:
         if reference := _risk_state_reference_from_row(row):
+            ref_dt = datetime.fromisoformat(reference["checked_at"].replace("Z", "+00:00"))
+            staleness = cutoff_dt - ref_dt
+            if staleness > TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE:
+                status = "stale_reference"
+            else:
+                status = "ok"
+            
             return {
-                "status": "ok",
+                "status": status,
                 "source": TRAILING_LOSS_SOURCE_OK,
                 "reference": reference,
             }
@@ -230,10 +257,10 @@ def _trailing_loss_snapshot(
     if status not in TRAILING_LOSS_STATUSES:
         raise RuntimeError(f"unexpected trailing loss status: {status}")
     reference = reference_info.get("reference")
-    if status != "ok" or reference is None:
+    if status not in ("ok", "stale_reference") or reference is None:
         return {
             "loss": 0.0,
-            "level": RiskLevel.RED,
+            "level": RiskLevel.DATA_DEGRADED,
             "degraded": True,
             "status": f"degraded:{status}",
             "source": str(reference_info["source"]),
@@ -241,15 +268,23 @@ def _trailing_loss_snapshot(
         }
     reference_equity = float(reference["effective_bankroll"])
     loss = round(max(0.0, reference_equity - current_equity), 2)
-    level = (
+    level_from_loss = (
         RiskLevel.RED
         if loss > float(initial_bankroll) * float(threshold_pct)
         else RiskLevel.GREEN
     )
+    
+    # Staleness degrades GREEN to DATA_DEGRADED, but preserves RED.
+    if status == "stale_reference":
+        level = RiskLevel.RED if level_from_loss == RiskLevel.RED else RiskLevel.DATA_DEGRADED
+        is_degraded = True
+    else:
+        level = level_from_loss
+        is_degraded = False
     return {
         "loss": loss,
         "level": level,
-        "degraded": False,
+        "degraded": is_degraded,
         "status": status,
         "source": str(reference_info["source"]),
         "reference": reference,
@@ -921,6 +956,11 @@ def tick() -> RiskLevel:
                 alert_warning("Settlement quality", float(degraded_rows), 1.0, detail=f"storage_source={settlement_storage_source}")
             if strategy_signal_level == RiskLevel.YELLOW:
                 alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
+        elif level == RiskLevel.DATA_DEGRADED:
+            if daily_loss_level == RiskLevel.DATA_DEGRADED:
+                alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+            if weekly_loss_level == RiskLevel.DATA_DEGRADED:
+                alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
     except Exception as exc:
         logger.warning("Discord alert emission failed: %s", exc)
 
