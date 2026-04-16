@@ -136,6 +136,31 @@ Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fal
 
 ---
 
+## CRITICAL: Settlement Source Mismatch (2026-04-16 smoke test)
+
+### [OPEN] HK: SettlementSemantics uses WMO half-up, but PM resolution uses floor (bin containment)
+**Location:** `src/contracts/settlement_semantics.py` → `for_city()` → non-WU path
+**Problem:** PM HK description says: "resolve to the temperature range that **contains** the highest temperature... temperatures in Celsius to **one decimal place**." HKO Daily Extract returns 0.1°C precision (e.g., 27.8°C). PM maps 27.8 into "27°C" bin via floor containment: 27 ≤ 27.8 < 28. Our `SettlementSemantics` uses `precision=1.0` + `rounding_rule="wmo_half_up"`, giving `floor(27.8+0.5)=28` — wrong bin.
+**Evidence:** Floor fixes 3/3 HKO-period mismatches (03-18, 03-24, 03-29) with 0 regressions against 16 total HK PM markets. All 11 existing matches preserved under floor.
+**Impact:** HK is the only city with decimal-precision raw values (all WU cities return integers where floor=WMO). This is an architecture-level change: modifying `SettlementSemantics.for_city()` for HKO rounding affects the probability chain (ENS → noise → settlement rounding → bin assignment).
+**Fix scope:** Change `rounding_rule` to `"floor"` for `settlement_source_type == "hko"` in `SettlementSemantics.for_city()`. Requires system constitution review since WMO half-up is stated as universal law in AGENTS.md line 49 and line 117.
+**Blocked by:** System constitution review — AGENTS.md says "Settlement: WMO asymmetric half-up rounding" as universal. HKO is an exception where PM uses containment semantics instead.
+
+### [OPEN] HK 03-13, 03-14: PM used WU/VHHH Airport Station, we have HKO Observatory data
+**Problem:** PM early markets (before 03-16) resolved from `wunderground.com/history/daily/hk/hong-kong/VHHH` (Airport Station). We only have HKO Observatory data. Values wildly different (HKO=21.8 vs PM≤15 on 03-13). These 2 dates need WU/VHHH observations.
+**Impact:** 2 mismatches. Cannot fix without WU/VHHH historical data for those dates.
+
+### [OPEN] WU cities (SZ/Seoul/SP/KL/etc.): API max(hourly) ≠ website daily summary high
+**Problem:** PM resolves from WU website daily summary page (e.g., `wunderground.com/history/daily/cn/shenzhen/ZGSZ`). We compute `max(hourly_temp_C)` from WU v1 API. These are different values. Tested on 10 SZ mismatch dates: neither floor(F→C) nor WMO(F→C) from API hourly data explains PM values (1/10 and 3/10 respectively). Additionally, the WU API returns obs from "Lau Fau Shan" (HK station) for ZGSZ, while PM reads the Bao'an Airport page.
+**Impact:** ~19 mismatches across SZ(10), Seoul(5), SP(2), KL(1), Chengdu(1).
+**Fix:** Need to either scrape the WU website daily summary or find the XHR API endpoint that the WU Angular SPA uses to load daily summary data.
+
+### [OPEN] Taipei: PM switched resolution source 3 times
+**Problem:** PM used CWA (03-16~03-22) → NOAA Taiwan Taoyuan Intl Airport (03-23~04-04) → WU/RCSS Taipei Songshan Airport (04-05+). We only have WU/RCSS data for all dates. Gaps of 1-5°C on 16 mismatch dates confirm wrong source.
+**Impact:** 16 mismatches. Need per-date source routing or historical data from CWA and NOAA for the affected periods.
+
+---
+
 ## Polymarket Bin Structure (verified from zeus.db, 2026-03-31)
 
 **这是 ground truth，来自实际市场数据，不是 spec：**

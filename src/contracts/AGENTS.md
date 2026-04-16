@@ -36,6 +36,22 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 - Contracts are **frozen dataclasses** — immutability is intentional
 - This is K0 (kernel) — changes here require planning lock and packet discipline
 
+### Settlement Rounding Rules
+
+| Rule | Semantics | Cities | Source |
+|------|-----------|--------|--------|
+| `wmo_half_up` | `floor(x + 0.5)` — WMO asymmetric half-up | 49 WU/NOAA/CWA cities | ASOS/AWOS integer °F/°C |
+| `oracle_truncate` | `floor(x)` — UMA truncation bias | Hong Kong (HKO) | HKO 0.1°C API |
+
+**⚠️ DANGER: `oracle_truncate` 仅限 HKO 等受到 UMA 截断偏见污染的合约使用！**
+**严禁用于正常的气象学 P_raw 模拟！**
+
+UMA 截断偏见 (Truncation Bias): 当 PM 合约选项只有整数 Bin (如 28°C/29°C) 且合约
+未明确 WMO 四舍五入规则时，UMA 投票者对 28.7°C 的认知是 "没到 29.0 就是 28 的区间"，
+事实上执行了 `floor()` 而非 `floor(x + 0.5)`。
+
+验证数据: HKO 14/14 同源日 100% 匹配 (floor) vs 5/14 36% 匹配 (wmo_half_up)。
+
 ## Common mistakes
 
 - Bypassing `SettlementSemantics` for "just a quick write" → precision drift

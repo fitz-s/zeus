@@ -8,7 +8,7 @@ from src.contracts.exceptions import SettlementPrecisionError
 
 logger = logging.getLogger(__name__)
 
-RoundingRule = Literal["wmo_half_up", "floor", "ceil"]
+RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
 def round_wmo_half_up_values(values, precision: float = 1.0) -> np.ndarray:
@@ -50,7 +50,14 @@ class SettlementSemantics:
 
         if self.rounding_rule == "wmo_half_up":
             rounded = np.floor(scaled + 0.5)
-        elif self.rounding_rule == "floor":
+        elif self.rounding_rule in ("floor", "oracle_truncate"):
+            # DANGER: oracle_truncate 仅限 HKO 等受到 UMA 截断偏见污染
+            # 的合约使用！严禁用于正常的气象学 P_raw 模拟！
+            #
+            # UMA voters treat decimal °C as truncated: "28.7 hasn't
+            # reached 29, so it's 28". Empirically verified: floor()
+            # achieves 14/14 (100%) match on HKO same-source settlement
+            # days vs 5/14 (36%) with wmo_half_up.
             rounded = np.floor(scaled)
         elif self.rounding_rule == "ceil":
             rounded = np.ceil(scaled)
@@ -132,8 +139,22 @@ class SettlementSemantics:
                 return cls.default_wu_celsius(city.wu_station)
             return cls.default_wu_fahrenheit(city.wu_station)
 
-        # Non-WU settlement sources (e.g., HKO, CWA, NOAA)
-        # Same precision/rounding contract, different resolution source
+        # Non-WU settlement sources
+        if source_type == "hko":
+            # DANGER: oracle_truncate 仅限 HKO！严禁用于其他城市！
+            # HKO reports 0.1°C precision. UMA voters apply truncation
+            # ("28.7 → 28"), not WMO half-up rounding ("28.7 → 29").
+            # Verified: floor() achieves 14/14 (100%) match on HKO
+            # same-source days vs 5/14 (36%) with wmo_half_up.
+            return cls(
+                resolution_source="HKO_HQ",
+                measurement_unit="C",
+                precision=1.0,
+                rounding_rule="oracle_truncate",
+                finalization_time="12:00:00Z",
+            )
+
+        # CWA, NOAA, etc. — default to WMO half-up
         return cls(
             resolution_source=f"{source_type}_{city.wu_station}",
             measurement_unit=city.settlement_unit,

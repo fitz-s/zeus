@@ -75,6 +75,22 @@ class TestComputeAlpha:
         with pytest.raises(TypeError):
             compute_alpha(1, 3.0, "AGREE", 3, 24.0, authority_verified=True)
 
+    @pytest.mark.parametrize(
+        "agreement, expected_alpha",
+        [
+            ("NOT_CHECKED", 0.65),    # no penalty — treated same as AGREE
+            ("AGREE", 0.65),          # no penalty
+            ("SOFT_DISAGREE", 0.55),  # -0.10 penalty
+        ],
+        ids=["not_checked", "agree", "soft_disagree"],
+    )
+    def test_p9_model_agreement_alpha_adjustment(self, agreement, expected_alpha):
+        """P9: model_agreement field drives alpha penalty correctly."""
+        a = compute_alpha(
+            1, TemperatureDelta(3.0, "F"), agreement, 3, 24.0, authority_verified=True
+        ).value
+        assert a == pytest.approx(expected_alpha, abs=0.01)
+
 
 class TestComputePosterior:
     def test_alpha_half(self):

@@ -46,6 +46,7 @@ class MarketAnalysis:
         lead_days: float = 3.0,
         unit: str = "F",  # P0-9 baseline bootstrap sigma still depends on settlement unit
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        round_fn: callable = None,  # Settlement rounding (oracle_truncate for HKO)
         city_name: str = "",
         season: str = "",
         forecast_source: str = "",
@@ -85,6 +86,7 @@ class MarketAnalysis:
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
+        self._round_fn = round_fn
         ensemble_spread = float(np.std(self._member_maxes)) if len(self._member_maxes) else None
         self._sigma_context = analysis_sigma_context(
             unit=unit,
@@ -184,11 +186,12 @@ class MarketAnalysis:
     def _settle(self, values: np.ndarray) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
 
-        Mirrors EnsembleSignal._simulate_settlement() logic.
-        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses WMO asymmetric half-up rounding: floor(x + 0.5).
+        Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
+        otherwise falls back to WMO asymmetric half-up: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
         """
+        if self._round_fn is not None:
+            return self._round_fn(values)
         return round_wmo_half_up_values(values, self._precision)
 
     def _bootstrap_bin(

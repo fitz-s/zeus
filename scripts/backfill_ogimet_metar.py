@@ -107,6 +107,13 @@ OGIMET_TARGETS: dict[str, OgimetTarget] = {
         unit="C",
         source_tag="ogimet_synop_46692",
     ),
+    "Tel Aviv": OgimetTarget(
+        city_name="Tel Aviv",
+        station="LLBG",
+        kind="metar",
+        unit="C",
+        source_tag="ogimet_metar_llbg",
+    ),
 }
 
 
