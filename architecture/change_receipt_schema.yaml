@@ -3,9 +3,10 @@ metadata:
   created: "2026-04-15"
   owner_packet: "Topology Enforcement Hardening Phase 3"
   purpose: >
-    Route/change receipts turn high-risk navigation protocol into a
-    machine-checkable closeout contract. They record the route source, allowed
-    write scope, forbidden scope, and evidence tied to a concrete diff.
+    Route/change receipts turn high-risk packet closeout into a
+    machine-checkable diff/scope contract with typed route-artifact evidence.
+    They do not prove interactive command history on their own; they prove that
+    the declared diff, route artifact shape, and law surface are coherent.
 
 required_fields:
   - task
@@ -80,3 +81,4 @@ notes:
   - Allowed/forbidden file lists may use glob patterns.
   - Receipt changed_files must match the closeout diff exactly; stale or partial receipts fail.
   - route_evidence must point to a real plan/current-state/packet artifact that explains the chosen route.
+  - Receipts prove declared packet scope and route-artifact coherence, not that a specific interactive command was executed.
