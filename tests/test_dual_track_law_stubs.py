@@ -36,8 +36,33 @@ def test_kelly_input_carries_distributional_info():
 
 # NC-15 / INV-22
 def test_fdr_family_key_is_canonical():
-    """NC-15 / INV-22: make_family_id() resolves to one canonical family grammar across every call site; per-path strategy_key drift is forbidden."""
-    pytest.skip("pending: enforced in Phase 1 identity work")
+    """NC-15 / INV-22: Phase 1 enforcement — scope-aware FDR family grammar.
+
+    make_hypothesis_family_id and make_edge_family_id produce distinct IDs for
+    the same candidate inputs, and both are deterministic within their scope.
+    This prevents BH discovery budgets from silently merging across scopes.
+    """
+    from src.strategy.selection_family import (
+        make_hypothesis_family_id,
+        make_edge_family_id,
+    )
+
+    cand = dict(
+        cycle_mode="opening_hunt",
+        city="NYC",
+        target_date="2026-04-01",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-1",
+    )
+    h_id = make_hypothesis_family_id(**cand)
+    e_id = make_edge_family_id(**cand, strategy_key="center_buy")
+
+    # Scope separation: same candidate inputs must produce different IDs
+    assert h_id != e_id, "hypothesis and edge family IDs must differ for same candidate inputs"
+
+    # Determinism within each scope
+    assert h_id == make_hypothesis_family_id(**cand), "hypothesis family ID must be deterministic"
+    assert e_id == make_edge_family_id(**cand, strategy_key="center_buy"), "edge family ID must be deterministic"
 
 
 # INV-19

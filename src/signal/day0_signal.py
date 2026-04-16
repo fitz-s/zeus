@@ -21,6 +21,7 @@ from src.signal.forecast_uncertainty import (
     day0_temporal_closure_weight,
 )
 from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
+from src.types.metric_identity import MetricIdentity
 
 
 class Day0Signal:
@@ -50,7 +51,7 @@ class Day0Signal:
         round_fn: Callable | None = None,  # Settlement rounding (oracle_truncate for HKO)
         observed_low_so_far: float | None = None,
         member_mins_remaining: np.ndarray | None = None,
-        temperature_metric: str = "high",
+        temperature_metric: MetricIdentity = None,  # type: ignore[assignment]
     ):
         """
         Args:
@@ -61,7 +62,33 @@ class Day0Signal:
                                    shape (n_members,)
             diurnal_peak_confidence: 0.0-1.0, how confident we are that the
                 daily peak has already passed (from diurnal_curves data)
+            temperature_metric: MetricIdentity instance (HIGH_LOCALDAY_MAX or
+                LOW_LOCALDAY_MIN). Bare str is rejected — convert via
+                MetricIdentity.from_raw() at the evaluator normalizer seam.
         """
+        # R4: type-seam guard — bare strings must not reach signal classes
+        if isinstance(temperature_metric, str):
+            raise TypeError(
+                f"Day0Signal requires a MetricIdentity instance for temperature_metric, "
+                f"got str {temperature_metric!r}. "
+                f"Convert via MetricIdentity.from_raw() at the evaluator normalizer seam "
+                f"(evaluator.py _normalize_temperature_metric)."
+            )
+        if temperature_metric is None:
+            raise TypeError(
+                "Day0Signal requires an explicit MetricIdentity for temperature_metric; "
+                "None is not a valid default. Pass HIGH_LOCALDAY_MAX or LOW_LOCALDAY_MIN "
+                "from src.types.metric_identity."
+            )
+        # R2: low-track not yet implemented — refuse rather than silently produce
+        # high-semantics output. Phase 6 replaces this guard with a real low nowcast.
+        if temperature_metric.is_low():
+            raise NotImplementedError(
+                "Day0Signal does not yet implement the low-temperature nowcast path. "
+                "Constructing Day0Signal with LOW_LOCALDAY_MIN is forbidden until Phase 6 "
+                "lands a dedicated low-track Day0 class. See Phase 6 of the dual-track "
+                "metric spine refactor plan."
+            )
         self.obs_high = observed_high_so_far
         self.obs_low = observed_low_so_far
         self.current_temp = current_temp

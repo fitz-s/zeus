@@ -22,7 +22,7 @@ from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.strategy.fdr_filter import fdr_filter
 from src.strategy.risk_limits import RiskLimits
-from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id
+from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id, make_edge_family_id
 from src.types import Bin, BinEdge
 
 
@@ -92,14 +92,16 @@ class TestFDRFilter:
 
 class TestSelectionFamilySubstrate:
     def test_family_id_is_stable(self):
-        assert make_family_id(
+        # Phase 1 (2026-04-16): migrated from make_family_id to make_edge_family_id.
+        # The canonical ID now carries the "edge|" scope prefix.
+        assert make_edge_family_id(
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
             strategy_key="center_buy",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
-        ) == "opening_hunt|NYC|2026-04-01|center_buy|opening_hunt|snap-1"
+        ) == "edge|opening_hunt|NYC|2026-04-01|center_buy|opening_hunt|snap-1"
 
     def test_bh_mask_uses_full_tested_family(self):
         mask = benjamini_hochberg_mask([0.001, 0.020, 0.080, 0.500], q=0.10)
@@ -214,7 +216,8 @@ class TestSelectionFamilySubstrate:
         conn.close()
 
         assert result == {"status": "written", "families": 1, "hypotheses": 3}
-        assert family["family_id"] == "opening_hunt|NYC|2026-04-01||opening_hunt|snap-1"
+        # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
+        assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|opening_hunt|snap-1"
         family_meta = json.loads(family["meta_json"])
         assert family_meta["active_fdr_selected"] == 1
         assert family_meta["passed_prefilter"] == 2
@@ -335,7 +338,8 @@ class TestSelectionFamilySubstrate:
         conn.close()
 
         assert result == {"status": "written", "families": 1, "hypotheses": 2}
-        assert family_ids == ["update_reaction|NYC|2026-04-01||update_reaction|snap-1"]
+        # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
+        assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|update_reaction|snap-1"]
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
             "center_buy",
             "shoulder_sell",

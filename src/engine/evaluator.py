@@ -50,7 +50,12 @@ from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
-from src.strategy.selection_family import apply_familywise_fdr, make_family_id
+from src.strategy.selection_family import (
+    apply_familywise_fdr,
+    make_hypothesis_family_id,
+    make_edge_family_id,
+)
+from src.types.metric_identity import MetricIdentity
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
@@ -266,9 +271,15 @@ def _forecast_source_key(model_name: str | None) -> str:
     return text
 
 
-def _normalize_temperature_metric(value: str | None) -> str:
+def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
+    """The single legal str→MetricIdentity conversion point in the codebase.
+
+    Wraps the raw string from MarketCandidate.temperature_metric into a typed
+    MetricIdentity. All downstream signal code receives the MetricIdentity object.
+    """
     text = str(value or "").strip().lower()
-    return "low" if text == "low" else "high"
+    raw = "low" if text == "low" else "high"
+    return MetricIdentity.from_raw(raw)
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -391,11 +402,10 @@ def _record_selection_family_facts(
     candidate_id = candidate.event_id or candidate.slug or f"{candidate.city.name}|{candidate.target_date}"
     rows = []
     if hypotheses is not None:
-        family_id = make_family_id(
+        family_id = make_hypothesis_family_id(
             cycle_mode=cycle_mode,
             city=candidate.city.name,
             target_date=candidate.target_date,
-            strategy_key="",
             discovery_mode=discovery_mode,
             decision_snapshot_id=decision_snapshot_id,
         )
@@ -430,7 +440,7 @@ def _record_selection_family_facts(
     else:
         for edge in edges:
             strategy_key = _strategy_key_for(candidate, edge)
-            family_id = make_family_id(
+            family_id = make_edge_family_id(
                 cycle_mode=cycle_mode,
                 city=candidate.city.name,
                 target_date=candidate.target_date,
@@ -474,14 +484,11 @@ def _record_selection_family_facts(
         )
     family_meta: dict[str, dict] = {}
     for row in selected_rows:
-        family_id = make_family_id(
-            cycle_mode=cycle_mode,
-            city=candidate.city.name,
-            target_date=candidate.target_date,
-            strategy_key=row["strategy_key"],
-            discovery_mode=discovery_mode,
-            decision_snapshot_id=decision_snapshot_id,
-        )
+        # Phase 1 (2026-04-16): carry the original family_id by reference from the
+        # row dict — do NOT reconstruct via make_family_id/make_edge_family_id here.
+        # Reconstructing would require knowing the scope (hyp vs edge) at this point,
+        # and the row already carries the canonical ID written during the discovery pass.
+        family_id = row["family_id"]
         meta = family_meta.setdefault(
             family_id,
             {
@@ -567,11 +574,10 @@ def _selected_edge_keys_from_full_family(
     cycle_mode = candidate.discovery_mode or "unknown"
     discovery_mode = candidate.discovery_mode or ""
     rows = []
-    family_id = make_family_id(
+    family_id = make_hypothesis_family_id(
         cycle_mode=cycle_mode,
         city=candidate.city.name,
         target_date=candidate.target_date,
-        strategy_key="",
         discovery_mode=discovery_mode,
         decision_snapshot_id=decision_snapshot_id,
     )
@@ -791,7 +797,7 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
-        if temperature_metric == "low" and candidate.observation.get("low_so_far") is None:
+        if temperature_metric.is_low() and candidate.observation.get("low_so_far") is None:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
@@ -812,6 +818,11 @@ def evaluate_candidate(
             current_temp=float(candidate.observation["current_temp"]),
             hours_remaining=hours_remaining,
             member_maxes_remaining=remaining_member_extrema,
+            # Phase 1: Day0Signal.__init__ raises NotImplementedError on low metrics,
+            # so member_mins_remaining is dead code today. When Phase 6 lands the
+            # Day0LowNowcastSignal split, the extrema producer must be re-split to
+            # emit separate max/min arrays — passing the max array here as mins is
+            # a Phase-6 TODO marker, not a valid low-track implementation.
             member_mins_remaining=remaining_member_extrema,
             unit=city.settlement_unit,
             observation_source=str(candidate.observation.get("source", "")),
@@ -1008,7 +1019,7 @@ def evaluate_candidate(
             )
             gfs_metric_values = (
                 gfs_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
-                if temperature_metric == "low"
+                if temperature_metric.is_low()
                 else gfs_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
             )
             gfs_measured = settlement_semantics.round_values(gfs_metric_values)

@@ -28,6 +28,7 @@ from src.config import (
 )
 from src.types import Bin
 from src.types.market import bin_counts_from_array
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 from src.types.temperature import TemperatureDelta, Unit
 
 
@@ -140,19 +141,24 @@ def member_maxes_for_target_date(
     timezone_name: str | ZoneInfo,
     target_date: date,
     *,
-    temperature_metric: str = "high",
+    temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
 ) -> np.ndarray:
     """Compute per-member daily extrema using the local target-date slice.
 
     For high-temperature markets (default), returns per-member daily maxes.
     For low-temperature markets, returns per-member daily mins.
+
+    Args:
+        temperature_metric: MetricIdentity instance. Callers holding a bare
+            string must convert via MetricIdentity.from_raw() at their own
+            seam (see evaluator.py _normalize_temperature_metric).
     """
     tz_hours = select_hours_for_target_date(
         target_date,
         timezone_name,
         times=times,
     )
-    if temperature_metric == "low":
+    if temperature_metric.is_low():
         return members_hourly[:, tz_hours].min(axis=1)
     return members_hourly[:, tz_hours].max(axis=1)
 
@@ -235,7 +241,7 @@ class EnsembleSignal:
         target_date: date,
         settlement_semantics: SettlementSemantics,
         decision_time: datetime | None = None,
-        temperature_metric: str = "high",
+        temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
     ):
         """
         Args:
@@ -245,7 +251,17 @@ class EnsembleSignal:
             target_date: the settlement date
             settlement_semantics: Exact resolution constraints for this target market
             decision_time: Exact time the orchestrator began the evaluation cycle
+            temperature_metric: MetricIdentity instance. Bare strings are rejected.
+                Callers holding a string must convert at their own seam via
+                MetricIdentity.from_raw() (evaluator.py _normalize_temperature_metric).
         """
+        if isinstance(temperature_metric, str):
+            raise TypeError(
+                f"EnsembleSignal requires a MetricIdentity instance for temperature_metric, "
+                f"got str {temperature_metric!r}. "
+                f"Convert via MetricIdentity.from_raw() at the caller seam."
+            )
+
         if members_hourly.shape[0] < ensemble_member_count():
             raise ValueError(
                 f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "

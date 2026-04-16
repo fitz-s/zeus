@@ -286,7 +286,14 @@ Every temperature-market family must carry a typed identity:
 - `data_version`
 
 This identity is row truth and model truth, not optional metadata. Bare
-`"high"` / `"low"` strings are legal only at serialization boundaries.
+`"high"` / `"low"` strings are legal only at serialization boundaries
+(gamma payloads, JSON persistence). Inside the runtime the typed object
+lives at `src/types/metric_identity.py` (`MetricIdentity`, with
+canonical instances `HIGH_LOCALDAY_MAX` and `LOW_LOCALDAY_MIN`);
+`MetricIdentity.from_raw()` is the single legal string-to-typed
+conversion point. Every consumer signal class must accept
+`MetricIdentity` only — it must not declare `temperature_metric: str`
+as a public parameter.
 
 A valid dual-track architecture must represent, on the same `(city,
 target_date)`, two distinct legitimate temperature truths: the daily high

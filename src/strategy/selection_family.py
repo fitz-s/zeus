@@ -3,10 +3,16 @@
 The active evaluator uses this module after the full-family scan. Family scope
 is determined by `family_id`: currently one candidate/market/snapshot family
 across strategy keys, not one whole-cycle family across all markets.
+
+Phase 1 (2026-04-16): make_family_id() is deprecated. Use the two scope-aware
+functions instead:
+  - make_hypothesis_family_id() — per-candidate BH budget, no strategy_key
+  - make_edge_family_id()       — per-strategy BH budget, requires strategy_key
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 
@@ -19,6 +25,61 @@ class HypothesisRecord:
     passed_prefilter: bool = False
 
 
+def make_hypothesis_family_id(
+    *,
+    cycle_mode: str,
+    city: str,
+    target_date: str,
+    discovery_mode: str,
+    decision_snapshot_id: str = "",
+) -> str:
+    """Canonical family ID for the per-candidate (hypothesis) scope.
+
+    BH discovery budget is shared across all hypotheses for a single candidate
+    × snapshot. Does NOT carry strategy_key — scope is per-candidate, not
+    per-strategy.
+
+    Encodes scope explicitly via "hyp|" prefix so IDs are always distinguishable
+    from edge-scope IDs even when all other fields match.
+    """
+    parts = ["hyp", cycle_mode, city, target_date, discovery_mode]
+    if decision_snapshot_id:
+        parts.append(decision_snapshot_id)
+    return "|".join(parts)
+
+
+def make_edge_family_id(
+    *,
+    cycle_mode: str,
+    city: str,
+    target_date: str,
+    strategy_key: str,
+    discovery_mode: str,
+    decision_snapshot_id: str = "",
+) -> str:
+    """Canonical family ID for the per-strategy (edge) scope.
+
+    BH discovery budget is scoped to a single (candidate × strategy × snapshot).
+    Carries strategy_key — a different strategy_key always produces a different ID.
+
+    Encodes scope explicitly via "edge|" prefix so IDs are always distinguishable
+    from hypothesis-scope IDs even when all other fields match.
+
+    Raises:
+        ValueError: if strategy_key is falsy (empty string or None). An edge
+            family requires a real strategy to prevent silent scope collapse.
+    """
+    if not strategy_key:
+        raise ValueError(
+            f"make_edge_family_id requires a non-empty strategy_key; "
+            f"got {strategy_key!r}. Use make_hypothesis_family_id for per-candidate scope."
+        )
+    parts = ["edge", cycle_mode, city, target_date, strategy_key, discovery_mode]
+    if decision_snapshot_id:
+        parts.append(decision_snapshot_id)
+    return "|".join(parts)
+
+
 def make_family_id(
     *,
     cycle_mode: str,
@@ -28,10 +89,36 @@ def make_family_id(
     discovery_mode: str,
     decision_snapshot_id: str = "",
 ) -> str:
-    parts = [cycle_mode, city, target_date, strategy_key, discovery_mode]
-    if decision_snapshot_id:
-        parts.append(decision_snapshot_id)
-    return "|".join(parts)
+    """DEPRECATED: use make_hypothesis_family_id or make_edge_family_id.
+
+    Routes based on strategy_key:
+    - Empty/None strategy_key → hypothesis scope (make_hypothesis_family_id)
+    - Real strategy_key       → edge scope (make_edge_family_id)
+
+    Emits DeprecationWarning on every call.
+    """
+    warnings.warn(
+        "make_family_id() is deprecated. Use make_hypothesis_family_id() for "
+        "per-candidate scope or make_edge_family_id() for per-strategy scope.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if not strategy_key:
+        return make_hypothesis_family_id(
+            cycle_mode=cycle_mode,
+            city=city,
+            target_date=target_date,
+            discovery_mode=discovery_mode,
+            decision_snapshot_id=decision_snapshot_id,
+        )
+    return make_edge_family_id(
+        cycle_mode=cycle_mode,
+        city=city,
+        target_date=target_date,
+        strategy_key=strategy_key,
+        discovery_mode=discovery_mode,
+        decision_snapshot_id=decision_snapshot_id,
+    )
 
 
 def benjamini_hochberg_mask(p_values: list[float], q: float) -> list[bool]:

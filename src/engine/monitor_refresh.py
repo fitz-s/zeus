@@ -30,6 +30,7 @@ from src.signal.ensemble_signal import EnsembleSignal
 from src.state.portfolio import Position
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.types import Bin
+from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
@@ -284,7 +285,11 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
 
-    temperature_metric = getattr(position, "temperature_metric", "high")
+    # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
+    # so Day0Signal receives the typed object, not a bare str.
+    temperature_metric = MetricIdentity.from_raw(
+        getattr(position, "temperature_metric", "high")
+    )
 
     remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
         ens_result["members_hourly"],
