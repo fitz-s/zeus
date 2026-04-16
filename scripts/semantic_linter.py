@@ -44,7 +44,7 @@ SEMANTIC_RULES = {
     }
 }
 
-TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py", "day0_residual.py"}
+TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py"}
 P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
 
 # K2_struct: forbid bare FROM calibration_pairs outside the allowlist.

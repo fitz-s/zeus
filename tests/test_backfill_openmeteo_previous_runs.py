@@ -134,7 +134,6 @@ def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfil
 
     assert step_ids.index("openmeteo_previous_runs") < step_ids.index("forecast_skill")
     assert step_ids.index("forecast_skill") < step_ids.index("historical_forecasts")
-    assert step_ids.index("historical_forecasts") < step_ids.index("forecast_error_profiles")
     assert "900" in steps["wu_daily"]["extra_args"]
     assert "900" in steps["hourly_openmeteo"]["extra_args"]
     assert "900" in steps["openmeteo_previous_runs"]["extra_args"]
@@ -144,4 +143,3 @@ def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfil
     assert "forecasts" in onboard_cities._verification_tables()
     assert "forecast_skill" in onboard_cities._verification_tables()
     assert "model_bias" in onboard_cities._verification_tables()
-    assert "forecast_error_profile" in onboard_cities._verification_tables()

@@ -270,11 +270,6 @@ PIPELINE_STEPS = [
         "script": "etl_historical_forecasts.py",
     },
     {
-        "id": "forecast_error_profiles",
-        "name": "Materialize forecast error profiles",
-        "script": "etl_forecast_error_profiles.py",
-    },
-    {
         "id": "asos_wu_offsets",
         "name": "Compute ASOS-WU station offsets",
         "script": "etl_asos_wu_offset.py",
@@ -743,7 +738,6 @@ def _verification_tables() -> list[str]:
         "forecasts",
         "forecast_skill",
         "model_bias",
-        "forecast_error_profile",
         "ensemble_snapshots",
         "calibration_pairs",
         "historical_forecasts",
