@@ -18,7 +18,7 @@ Authority basis: Operator-established tribunal precedence (Phase 1, 2026-04-11)
 
 1. **Live may act. Backtest may evaluate. Shadow may observe.** No context may exceed its authority.
 2. **No silent JSON fallback in live.** DB canonical truth is the only read authority for live position state. JSON exports are derived caches, never promoted back.
-3. **No replay-derived promotion authority.** Until replay achieves: market-price linkage, active sizing parity, and selection-family parity, its output may inform but NOT authorize live math changes.
+3. **No replay-derived promotion authority.** Until replay achieves full market-price linkage across all subjects, active sizing parity, and selection-family parity, its output may inform but NOT authorize live math changes. Market-price linkage is already tracked per-subject as `full`/`partial`/`none`; the remaining gaps are sizing and selection-family parity.
 4. **No prestige-math live cutover.** A model that shows better backtested metrics does not earn live deployment. The promotion path is: shadow instrumentation -> candidate evaluation -> explicit operator approval -> live cutover.
 5. **Shadow -> candidate -> live promotion path is mandatory.** No math change reaches live without passing through shadow observation and explicit human gate.
 
@@ -68,7 +68,7 @@ It may NOT:
 To promote any math change from shadow/backtest to live:
 
 1. Shadow instrumentation must have collected >= 30 days of parallel data
-2. Backtest evaluation must use honest replay (market prices, active sizing, and selection-family parity with the live control unit)
+2. Backtest evaluation must use honest replay (full market-price linkage, active sizing parity, and selection-family parity with the live control unit)
 3. Candidate evaluation must show statistical improvement on the live-relevant metric
 4. Operator must explicitly approve the cutover
 5. A governance packet must document the promotion with rollback plan
