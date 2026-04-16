@@ -12,9 +12,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.data.observation_client import Day0ObservationContext
 
 from src.calibration.manager import get_calibrator
 from src.calibration.manager import season_from_date
@@ -86,7 +89,7 @@ class MarketCandidate:
     temperature_metric: str = "high"
     event_id: str = ""
     slug: str = ""
-    observation: Optional[dict] = None
+    observation: Optional["Day0ObservationContext"] = None
     discovery_mode: str = ""
 
 
@@ -617,13 +620,13 @@ def _availability_status_for_error(exc: Exception) -> str:
     return "DATA_UNAVAILABLE"
 
 
-def _get_day0_temporal_context(city: City, target_date: date, observation: Optional[dict] = None):
+def _get_day0_temporal_context(city: City, target_date: date, observation: "Optional[Day0ObservationContext]" = None):
     try:
-        if observation is not None and not observation.get("observation_time"):
+        if observation is not None and not observation.observation_time:
             return None
         from src.signal.diurnal import build_day0_temporal_context
-        observation_time = observation.get("observation_time") if observation else None
-        observation_source = observation.get("source", "") if observation else ""
+        observation_time = observation.observation_time if observation else None
+        observation_source = observation.source if observation else ""
         return build_day0_temporal_context(
             city.name,
             target_date,
@@ -797,11 +800,11 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
-        if temperature_metric.is_low() and candidate.observation.get("low_so_far") is None:
+        if temperature_metric.is_low() and candidate.observation.low_so_far is None:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
-                rejection_stage="SIGNAL_QUALITY",
+                rejection_stage="OBSERVATION_UNAVAILABLE_LOW",
                 rejection_reasons=["Day0 low observation unavailable"],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
@@ -809,13 +812,9 @@ def evaluate_candidate(
             )]
 
         day0 = Day0Signal(
-            observed_high_so_far=float(candidate.observation["high_so_far"]),
-            observed_low_so_far=(
-                float(candidate.observation["low_so_far"])
-                if candidate.observation.get("low_so_far") is not None
-                else None
-            ),
-            current_temp=float(candidate.observation["current_temp"]),
+            observed_high_so_far=float(candidate.observation.high_so_far),
+            observed_low_so_far=float(candidate.observation.low_so_far),
+            current_temp=float(candidate.observation.current_temp),
             hours_remaining=hours_remaining,
             member_maxes_remaining=remaining_member_extrema,
             # Phase 1: Day0Signal.__init__ raises NotImplementedError on low metrics,
@@ -825,8 +824,8 @@ def evaluate_candidate(
             # a Phase-6 TODO marker, not a valid low-track implementation.
             member_mins_remaining=remaining_member_extrema,
             unit=city.settlement_unit,
-            observation_source=str(candidate.observation.get("source", "")),
-            observation_time=candidate.observation.get("observation_time"),
+            observation_source=str(candidate.observation.source),
+            observation_time=candidate.observation.observation_time,
             current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
             temporal_context=temporal_context,
             temperature_metric=temperature_metric,

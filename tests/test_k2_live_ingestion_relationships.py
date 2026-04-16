@@ -144,44 +144,38 @@ def test_R2_forecasts_sources_match_registry() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R3 — WU CITY_STATIONS must stay in sync with the backfill script
+# R3 — daily_obs_append reads WU station config from cities.json (R-G)
 # ---------------------------------------------------------------------------
 
 
-def test_R3_wu_city_stations_match_backfill_script() -> None:
-    """daily_obs_append.CITY_STATIONS must be a subset+same-values of the
-    backfill script's CITY_STATIONS (which is the authoritative source).
+def test_R3_daily_obs_append_has_no_city_stations() -> None:
+    """Phase 3 R-G: daily_obs_append must NOT declare a local CITY_STATIONS map.
 
-    Path A duplication only works if the two stay aligned. If a new city
-    is added to the backfill but not to the live appender, the live path
-    will silently stop collecting it — data freshness bug that no unit
-    test would catch.
+    Station config (ICAO, country code, unit) is now read exclusively from
+    cities.json via src.config.cities_by_name. The parallel map is deleted.
     """
-    import importlib.util
-    script_path = PROJECT_ROOT / "scripts" / "backfill_wu_daily_all.py"
-    spec = importlib.util.spec_from_file_location("_backfill_wu", script_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    script_stations = mod.CITY_STATIONS
-    append_stations = daily_obs_append.CITY_STATIONS
-
-    # Every key in append must exist in script with identical tuple.
-    mismatches = []
-    for name, info in append_stations.items():
-        if name not in script_stations:
-            mismatches.append(f"{name} in append but not in backfill script")
-        elif script_stations[name] != info:
-            mismatches.append(
-                f"{name}: append={info} != script={script_stations[name]}"
-            )
-    # Also flag any cities in script that daily_obs_append is missing.
-    for name in script_stations:
-        if name not in append_stations:
-            mismatches.append(f"{name} in backfill script but not in append")
-    assert not mismatches, (
-        "CITY_STATIONS drifted between append and backfill:\n  "
-        + "\n  ".join(mismatches)
+    assert not hasattr(daily_obs_append, "CITY_STATIONS"), (
+        "daily_obs_append still exports CITY_STATIONS — Phase 3 R-G requires "
+        "this map to be deleted; station config must come from cities.json."
     )
+
+
+def test_R3_daily_obs_append_wu_cities_sourced_from_cities_json() -> None:
+    """daily_tick iterates cities_by_name filtered by settlement_source_type=='wu_icao'.
+
+    Verify that all wu_icao cities in cities.json have a non-empty wu_station
+    and country_code — the two fields append_wu_city reads in place of CITY_STATIONS.
+    """
+    from src.config import cities_by_name
+    wu_cities = [c for c in cities_by_name.values() if c.settlement_source_type == "wu_icao"]
+    assert wu_cities, "No wu_icao cities found in cities.json"
+    missing = []
+    for c in wu_cities:
+        if not c.wu_station:
+            missing.append(f"{c.name}: wu_station is empty")
+        if not c.country_code:
+            missing.append(f"{c.name}: country_code is empty")
+    assert not missing, "wu_icao cities missing required station fields:\n  " + "\n  ".join(missing)
 
 
 # ---------------------------------------------------------------------------

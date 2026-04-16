@@ -11,6 +11,8 @@ Contract:
 """
 
 import logging
+import warnings
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -19,7 +21,64 @@ import os
 import httpx
 
 from src.config import City
+from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 from src.data.openmeteo_quota import quota_tracker
+
+
+@dataclass(frozen=True, slots=True)
+class Day0ObservationContext:
+    """Typed observation snapshot returned by every provider path.
+
+    low_so_far is required and may never be None — providers that cannot
+    produce it must raise ObservationUnavailableError instead.
+    """
+
+    current_temp: float
+    high_so_far: float
+    low_so_far: float
+    source: str
+    observation_time: object  # raw timestamp — str | int | float | None
+    unit: str
+
+    def __post_init__(self) -> None:
+        if self.low_so_far is None:
+            raise ValueError("Day0ObservationContext.low_so_far must not be None")
+
+    def as_dict(self) -> dict:
+        """Backward-compat shim — callers that still use dict access."""
+        warnings.warn(
+            "Day0ObservationContext.as_dict() is deprecated; access fields directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {
+            "current_temp": self.current_temp,
+            "high_so_far": self.high_so_far,
+            "low_so_far": self.low_so_far,
+            "source": self.source,
+            "observation_time": self.observation_time,
+            "unit": self.unit,
+        }
+
+    # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh
+    def get(self, key: str, default=None):
+        warnings.warn(
+            f"Day0ObservationContext.get('{key}') is deprecated; access field directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str):
+        warnings.warn(
+            f"Day0ObservationContext['{key}'] is deprecated; access field directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +175,7 @@ def get_current_observation(
     city: City,
     target_date: date | str | None = None,
     reference_time: datetime | str | None = None,
-) -> Optional[dict]:
+) -> Day0ObservationContext:
     """Get the current target-date observation for Day0 signal."""
 
     target_day, _, reference_local, tz = _resolve_observation_context(
@@ -136,8 +195,6 @@ def get_current_observation(
     if result is not None:
         return result
 
-    from src.contracts.exceptions import ObservationUnavailableError
-
     logger.error(
         "No observation source available for %s on local target_date=%s up to %s",
         city.name,
@@ -153,7 +210,7 @@ def _fetch_wu_observation(
     target_day: date,
     reference_local: datetime,
     tz: ZoneInfo,
-) -> Optional[dict]:
+) -> Optional[Day0ObservationContext]:
     try:
         url = WU_OBS_URL.format(lat=city.lat, lon=city.lon)
         unit = "e" if city.settlement_unit == "F" else "m"
@@ -193,13 +250,15 @@ def _fetch_wu_observation(
 
         current_temp, _, raw_time = selected[-1]
         high_so_far = max(temp for temp, _, _ in selected)
-        return {
-            "high_so_far": float(high_so_far),
-            "current_temp": float(current_temp),
-            "source": "wu_api",
-            "observation_time": raw_time,
-            "unit": city.settlement_unit,
-        }
+        low_so_far = min(temp for temp, _, _ in selected)
+        return Day0ObservationContext(
+            high_so_far=float(high_so_far),
+            low_so_far=float(low_so_far),
+            current_temp=float(current_temp),
+            source="wu_api",
+            observation_time=raw_time,
+            unit=city.settlement_unit,
+        )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("WU observation fetch failed for %s (%s): %s", city.name, type(e).__name__, e)
@@ -248,16 +307,30 @@ def _fetch_iem_asos(
         offset = _get_asos_wu_offset(city, target_date=target_day)
 
         current_temp = float(temp_f) + offset
-        high_so_far = float(ob["max_tmpf"]) + offset if ob.get("max_tmpf") is not None else current_temp
+        if ob.get("max_tmpf") is None or ob.get("min_tmpf") is None:
+            # IEM ASOS current endpoint may not carry daily max/min yet (early in day).
+            # Silently defaulting to current_temp would violate NC-8 / fail-closed law.
+            # Return None so the next provider is tried.
+            logger.debug(
+                "IEM ASOS for %s missing max_tmpf or min_tmpf — skipping (fail-closed, not defaulting)",
+                city.name,
+            )
+            return None
+        high_so_far = float(ob["max_tmpf"]) + offset
+        low_so_far = float(ob["min_tmpf"]) + offset
 
-        return {
-            "high_so_far": high_so_far,
-            "current_temp": current_temp,
-            "source": "iem_asos",
-            "observation_time": local_valid,
-            "unit": "F",
-        }
+        return Day0ObservationContext(
+            high_so_far=high_so_far,
+            low_so_far=low_so_far,
+            current_temp=current_temp,
+            source="iem_asos",
+            observation_time=local_valid,
+            unit="F",
+        )
 
+    except MissingCalibrationError:
+        logger.debug("IEM ASOS skipped for %s — no calibrated ASOS→WU offset, falling through", city.name)
+        return None
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("IEM ASOS fetch failed for %s: %s", city.name, e)
         return None
@@ -315,13 +388,15 @@ def _fetch_openmeteo_hourly(
 
         current_temp, _, raw_time = selected[-1]
         high_so_far = max(temp for temp, _, _ in selected)
-        return {
-            "high_so_far": float(high_so_far),
-            "current_temp": float(current_temp),
-            "source": "openmeteo_hourly",
-            "observation_time": raw_time,
-            "unit": city.settlement_unit,
-        }
+        low_so_far = min(temp for temp, _, _ in selected)
+        return Day0ObservationContext(
+            high_so_far=float(high_so_far),
+            low_so_far=float(low_so_far),
+            current_temp=float(current_temp),
+            source="openmeteo_hourly",
+            observation_time=raw_time,
+            unit=city.settlement_unit,
+        )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("Open-Meteo hourly fetch failed for %s: %s", city.name, e)

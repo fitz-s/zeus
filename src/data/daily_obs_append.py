@@ -4,7 +4,8 @@ Replaces the broken `src/data/wu_daily_collector.py` for live ingestion of
 daily high/low temperatures into the `observations` table. Handles the two
 distinct daily-obs source lanes Zeus uses:
 
-1. WU ICAO history for 45 configured cities. Uses the same
+1. WU ICAO history for cities whose settlement_source_type == "wu_icao" in
+   cities.json. Uses the same
    `v1/location/{ICAO}:9:{CC}/observations/historical.json` endpoint as
    `scripts/backfill_wu_daily_all.py` — NOT the older `timeseries.json`
    endpoint that `wu_daily_collector.py` used — so a live write and a
@@ -28,12 +29,12 @@ Contract:
   silently landed rows as `UNVERIFIED` and made them dead data for
   calibration.
 
-Source registry (CITY_STATIONS) and fetch helpers are intentionally
-duplicated from `scripts/backfill_wu_daily_all.py` and
-`scripts/backfill_hko_daily.py` (Path A). Phase C of the K2 packet will
-extract the common client into `src/data/wu_icao_client.py` +
-`src/data/hko_client.py` so backfill and live append share one
-implementation.
+Station config (ICAO code, country code, settlement unit) is read from
+cities.json via src.config.cities_by_name — that is the single source of
+truth. The local CITY_STATIONS parallel map has been removed (Phase 3 R-G).
+Phase C of the K2 packet will extract the WU/HKO fetch helpers into shared
+clients (wu_icao_client.py, hko_client.py) so backfill and live append share
+one implementation.
 
 Public API:
 - `append_wu_city(city_name, target_dates, conn, *, rebuild_run_id)` —
@@ -106,69 +107,6 @@ WU_ICAO_HISTORY_URL = (
     "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
 )
 WU_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
-
-#: city name → (ICAO code, country code, declared settlement unit)
-CITY_STATIONS: dict[str, tuple[str, str, str]] = {
-    # US cities (F-unit settlement)
-    "NYC":           ("KLGA", "US", "F"),
-    "Chicago":       ("KORD", "US", "F"),
-    "Atlanta":       ("KATL", "US", "F"),
-    "Austin":        ("KAUS", "US", "F"),
-    "Dallas":        ("KDAL", "US", "F"),
-    "Denver":        ("KBKF", "US", "F"),
-    "Houston":       ("KHOU", "US", "F"),
-    "Los Angeles":   ("KLAX", "US", "F"),
-    "Miami":         ("KMIA", "US", "F"),
-    "San Francisco": ("KSFO", "US", "F"),
-    "Seattle":       ("KSEA", "US", "F"),
-    # Americas
-    "Buenos Aires":  ("SAEZ", "AR", "C"),
-    "Mexico City":   ("MMMX", "MX", "C"),
-    "Sao Paulo":     ("SBGR", "BR", "C"),
-    "Toronto":       ("CYYZ", "CA", "C"),
-    # Europe
-    "London":        ("EGLC", "GB", "C"),
-    "Paris":         ("LFPG", "FR", "C"),
-    "Munich":        ("EDDM", "DE", "C"),
-    "Madrid":        ("LEMD", "ES", "C"),
-    "Milan":         ("LIMC", "IT", "C"),
-    "Warsaw":        ("EPWA", "PL", "C"),
-    "Amsterdam":     ("EHAM", "NL", "C"),
-    "Helsinki":      ("EFHK", "FI", "C"),
-    "Ankara":        ("LTAC", "TR", "C"),
-    # Asia
-    "Beijing":       ("ZBAA", "CN", "C"),
-    "Shanghai":      ("ZSPD", "CN", "C"),
-    "Shenzhen":      ("ZGSZ", "CN", "C"),
-    "Chengdu":       ("ZUUU", "CN", "C"),
-    "Chongqing":     ("ZUCK", "CN", "C"),
-    "Wuhan":         ("ZHHH", "CN", "C"),
-    "Guangzhou":     ("ZGGG", "CN", "C"),
-    # Hong Kong is intentionally NOT in CITY_STATIONS — HKO is the
-    # authoritative Polymarket settlement source for HK.
-    "Tokyo":         ("RJTT", "JP", "C"),
-    "Seoul":         ("RKSI", "KR", "C"),
-    "Taipei":        ("RCSS", "TW", "C"),
-    "Singapore":     ("WSSS", "SG", "C"),
-    "Lucknow":       ("VILK", "IN", "C"),
-    "Karachi":       ("OPKC", "PK", "C"),
-    "Manila":        ("RPLL", "PH", "C"),
-    # Oceania
-    "Wellington":    ("NZWN", "NZ", "C"),
-    "Auckland":      ("NZAA", "NZ", "C"),
-    # Africa
-    "Lagos":         ("DNMM", "NG", "C"),
-    "Cape Town":     ("FACT", "ZA", "C"),
-    # Middle East
-    "Jeddah":        ("OEJN", "SA", "C"),
-    # Southeast Asia
-    "Kuala Lumpur":  ("WMKK", "MY", "C"),
-    "Jakarta":       ("WIHH", "ID", "C"),
-    # Northeast Asia
-    "Busan":         ("RKPK", "KR", "C"),
-    # Latin America
-    "Panama City":   ("MPMG", "PA", "C"),
-}
 
 #: WU data_source string as it appears in both `observations.source` and
 #: `data_coverage.data_source`. Must match the backfill script exactly.
@@ -860,16 +798,14 @@ def append_wu_city(
 
     Returns {'inserted', 'guard_rejected', 'fetch_errors', 'missing_from_api'}.
     """
-    info = CITY_STATIONS.get(city_name)
-    if not info:
-        logger.warning("append_wu_city: %s not in CITY_STATIONS", city_name)
-        return {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
-
-    icao, cc, unit = info
     city_cfg = cities_by_name.get(city_name)
     if city_cfg is None:
         logger.warning("append_wu_city: %s not in cities.json", city_name)
         return {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
+
+    icao = city_cfg.wu_station
+    cc = city_cfg.country_code
+    unit = city_cfg.settlement_unit
 
     dates = sorted(set(target_dates))
     if not dates:
@@ -1409,10 +1345,10 @@ def daily_tick(
 
     scheduler = WuDailyScheduler()
     wu_totals = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "missing_from_api": 0}
-    for city_name in CITY_STATIONS:
-        city_cfg = cities_by_name.get(city_name)
-        if city_cfg is None:
+    for city_cfg in cities_by_name.values():
+        if city_cfg.settlement_source_type != "wu_icao":
             continue
+        city_name = city_cfg.name
         if not scheduler.should_collect_now(city_cfg, now_utc):
             continue
         # Fetch the LAST COMPLETED local calendar day, not the in-progress

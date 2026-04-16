@@ -255,7 +255,7 @@ def _refresh_day0_observation(
     if obs is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation"]
-    if not obs.get("observation_time"):
+    if not obs.observation_time:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
 
@@ -275,8 +275,8 @@ def _refresh_day0_observation(
             city.name,
             target_d,
             city.timezone,
-            observation_time=obs.get("observation_time"),
-            observation_source=obs.get("source", ""),
+            observation_time=obs.observation_time,
+            observation_source=obs.source,
         )
     except Exception:
         temporal_context = None
@@ -304,19 +304,15 @@ def _refresh_day0_observation(
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     day0 = Day0Signal(
-        observed_high_so_far=float(obs["high_so_far"]),
-        observed_low_so_far=(
-            float(obs["low_so_far"])
-            if obs.get("low_so_far") is not None
-            else None
-        ),
-        current_temp=float(obs["current_temp"]),
+        observed_high_so_far=float(obs.high_so_far),
+        observed_low_so_far=float(obs.low_so_far),
+        current_temp=float(obs.current_temp),
         hours_remaining=hours_remaining,
         member_maxes_remaining=remaining_member_maxes,
         member_mins_remaining=remaining_member_maxes,
         unit=city.settlement_unit,
-        observation_source=str(obs.get("source", "")),
-        observation_time=obs.get("observation_time"),
+        observation_source=str(obs.source),
+        observation_time=obs.observation_time,
         current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
         temporal_context=temporal_context,
         temperature_metric=temperature_metric,
