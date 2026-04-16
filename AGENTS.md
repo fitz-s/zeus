@@ -193,7 +193,7 @@ DB truth contracts, or supervisor contracts.
 - Write a daily-low row on the legacy `settlements` (non-v2) table.
 - Route a `causality_status != 'OK'` Day0 slot through a historical Platt lookup.
 - Mix high and low rows in any single Platt model, bin lookup, or calibration family.
-- Call `kelly_size()` with a bare static `entry_price` at a cross-layer seam (INV-13 / DT#5).
+- Call `kelly_size()` with a bare static `entry_price` at a cross-layer seam (INV-21 / DT#5). INV-13 (cascade-constants registration) remains separate and in force.
 - Write a JSON export before the corresponding DB commit returns (DT#1).
 
 ## Work Discipline

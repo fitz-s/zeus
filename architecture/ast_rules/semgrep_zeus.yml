@@ -100,3 +100,55 @@ rules:
       - pattern: unit = "F"
       - pattern: unit="C"
       - pattern: unit = "C"
+
+  # --- Dual-Track Metric Spine rules (Phase 0b) ---
+  # TODO: Phase 9 will tighten this pattern to require a distributional object parameter.
+  - id: zeus-no-bare-entry-price-kelly
+    message: "kelly_size() must receive a distributional price object, not a bare entry_price scalar. A bare scalar discards fill probability and adverse selection."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern: kelly_size(..., entry_price=$X, ...)
+
+  # TODO: Phase 2 will land a concrete commit-ordering pattern once state-authority refactor is complete.
+  - id: zeus-no-json-before-db-commit
+    message: "JSON export writes must not precede the DB commit. Write JSON only after conn.commit() returns."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern: |
+      $X.write_text(...)
+      ...
+      $CONN.commit()
+
+  # TODO: Phase 2/7 will land a concrete pattern after World DB v2 schema exists with explicit temperature_metric column.
+  - id: zeus-no-high-low-row-mix
+    message: "High and low rows must not be mixed in the same Platt model, calibration set, bin lookup, or settlement identity. Placeholder: concrete pattern pending v2 schema."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern: "\"daily_low\""
+
+  # TODO: Phase 1 identity work will tighten this to detect the full drift pattern across call sites.
+  - id: zeus-no-fdr-family-key-drift
+    message: "make_family_id() must not be called with an empty strategy_key at some call sites and a non-empty one at others. Per-path drift in family key construction is forbidden."
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - tests/**/*.py
+    pattern: make_family_id(..., strategy_key="", ...)

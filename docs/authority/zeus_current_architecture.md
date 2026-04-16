@@ -377,6 +377,8 @@ happens to cross.
 Enforcement intent: one choke-point helper; a test that asserts every call
 site delegates to it.
 
+Machine manifest identifier: **INV-22** in `architecture/invariants.yaml`.
+
 ---
 
 ## 19. Chain-truth three-state law (DT#4)
@@ -395,9 +397,12 @@ law; the state machine must be made explicit.
 
 ---
 
-## 20. Kelly executable-price law (elevates INV-13)
+## 20. Kelly executable-price law (DT#5)
 
-INV-13 is elevated from aspirational to in-scope for the dual-track refactor.
+This is a **new invariant, `INV-21`**, separate from the existing `INV-13`
+cascade-constants registration law in §9. Both laws remain in scope for the
+dual-track refactor; they are complementary (INV-13 governs the multiplier
+cascade; INV-21 governs the price input).
 
 Sizing inputs at the Kelly boundary must describe an executable price
 distribution, not a single static `entry_price`. At minimum:
@@ -407,8 +412,12 @@ distribution, not a single static `entry_price`. At minimum:
 - queue-priority and adverse-selection hazards
 
 A bare `entry_price: float` passed to `kelly_size()` at a cross-layer seam is
-a §20 / INV-13 violation. Backtests may assume simplified execution only if
-they cross-check against live fill evidence.
+an INV-21 violation. Backtests may assume simplified execution only if they
+cross-check against live fill evidence. A `dict(best_bid=..., best_ask=...)`
+with no fill-probability or adverse-selection semantics does **not** satisfy
+INV-21; the input must carry distributional information.
+
+Machine manifest identifier: **INV-21** in `architecture/invariants.yaml`.
 
 ---
 
