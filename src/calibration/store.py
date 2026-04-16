@@ -407,7 +407,9 @@ def deactivate_model_v2(
     Returns the number of rows deleted (0 or 1). Called by refit_platt_v2.py
     before save_platt_model_v2. Deletion (not soft-deactivation) is required
     because UNIQUE(model_key) means the old row must be removed before the
-    new INSERT can succeed with the same key.
+    new INSERT can succeed with the same key. Audit trail lives in git commit
+    history and the new row's fitted_at timestamp — no separate soft-delete
+    log is needed for this internal pipeline operation.
     """
     model_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}"

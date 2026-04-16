@@ -286,3 +286,115 @@ class TestCalibrationPairsV2IdentityFields:
             assert val is not None, (
                 f"{field_name} must not be NULL in calibration_pairs_v2 row (R-M)"
             )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2: Pipeline integration test — rebuild_v2 end-to-end
+# ---------------------------------------------------------------------------
+
+class TestRebuildV2PipelineIntegration:
+    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs_v2 rows with correct
+    identity fields when called end-to-end (not just add_calibration_pair_v2 in isolation).
+
+    This is the test that would have caught CRITICAL-1 (phantom 'source' column in SELECT)
+    before critic-alice's review — direct calls to add_calibration_pair_v2 bypass the
+    _fetch_eligible_snapshots_v2 SQL path entirely.
+    """
+
+    _CITY_NAME = "Atlanta"
+    _TARGET_DATE = "2025-06-15"
+    _ISSUE_TIME = "2025-06-13T00:00:00Z"
+    _AVAILABLE_AT = "2025-06-13T06:00:00Z"
+    _DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+    _OBS_TEMP_F = 75.0
+
+    def _make_conn(self) -> sqlite3.Connection:
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        init_schema(conn)
+        apply_v2_schema(conn)
+        return conn
+
+    def _insert_snapshot(self, conn: sqlite3.Connection) -> int:
+        import json
+        import numpy as np
+        members = list(np.full(51, self._OBS_TEMP_F).tolist())
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2
+                (city, target_date, temperature_metric, physical_quantity, observation_field,
+                 issue_time, available_at, fetch_time, lead_hours, members_json,
+                 model_version, data_version, training_allowed, causality_status,
+                 authority, members_unit)
+            VALUES (?, ?, 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                    ?, ?, '2025-06-13T06:05:00', 48.0, ?,
+                    'ENS', ?, 1, 'OK', 'VERIFIED', 'degF')
+            """,
+            (
+                self._CITY_NAME, self._TARGET_DATE,
+                self._ISSUE_TIME, self._AVAILABLE_AT,
+                json.dumps(members),
+                self._DATA_VERSION,
+            ),
+        )
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _insert_observation(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            INSERT INTO observations
+                (city, target_date, source, high_temp, unit, authority)
+            VALUES (?, ?, 'WU', ?, 'F', 'VERIFIED')
+            """,
+            (self._CITY_NAME, self._TARGET_DATE, self._OBS_TEMP_F),
+        )
+        conn.commit()
+
+    def test_rebuild_v2_writes_high_track_identity_fields(self):
+        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs_v2 rows with
+        temperature_metric='high', observation_field='high_temp',
+        data_version='tigge_mx2t6_local_calendar_day_max_v1', training_allowed=1.
+
+        This test exercises the _fetch_eligible_snapshots_v2 SQL path, which is where
+        CRITICAL-1 (phantom 'source' column) lived. Any regression there fails here.
+        """
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from rebuild_calibration_pairs_v2 import rebuild_v2
+
+        conn = self._make_conn()
+        self._insert_snapshot(conn)
+        self._insert_observation(conn)
+
+        import numpy as np
+        rng = np.random.default_rng(42)
+        stats = rebuild_v2(conn, dry_run=False, force=True, n_mc=200, rng=rng)
+
+        assert stats.pairs_written > 0, (
+            f"rebuild_v2 wrote 0 pairs — pipeline integration failed (MAJOR-2). "
+            f"Stats: {stats.as_dict()}"
+        )
+        assert not stats.refused, f"rebuild_v2 refused: stats={stats.as_dict()}"
+
+        rows = conn.execute(
+            """SELECT temperature_metric, observation_field, data_version, training_allowed
+               FROM calibration_pairs_v2
+               WHERE city=? AND target_date=?""",
+            (self._CITY_NAME, self._TARGET_DATE),
+        ).fetchall()
+
+        assert len(rows) > 0, (
+            "No calibration_pairs_v2 rows found for Atlanta/2025-06-15 after rebuild_v2 (MAJOR-2)"
+        )
+
+        for row in rows:
+            tm, of, dv, ta = row["temperature_metric"], row["observation_field"], row["data_version"], row["training_allowed"]
+            assert tm == "high", f"temperature_metric must be 'high', got {tm!r} (MAJOR-2)"
+            assert of == "high_temp", f"observation_field must be 'high_temp', got {of!r} (MAJOR-2)"
+            assert dv == self._DATA_VERSION, f"data_version must be {self._DATA_VERSION!r}, got {dv!r} (MAJOR-2)"
+            assert ta == 1, f"training_allowed must be 1, got {ta!r} (MAJOR-2)"
