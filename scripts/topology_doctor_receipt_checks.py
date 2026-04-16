@@ -88,12 +88,15 @@ def validate_receipt_payload(
         for pattern in ((schema.get("route_evidence_globs_by_source") or {}).get(str(route_source)) or [])
     ]
     if route_source and route_evidence and allowed_evidence_globs:
-        if not any(path_matches_any(ref, allowed_evidence_globs) for ref in route_evidence):
+        invalid_evidence = [
+            ref for ref in route_evidence if not path_matches_any(ref, allowed_evidence_globs)
+        ]
+        if invalid_evidence:
             issues.append(
                 api._issue(
                     "change_receipt_route_evidence_invalid",
                     receipt_path,
-                    f"route_evidence does not match allowed artifacts for route_source {route_source!r}",
+                    f"route_evidence entries {invalid_evidence!r} do not match allowed artifacts for route_source {route_source!r}",
                 )
             )
 
