@@ -89,3 +89,78 @@ invariants:
         - scripts/check_work_packets.py
       docs:
         - architecture/self_check/zero_context_entry.md
+  - id: INV-21
+    zones: [K2_runtime, K3_extension]
+    statement: Kelly sizing requires an executable-price distribution, not a bare static entry_price.
+    why: A bare entry_price scalar discards fill probability, adverse selection, and queue-priority hazards; sizing against it produces systematically wrong position sizes.
+    enforced_by:
+      spec_sections: [20]
+      negative_constraints: [NC-14]
+      semgrep_rule_ids: [zeus-no-bare-entry-price-kelly]
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_kelly_input_carries_distributional_info
+  - id: INV-14
+    zones: [K0_frozen_kernel, K2_runtime]
+    statement: Every temperature-market family row in canonical tables must carry temperature_metric, physical_quantity, observation_field, and data_version.
+    why: These four fields are row identity; without them, high and low truths share the same key space and conflate two distinct settlement facts.
+    enforced_by:
+      spec_sections: [13]
+      negative_constraints: [NC-11, NC-12]
+      schema:
+        - migrations/2026_04_02_architecture_kernel.sql
+  - id: INV-15
+    zones: [K2_runtime]
+    statement: Forecast rows lacking canonical cycle identity may serve runtime degrade paths but must not enter canonical training.
+    why: Training purity requires every training row to carry verified provenance; fallback rows without reliable issue_time are not training evidence.
+    enforced_by:
+      spec_sections: [14]
+      schema:
+        - migrations/2026_04_02_architecture_kernel.sql
+  - id: INV-16
+    zones: [K2_runtime]
+    statement: Day0 low slots with causality_status != 'OK' must not route through historical Platt lookup; low Day0 uses nowcast path only.
+    why: Causality preservation — routing a slot that is already partly historical through a forecast Platt model produces incorrect probability estimates.
+    enforced_by:
+      spec_sections: [15]
+      negative_constraints: [NC-12]
+  - id: INV-17
+    zones: [K0_frozen_kernel, K2_runtime]
+    statement: DB authority writes (event append + projection fold) must COMMIT before any derived JSON export is updated.
+    why: On a mid-step crash the DB wins and JSON is rebuilt from projection; a JSON write that races the commit can leave exports ahead of authority, making recovery ambiguous.
+    enforced_by:
+      spec_sections: [16]
+      negative_constraints: [NC-13]
+  - id: INV-18
+    zones: [K2_runtime]
+    statement: Chain reconciliation state is three-valued — CHAIN_SYNCED / CHAIN_EMPTY / CHAIN_UNKNOWN — and void decisions require CHAIN_EMPTY.
+    why: Collapsing CHAIN_UNKNOWN into CHAIN_EMPTY causes void decisions on stale or incomplete chain reads, creating phantom exits.
+    enforced_by:
+      spec_sections: [19]
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_chain_reconciliation_three_state_machine
+  - id: INV-19
+    zones: [K1_governance, K2_runtime]
+    statement: RED risk level must cancel all pending orders and sweep active positions toward exit; advisory-only RED is forbidden.
+    why: RED is a truth claim about system integrity, not a throttle; an entry-block-only implementation is theater and leaves open exposure during detected integrity failures.
+    enforced_by:
+      spec_sections: [17]
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_red_triggers_active_position_sweep
+  - id: INV-20
+    zones: [K2_runtime]
+    statement: Authority-loss must preserve monitor/exit/reconciliation paths in read-only mode; raising RuntimeError that kills the entire cycle on authority-loss is forbidden.
+    why: Fail-closed for new-risk creation must not blind the monitor/exit lane of a live single-daemon system.
+    enforced_by:
+      spec_sections: [21]
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_load_portfolio_degrades_gracefully_on_authority_loss
+  - id: INV-22
+    zones: [K1_governance, K2_runtime]
+    statement: "make_family_id() must resolve to one canonical family grammar across every call site. strategy_key is either always part of the family key or never part of it; per-path drift is forbidden. Enforcement intent: one choke-point helper + test asserting every call site delegates to it."
+    why: FDR family key drift allows the same market to be tracked under multiple identities, corrupting Platt calibration, settlement lookup, and chain reconciliation.
+    enforced_by:
+      spec_sections: [18]
+      negative_constraints: [NC-15]
+      semgrep_rule_ids: [zeus-no-fdr-family-key-drift]
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical

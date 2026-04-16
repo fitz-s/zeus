@@ -22,6 +22,7 @@ categories:
     - tests/test_cross_module_relationships.py
     - tests/test_data_rebuild_relationships.py
     - tests/test_db.py
+    - tests/test_dual_track_law_stubs.py
     - tests/test_ensemble_signal.py
     - tests/test_execution_price.py
     - tests/test_expiring_assumption.py
@@ -299,6 +300,14 @@ high_sensitivity_skips:
     reason_patterns:
       - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
     sunset: Resolve with truth-surface cleanup packet.
+  tests/test_dual_track_law_stubs.py:
+    owner: dual-track-program
+    packet: Phase 0b
+    reason: Dual-track metric spine/death-trap law stubs are intentionally skipped until their phase-specific enforcement lands.
+    skip_count: 9
+    reason_patterns:
+      - "pending: enforced"
+    sunset: Replace each skip with its real assertion in the named dual-track phase.
   tests/test_reality_contracts.py:
     owner: topology-program
     packet: Packet 5

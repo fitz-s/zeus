@@ -211,7 +211,11 @@ implementation of this law; the state machine must be made explicit.
 
 ### DT#5 — Kelly executable-price law
 
-INV-13 (aspirational) is elevated to in-scope for this refactor.
+A new invariant, `INV-21`, is introduced for this law. It is **not** the same
+as the existing aspirational `INV-13` (cascade-constants registration in
+`zeus_current_architecture.md` §9); both remain in scope and are
+complementary. Sizing correctness requires both: registered multipliers
+(INV-13) and a real executable price distribution (INV-21).
 
 Sizing inputs at the Kelly boundary must be an executable price distribution,
 not a single static `entry_price`. At minimum, sizing must incorporate:
@@ -220,8 +224,9 @@ not a single static `entry_price`. At minimum, sizing must incorporate:
 - fill probability at intended order size
 - queue-priority and adverse-selection hazards
 
-Bare `entry_price` into `kelly_size()` at cross-layer seams is a DT#5 / INV-13
-violation.
+Bare `entry_price` into `kelly_size()` at cross-layer seams is a DT#5 / INV-21
+violation. A `dict(best_bid=..., best_ask=...)` without fill-probability or
+adverse-selection semantics does not satisfy INV-21.
 
 ### DT#6 — Graceful degradation law
 
@@ -303,7 +308,11 @@ here.
 - `zeus_current_architecture.md`: carries §13–§22 (identity, fallback,
   causality, death-trap remediation); this file is the integrated longform.
 - `architecture/invariants.yaml` and `architecture/negative_constraints.yaml`:
-  receive machine-checkable INV-14 … INV-20 and NC-11 … NC-14 in Phase 0b.
+  carry machine-checkable INV-14 … INV-22 and NC-11 … NC-15 (landed in
+  Phase 0b). INV-21 encodes DT#5 Kelly executable-price; INV-22 encodes DT#3
+  FDR family canonicalization. The pre-existing aspirational INV-13
+  (cascade-constants registration) in `zeus_current_architecture.md` §9
+  remains a distinct law and is not overwritten.
 - `docs/operations/data_rebuild_plan.md`: inherits the canonical product and
   separation rules from §2.2 and §4.
 - `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`: the
