@@ -302,6 +302,12 @@ def run_harvester() -> dict:
             if winning_label is None:
                 continue
 
+            # Write settlement truth to settlements table (ground truth from PM)
+            _write_settlement_truth(
+                shared_conn, city, target_date, winning_label,
+                event_slug=event.get("slug", ""),
+            )
+
             # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
             learning_contexts = []
@@ -464,6 +470,54 @@ def _extract_all_bin_labels(event: dict) -> list[str]:
         if label:
             labels.append(label)
     return labels
+
+
+
+def _write_settlement_truth(
+    conn,
+    city: City,
+    target_date: str,
+    winning_bin: str,
+    *,
+    event_slug: str = "",
+) -> None:
+    """Write PM settlement truth (winning_bin) to settlements table.
+
+    Uses UPDATE then INSERT fallback to upsert. The settlement_source and
+    settlement_source_type come from city config (WU/HKO/NOAA/CWA),
+    not from PM — PM is the bin authority, the weather station is the
+    temperature authority.
+    """
+    settled_at = datetime.now(timezone.utc).isoformat()
+    _SOURCE_TYPE_MAP = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
+    db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
+    try:
+        conn.execute(
+            """
+            UPDATE settlements
+            SET winning_bin = ?,
+                settled_at = COALESCE(settled_at, ?),
+                market_slug = COALESCE(market_slug, ?)
+            WHERE city = ? AND target_date = ?
+            """,
+            (winning_bin, settled_at, event_slug or None, city.name, target_date),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0] == 0:
+            conn.execute(
+                """
+                INSERT INTO settlements (city, target_date, winning_bin, settled_at,
+                                        market_slug, settlement_source,
+                                        settlement_source_type, authority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED')
+                """,
+                (city.name, target_date, winning_bin, settled_at,
+                 event_slug or None, city.settlement_source,
+                 db_source_type),
+            )
+        conn.commit()
+        logger.info("Settlement truth written: %s %s → %s", city.name, target_date, winning_bin)
+    except Exception as e:
+        logger.warning("Failed to write settlement truth for %s %s: %s", city.name, target_date, e)
 
 
 def _extract_target_date(event: dict) -> Optional[str]:
