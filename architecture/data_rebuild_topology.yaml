@@ -23,6 +23,7 @@ live_math_certification:
     - bootstrap_resampling_unit
     - zeus_backtest_non_promotion
     - replay_coverage_prerequisites
+    - dst_historical_rebuild
 
 criteria:
   decision_group_id_stability:
@@ -111,6 +112,16 @@ criteria:
       - tests/test_backtest_settlement_value_outcome.py
     certification_gate: "WU settlement sample alone is not strategy replay coverage."
     blocks_live_math_certification: true
+  dst_historical_rebuild:
+    status: target_not_certified
+    source: docs/known_gaps.md#CRITICAL-DST-Timezone
+    protects: [scripts/etl_hourly_observations.py, scripts/etl_diurnal_curves.py, src/signal/diurnal.py]
+    required_tests: []
+    certification_gate: "Historical diurnal aggregates rebuilt from zone-aware local timestamps for all DST cities."
+    blocks_live_math_certification: true
+    note: >
+      ZDM-04: This criterion exists as a non-certification marker. The rebuild
+      itself is NOT authorized — only preflight audit and certification prep.
 
 rebuilt_row_contract:
   tables:
