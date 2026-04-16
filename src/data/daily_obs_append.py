@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -327,11 +328,14 @@ def _fetch_wu_icao_daily_highs_lows(
 # ---------------------------------------------------------------------------
 
 HKO_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
+HKO_REALTIME_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
 HKO_STATION = "HKO"
 HKO_CITY_NAME = "Hong Kong"
 HKO_SOURCE = "hko_daily_api"
+HKO_REALTIME_SOURCE = "hko_realtime_api"
 HKO_FETCH_RETRY_COUNT = 2
 HKO_FETCH_RETRY_BACKOFF_SEC = 3.0
+HKO_REALTIME_MIN_READINGS = 18
 
 
 def _fetch_hko_month(
@@ -390,6 +394,193 @@ def _fetch_hko_month_with_retry(
                 continue
             return {}, f"http error after {HKO_FETCH_RETRY_COUNT + 1} tries: {e}"
     return {}, "exhausted retries"
+
+
+# ---------------------------------------------------------------------------
+# HKO real-time hourly accumulator (supplements CLMMAXT/CLMMINT)
+# ---------------------------------------------------------------------------
+
+
+def _ensure_hko_accumulator_table(conn) -> None:
+    """Create hko_hourly_accumulator if it doesn't exist."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc    TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (target_date, hour_utc)
+        )
+    """)
+
+
+def _accumulate_hko_reading(conn) -> bool:
+    """Fetch current HKO rhrread temperature and store in accumulator.
+
+    The rhrread endpoint returns the latest hourly reading only; we call
+    this on every hourly tick to build up a full day of readings. Returns
+    True if a reading was successfully stored, False otherwise.
+    """
+    _ensure_hko_accumulator_table(conn)
+    try:
+        resp = httpx.get(
+            HKO_REALTIME_URL,
+            params={"dataType": "rhrread", "lang": "en"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        logger.warning("HKO rhrread fetch failed: %s", e)
+        return False
+
+    temp_data = data.get("temperature", {}).get("data", [])
+    hko_reading = None
+    for entry in temp_data:
+        if entry.get("place") == "Hong Kong Observatory":
+            hko_reading = entry.get("value")
+            break
+
+    if hko_reading is None:
+        logger.warning("HKO rhrread: no 'Hong Kong Observatory' station in response")
+        return False
+
+    try:
+        temp_c = float(hko_reading)
+    except (TypeError, ValueError):
+        logger.warning("HKO rhrread: non-numeric temperature value: %r", hko_reading)
+        return False
+
+    now_utc = datetime.now(timezone.utc)
+    # Target date in HKT (UTC+8)
+    hkt = ZoneInfo("Asia/Hong_Kong")
+    hkt_now = now_utc.astimezone(hkt)
+    target_date_str = hkt_now.date().isoformat()
+    hour_utc_str = now_utc.strftime("%Y-%m-%dT%H:00Z")
+
+    conn.execute(
+        """
+        INSERT INTO hko_hourly_accumulator (target_date, hour_utc, temperature, fetched_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(target_date, hour_utc) DO UPDATE SET
+            temperature = excluded.temperature,
+            fetched_at = excluded.fetched_at
+        """,
+        (target_date_str, hour_utc_str, temp_c, now_utc.isoformat()),
+    )
+    conn.commit()
+    logger.debug(
+        "HKO rhrread accumulated: date=%s hour=%s temp=%.1f°C",
+        target_date_str, hour_utc_str, temp_c,
+    )
+    return True
+
+
+def _finalize_hko_yesterday(
+    conn,
+    *,
+    now_utc: datetime | None = None,
+    rebuild_run_id: str = "",
+) -> dict | None:
+    """Check if yesterday (HKT) has enough accumulated readings to produce an observation.
+
+    HKT midnight = UTC 16:00, so at UTC hour 2 (the call site), yesterday's
+    HKT day is fully complete. We require >= HKO_REALTIME_MIN_READINGS
+    readings to trust the daily max/min.
+
+    Returns stats dict on success, None if not enough data or already written.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+
+    _ensure_hko_accumulator_table(conn)
+
+    hkt = ZoneInfo("Asia/Hong_Kong")
+    hkt_now = now_utc.astimezone(hkt)
+    yesterday_hkt = (hkt_now - timedelta(days=1)).date()
+    yesterday_str = yesterday_hkt.isoformat()
+
+    rows = conn.execute(
+        "SELECT temperature FROM hko_hourly_accumulator WHERE target_date = ?",
+        (yesterday_str,),
+    ).fetchall()
+
+    if len(rows) < HKO_REALTIME_MIN_READINGS:
+        logger.info(
+            "HKO realtime: %s has %d readings (need %d), skipping finalization",
+            yesterday_str, len(rows), HKO_REALTIME_MIN_READINGS,
+        )
+        return None
+
+    temps = [r[0] for r in rows]
+    high_val = float(math.floor(max(temps)))
+    low_val = float(math.floor(min(temps)))
+
+    logger.info(
+        "HKO realtime: finalizing %s — %d readings, high=%.0f low=%.0f",
+        yesterday_str, len(rows), high_val, low_val,
+    )
+
+    stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
+
+    try:
+        atom_high, atom_low = _build_atom_pair(
+            city_name=HKO_CITY_NAME,
+            target_d=yesterday_hkt,
+            high_val=high_val,
+            low_val=low_val,
+            raw_unit="C",
+            target_unit="C",
+            station_id=HKO_STATION,
+            source=HKO_REALTIME_SOURCE,
+            rebuild_run_id=rebuild_run_id,
+            data_source_version="hko_rhrread_accumulated_v1",
+            api_endpoint=f"{HKO_REALTIME_URL}?dataType=rhrread&lang=en",
+            provenance={
+                "station": "Hong Kong Observatory",
+                "method": "hourly_rhrread_accumulation",
+                "readings_count": len(rows),
+                "raw_max": max(temps),
+                "raw_min": min(temps),
+            },
+            fetch_utc=now_utc,
+        )
+    except IngestionRejected as e:
+        stats["guard_rejected"] += 1
+        logger.warning("HKO realtime guard dropped %s: %s", yesterday_str, e)
+        record_legitimate_gap(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_REALTIME_SOURCE,
+            target_date=yesterday_hkt,
+            reason=CoverageReason.GUARD_REJECTED,
+        )
+        conn.commit()
+        return stats
+
+    try:
+        _write_atom_with_coverage(conn, atom_high, atom_low, data_source=HKO_REALTIME_SOURCE)
+        stats["inserted"] += 1
+        logger.info(
+            "HKO realtime: wrote observation for %s (high=%.0f low=%.0f)",
+            yesterday_str, high_val, low_val,
+        )
+    except Exception as e:
+        stats["fetch_errors"] += 1
+        logger.error("HKO realtime insert failed %s: %s", yesterday_str, e)
+        record_failed(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_REALTIME_SOURCE,
+            target_date=yesterday_hkt,
+            reason=CoverageReason.NETWORK_ERROR,
+            retry_after=_retry_embargo(hours=1),
+        )
+
+    conn.commit()
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -1240,17 +1431,31 @@ def daily_tick(
         for k in wu_totals:
             wu_totals[k] += stats.get(k, 0)
 
+    # HKO real-time accumulation: on EVERY tick, fetch the current rhrread
+    # temperature and store it. This builds up hourly readings throughout
+    # the day so we can compute daily max/min even when CLMMAXT/CLMMINT
+    # archives aren't yet available (they lag by weeks/months).
+    _accumulate_hko_reading(conn)
+
     # HKO refresh: gate to once per day at UTC hour 2 (=10:00 HKT). Running
     # every hourly tick produced ~720 fetches/month with near-zero marginal
     # benefit since HKO publishes monthly with multi-day #→C flips.
     # Reviewer flagged the every-tick version as S2.
     hko_stats = None
+    hko_rt_stats = None
     if now_utc.hour == 2:
         hko_now = now_utc.astimezone(ZoneInfo(cities_by_name[HKO_CITY_NAME].timezone))
         months = [(hko_now.year, hko_now.month)]
         prior_y, prior_m = _prior_month(hko_now.year, hko_now.month)
         months.append((prior_y, prior_m))
         hko_stats = append_hko_months(months, conn, rebuild_run_id=rebuild_run_id)
+
+        # Also try to finalize yesterday's real-time accumulated observation.
+        # This produces an hko_realtime_api row that supplements the monthly
+        # CLMMAXT/CLMMINT archive (which returns empty for the current month).
+        hko_rt_stats = _finalize_hko_yesterday(
+            conn, now_utc=now_utc, rebuild_run_id=rebuild_run_id,
+        )
 
     # Ogimet refresh: once per day at UTC hour 6. Istanbul (UTC+3) and
     # Moscow (UTC+3) have their previous local day completed by then.
@@ -1269,7 +1474,7 @@ def daily_tick(
             for k in ogimet_stats:
                 ogimet_stats[k] += stats.get(k, 0)
 
-    return {"wu": wu_totals, "hko": hko_stats, "ogimet": ogimet_stats}
+    return {"wu": wu_totals, "hko": hko_stats, "hko_realtime": hko_rt_stats, "ogimet": ogimet_stats}
 
 
 def catch_up_missing(
