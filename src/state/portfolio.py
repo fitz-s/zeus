@@ -167,6 +167,7 @@ class Position:
     decision_snapshot_id: str = ""  # FK to ensemble_snapshots at decision time
     selected_method: str = ""
     applied_validations: list[str] = field(default_factory=list)
+    entry_model_agreement: str = "NOT_CHECKED"  # P9 fix: GFS crosscheck result at entry time
 
     # Strategy + attribution
     strategy_key: str = ""

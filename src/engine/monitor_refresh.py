@@ -186,7 +186,7 @@ def _refresh_ens_member_counting(
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ens.spread(),
-        model_agreement="AGREE",
+        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
         authority_verified=_authority_verified,
@@ -376,7 +376,7 @@ def _refresh_day0_observation(
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ensemble_spread,
-        model_agreement="AGREE",
+        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
         lead_days=0.0,
         hours_since_open=hours_since_open,
         authority_verified=_authority_verified,
