@@ -454,3 +454,5 @@ scripts:
   venus_autonomy_gate.py: {class: runtime_support}
   venus_sensing_report.py: {class: runtime_support}
   verify_truth_surfaces.py: {class: diagnostic}
+  oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
+  bridge_oracle_to_calibration.py: {class: diagnostic, canonical_command: "python scripts/bridge_oracle_to_calibration.py", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}

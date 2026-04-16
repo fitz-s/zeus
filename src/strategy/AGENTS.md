@@ -44,3 +44,11 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 - Applying FDR only to prefiltered positive-CI edges instead of the full tested family → defeats the purpose
 - Adding a new Kelly multiplier adjustment without registering it in `provenance_registry.yaml`
 - Confusing gross edge (before fees) with net edge → fee leakage
+
+## Oracle Penalty (`oracle_penalty.py`)
+
+Kelly multiplier penalty for cities where WU/HKO oracle diverges from PM settlement.
+- `get_oracle_info(city)` → `OracleInfo(status, error_rate, threshold)`
+- `OracleStatus.BLACKLISTED` blocks trading; `CAUTION` applies `1 - error_rate` multiplier
+- Reads `data/oracle_error_rates.json`
+- Thresholds: <3% OK, 3–10% CAUTION, >10% BLACKLISTED

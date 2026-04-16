@@ -1309,3 +1309,50 @@ cards:
     zero_context_digest: >
       Never use `if numpy_array:` — it raises ValueError when the array
       has multiple elements. Use a pre-computed boolean instead.
+
+  - id: ORACLE_TRUNCATION_BIAS
+    epoch: "2026-04-15"
+    summary: >
+      HKO rounds settlement temperatures by truncation (floor), not WMO
+      half-up. Applying WMO rounding to HKO cities created a systematic
+      +0.5°C oracle bias that inflated edge estimates and caused losses.
+    symptoms:
+      - "HKO settlement values off by 1 bin vs Polymarket resolution"
+      - "Persistent positive edge on HKO cities that vanishes at settlement"
+      - "Calibration drift on Hong Kong markets"
+    mistake_patterns:
+      - "Assuming all sources use WMO half-up rounding"
+      - "Hardcoding round_half_up without per-source dispatch"
+    correct_rule: >
+      Use SettlementSemantics.for_city(city) to get the correct rounding
+      law. HKO uses oracle_truncate (math.floor); all others use wmo_half_up.
+      Never call round() or math.floor() directly on settlement values.
+    antibodies:
+      code:
+        - src/contracts/settlement_semantics.py
+        - src/strategy/oracle_penalty.py
+      tests:
+        - tests/test_instrument_invariants.py
+      gates:
+        - pytest -q tests/test_instrument_invariants.py -k settlement
+    residual_risk: >
+      Other weather sources (CWA, NOAA) may also use non-WMO rounding;
+      not yet investigated.
+    invalidation_condition: >
+      If HKO changes its rounding method or PM standardises bin resolution,
+      the oracle_truncate path may need updating.
+    routing:
+      task_terms: [hko, oracle, truncate, rounding, settlement, floor, bias]
+      file_patterns:
+        - src/contracts/settlement_semantics.py
+        - src/strategy/oracle_penalty.py
+        - data/oracle_error_rates.json
+    downstream_blast_radius:
+      - src/contracts/settlement_semantics.py
+      - src/signal/day0_signal.py
+      - src/strategy/market_analysis.py
+      - src/engine/evaluator.py
+      - src/engine/replay.py
+    zero_context_digest: >
+      HKO truncates temperatures (floor), not WMO half-up. Use
+      SettlementSemantics.for_city() to dispatch the correct rounding law.

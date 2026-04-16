@@ -37,3 +37,9 @@ Critical invariant: **engine may coordinate work, but may not redefine truth**. 
 - Performing "local close" on exit decisions instead of expressing exit intent → INV-01 violation
 - Skipping chain reconciliation before trading in live mode → truth divergence
 - Treating WU settlement coverage as strategy/PnL replay coverage. Strategy replay also needs forecast references, vector-compatible snapshots, and parseable typed bins.
+
+## Oracle Penalty Gate (evaluator.py)
+
+`evaluator.py` checks `OracleStatus` before sizing. Blacklisted cities skip.
+Caution cities get Kelly multiplied by `(1 - error_rate)`.
+`round_fn` from `SettlementSemantics.for_city(city)` is threaded to Day0Signal and MarketAnalysis.

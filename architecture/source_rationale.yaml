@@ -145,7 +145,7 @@ files:
   src/contracts/reality_contracts_loader.py: {zone: K0_frozen_kernel, authority_role: contract_loader, why: "Loads YAML reality contracts into typed contract objects."}
   src/contracts/reality_verifier.py: {zone: K0_frozen_kernel, authority_role: reality_drift_detector, why: "Verifies reality contracts against current evidence."}
   src/contracts/semantic_types.py: {zone: K0_frozen_kernel, authority_role: semantic_atom_contracts, why: "Defines direction, strategy attribution, held/native probability and price semantics."}
-  src/contracts/settlement_semantics.py: {zone: K0_frozen_kernel, authority_role: settlement_rounding_law, why: "Canonical WMO half-up settlement rounding contract for DB writes and simulation.", hazards: [WMO_ROUNDING_LAW], write_routes: [settlement_write], downstream: ["src/signal/ensemble_signal.py", "src/signal/day0_signal.py", "src/strategy/market_analysis.py", "src/execution/harvester.py"]}
+  src/contracts/settlement_semantics.py: {zone: K0_frozen_kernel, authority_role: settlement_rounding_law, why: "Settlement rounding contract (wmo_half_up + oracle_truncate) for DB writes and MC simulation. for_city() factory routes HKO to oracle_truncate, all others to wmo_half_up.", hazards: [WMO_ROUNDING_LAW, ORACLE_TRUNCATION_BIAS], write_routes: [settlement_write], downstream: ["src/signal/ensemble_signal.py", "src/signal/day0_signal.py", "src/strategy/market_analysis.py", "src/execution/harvester.py", "src/engine/evaluator.py", "src/engine/replay.py"]}
   src/contracts/tail_treatment.py: {zone: K0_frozen_kernel, authority_role: probability_treatment_contract, why: "Declares tail probability treatment and validation basis."}
   src/contracts/vig_treatment.py: {zone: K0_frozen_kernel, authority_role: market_probability_contract, why: "Declares vig treatment before posterior fusion."}
 
@@ -193,7 +193,7 @@ files:
   src/engine/cycle_runner.py: {zone: K2_runtime, authority_role: cycle_orchestrator, why: "Coordinates live cycle from fetch to evaluation to execution without owning lifecycle law.", downstream: ["src/engine/evaluator.py", "src/execution/executor.py"]}
   src/engine/cycle_runtime.py: {zone: K2_runtime, authority_role: runtime_helper, why: "Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority."}
   src/engine/discovery_mode.py: {zone: K2_runtime, authority_role: mode_enum, why: "Defines discovery cycle modes used by runner/evaluator."}
-  src/engine/evaluator.py: {zone: K3_extension, authority_role: signal_strategy_sizing_pipeline, why: "Converts forecast/market inputs into candidate decisions and sizing.", downstream: ["src/signal/ensemble_signal.py", "src/strategy/market_analysis.py", "src/strategy/kelly.py"]}
+  src/engine/evaluator.py: {zone: K3_extension, authority_role: signal_strategy_sizing_pipeline, why: "Converts forecast/market inputs into candidate decisions and sizing.", downstream: ["src/signal/ensemble_signal.py", "src/strategy/market_analysis.py", "src/strategy/kelly.py", "src/strategy/oracle_penalty.py", "src/contracts/settlement_semantics.py"]}
   src/engine/lifecycle_events.py: {zone: K2_runtime, authority_role: lifecycle_event_builder, why: "Builds canonical event/projection payloads; must not bypass lifecycle manager.", write_routes: [canonical_position_write]}
   src/engine/monitor_refresh.py: {zone: K2_runtime, authority_role: position_monitoring, why: "Refreshes held position probabilities and exit signals using entry-parity math."}
   src/engine/process_lock.py: {zone: K2_runtime, authority_role: process_safety, why: "Prevents overlapping daemon instances."}
@@ -240,6 +240,7 @@ files:
   src/strategy/market_analysis_family_scan.py: {zone: K3_extension, authority_role: tested_family_accounting, why: "Builds full tested family for FDR truth."}
   src/strategy/market_fusion.py: {zone: K3_extension, authority_role: posterior_fusion, why: "Computes alpha-weighted P_cal/P_market posterior and VWMP."}
   src/strategy/risk_limits.py: {zone: K3_extension, authority_role: strategy_risk_limits, why: "Strategy-level risk limits before execution sizing."}
+  src/strategy/oracle_penalty.py: {zone: K3_extension, authority_role: oracle_error_rate_penalty, why: "Per-city oracle error rate classification and Kelly sizing penalty multiplier. Loads data/oracle_error_rates.json.", hazards: [ORACLE_TRUNCATION_BIAS], downstream: ["src/engine/evaluator.py"]}
   src/strategy/selection_family.py: {zone: K3_extension, authority_role: hypothesis_family_model, why: "Represents selection family for statistical testing."}
 
   src/state/AGENTS.md: {zone: docs, authority_role: registry, why: "State package rules and registry."}
