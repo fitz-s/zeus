@@ -5,6 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 
+def protected_path_exists(api: Any, path: str) -> bool:
+    if (api.ROOT / path).exists():
+        return True
+    if path.startswith("state/"):
+        declared = api._declared_paths(api.load_topology().get("state_surfaces", []))
+        return api._path_declared(path, declared)
+    return False
+
+
 def run_data_rebuild(api: Any) -> Any:
     topology = api.load_data_rebuild_topology()
     issues: list[Any] = []
@@ -24,7 +33,7 @@ def run_data_rebuild(api: Any) -> Any:
         if "blocks_live_math_certification" not in criterion:
             issues.append(api._issue("data_rebuild_criterion_incomplete", name, "missing blocks_live_math_certification"))
         for path in criterion.get("protects", []):
-            if not (api.ROOT / path).exists():
+            if not protected_path_exists(api, path):
                 issues.append(api._issue("data_rebuild_protects_missing", path, f"{name} protects missing path"))
         for path in criterion.get("required_tests", []):
             if not (api.ROOT / path).exists():

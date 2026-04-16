@@ -258,7 +258,7 @@ cards:
       - src/engine/replay.py
       - src/calibration/store.py
       - scripts/rebuild_calibration.py
-      - scripts/rebuild_settlements.py
+      - src/execution/harvester.py
     zero_context_digest: >
       Before touching settlement/probability/calibration, verify WMO half-up
       through SettlementSemantics and never use banker rounding.
@@ -334,7 +334,7 @@ cards:
       letting wrong-unit, Kelvin, NaN, or wrong-member-count rows pass through
       the live calibration gate.
     trigger_context:
-      - rebuild_settlements
+      - settlement rebuild
       - rebuild_calibration
       - refit_platt
       - calibration pair reads
@@ -354,7 +354,7 @@ cards:
         - src/calibration/blocked_oos.py
         - src/calibration/effective_sample_size.py
         - scripts/rebuild_calibration.py
-        - scripts/rebuild_settlements.py
+        - src/execution/harvester.py
       tests:
         - tests/test_rebuild_validators.py
         - tests/test_rebuild_pipeline.py
@@ -777,7 +777,7 @@ cards:
     antibodies:
       code:
         - scripts/rebuild_calibration.py
-        - scripts/rebuild_settlements.py
+        - src/execution/harvester.py
       tests:
         - tests/test_rebuild_pipeline.py
         - tests/test_rebuild_validators.py
@@ -1311,18 +1311,30 @@ cards:
       has multiple elements. Use a pre-computed boolean instead.
 
   - id: ORACLE_TRUNCATION_BIAS
-    epoch: "2026-04-15"
-    summary: >
+    status: active_law
+    severity: high
+    sources:
+      - docs/authority/zeus_current_architecture.md
+      - src/contracts/settlement_semantics.py
+      - src/strategy/oracle_penalty.py
+      - data/oracle_error_rates.json
+    failure_mode: >
       HKO rounds settlement temperatures by truncation (floor), not WMO
       half-up. Applying WMO rounding to HKO cities created a systematic
       +0.5°C oracle bias that inflated edge estimates and caused losses.
+    trigger_context:
+      - HKO settlement handling
+      - oracle penalty updates
+      - settlement rounding changes
+      - calibration/replay work touching settlement values
+    wrong_moves:
+      - "Assuming all sources use WMO half-up rounding"
+      - "Hardcoding round_half_up without per-source dispatch"
+      - "Treating oracle error rates as canonical settlement truth"
     symptoms:
       - "HKO settlement values off by 1 bin vs Polymarket resolution"
       - "Persistent positive edge on HKO cities that vanishes at settlement"
       - "Calibration drift on Hong Kong markets"
-    mistake_patterns:
-      - "Assuming all sources use WMO half-up rounding"
-      - "Hardcoding round_half_up without per-source dispatch"
     correct_rule: >
       Use SettlementSemantics.for_city(city) to get the correct rounding
       law. HKO uses oracle_truncate (math.floor); all others use wmo_half_up.
@@ -1353,6 +1365,10 @@ cards:
       - src/strategy/market_analysis.py
       - src/engine/evaluator.py
       - src/engine/replay.py
+    zero_context_digest: >
+      HKO/Oracle settlement semantics use truncation, not WMO half-up. Route
+      all settlement rounding through SettlementSemantics.for_city and keep
+      oracle_penalty as evidence/penalty logic, not canonical truth.
     zero_context_digest: >
       HKO truncates temperatures (floor), not WMO half-up. Use
       SettlementSemantics.for_city() to dispatch the correct rounding law.

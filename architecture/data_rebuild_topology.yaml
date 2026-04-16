@@ -68,7 +68,7 @@ criteria:
       - src/types/observation_atom.py
       - src/data/ingestion_guard.py
       - src/data/rebuild_validators.py
-      - scripts/rebuild_settlements.py
+      - src/execution/harvester.py
       - scripts/rebuild_calibration_pairs_canonical.py
       - scripts/refit_platt.py
     required_tests:
@@ -140,7 +140,7 @@ rebuilt_row_contract:
       authority_required: true
       provenance_required: true
       required_fields: [authority, settlement_value, settlement_source, settled_at]
-      producer_contract: scripts/rebuild_settlements.py
+      producer_contract: src/execution/harvester.py
       rounding_law: src/contracts/settlement_semantics.py
     calibration_pairs:
       authority_required: true

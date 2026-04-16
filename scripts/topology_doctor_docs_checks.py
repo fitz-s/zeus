@@ -65,7 +65,7 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
         for rel in api._git_visible_files()
         if rel.startswith("docs/") and (api.ROOT / rel).is_file()
     ]
-    allowed_root_files = {"docs/AGENTS.md", "docs/README.md", "docs/known_gaps.md"}
+    allowed_root_files = set(topology.get("docs_root_allowed_files") or {"docs/AGENTS.md", "docs/README.md", "docs/known_gaps.md"})
     for path in sorted(visible_docs_files):
         rel = path.relative_to(api.ROOT).as_posix()
         if any(is_under(path, root) for root in excluded_roots):

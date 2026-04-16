@@ -6,6 +6,15 @@ import ast
 from typing import Any
 
 
+def protected_path_exists(api: Any, path: str) -> bool:
+    if (api.ROOT / path).exists():
+        return True
+    if path.startswith("state/"):
+        declared = api._declared_paths(api.load_topology().get("state_surfaces", []))
+        return api._path_declared(path, declared)
+    return False
+
+
 def run_tests(api: Any) -> Any:
     topology = api.load_test_topology()
     actual = {
@@ -64,7 +73,7 @@ def run_tests(api: Any) -> Any:
                     )
                 )
         for path in spec.get("protects", []):
-            if not (api.ROOT / path).exists():
+            if not protected_path_exists(api, path):
                 issues.append(api._issue("test_law_gate_stale_protects", path, f"{law} protects missing path"))
 
     wmo_protects = set((law_gate.get("WMO_ROUNDING") or {}).get("protects", []))

@@ -171,6 +171,12 @@ root_governed_files:
     zone: root
     authority_role: scratch_artifact
     forbidden_misread: Root-level DB artifact is not canonical; canonical world DB path is state/zeus-world.db.
+  - path: "zeus-architecture-deep-map.md"
+    status: generated
+    scope: historical
+    zone: root
+    authority_role: derived_diagnostic
+    forbidden_misread: Generated deep map is refactor/reference evidence, not active authority.
 
 state_surfaces:
   - path: "state/LIVE_LOCK"
@@ -377,6 +383,12 @@ state_surfaces:
     zone: state
     authority_role: scratch_artifact
     forbidden_misread: Pre-rebuild backup artifact; do not promote without dedicated rebuild packet.
+  - path: "state/auto_pause_failclosed.tombstone"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Auto-pause fail-closed tombstone is runtime evidence, not canonical trade truth.
 
 required_active_pointers:
   - path: "docs/operations/current_state.md"
@@ -401,10 +413,22 @@ registry_directories:
 
 docs_mode_excluded_roots: []
 
+docs_root_allowed_files:
+  - docs/AGENTS.md
+  - docs/README.md
+  - docs/known_gaps.md
+  - docs/zeus-architecture-deep-map.md
+  - docs/settlement-source-provenance.md
+  - docs/settlement-validation-workflow.md
+  - docs/zeus-pathology-registry.md
+  - docs/zeus-refactor-plan.md
+  - docs/zeus-system-constitution.md
+
 active_operations_registry:
   current_state: docs/operations/current_state.md
   required_labels:
-    - Primary packet file
+    - Topology program packet file
+    - Dual-Track refactor packet file
     - Active backlog
     - Active checklist/evidence
     - Next packet
@@ -425,7 +449,7 @@ docs_subroots:
     role: operations
     requires_agents: true
     allow_non_markdown: true
-    allowed_extensions: [".md", ".json"]
+    allowed_extensions: [".md", ".json", ".txt"]
   - path: "docs/runbooks"
     role: runbook
     requires_agents: true
@@ -464,8 +488,8 @@ reference_fact_specs:
 core_map_profiles:
   - id: probability-chain
     purpose: compact verified working view of probability-to-sizing flow
-    max_nodes: 8
-    max_edges: 8
+    max_nodes: 9
+    max_edges: 11
     forbidden_phrases:
       - "round(value + 0.5)"
       - "Python round"
@@ -502,8 +526,8 @@ core_map_profiles:
       - {from: market_analysis, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.market_analysis, symbol: MarketAnalysis}}
       - {from: fdr_filter, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.fdr_filter, symbol: fdr_filter}}
       - {from: kelly, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.kelly, symbol: dynamic_kelly_mult}}
-      - {from: settlement_semantics, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
-      - {from: settlement_semantics, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.contracts.settlement_semantics, symbol: SettlementSemantics}}
+      - {from: settlement_semantics, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.contracts, symbol: SettlementSemantics}}
+      - {from: settlement_semantics, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.contracts.settlement_semantics, symbol: round_wmo_half_up_values}}
       - {from: oracle_penalty, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.oracle_penalty, symbol: get_oracle_info}}
 
 digest_profiles:
@@ -587,9 +611,9 @@ digest_profiles:
       - "Live math certification is blocked until data_rebuild_topology criteria are certified."
       - "WU settlement coverage alone is not strategy replay coverage."
     allowed_files:
-      - "scripts/rebuild_settlements.py"
       - "scripts/rebuild_calibration_pairs_canonical.py"
       - "scripts/backfill_wu_daily_all.py"
+      - "src/execution/harvester.py"
       - "src/data/ingestion_guard.py"
       - "src/data/rebuild_validators.py"
       - "src/types/observation_atom.py"
