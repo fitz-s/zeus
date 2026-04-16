@@ -48,6 +48,7 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import apply_familywise_fdr, make_family_id
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
@@ -818,6 +819,7 @@ def evaluate_candidate(
             current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
             temporal_context=temporal_context,
             temperature_metric=temperature_metric,
+            round_fn=settlement_semantics.round_values,
         )
         p_raw = day0.p_vector(bins)
         day0_forecast_context = day0.forecast_context()
@@ -1126,6 +1128,7 @@ def evaluate_candidate(
         calibrator=cal,
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
+        round_fn=settlement_semantics.round_values,
         city_name=city.name,
         season=season,
         forecast_source=forecast_source,
@@ -1319,8 +1322,31 @@ def evaluate_candidate(
             ))
             continue
 
+        # Oracle penalty gate — blacklisted cities skip trading entirely
+        oracle = get_oracle_info(city.name)
+        if oracle.status == OracleStatus.BLACKLIST:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="ORACLE_BLACKLISTED",
+                rejection_reasons=[
+                    f"oracle_error_rate={oracle.error_rate:.1%} > 10% — city blacklisted"
+                ],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "oracle_penalty"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
+
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
+        if oracle.status == OracleStatus.CAUTION:
+            decision_validations.append(
+                f"oracle_penalty_{oracle.penalty_multiplier:.2f}x"
+            )
         current_heat = (
             projected_total_exposure_usd / sizing_bankroll
             if sizing_bankroll > 0
@@ -1377,6 +1403,11 @@ def evaluate_candidate(
             continue
         if policy.threshold_multiplier > 1.0:
             km = km / policy.threshold_multiplier
+            decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
+
+        # Oracle penalty: reduce Kelly for CAUTION cities (3–10% error rate)
+        if oracle.penalty_multiplier < 1.0:
+            km *= oracle.penalty_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.

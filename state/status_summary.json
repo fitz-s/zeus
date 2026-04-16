@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-04-15T15:28:28.374819+00:00",
+  "timestamp": "2026-04-16T13:23:22.019606+00:00",
   "process": {
-    "pid": 80972,
+    "pid": 79490,
     "mode": "live",
     "version": "zeus_v2"
   },
@@ -24,228 +24,47 @@
     "recommended_commands": []
   },
   "risk": {
-    "level": "YELLOW",
-    "riskguard_level": "YELLOW",
-    "details": {
-      "brier_level": "GREEN",
-      "settlement_quality_level": "GREEN",
-      "execution_quality_level": "GREEN",
-      "strategy_signal_level": "GREEN",
-      "daily_loss_level": "GREEN",
-      "weekly_loss_level": "YELLOW",
-      "daily_loss": 0.0,
-      "weekly_loss": 0.0,
-      "daily_loss_status": "ok",
-      "weekly_loss_status": "insufficient_history",
-      "daily_loss_source": "risk_state_history",
-      "weekly_loss_source": "no_trustworthy_reference_row",
-      "daily_loss_reference": {
-        "row_id": 2802,
-        "checked_at": "2026-04-14T15:26:56.500217+00:00",
-        "initial_bankroll": 150.0,
-        "total_pnl": 0.0,
-        "effective_bankroll": 150.0
-      },
-      "weekly_loss_reference": null,
-      "initial_bankroll": 150.0,
-      "daily_baseline_total": 150.0,
-      "weekly_baseline_total": 150.0,
-      "realized_pnl": 0,
-      "unrealized_pnl": 0.0,
-      "total_pnl": 0.0,
-      "effective_bankroll": 150.0,
-      "portfolio_truth_source": "position_current",
-      "portfolio_loader_status": "ok",
-      "portfolio_fallback_active": false,
-      "portfolio_fallback_reason": "",
-      "portfolio_position_count": 2,
-      "portfolio_capital_source": "working_state_metadata",
-      "realized_truth_source": "none",
-      "settlement_sample_size": 0,
-      "settlement_storage_source": "none",
-      "settlement_row_storage_sources": [],
-      "settlement_authority_levels": {},
-      "settlement_degraded_row_count": 0,
-      "settlement_learning_snapshot_ready_count": 0,
-      "settlement_canonical_payload_complete_count": 0,
-      "settlement_metric_ready_count": 0,
-      "probability_directional_accuracy": 0.5,
-      "strategy_settlement_summary": {},
-      "entry_execution_summary": {
-        "overall": {
-          "attempted": 10,
-          "filled": 2,
-          "rejected": 0,
-          "fill_rate": 1.0
-        },
-        "by_strategy": {
-          "opening_inertia": {
-            "attempted": 10,
-            "filled": 2,
-            "rejected": 0,
-            "fill_rate": 1.0
-          }
-        }
-      },
-      "strategy_tracker_summary": {
-        "settlement_capture": {
-          "trades": 0,
-          "pnl": 0.0
-        },
-        "shoulder_sell": {
-          "trades": 0,
-          "pnl": 0.0
-        },
-        "center_buy": {
-          "trades": 0,
-          "pnl": 0.0
-        },
-        "opening_inertia": {
-          "trades": 0,
-          "pnl": 0.0
-        }
-      },
-      "strategy_edge_compression_alerts": [],
-      "strategy_tracker_accounting": {
-        "accounting_scope": "canonical_projection",
-        "performance_headline_authority": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
-        "tracker_role": "canonical_projection",
-        "authority_mode": "projection_from_position_events",
-        "includes_legacy_history": false,
-        "current_regime_started_at": "",
-        "history_archive_path": "",
-        "projection_source": "position_events via query_authoritative_settlement_rows"
-      },
-      "strategy_tracker_error": "",
-      "recommended_strategy_gates": [],
-      "recommended_strategy_gate_reasons": {},
-      "recommended_controls": [],
-      "recommended_control_reasons": {},
-      "durable_risk_action_emission_status": "emitted",
-      "durable_risk_action_emitted_count": 0,
-      "durable_risk_action_expired_count": 0,
-      "strategy_health_refresh_status": "refreshed",
-      "strategy_health_rows_written": 1,
-      "strategy_health_missing_required_tables": [],
-      "strategy_health_missing_optional_tables": [],
-      "strategy_health_omitted_fields": [
-        "risk_level",
-        "brier_30d",
-        "edge_trend_30d"
-      ],
-      "strategy_health_snapshot_status": "fresh",
-      "strategy_health_stale_strategy_keys": []
-    },
+    "level": "RED",
+    "riskguard_level": "RED",
+    "details": {},
     "consistency_check": {
       "ok": false,
       "issues": [
-        "cycle_risk_level_mismatch:GREEN->YELLOW"
+        "cycle_risk_level_mismatch:GREEN->RED",
+        "strategy_health_empty"
       ],
       "cycle_risk_level": "GREEN"
     },
     "infrastructure_level": "YELLOW",
     "infrastructure_issues": [
-      "cycle_risk_level_mismatch:GREEN->YELLOW"
+      "cycle_risk_level_mismatch:GREEN->RED",
+      "strategy_health_empty"
     ]
   },
   "portfolio": {
-    "open_positions": 2,
-    "total_exposure_usd": 9.9,
-    "heat_pct": 6.6,
+    "open_positions": 0,
+    "total_exposure_usd": 0.0,
+    "heat_pct": 0.0,
     "initial_bankroll": 150.0,
     "realized_pnl": 0.0,
     "unrealized_pnl": 0.0,
     "total_pnl": 0.0,
     "effective_bankroll": 150.0,
     "bankroll": 150.0,
-    "positions": [
-      {
-        "trade_id": "648f96f2-747",
-        "city": "Seattle",
-        "direction": "buy_no",
-        "strategy": "opening_inertia",
-        "state": "active",
-        "chain_state": "synced",
-        "exit_state": "none",
-        "entry_fill_verified": false,
-        "admin_exit_reason": "",
-        "size_usd": 4.9047,
-        "shares": 5.9093,
-        "entry_price": 0.83,
-        "edge": null,
-        "bin_label": "Will the highest temperature in Seattle be between 50-51\u00b0F on April 14?",
-        "decision_snapshot_id": "79779",
-        "token_id": "47634522020082427227409776718793175526180467783470680585432681344004645042210",
-        "no_token_id": "85347790774096219106093509912759372067798681667972282289788016141549820984756",
-        "condition_id": "0xb0213f22bdd93928b0f781369d3bfaf4323cc1a950d6a1db838bb5007022a2d4",
-        "day0_entered_at": "",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      },
-      {
-        "trade_id": "6c7e6a68-fc6",
-        "city": "Seattle",
-        "direction": "buy_no",
-        "strategy": "opening_inertia",
-        "state": "active",
-        "chain_state": "local_only",
-        "exit_state": "none",
-        "entry_fill_verified": false,
-        "admin_exit_reason": "",
-        "size_usd": 5.0,
-        "shares": 5.268703898840886,
-        "entry_price": 0.949,
-        "edge": null,
-        "bin_label": "Will the highest temperature in Seattle be between 52-53\u00b0F on April 14?",
-        "decision_snapshot_id": "79779",
-        "token_id": "98097477977922251107195754980922640755084822724692841311733450953367952567120",
-        "no_token_id": "78171435354299871709776843837580636309637505483827630340410251575447937465053",
-        "condition_id": "",
-        "day0_entered_at": "",
-        "mark_price": null,
-        "unrealized_pnl": 0.0
-      }
-    ]
+    "positions": []
   },
   "runtime": {
-    "chain_state_counts": {
-      "synced": 1,
-      "local_only": 1
-    },
-    "exit_state_counts": {
-      "none": 2
-    },
-    "unverified_entries": 2,
+    "chain_state_counts": {},
+    "exit_state_counts": {},
+    "unverified_entries": 0,
     "day0_positions": 0
   },
-  "strategy": {
-    "opening_inertia": {
-      "open_positions": 2,
-      "open_exposure_usd": 9.9,
-      "realized_pnl": 0.0,
-      "unrealized_pnl": 0.0,
-      "total_pnl": 0.0,
-      "settlement_count": 0,
-      "settlement_pnl": 0.0,
-      "settlement_accuracy": null,
-      "fill_rate_14d": 1.0,
-      "execution_decay_flag": false,
-      "edge_compression_flag": false,
-      "gated": false,
-      "recommended_gate": false,
-      "recommended_gate_reasons": [],
-      "no_trade_count": 0,
-      "no_trade_stage_counts": {},
-      "entry_attempted": 10,
-      "entry_filled": 2,
-      "entry_rejected": 0
-    }
-  },
+  "strategy": {},
   "execution": {
-    "event_sample_size": 31,
+    "event_sample_size": 0,
     "overall": {
-      "entry_attempted": 10,
-      "entry_filled": 2,
+      "entry_attempted": 0,
+      "entry_filled": 0,
       "entry_rejected": 0,
       "exit_attempted": 0,
       "exit_filled": 0,
@@ -256,21 +75,7 @@
       "exit_fill_confirmed": 0,
       "exit_retry_released": 0
     },
-    "by_strategy": {
-      "opening_inertia": {
-        "entry_attempted": 10,
-        "entry_filled": 2,
-        "entry_rejected": 0,
-        "exit_attempted": 0,
-        "exit_filled": 0,
-        "exit_retry_scheduled": 0,
-        "exit_backoff_exhausted": 0,
-        "exit_fill_check_failed": 0,
-        "exit_fill_checked": 0,
-        "exit_fill_confirmed": 0,
-        "exit_retry_released": 0
-      }
-    }
+    "by_strategy": {}
   },
   "learning": {
     "settlement_sample_size": 0,
@@ -278,10 +83,10 @@
     "no_trade_stage_counts": {},
     "availability_status_counts": {},
     "execution": {
-      "event_sample_size": 31,
+      "event_sample_size": 0,
       "overall": {
-        "entry_attempted": 10,
-        "entry_filled": 2,
+        "entry_attempted": 0,
+        "entry_filled": 0,
         "entry_rejected": 0,
         "exit_attempted": 0,
         "exit_filled": 0,
@@ -292,41 +97,16 @@
         "exit_fill_confirmed": 0,
         "exit_retry_released": 0
       },
-      "by_strategy": {
-        "opening_inertia": {
-          "entry_attempted": 10,
-          "entry_filled": 2,
-          "entry_rejected": 0,
-          "exit_attempted": 0,
-          "exit_filled": 0,
-          "exit_retry_scheduled": 0,
-          "exit_backoff_exhausted": 0,
-          "exit_fill_check_failed": 0,
-          "exit_fill_checked": 0,
-          "exit_fill_confirmed": 0,
-          "exit_retry_released": 0
-        }
-      }
+      "by_strategy": {}
     },
-    "by_strategy": {
-      "opening_inertia": {
-        "settlement_count": 0,
-        "settlement_pnl": 0.0,
-        "settlement_accuracy": null,
-        "no_trade_count": 0,
-        "no_trade_stage_counts": {},
-        "entry_attempted": 10,
-        "entry_filled": 2,
-        "entry_rejected": 0
-      }
-    }
+    "by_strategy": {}
   },
   "no_trade": {
     "recent_stage_counts": {}
   },
   "cycle": {
     "mode": "opening_hunt",
-    "started_at": "2026-04-15T15:28:28.373573+00:00",
+    "started_at": "2026-04-16T13:21:17.690649+00:00",
     "monitors": 0,
     "exits": 0,
     "candidates": 0,
@@ -339,18 +119,21 @@
     "smoke_test_portfolio_cap_usd": 5.0,
     "entries_paused": true,
     "entries_pause_reason": "auto_pause:ValueError",
-    "completed_at": "2026-04-15T15:28:28.374814+00:00"
+    "completed_at": "2026-04-16T13:23:22.019555+00:00"
   },
   "truth": {
     "mode": "live",
-    "generated_at": "2026-04-15T15:28:28.374819+00:00",
+    "generated_at": "2026-04-16T13:23:22.019606+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,
     "archived_to": null,
     "db_primary_inputs": {
       "position_current": "ok",
-      "strategy_health": "fresh"
+      "strategy_health": "empty"
+    },
+    "compatibility_inputs": {
+      "bankroll_fallback_source": "settings.capital_base_usd"
     }
   }
 }

@@ -8,6 +8,8 @@ This constraint dramatically narrows probability distribution near settlement.
 import numpy as np
 
 from src.config import day0_n_mc, day0_obs_dominates_threshold
+from typing import Callable
+
 from src.contracts.settlement_semantics import round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     day0_backbone_context,
@@ -45,6 +47,7 @@ class Day0Signal:
         current_local_hour: float | None = None,
         daylight_progress: float | None = None,
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        round_fn: Callable | None = None,  # Settlement rounding (oracle_truncate for HKO)
         observed_low_so_far: float | None = None,
         member_mins_remaining: np.ndarray | None = None,
         temperature_metric: str = "high",
@@ -71,6 +74,7 @@ class Day0Signal:
         self._observation_time = observation_time
         self._current_utc_timestamp = current_utc_timestamp
         self._precision = precision
+        self._round_fn = round_fn
         if temporal_context is not None:
             diurnal_peak_confidence = temporal_context.post_peak_confidence
             solar_day = temporal_context.solar_day
@@ -101,12 +105,12 @@ class Day0Signal:
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
 
-        Mirrors EnsembleSignal._simulate_settlement() logic.
-        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses WMO asymmetric half-up rounding: floor(x + 0.5).
+        Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
+        otherwise falls back to WMO asymmetric half-up: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
-        Accepts both scalar and ndarray inputs.
         """
+        if self._round_fn is not None:
+            return self._round_fn(values)
         return round_wmo_half_up_values(values, self._precision)
 
     def p_vector(self, bins: list[Bin], n_mc: int | None = None, rng=None) -> np.ndarray:

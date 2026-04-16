@@ -2,9 +2,17 @@
 
 > How to detect, investigate, and resolve discrepancies between our observation data and Polymarket settlement outcomes.
 
-## Overview
+## Axiom: Market Is Always Right
 
-Our settlement pipeline depends on observation data matching what Polymarket uses to resolve markets. Polymarket can change settlement sources at any time. This workflow catches those changes before they cause financial losses.
+**PM settlement values are the ground truth. Period.**
+
+Zeus is a free-trading machine. As a trader you cannot defy the market. When our data disagrees with PM's settlement, **we are wrong** — not PM. Every mismatch, including ±1°C, is a critical error that must be investigated and fixed.
+
+Known root causes of mismatches:
+- **Wrong station**: WU API may return a different physical station than what the PM resolution page shows (e.g., ZGSZ returns "Lau Fau Shan" instead of Shenzhen Bao'an airport)
+- **F↔C rounding**: WU stores data in °F internally; `max(hourly_°C)` ≠ `round(max(hourly_°F) → °C)` in edge cases
+- **Source period change**: PM changes the data source for a city (e.g., Taipei CWA → WU)
+- **Data pipeline mismatch**: Our data source (API endpoint) differs from what PM's auto-resolver reads (website SPA)
 
 ## Step 1: Run the Smoke Test
 
@@ -14,7 +22,7 @@ source .venv/bin/activate
 python scripts/smoke_test_settlements.py
 ```
 
-**Expected output**: >95% MATCH rate. Any new MISMATCH needs investigation.
+**Target: 0 MISMATCH.** Any mismatch is a critical error requiring immediate investigation.
 
 Options:
 - `--verbose`: Also print NO_DATA rows
@@ -22,24 +30,25 @@ Options:
 
 ## Step 2: Triage Mismatches
 
-Mismatches fall into 4 categories:
+ALL mismatches are critical. Triage by root cause:
 
-### Category A: ±1°C Rounding (acceptable)
-- Same station, same source type
-- Delta is exactly ±1°C
-- **Action**: No action needed. This is systemic noise from WU/NOAA rounding differences.
+### Category A: Wrong Station / Data Source
+- Our API returns data from a different physical station than what PM reads
+- Example: ZGSZ API → "Lau Fau Shan" (HK) instead of Shenzhen airport METAR
+- **Action**: Switch data source (e.g., to ogimet METAR for the correct ICAO station)
 
-### Category B: Source Change (critical)
-- Delta >2°C or affects multiple consecutive days for one city
-- **Action**: Investigate the source change immediately (Step 3)
+### Category B: Source Change (PM changed provider)
+- PM changed the resolution source for a city
+- Detectable by description text changes in Gamma API events
+- **Action**: Update our data source to match PM's new source (Step 3)
 
 ### Category C: Bad Observation Data (data quality)
 - High == Low, or values clearly wrong (e.g., Chicago high=34°F when neighbors are 60-70°F)
 - **Action**: QUARANTINE the observation (`authority='QUARANTINED'`)
 
-### Category D: Date Mapping Bug (code bug)
-- Systemic off-by-one affecting ALL cities on certain dates
-- **Action**: Fix date extraction logic in the smoke test and settlement code
+### Category D: Date Mapping / Rounding Bug (code bug)
+- Systemic off-by-one or F↔C conversion mismatch
+- **Action**: Fix computation logic to match PM's methodology
 
 ## Step 3: Investigate Source Changes
 
@@ -132,3 +141,14 @@ WHERE authority = 'QUARANTINED';
 2. **±1°C systemic noise**: WU and Polymarket may use slightly different observation windows or rounding. This affects ~1-2% of settlements and cannot be eliminated.
 
 3. **Gamma API endDate ≠ weather date**: Market `endDate` is always 1 day after the actual weather observation date. Always extract the date from the event `title` field.
+
+## Cron Task Config
+
+| Field | Value |
+|-------|-------|
+| name | `zeus-settlement-smoke-test` |
+| schedule | `0 7 * * 5` (Friday 7:00 AM CT — weekly) |
+| agent | `venus` |
+| timeout | 300s |
+| delivery | `channel:1482231433153085500` |
+| delivery_mode | `announce` |

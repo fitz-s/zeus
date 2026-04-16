@@ -583,14 +583,22 @@ def derive_outcome_from_settlement_value(
     settlement_value: float | None,
     bin: Bin,
     unit: str,
+    round_fn: callable = None,
 ) -> bool:
-    """Derive YES outcome from WU settlement value and a typed bin."""
+    """Derive YES outcome from settlement value and a typed bin.
+
+    Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
+    otherwise falls back to WMO asymmetric half-up rounding.
+    """
     if settlement_value is None:
         raise ValueError("settlement_value is required")
     if bin.unit != unit:
         raise ValueError(f"settlement unit mismatch: bin={bin.unit} settlement={unit}")
 
-    value = round_wmo_half_up_value(float(settlement_value))
+    if round_fn is not None:
+        value = float(round_fn(np.array([float(settlement_value)]))[0])
+    else:
+        value = round_wmo_half_up_value(float(settlement_value))
     if bin.low is None and bin.high is not None:
         return value <= bin.high
     if bin.high is None and bin.low is not None:
@@ -1073,6 +1081,10 @@ def _replay_one_settlement(
     from src.calibration.manager import season_from_month
     from src.data.market_scanner import _parse_temp_range
     from src.types import Bin
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    _sem = SettlementSemantics.for_city(city)
+    _round_fn = _sem.round_values
 
     decision_ref = ctx.get_decision_reference_for(city.name, target_date)
     if decision_ref is None:
@@ -1205,6 +1217,7 @@ def _replay_one_settlement(
         calibrator=cal,
         lead_days=lead_days,
         unit=city.settlement_unit,
+        round_fn=_round_fn,
     )
     edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
     filtered = fdr_filter(edges)
@@ -1213,7 +1226,7 @@ def _replay_one_settlement(
     settlement_value = settlement.get("settlement_value")
     # Defensive: round to integer per settlement precision contract
     if settlement_value is not None:
-        settlement_value = round_wmo_half_up_value(float(settlement_value))
+        settlement_value = float(_round_fn(np.array([float(settlement_value)]))[0])
 
     decisions = []
     best_edge = 0.0

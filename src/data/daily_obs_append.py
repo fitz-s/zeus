@@ -135,7 +135,6 @@ CITY_STATIONS: dict[str, tuple[str, str, str]] = {
     "Amsterdam":     ("EHAM", "NL", "C"),
     "Helsinki":      ("EFHK", "FI", "C"),
     "Ankara":        ("LTAC", "TR", "C"),
-    "Tel Aviv":      ("LLBG", "IL", "C"),
     # Asia
     "Beijing":       ("ZBAA", "CN", "C"),
     "Shanghai":      ("ZSPD", "CN", "C"),
@@ -883,6 +882,15 @@ def append_hko_months(
                 continue
 
             try:
+                # HKO reports 0.1°C precision (e.g. 27.8°C) but PM's UMA
+                # Oracle floors to integer °C for bin placement (27°C).
+                # Keep raw_value at original precision for audit; floor the
+                # value that enters _build_atom_pair so observations match
+                # PM settlement semantics.  See oracle_error_rate analysis.
+                import math as _math
+                high_val = float(_math.floor(high_val))
+                low_val = float(_math.floor(low_val))
+
                 atom_high, atom_low = _build_atom_pair(
                     city_name=HKO_CITY_NAME,
                     target_d=target_d,
@@ -960,6 +968,10 @@ OGIMET_CITIES: dict[str, _OgimetTarget] = {
     "Moscow": _OgimetTarget(
         city_name="Moscow", station="UUWW", kind="metar",
         source_tag="ogimet_metar_uuww",
+    ),
+    "Tel Aviv": _OgimetTarget(
+        city_name="Tel Aviv", station="LLBG", kind="metar",
+        source_tag="ogimet_metar_llbg",
     ),
 }
 

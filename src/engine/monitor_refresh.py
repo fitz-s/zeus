@@ -450,6 +450,8 @@ def _check_persistence_anomaly(
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
+                # Note: uses WMO half-up as generic directional delta.
+                # oracle_truncate precision not critical here (±0.5 max).
                 deltas.append(
                     predicted_high - round_wmo_half_up_value(float(row["settlement_value"]))
                 )
