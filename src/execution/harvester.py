@@ -52,12 +52,21 @@ logger = logging.getLogger(__name__)
 
 
 def _get_canonical_exit_flag() -> bool:
-    """Read CANONICAL_EXIT_PATH feature flag from settings."""
+    """Read CANONICAL_EXIT_PATH feature flag from settings.
+
+    B043: typed error taxonomy (SD-B). A broad ``except Exception``
+    would silently disable the canonical exit path on any fault
+    (TypeError/RuntimeError from a regression in ``feature_flags``),
+    indistinguishable from the flag being legitimately False. Narrow
+    to the two legitimate "settings surface missing" cases only;
+    anything else is a code defect and must propagate.
+    """
     try:
         from src.config import settings
-        return settings.feature_flags.get("CANONICAL_EXIT_PATH", False)
-    except Exception:
+        flags = settings.feature_flags
+    except (ImportError, AttributeError):
         return False
+    return flags.get("CANONICAL_EXIT_PATH", False)
 
 
 def _next_canonical_sequence_no(conn, position_id: str) -> int:
@@ -414,8 +423,25 @@ def run_harvester() -> dict:
 
 
 def _fetch_settled_events() -> list[dict]:
-    """Poll Gamma API for recently settled weather markets."""
-    events = []
+    """Poll Gamma API for recently settled weather markets.
+
+    B045: mid-pagination HTTPError handling (SD-B). Previously any
+    httpx.HTTPError broke out of the loop and returned the partial
+    page batch as if it were the complete settled-event set.
+    Downstream in run_harvester events not yet fetched look
+    identical to "no settlement yet," so settlements on page 2+
+    would be silently dropped for this cycle's portfolio close
+    accounting.
+
+    Contract:
+      * first-page (offset == 0) HTTPError is tolerated with a
+        warning and an empty return -- indistinguishable from a
+        hand-off hour with no settled events, next cycle retries.
+      * mid-pagination HTTPError (offset > 0) raises RuntimeError
+        so the outer cron wrapper logs a real fault and we do NOT
+        commit partial settlement state to the portfolio this cycle.
+    """
+    events: list[dict] = []
     offset = 0
 
     while True:
@@ -428,8 +454,14 @@ def _fetch_settled_events() -> list[dict]:
             resp.raise_for_status()
             batch = resp.json()
         except httpx.HTTPError as e:
-            logger.warning("Gamma API fetch failed: %s", e)
-            break
+            if offset == 0:
+                logger.warning("Gamma API fetch failed on first page: %s", e)
+                break
+            raise RuntimeError(
+                f"Gamma API pagination failed at offset={offset} after "
+                f"{len(events)} events already fetched: {e}. Refusing "
+                f"to return partial settled events as complete."
+            ) from e
 
         if not batch:
             break

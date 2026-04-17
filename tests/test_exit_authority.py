@@ -107,3 +107,105 @@ class TestCanonicalExitFlag:
                 settings._data.get("feature_flags", {}).pop("CANONICAL_EXIT_PATH", None)
             else:
                 settings._data["feature_flags"]["CANONICAL_EXIT_PATH"] = original
+
+
+class TestHarvesterBoundaryErrors:
+    """B043 + B045 relationship tests for src/execution/harvester.py.
+
+    B043: canonical-exit flag must not mask TypeError/RuntimeError as
+          "flag disabled" \u2014 only legitimate "settings unavailable"
+          cases return False.
+    B045: mid-pagination HTTPError must NOT produce a partial
+          settled-events list that looks like the full set to
+          downstream portfolio accounting.
+    """
+
+    def test_b043_canonical_exit_flag_propagates_unknown_failures(self, monkeypatch):
+        """A RuntimeError while reading feature_flags is a code bug,
+        NOT a legitimate \"flag disabled\" state. It must propagate.
+        """
+        from src.execution.harvester import _get_canonical_exit_flag
+        from src.config import Settings
+
+        def _boom(self):
+            raise RuntimeError("feature_flags backend corrupt")
+
+        # Patch the property on the class so settings.feature_flags raises.
+        monkeypatch.setattr(Settings, "feature_flags", property(_boom))
+        with pytest.raises(RuntimeError, match="feature_flags backend corrupt"):
+            _get_canonical_exit_flag()
+
+    def test_b043_canonical_exit_flag_returns_false_on_attribute_error(self, monkeypatch):
+        """Legitimate AttributeError path (settings surface missing) still
+        returns False \u2014 backwards-compat guarantee.
+        """
+        from src.execution.harvester import _get_canonical_exit_flag
+        from src.config import Settings
+
+        def _raise_attr(self):
+            raise AttributeError("feature_flags not configured")
+
+        monkeypatch.setattr(Settings, "feature_flags", property(_raise_attr))
+        assert _get_canonical_exit_flag() is False
+
+    def test_b045_fetch_settled_events_raises_on_mid_pagination_failure(self, monkeypatch):
+        """HTTPError at offset > 0 must raise, not silently truncate."""
+        import httpx
+        from src.execution import harvester
+
+        call_state = {"n": 0}
+
+        def _fake_get(url, params=None, timeout=None):
+            call_state["n"] += 1
+            # First call (offset=0): return 200 items (full page)
+            if params.get("offset", 0) == 0:
+                class _Resp:
+                    def raise_for_status(self):
+                        pass
+
+                    def json(self):
+                        # Return 200 items so the loop continues to next page
+                        return [{"title": "Temperature NYC", "slug": f"s{i}"} for i in range(200)]
+                return _Resp()
+            # Second call (offset=200): simulate HTTPError
+            raise httpx.HTTPError("simulated 503 on page 2")
+
+        monkeypatch.setattr(harvester.httpx, "get", _fake_get)
+
+        with pytest.raises(RuntimeError, match="pagination failed at offset=200"):
+            harvester._fetch_settled_events()
+
+    def test_b045_fetch_settled_events_tolerates_first_page_failure(self, monkeypatch):
+        """HTTPError at offset == 0 is still tolerated (warning + empty list).
+
+        Backwards-compat: a transient Gamma outage at the start of a
+        cycle should not crash the cron job — next cycle will retry.
+        """
+        import httpx
+        from src.execution import harvester
+
+        def _fake_get(url, params=None, timeout=None):
+            raise httpx.HTTPError("simulated 503 on page 1")
+
+        monkeypatch.setattr(harvester.httpx, "get", _fake_get)
+        result = harvester._fetch_settled_events()
+        assert result == []
+
+    def test_b045_fetch_settled_events_happy_path_single_page(self, monkeypatch):
+        """Single short page (< 200) returns normally \u2014 no regression."""
+        import httpx
+        from src.execution import harvester
+
+        def _fake_get(url, params=None, timeout=None):
+            class _Resp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return [{"title": "Temperature NYC", "slug": "a"}]
+            return _Resp()
+
+        monkeypatch.setattr(harvester.httpx, "get", _fake_get)
+        result = harvester._fetch_settled_events()
+        assert len(result) == 1
+        assert result[0]["slug"] == "a"
