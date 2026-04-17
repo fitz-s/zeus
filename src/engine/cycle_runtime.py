@@ -207,6 +207,16 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
 
 
 def materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, env: str, bankroll_at_entry=None, deps):
+    # B097 [YELLOW / flag for §7c architect sign-off]: bankroll_at_entry
+    # must be captured authoritatively at the point of entry. Falling back
+    # to None (which previously propagated through to Position) corrupts
+    # subsequent per-position P&L and size-reconstruction analytics. Reject
+    # the materialization outright rather than synthesize a fake value.
+    if bankroll_at_entry is None:
+        raise ValueError(
+            f"materialize_position: bankroll_at_entry is None for trade_id={getattr(result, 'trade_id', '?')!r} "
+            f"state={state!r} env={env!r}; entry materialization requires an authoritative bankroll snapshot"
+        )
     now = deps._utcnow()
     entry_price = result.fill_price or result.submitted_price or decision.edge.entry_price
     shares = result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0)

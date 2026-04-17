@@ -122,11 +122,17 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             logger.error("Quarantining invalid canonical portfolio row: %s", exc)
             raise RuntimeError(f"RiskGuard DB loader fault: {exc}")
 
-    # B053: Dual-source consistency locking
+    # B053 [YELLOW / flag for SD-A authority-separation reviewer]:
+    # Dual-source consistency locking. A position-count mismatch between
+    # canonical_db (the authoritative source) and capital metadata (the
+    # blending input) indicates stale or drifted state. Elevate to ERROR
+    # log level and expose both counts on the returned dict so downstream
+    # callers can fail-close on `consistency_lock == 'mismatched'` rather
+    # than silently blend inconsistent authority sources.
     metadata_positions = getattr(metadata_state, "positions", [])
     if len(positions) != len(metadata_positions):
-        logger.warning(
-            "B053 Consistency Mismatch: canonical_db has %d positions vs %d in capital metadata. RiskGuard blending may be stale.",
+        logger.error(
+            "B053 Consistency Mismatch: canonical_db has %d positions vs %d in capital metadata. RiskGuard blending MUST NOT proceed on the blended view without caller-side consistency_lock check.",
             len(positions), len(metadata_positions)
         )
 
@@ -149,6 +155,9 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "position_count": len(positions),
         "capital_source": "dual_source_blended",
         "consistency_lock": "pass" if len(positions) == len(metadata_positions) else "mismatched",
+        # B053: expose both source counts so callers can diff explicitly
+        # rather than rely on a single boolean lock.
+        "metadata_position_count": len(metadata_positions),
     }
 
 
