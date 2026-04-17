@@ -370,11 +370,14 @@ class ReplayContext:
         for log_row in log_rows:
             try:
                 artifact = json.loads(log_row["artifact_json"])
-            except (json.JSONDecodeError, TypeError) as exc:
-                # B094 [YELLOW / flag for DT merge review]: narrow from bare
-                # Exception. A corrupt artifact_json must not kill the
-                # whole batch; log and continue so the rest of decision_log
-                # can still replay.
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
+                # B094 [critic amendment]: narrow from bare Exception.
+                # Persisted artifact_json is untrusted data, so include
+                # UnicodeDecodeError (bad encoding) and RecursionError
+                # (pathologically deep nesting) alongside the common
+                # JSONDecodeError/TypeError. A corrupt artifact_json
+                # must not kill the whole batch; log and continue so
+                # the rest of decision_log can still replay.
                 logger.warning(
                     "REPLAY_ARTIFACT_JSON_CORRUPT: started_at=%s error=%s",
                     log_row["started_at"],
@@ -444,7 +447,7 @@ class ReplayContext:
             if shadow is not None and shadow["decision_snapshot_id"]:
                 try:
                     edges_payload = json.loads(shadow["edges_json"]) if shadow["edges_json"] else []
-                except (json.JSONDecodeError, TypeError) as exc:
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
                     logger.warning(
                         "REPLAY_SHADOW_EDGES_JSON_CORRUPT: timestamp=%s error=%s",
                         shadow["timestamp"],
@@ -452,13 +455,12 @@ class ReplayContext:
                     )
                     edges_payload = []
                 bin_labels = [edge.get("bin_label", "") for edge in edges_payload if edge.get("bin_label")]
-                # B094 [YELLOW / flag for DT merge review]: protect the two
-                # previously-unwrapped json.loads calls below; corrupt
-                # p_raw_json/p_cal_json must yield an empty vector rather
-                # than crash the entire reference-synthesis path.
+                # B094 [critic amendment]: protect the two previously-
+                # unwrapped json.loads calls below. Include UnicodeDecodeError
+                # and RecursionError since persisted data is untrusted.
                 try:
                     p_raw_vector = json.loads(shadow["p_raw_json"]) if shadow["p_raw_json"] else []
-                except (json.JSONDecodeError, TypeError) as exc:
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
                     logger.warning(
                         "REPLAY_SHADOW_P_RAW_JSON_CORRUPT: timestamp=%s error=%s",
                         shadow["timestamp"],
@@ -467,7 +469,7 @@ class ReplayContext:
                     p_raw_vector = []
                 try:
                     p_cal_vector = json.loads(shadow["p_cal_json"]) if shadow["p_cal_json"] else []
-                except (json.JSONDecodeError, TypeError) as exc:
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, RecursionError) as exc:
                     logger.warning(
                         "REPLAY_SHADOW_P_CAL_JSON_CORRUPT: timestamp=%s error=%s",
                         shadow["timestamp"],

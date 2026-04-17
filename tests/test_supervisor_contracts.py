@@ -11,6 +11,7 @@ from src.supervisor_api.contracts import (
     Proposal,
     SupervisorCommand,
     SupervisorContractError,
+    is_unverified_env,
 )
 
 
@@ -122,3 +123,33 @@ def test_b005_provenance_ref_accepts_string_and_preserves(cls, base_kwargs):
     """provenance_ref must round-trip when explicitly set."""
     obj = cls(**base_kwargs, provenance_ref="obs:abc123")
     assert obj.provenance_ref == "obs:abc123"
+
+
+# ---------------------------------------------------------------------------
+# B074 provenance-sentinel env: "unknown_env" is a VALID contract value but
+# must be flagged UNVERIFIED by `is_unverified_env()`.
+# ---------------------------------------------------------------------------
+
+
+def test_b074_unknown_env_is_accepted_by_contract():
+    """`unknown_env` is a provenance-preserving sentinel for canonical
+    projection rows that carry no env. It must pass the B006 contract
+    check so those rows can still reach Venus for observation."""
+    o = Observation(
+        kind="heartbeat",
+        severity="INFO",
+        payload={},
+        observed_at="2026-01-01T00:00:00Z",
+        env="unknown_env",
+    )
+    assert o.env == "unknown_env"
+
+
+@pytest.mark.parametrize("env_value,expected", [
+    ("unknown_env", True),
+    ("live", False),
+    ("paper", False),
+    ("test", False),
+])
+def test_b074_is_unverified_env(env_value, expected):
+    assert is_unverified_env(env_value) is expected
