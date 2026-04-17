@@ -96,7 +96,9 @@ def resolve_strategy_policy(
                 continue
             sources.append(f"manual_override:{action_type}")
         except Exception as e:
-            logger.error("policy: bad_row for manual_override %s: %s", row.get('override_id', '?'), e)
+            # B050: sqlite3.Row has no .get() — use keys() membership.
+            row_id = row["override_id"] if "override_id" in row.keys() else "?"
+            logger.error("policy: bad_row for manual_override %s: %s", row_id, e)
             continue
 
     for row in risk_actions:
@@ -130,7 +132,9 @@ def resolve_strategy_policy(
                 continue
             sources.append(f"risk_action:{action_type}")
         except Exception as e:
-            logger.error("policy: bad_row for risk_action %s: %s", row.get('action_id', '?'), e)
+            # B050: sqlite3.Row has no .get() — use keys() membership.
+            row_id = row["action_id"] if "action_id" in row.keys() else "?"
+            logger.error("policy: bad_row for risk_action %s: %s", row_id, e)
             continue
 
     return StrategyPolicy(
@@ -239,7 +243,14 @@ def _select_rows(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
         if action_type not in chosen:
             chosen[action_type] = row
         else:
-            row_id = row.get("override_id") or row.get("action_id") or "?"
+            # B050: sqlite3.Row has no .get() — use keys() membership.
+            keys = row.keys()
+            if "override_id" in keys:
+                row_id = row["override_id"]
+            elif "action_id" in keys:
+                row_id = row["action_id"]
+            else:
+                row_id = "?"
             logger.warning(
                 "policy: duplicate %s (row %s) discarded — first-in wins",
                 action_type, row_id,
