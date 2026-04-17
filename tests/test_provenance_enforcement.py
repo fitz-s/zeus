@@ -181,3 +181,74 @@ class TestEmergencyBypassLogsAndExpires:
         expiry = _emergency_bypasses.get(name)
         assert expiry is not None
         assert before + _BYPASS_TTL_SECONDS <= expiry <= after + _BYPASS_TTL_SECONDS + 1
+
+
+# ---------------------------------------------------------------------------
+# B009 relationship tests: per-entry YAML parse isolation (SD-B)
+# ---------------------------------------------------------------------------
+
+class TestB009YamlPerEntryIsolation:
+    """_load_registry must not discard the entire registry on a single
+    malformed entry. One bad row should log and skip; good rows survive.
+    """
+
+    def test_b009_single_bad_entry_does_not_poison_registry(self, tmp_path):
+        """A YAML with 2 good entries and 1 missing-key entry should
+        return a registry with 2 good records (not empty/degraded)."""
+        from src.contracts.provenance_registry import _load_registry
+        yaml_text = """
+constants:
+  - constant_name: good_alpha
+    file_location: src/strategy/kelly.py
+    declared_target: risk_cap
+    data_basis: "calibration backtest 2026-03"
+    validated_at: "2026-03-15"
+    replacement_criteria: "recalibrate on Platt refit"
+  - constant_name: bad_beta
+    # missing file_location, declared_target, etc. — should be skipped
+    data_basis: "partial"
+  - constant_name: good_gamma
+    file_location: src/strategy/market_fusion.py
+    declared_target: ev
+    data_basis: "ensemble spread study 2026-03"
+    validated_at: "2026-03-20"
+    replacement_criteria: "re-fit on tail recalibration"
+"""
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(yaml_text)
+
+        registry, degraded = _load_registry(f)
+
+        # Degraded flag False because the STRUCTURE was fine; just one
+        # entry was bad. Registry has the two good ones.
+        assert degraded is False
+        assert "good_alpha" in registry
+        assert "good_gamma" in registry
+        assert "bad_beta" not in registry
+        assert len(registry) == 2
+
+    def test_b009_all_bad_entries_still_returns_empty_but_not_broken(self, tmp_path):
+        """If every entry is malformed, registry is empty; loader does
+        not crash."""
+        from src.contracts.provenance_registry import _load_registry
+        yaml_text = """
+constants:
+  - constant_name: bad_one
+  - data_basis: "no constant_name at all"
+"""
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(yaml_text)
+        registry, degraded = _load_registry(f)
+        assert registry == {}
+        # Loader did not raise — per-entry skip is the path.
+
+    def test_b009_structural_yaml_failure_still_degrades_whole_file(self, tmp_path):
+        """Malformed YAML at top level (not parseable) still degrades
+        to empty+degraded=True. Per-entry isolation only applies once
+        the top-level ``constants`` list is iterable."""
+        from src.contracts.provenance_registry import _load_registry
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text("constants: [unclosed: {list\n")
+        registry, degraded = _load_registry(f)
+        assert registry == {}
+        assert degraded is True

@@ -1581,3 +1581,77 @@ def test_empty_env_positions_pass_guard():
         assert len(loaded.positions) == 1
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# B041 relationship tests: fill_tracker typed error taxonomy (SD-B)
+# ---------------------------------------------------------------------------
+
+class TestB041FillTrackerBoundaryErrors:
+    """_check_entry_fill must distinguish transient IO failures
+    (legitimate ``still_pending``) from code defects (must propagate)."""
+
+    def test_b041_ioerror_maps_to_still_pending(self):
+        """A legitimate transient network-style error (ConnectionError)
+        keeps the order pending — the exchange state is genuinely
+        unknown this cycle.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = ConnectionError("simulated timeout")
+        clob.cancel_order.return_value = {"status": "CANCELLED"}
+
+        stats = check_pending_entries(portfolio, clob)
+        # still_pending, no fill, no void — pos stays as-is
+        assert stats["voided"] == 0
+        assert stats["entered"] == 0
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].state == "pending_tracked"
+
+    def test_b041_attributeerror_propagates(self):
+        """An AttributeError from a wrong-shape clob mock is a code
+        defect, NOT a legitimate transient state — must propagate
+        rather than silently becoming ``still_pending`` forever.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = AttributeError(
+            "clob has no attribute 'get_order_status'"
+        )
+        with pytest.raises(AttributeError, match="get_order_status"):
+            check_pending_entries(portfolio, clob)
+
+    def test_b041_typeerror_propagates(self):
+        """A TypeError (e.g. wrong arg count from a regression) is a
+        code defect and must propagate."""
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = TypeError(
+            "got unexpected keyword argument"
+        )
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            check_pending_entries(portfolio, clob)

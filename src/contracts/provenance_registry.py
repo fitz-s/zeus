@@ -106,22 +106,47 @@ def _load_registry(yaml_path: Path) -> tuple[dict[str, ProvenanceRecord], bool]:
             return {}, True
 
         registry: dict[str, ProvenanceRecord] = {}
+        # B009: per-entry isolation (SD-B). Previously a single malformed
+        # entry (missing key, bad cascade_bound shape, invalid declared_target)
+        # would raise inside this loop, the outer ``except Exception`` would
+        # fire, and the ENTIRE registry would be returned as empty/degraded.
+        # One bad row should not poison INV-13 enforcement for all other
+        # constants. Per-entry try/except logs the offending record and
+        # continues; only truly structural YAML failures (missing
+        # ``constants`` key, load error) still degrade the whole file.
+        entries_skipped = 0
         for entry in raw["constants"]:
-            cb_raw = entry.get("cascade_bound")
-            cascade_bound = tuple(cb_raw) if cb_raw else None
-            record = ProvenanceRecord(
-                constant_name=entry["constant_name"],
-                file_location=entry["file_location"],
-                declared_target=entry["declared_target"],
-                data_basis=entry["data_basis"],
-                validated_at=entry["validated_at"],
-                replacement_criteria=entry["replacement_criteria"],
-                cascade_bound=cascade_bound,  # type: ignore[arg-type]
-            )
-            if record.constant_name in registry:
-                raise ValueError(f"Duplicate provenance constant_name: {record.constant_name}")
-            registry[record.constant_name] = record
+            try:
+                cb_raw = entry.get("cascade_bound")
+                cascade_bound = tuple(cb_raw) if cb_raw else None
+                record = ProvenanceRecord(
+                    constant_name=entry["constant_name"],
+                    file_location=entry["file_location"],
+                    declared_target=entry["declared_target"],
+                    data_basis=entry["data_basis"],
+                    validated_at=entry["validated_at"],
+                    replacement_criteria=entry["replacement_criteria"],
+                    cascade_bound=cascade_bound,  # type: ignore[arg-type]
+                )
+                if record.constant_name in registry:
+                    raise ValueError(
+                        f"Duplicate provenance constant_name: {record.constant_name}"
+                    )
+                registry[record.constant_name] = record
+            except (KeyError, ValueError, TypeError) as exc:
+                entries_skipped += 1
+                logger.error(
+                    "provenance_registry.yaml entry skipped (%s): %s",
+                    exc, entry if isinstance(entry, dict) else repr(entry),
+                )
+                continue
 
+        if entries_skipped:
+            logger.error(
+                "provenance_registry: %d entries skipped due to per-entry "
+                "errors; INV-13 enforcement may be partial.",
+                entries_skipped,
+            )
         logger.info("ProvenanceRegistry loaded %d records", len(registry))
         return registry, False
     except Exception as exc:
