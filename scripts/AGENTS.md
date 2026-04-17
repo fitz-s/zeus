@@ -37,6 +37,12 @@ scripts are registered and safe for their declared class.
 
 - Check the manifest before adding a top-level script; reuse or extend existing
   long-lived tools when possible.
+- Canonical file/function naming and freshness rules live in
+  `architecture/naming_conventions.yaml`; do not redefine them here.
+- Touched, newly created, or evidence-reused scripts must satisfy the freshness
+  header contract in `architecture/naming_conventions.yaml`.
+- Old or unknown scripts must be inspected against this file and
+  `architecture/script_manifest.yaml` before execution.
 - One-off scripts need `task_YYYY-MM-DD_<purpose>.py` naming plus `delete_by`.
 - Repair/ETL writers must declare write targets and dry-run/apply behavior.
 - Diagnostics and reports must not write canonical DB truth.

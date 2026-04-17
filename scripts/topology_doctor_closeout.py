@@ -1,4 +1,7 @@
 """Compiled closeout lane for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Combine changed-file topology lanes into one closeout result.
+# Reuse: Keep lane additions scoped and parity-tested through tests/test_topology_doctor.py.
 
 from __future__ import annotations
 
@@ -159,6 +162,8 @@ def run_closeout(
         "change_receipts": api.run_change_receipts(actual_changed, receipt_path),
         "map_maintenance": api.run_map_maintenance(actual_changed, mode="closeout"),
         "artifact_lifecycle": api.run_artifact_lifecycle(),
+        "naming_conventions": api.run_naming_conventions(),
+        "freshness_metadata": api.run_freshness_metadata(actual_changed),
     }
     if selected["docs"]:
         lanes["docs"] = scoped_result(api, api.run_docs(), actual_changed)

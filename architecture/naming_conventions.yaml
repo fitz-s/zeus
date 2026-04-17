@@ -1,0 +1,149 @@
+schema_version: 1
+metadata:
+  created: "2026-04-16"
+  owner_packet: "Function Naming and Freshness Metadata"
+  purpose: >
+    Canonical naming map for files, functions, and script/test freshness
+    metadata. AGENTS files may summarize this map, but this file owns the
+    durable rule text.
+
+required_top_level_keys:
+  - schema_version
+  - metadata
+  - file_naming
+  - function_naming
+  - freshness_metadata
+
+file_naming:
+  scripts:
+    long_lived:
+      rule: >
+        Durable top-level scripts need stable verb prefixes or an explicit
+        exception. One-off probes belong in packet-ephemeral names, not generic
+        long-lived script names.
+      allowed_prefixes:
+        - check_
+        - validate_
+        - verify_
+        - audit_
+        - diagnose_
+        - etl_
+        - backfill_
+        - rebuild_
+        - migrate_
+        - repair_
+        - run_
+        - generate_
+        - build_
+        - capture_
+        - post_
+        - resume_
+        - kickoff_
+        - watch_
+      exceptions:
+        _yaml_bootstrap.py: import bootstrap helper for script entrypoints
+        antibody_scan.py: established operator diagnostic name
+        apply_recommended_controls.py: established control-plane repair entrypoint
+        automation_analysis.py: established automation diagnostic report
+        baseline_experiment.py: established diagnostic baseline report
+        cleanup_ghost_positions.py: established repair command name
+        data_completeness_audit.py: legacy word-order exception; keep until renamed
+        deep_heartbeat.py: established runtime heartbeat helper
+        deprecate_legacy_state_files.py: established repair command name
+        _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
+        bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
+        equity_curve.py: established diagnostic report command
+        force_lifecycle.py: established repair command name; dangerous and packet-gated
+        healthcheck.py: established operator entrypoint
+        heartbeat_dispatcher.py: established runtime dispatcher
+        investigate_ecmwf_bias.py: established diagnostic report name
+        live_smoke_test.py: established runtime smoke entrypoint
+        nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
+        onboard_cities.py: established ETL/operator onboarding entrypoint
+        oracle_snapshot_listener.py: oracle snapshot runtime listener retained under cron/operator naming
+        parse_change_log.py: established utility entrypoint
+        post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
+        resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
+        profit_validation_replay.py: established diagnostic report command
+        refit_platt.py: established repair command name
+        replay_parity.py: established diagnostic command
+        semantic_linter.py: established enforcement tool
+        topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
+        topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
+        topology_doctor_closeout.py: compiled closeout checker-family module imported by topology_doctor.py
+        topology_doctor_context_pack.py: context-pack/impact builder-family module imported by topology_doctor.py
+        topology_doctor_core_map.py: core-map/compiled-topology builder-family module imported by topology_doctor.py
+        topology_doctor_data_rebuild_checks.py: data-rebuild checker-family module imported by topology_doctor.py
+        topology_doctor_digest.py: digest builder-family module imported by topology_doctor.py
+        topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
+        topology_doctor_freshness_checks.py: freshness/naming checker-family module imported by topology_doctor.py
+        topology_doctor_map_maintenance.py: map-maintenance checker-family module imported by topology_doctor.py
+        topology_doctor_packet_prefill.py: packet-prefill/invariant-slice builder-family module imported by topology_doctor.py
+        topology_doctor_policy_checks.py: governance/policy checker-family module imported by topology_doctor.py
+        topology_doctor_registry_checks.py: registry/root/docs-strict checker-family module imported by topology_doctor.py
+        topology_doctor_reference_checks.py: reference/core-claim checker-family module imported by topology_doctor.py
+        topology_doctor_receipt_checks.py: change-receipt checker-family module imported by topology_doctor.py
+        topology_doctor_script_checks.py: script-manifest checker-family module imported by topology_doctor.py
+        topology_doctor_source_checks.py: source-rationale/scoped-AGENTS checker-family module imported by topology_doctor.py
+        topology_doctor_test_checks.py: test-topology checker-family module imported by topology_doctor.py
+        topology_doctor.py: established topology compiler/checker
+        venus_autonomy_gate.py: established Venus boundary gate
+        venus_sensing_report.py: established Venus boundary report
+    packet_ephemeral:
+      pattern: "task_YYYY-MM-DD_<purpose>.py"
+      required_metadata:
+        - owner_packet
+        - created_for
+        - delete_by
+      rule: Temporary probes must carry a delete_by date and should not be promoted silently.
+  tests:
+    top_level_pattern: "tests/test_<behavior_or_law>.py"
+    helper_rule: Test helper names should state the behavior or law being protected.
+  operations_packets:
+    single_file_pattern: "docs/operations/task_YYYY-MM-DD_slug.md"
+    folder_pattern: "docs/operations/task_YYYY-MM-DD_slug/"
+    archive_pattern: "docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/"
+  docs:
+    rule: Generic names like plan.md/progress.md are allowed only inside active task folders.
+
+function_naming:
+  preferred_shape: "<verb>_<domain_object>[_<truth_surface>]"
+  principle: >
+    Function names should expose action, domain object, and authority/truth
+    surface where relevant. Rename stale private helpers when behavior changes.
+  allowed_generic_entrypoints:
+    - main
+    - build_parser
+    - run_cycle
+  vague_stems_to_avoid_unqualified:
+    - process
+    - handle
+    - fix
+    - update
+    - data
+    - helper
+  examples:
+    good:
+      - validate_receipt_payload
+      - build_context_pack
+      - run_closeout_lane
+    weak_without_domain:
+      - process
+      - handle
+      - fix_data
+
+freshness_metadata:
+  applies_to:
+    - scripts/*.py
+    - scripts/*.sh
+    - tests/test_*.py
+  rollout: changed_files_only
+  header_line_limit: 30
+  required_header_lines:
+    - "Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never"
+    - "Purpose: <why this script/test exists now>"
+    - "Reuse: <what to inspect before running or relying on it>"
+  stale_unknown_rule: >
+    Scripts and tests with missing or stale freshness metadata are not directly
+    reusable. Inspect source plus the relevant manifest, then update
+    last_reviewed/last_reused before execution or evidence use.

@@ -214,25 +214,14 @@ Git safety is summarized by lore card `UNCOMMITTED_AGENT_EDIT_LOSS`: never run
 destructive git commands or overwrite others' dirty work without explicit human
 approval.
 
-## File Provenance Comments (mandatory for new/reused scripts + tests)
+## Function Naming and Reuse Freshness
 
-Every new or substantially-touched script (`scripts/*.py`) and every new test
-file (`tests/test_*.py`) carries a header comment block:
-
-```python
-# Created: YYYY-MM-DD
-# Last reused/audited: YYYY-MM-DD
-# Authority basis: <law doc / Phase tag>
-```
-
-When reusing an older script, the reuse commit updates
-`Last reused/audited:`. Files without these headers are **legacy-until-audited** —
-a future session must run a provenance audit + add the headers retroactively
-before mechanical reuse. Rationale: the system has gone through many version
-updates; without date + authority anchor, agents cannot distinguish
-still-current code from stale-against-new-law code. See
-`~/.claude/CLAUDE.md` § "Code Provenance: Legacy Is Untrusted Until Audited"
-for the universal rule.
+Canonical file naming, function naming, and script/test freshness rules live in
+`architecture/naming_conventions.yaml`. AGENTS files may summarize the policy
+but must not redefine it. Old/unknown scripts/tests are review-required before
+execution or evidence use. Machine checks:
+`python scripts/topology_doctor.py --naming-conventions` and
+`python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
 
 ## Mesh Maintenance
 

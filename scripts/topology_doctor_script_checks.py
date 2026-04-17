@@ -1,4 +1,7 @@
 """Script manifest checker family for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Validate top-level script lifecycle, naming, and write-target metadata.
+# Reuse: Inspect architecture/script_manifest.yaml + architecture/naming_conventions.yaml before changing script gates.
 
 from __future__ import annotations
 
@@ -45,8 +48,13 @@ def metadata_missing(api: Any, value: Any) -> bool:
     return False
 
 
-def long_lived_script_name_allowed(manifest: dict[str, Any], name: str) -> bool:
-    naming = manifest.get("long_lived_naming") or {}
+def long_lived_script_name_allowed(api: Any, manifest: dict[str, Any], name: str) -> bool:
+    conventions = api.load_naming_conventions() if api.NAMING_CONVENTIONS_PATH.exists() else {}
+    naming = (
+        (((conventions.get("file_naming") or {}).get("scripts") or {}).get("long_lived") or {})
+        or manifest.get("long_lived_naming")
+        or {}
+    )
     prefixes = tuple(naming.get("allowed_prefixes") or ())
     exceptions = set((naming.get("exceptions") or {}).keys())
     return name.startswith(prefixes) or name in exceptions
@@ -111,7 +119,7 @@ def check_script_lifecycle(
                     "task/probe/scratch names must be packet_ephemeral or renamed before promotion",
                 )
             )
-        if not long_lived_script_name_allowed(manifest, name):
+        if not long_lived_script_name_allowed(api, manifest, name):
             issues.append(
                 api._issue(
                     "script_long_lived_bad_name",

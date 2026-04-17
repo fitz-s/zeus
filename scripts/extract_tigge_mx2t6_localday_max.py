@@ -1,9 +1,15 @@
-# Created: 2026-04-17
-# Last reused/audited: 2026-04-17
-# Authority basis: Zeus Dual-Track Metric Spine Refactor Phase 4.5 + Phase 4.6;
-#                  docs/authority/zeus_dual_track_architecture.md §2/§5/§6/§8;
-#                  R-Q..R-U in tests/test_phase4_5_extractor.py;
-#                  R-AA (cities cross-validate) in tests/test_phase4_6_cities_drift.py.
+# Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
+# Purpose: GRIB→JSON extractor for mx2t6 local-calendar-day max (high track);
+#          emits canonical payload consumed by scripts/ingest_grib_to_snapshots.py;
+#          implements Phase 4.5 R-Q..R-U (step horizon, causality, manifest hash,
+#          Kelvin fail-closed, boundary=False) and Phase 4.6 R-AA (cities cross-validate).
+# Reuse: Before running, confirm (1) config/cities.json is canonical source of
+#        city identity, (2) 51 source data/docs/tigge_city_coordinate_manifest_full_latest.json
+#        aligns (runs through _cross_validate_city_manifests, tolerance ±0.01°),
+#        (3) DEFAULT_MANIFEST path exists for manifest_sha256, (4) eccodes system
+#        dep installed (brew install eccodes). See docs/authority/zeus_dual_track_architecture.md
+#        §2/§5/§6/§8 for track semantics; tests at tests/test_phase4_5_extractor.py +
+#        tests/test_phase4_6_cities_drift.py are the contract.
 #!/usr/bin/env python3
 """GRIB→JSON extractor for mx2t6 local-calendar-day max (high track only).
 
