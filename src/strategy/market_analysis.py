@@ -14,7 +14,7 @@ import numpy as np
 
 from src.calibration.platt import ExtendedPlattCalibrator, logit_safe
 from src.config import edge_n_bootstrap
-from src.contracts.settlement_semantics import round_wmo_half_up_values
+from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,
@@ -189,10 +189,12 @@ class MarketAnalysis:
         Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
         otherwise falls back to WMO asymmetric half-up: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
+
+        B081 [YELLOW / flag for call-site unification review]: delegates to
+        shared helper `apply_settlement_rounding` in settlement_semantics to
+        consolidate with Day0Signal._settle. No behavior change.
         """
-        if self._round_fn is not None:
-            return self._round_fn(values)
-        return round_wmo_half_up_values(values, self._precision)
+        return apply_settlement_rounding(values, self._round_fn, self._precision)
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int
