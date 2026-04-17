@@ -8,8 +8,9 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 
@@ -18,6 +19,36 @@ from src.config import City, cities_by_name
 logger = logging.getLogger(__name__)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+
+# B017: data-provenance types. See also src/data/__init__.py note.
+# Authority literal follows the house pattern established in
+# src/contracts/observation_atom.py::ObservationAtom.authority.
+ScanAuthority = Literal["VERIFIED", "STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"]
+
+
+@dataclass(frozen=True)
+class MarketSnapshot:
+    """A provenance-tagged snapshot of active weather events.
+
+    The ``authority`` field explicitly distinguishes:
+      - ``VERIFIED``       : fresh network fetch succeeded this call
+      - ``STALE``          : network fetch failed, cached data returned
+                             (``stale_age_seconds`` > 0, originally fetched
+                             at ``fetched_at_utc``)
+      - ``EMPTY_FALLBACK`` : network fetch failed AND no cache was
+                             available (events == [])
+      - ``NEVER_FETCHED``  : initial state before any fetch attempted
+
+    Callers MAY treat the events as a plain ``list[dict]`` for backwards
+    compatibility, but live-trading call paths SHOULD branch on
+    ``authority`` before generating new BUY/SELL signals on potentially
+    stale event data (Fitz methodology constraint #4: data provenance).
+    """
+
+    events: list[dict] = field(default_factory=list)
+    authority: ScanAuthority = "NEVER_FETCHED"
+    fetched_at_utc: datetime | None = None
+    stale_age_seconds: float | None = None
 
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
@@ -38,6 +69,8 @@ _LOW_METRIC_KEYWORDS = (
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
+_ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
+_ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
 
 
@@ -134,24 +167,94 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
 
 
 def _get_active_events() -> list[dict]:
+    """Return active events list (legacy API, backwards-compatible).
+
+    Prefer ``_get_active_events_snapshot()`` when you need provenance
+    metadata (B017). This wrapper unpacks the snapshot's events list so
+    existing callers continue to work unchanged.
+    """
+    return list(_get_active_events_snapshot().events)
+
+
+def _get_active_events_snapshot() -> MarketSnapshot:
+    """Return a MarketSnapshot with explicit provenance (B017 / SD-H).
+
+    On successful fetch: authority="VERIFIED", stale_age_seconds=0.0.
+    On network failure with cache: authority="STALE", stale_age_seconds
+        = seconds since last successful fetch.
+    On network failure without cache: authority="EMPTY_FALLBACK",
+        events=[].
+    """
     global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
+    global _ACTIVE_EVENTS_CACHE_AT_UTC, _ACTIVE_EVENTS_LAST_STATUS
     now = time.monotonic()
-    if _ACTIVE_EVENTS_CACHE is None or (now - _ACTIVE_EVENTS_CACHE_AT) > _ACTIVE_EVENTS_TTL:
+    fresh_needed = (
+        _ACTIVE_EVENTS_CACHE is None
+        or (now - _ACTIVE_EVENTS_CACHE_AT) > _ACTIVE_EVENTS_TTL
+    )
+    if fresh_needed:
         try:
             _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
             _ACTIVE_EVENTS_CACHE_AT = now
+            _ACTIVE_EVENTS_CACHE_AT_UTC = datetime.now(timezone.utc)
+            _ACTIVE_EVENTS_LAST_STATUS = "VERIFIED"
         except httpx.RequestError as e:
-            logger.error("Active events fetch failed: %s", e)
             if _ACTIVE_EVENTS_CACHE is not None:
-                return list(_ACTIVE_EVENTS_CACHE)
-            return []
-    return list(_ACTIVE_EVENTS_CACHE)
+                stale_age = now - _ACTIVE_EVENTS_CACHE_AT
+                logger.error(
+                    "Active events fetch failed, returning STALE cache: "
+                    "error=%s stale_age_seconds=%.1f cache_ttl=%.1f",
+                    e,
+                    stale_age,
+                    _ACTIVE_EVENTS_TTL,
+                )
+                _ACTIVE_EVENTS_LAST_STATUS = "STALE"
+                return MarketSnapshot(
+                    events=list(_ACTIVE_EVENTS_CACHE),
+                    authority="STALE",
+                    fetched_at_utc=_ACTIVE_EVENTS_CACHE_AT_UTC,
+                    stale_age_seconds=stale_age,
+                )
+            logger.error(
+                "Active events fetch failed and no cache available: %s", e
+            )
+            _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+            return MarketSnapshot(
+                events=[],
+                authority="EMPTY_FALLBACK",
+                fetched_at_utc=None,
+                stale_age_seconds=None,
+            )
+    # Cache still valid (within TTL) -- treat as VERIFIED from the most
+    # recent successful fetch. stale_age_seconds reflects elapsed time
+    # since that fetch (informational only; within TTL it is not stale).
+    _ACTIVE_EVENTS_LAST_STATUS = "VERIFIED"
+    return MarketSnapshot(
+        events=list(_ACTIVE_EVENTS_CACHE) if _ACTIVE_EVENTS_CACHE else [],
+        authority="VERIFIED",
+        fetched_at_utc=_ACTIVE_EVENTS_CACHE_AT_UTC,
+        stale_age_seconds=0.0,
+    )
+
+
+def get_last_scan_authority() -> ScanAuthority:
+    """Return the provenance authority of the most recent scan (B017).
+
+    Dual-Track callers that need to fail-closed on stale market data may
+    check this after calling ``find_weather_markets``/``get_current_yes_price``
+    /``get_sibling_outcomes``. Returns ``"NEVER_FETCHED"`` before any
+    scan has occurred.
+    """
+    return _ACTIVE_EVENTS_LAST_STATUS
 
 
 def _clear_active_events_cache() -> None:
     global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
+    global _ACTIVE_EVENTS_CACHE_AT_UTC, _ACTIVE_EVENTS_LAST_STATUS
     _ACTIVE_EVENTS_CACHE = None
     _ACTIVE_EVENTS_CACHE_AT = 0.0
+    _ACTIVE_EVENTS_CACHE_AT_UTC = None
+    _ACTIVE_EVENTS_LAST_STATUS = "NEVER_FETCHED"
 
 
 def _fetch_events_by_tags() -> list[dict]:
