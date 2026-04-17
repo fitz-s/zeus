@@ -253,3 +253,87 @@ class TestBootstrapWithPlattCalibrator:
         assert np.isfinite(ci_hi)
         assert ci_lo <= ci_hi
         assert 0.0 <= p_val <= 1.0
+
+
+
+# ---------------------------------------------------------------------------
+# B082 relationship test: has_platt must accept single fitted param set
+# ---------------------------------------------------------------------------
+
+class TestB082HasPlattSingleParamSet:
+    """Previous code required ``len(bootstrap_params) > 1`` to count as
+    calibrated, silently falling back to raw probabilities for any
+    calibrator that had been fit once without bootstrap. That treated a
+    legitimate fitted Platt model as uncalibrated. Fix: ``>= 1``.
+    """
+
+    def _make_calibrator(self, n_param_sets: int):
+        from types import SimpleNamespace
+        # Single or multiple Platt parameter sets. Each set is (A, B, C).
+        params = np.array([[0.5, -0.1, 0.2]] * n_param_sets)
+        return SimpleNamespace(
+            fitted=True,
+            bootstrap_params=params,
+            input_space="raw_probability",
+        )
+
+    def _make_ma(self, calibrator):
+        from src.strategy.market_analysis import MarketAnalysis
+        bins = _bins_3()
+        members = np.random.default_rng(42).normal(60, 2, size=20)
+        return MarketAnalysis(
+            p_raw=np.array([0.15, 0.55, 0.30]),
+            p_cal=np.array([0.15, 0.55, 0.30]),
+            p_market=np.array([0.18, 0.48, 0.34]),
+            alpha=0.6,
+            bins=bins,
+            member_maxes=members,
+            calibrator=calibrator,
+            lead_days=2,
+            unit="F",
+            rng_seed=777,
+        )
+
+    def test_b082_single_fitted_param_set_counts_as_calibrated(self):
+        """Calibrator with 1 bootstrap_params row must drive has_platt=True.
+
+        Exercised indirectly: with has_platt=True the bootstrap path
+        samples from Platt params at ``platt_params[rng.integers(1)]``.
+        If the fix is wrong (legacy ``> 1``), the code path degenerates
+        to ``p_cal_boot_all = p_raw_all`` (no Platt applied). We detect
+        the difference by comparing the CI obtained under a calibrator
+        with 1 row to the CI obtained with NO calibrator.
+        """
+        ma_with = self._make_ma(self._make_calibrator(1))
+        ma_without = self._make_ma(None)
+
+        ci_lo_with, ci_hi_with, _ = ma_with._bootstrap_bin(1, n=200)
+        ci_lo_none, ci_hi_none, _ = ma_without._bootstrap_bin(1, n=200)
+
+        # If B082 is still broken, has_platt=False for the 1-row calibrator
+        # and the two CIs would be identical (both use raw p_raw_all).
+        # After the fix, the 1-row calibrator applies Platt → different CI.
+        assert (ci_lo_with, ci_hi_with) != (ci_lo_none, ci_hi_none), (
+            "B082 regression: single-fit Platt calibrator was treated as "
+            "uncalibrated (bootstrap CI identical to no-calibrator case)"
+        )
+
+    def test_b082_multi_fitted_param_set_still_works(self):
+        """Regression guard: ``> 1`` cases still behave the same."""
+        ma = self._make_ma(self._make_calibrator(5))
+        ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=200)
+        assert np.isfinite(ci_lo) and np.isfinite(ci_hi)
+        assert 0.0 <= p_val <= 1.0
+
+    def test_b082_no_side_also_accepts_single_fitted_param_set(self):
+        """The sibling ``_bootstrap_bin_no`` must get the same fix."""
+        ma_with = self._make_ma(self._make_calibrator(1))
+        ma_without = self._make_ma(None)
+
+        ci_lo_with, ci_hi_with, _ = ma_with._bootstrap_bin_no(1, n=200)
+        ci_lo_none, ci_hi_none, _ = ma_without._bootstrap_bin_no(1, n=200)
+
+        assert (ci_lo_with, ci_hi_with) != (ci_lo_none, ci_hi_none), (
+            "B082 regression (NO side): single-fit Platt calibrator was "
+            "treated as uncalibrated"
+        )

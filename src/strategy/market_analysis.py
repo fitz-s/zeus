@@ -217,7 +217,7 @@ class MarketAnalysis:
         has_platt = (
             self._calibrator is not None
             and self._calibrator.fitted
-            and len(self._calibrator.bootstrap_params) > 1
+            and len(self._calibrator.bootstrap_params) >= 1
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
@@ -278,7 +278,7 @@ class MarketAnalysis:
         has_platt = (
             self._calibrator is not None
             and self._calibrator.fitted
-            and len(self._calibrator.bootstrap_params) > 1
+            and len(self._calibrator.bootstrap_params) >= 1
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
