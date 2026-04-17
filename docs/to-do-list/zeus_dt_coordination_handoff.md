@@ -83,6 +83,18 @@ These bugs depend on Phase 1–4 deliverables that are already in place. They ca
 
 These bugs require Phase 5 deliverables that are currently in flight (authoritative truth flag, low-lane MetricIdentity propagation, mode-aware truth files). Land the fix **as** the matching Phase 5 commit merges, not before — otherwise the fix will be re-written.
 
+### Status as of Phase 5B commit (2026-04-17)
+
+- **B069 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (absorbed into truth-authority spine).
+- **B073 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (PortfolioState.authority field + 3 exit paths).
+- **B077 — ✅ RESOLVED** in Phase 5A commit `977d9ae` (ModeMismatchError + mode threading; Zeus stays live-only, paper retired antibody msg in place).
+- **B078 — ✅ RESOLVED** in Phase 5B commit (LEGACY_STATE_FILES gains `platt_models_low.json` + `calibration_pairs_low.json`; `build_truth_metadata`/`annotate_truth_payload` accept `temperature_metric` + `data_version` kwargs; fail-closed via `_LOW_LANE_FILES` frozenset when low-lane file lacks metric).
+- **B093 — ⏳ BIFURCATED**: half-1 (sentinel→typed status fields) rides 5C; half-2 (replay query source migration to `historical_forecasts_v2`) DEFERRED to Phase 7 (requires v2 populated).
+
+Bug-fix agent can mark B069/B073/B077/B078 closed. B093 stays open pending Phase 5C commit.
+
+---
+
 ### B069 — `portfolio_loader_view` synthesizes defaults; DB outage ≡ legitimate-empty
 - **File**: [src/state/db.py#L3560-L3583](../../src/state/db.py#L3560) + consumers in [src/state/portfolio.py](../../src/state/portfolio.py).
 - **Failure mode today**: When the canonical DB is unreachable the loader returns an empty `PortfolioState` with default bankroll and no marker. A legitimately empty low book is indistinguishable from a live outage, and downstream risk math uses synthesized zeros as if they were authority.

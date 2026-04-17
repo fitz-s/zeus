@@ -73,7 +73,35 @@ from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
-from src.types.metric_identity import HIGH_LOCALDAY_MAX
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
+
+
+@dataclass(frozen=True)
+class CalibrationMetricSpec:
+    identity: MetricIdentity
+    allowed_data_version: str
+
+
+METRIC_SPECS: tuple[CalibrationMetricSpec, ...] = (
+    CalibrationMetricSpec(HIGH_LOCALDAY_MAX, HIGH_LOCALDAY_MAX.data_version),
+    CalibrationMetricSpec(LOW_LOCALDAY_MIN, LOW_LOCALDAY_MIN.data_version),
+)
+
+
+def iter_training_snapshots(conn: sqlite3.Connection, spec: CalibrationMetricSpec):
+    return conn.execute(
+        """
+        SELECT *
+        FROM ensemble_snapshots_v2
+        WHERE temperature_metric = ?
+          AND data_version = ?
+          AND training_allowed = 1
+          AND causality_status = 'OK'
+          AND authority = 'VERIFIED'
+        ORDER BY target_date, city, available_at
+        """,
+        (spec.identity.temperature_metric, spec.allowed_data_version),
+    ).fetchall()
 
 
 CANONICAL_BIN_SOURCE_V2 = "canonical_v2"

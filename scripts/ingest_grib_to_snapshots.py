@@ -35,6 +35,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     assert_data_version_allowed,
     validate_members_unit,
 )
+from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.state.canonical_write import commit_then_export
 from src.state.db import get_world_connection
 from src.state.schema.v2_schema import apply_v2_schema
@@ -168,6 +169,25 @@ def ingest_json_file(
     members_unit = _normalize_unit(raw_unit)
     validate_members_unit(members_unit, context=str(path))
 
+    # Wire contract: enrich payload with authoritative metric fields before validation
+    # so the contract can cross-check temperature_metric/physical_quantity against
+    # data_version without requiring the JSON to self-report redundantly.
+    # High-track payloads written before Phase 5B lack a causality field; default
+    # to {"status": "OK"} to match the pre-existing _extract_causality_status behavior.
+    contract_payload = dict(payload)
+    contract_payload.setdefault("temperature_metric", metric.temperature_metric)
+    contract_payload.setdefault("physical_quantity", metric.physical_quantity)
+    contract_payload.setdefault("members_unit", members_unit)
+    contract_payload.setdefault("causality", {"status": "OK"})
+    decision = validate_snapshot_contract(contract_payload)
+    if not decision.accepted:
+        logger.warning(
+            "ingest_json_file contract_rejected: path=%s reason=%s",
+            path,
+            decision.reason,
+        )
+        return f"contract_rejected: {decision.reason}"
+
     city = str(payload.get("city", ""))
     target_date = str(payload.get("target_date_local", ""))
     issue_time = str(payload.get("issue_time_utc", ""))
@@ -182,8 +202,9 @@ def ingest_json_file(
             return "skipped_exists"
 
     members = _members_list(payload)
-    training_allowed = 1 if payload.get("training_allowed") else 0
-    causality_status = _extract_causality_status(payload)
+    # Use contract-authoritative values — override payload's self-reported fields.
+    training_allowed = 1 if decision.training_allowed else 0
+    causality_status = decision.causality_status
     boundary_ambiguous, ambiguous_member_count = _extract_boundary_fields(payload)
     manifest_hash = _manifest_hash_from_payload(payload)
     prov_json = _provenance_json(payload, metric)
@@ -255,13 +276,6 @@ def ingest_track(
     overwrite: bool,
     require_files: bool = True,
 ) -> dict:
-    # MODERATE-6: low track is Phase 5 scope — boundary quarantine logic not yet implemented.
-    if track == "mn2t6_low":
-        raise NotImplementedError(
-            "Phase 5 scope — mn2t6_low track requires boundary quarantine logic "
-            "not yet implemented. Use track='mx2t6_high' for Phase 4B ingest."
-        )
-
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
     model_version: str = cfg["model_version"]
