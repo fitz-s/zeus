@@ -236,10 +236,30 @@ def _query_rows(
 
 
 def _select_rows(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
-    """K1/#71: first-in wins per action_type; log discarded duplicates."""
+    """K1/#71: first-in wins per action_type; log discarded duplicates.
+
+    B051: per-row isolation. A single malformed row (missing
+    ``action_type`` column, non-string coercible value, etc.) must not
+    discard every other row alongside it. Each row is handled under its
+    own try/except.
+    """
     chosen: dict[str, sqlite3.Row] = {}
     for row in rows:
-        action_type = str(row["action_type"])
+        try:
+            action_type = str(row["action_type"])
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            # B050: sqlite3.Row has no .get() — use keys() membership.
+            keys = row.keys() if hasattr(row, "keys") else []
+            row_id = (
+                row["override_id"] if "override_id" in keys
+                else row["action_id"] if "action_id" in keys
+                else "?"
+            )
+            logger.warning(
+                "policy: malformed row %s skipped in _select_rows: %s",
+                row_id, exc,
+            )
+            continue
         if action_type not in chosen:
             chosen[action_type] = row
         else:
