@@ -205,12 +205,16 @@ def _insert_control_override(
     effective_until: str | None,
     precedence: int = 100,
 ) -> None:
+    # B070: control_overrides is now a VIEW. Seed the append-only history
+    # directly with operation='upsert' and recorded_at=issued_at so the VIEW
+    # projects this row as the latest.
     conn.execute(
         """
-        INSERT INTO control_overrides (
+        INSERT INTO control_overrides_history (
             override_id, target_type, target_key, action_type, value,
-            issued_by, issued_at, effective_until, reason, precedence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upsert', ?)
         """,
         (
             override_id,
@@ -223,6 +227,7 @@ def _insert_control_override(
             effective_until,
             "test",
             precedence,
+            issued_at,
         ),
     )
 
