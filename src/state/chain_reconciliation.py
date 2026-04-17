@@ -27,6 +27,29 @@ logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 
 
+def resolve_rescue_authority(position) -> tuple[str, str, str]:
+    """Resolve (temperature_metric, authority, authority_source) for a
+    rescue_events_v2 row from a Position object.
+
+    SD-1 (binary temperature_metric) + SD-H (provenance on authority):
+    - Position materialized through materialize_position() carries a valid
+      temperature_metric in {"high", "low"} → VERIFIED + "position_materialized".
+    - Position with missing, None, empty, or out-of-domain temperature_metric
+      (quarantine placeholder, stale JSON reconstruction, legacy row) falls
+      back to the SD-1 default "high" but MUST be tagged UNVERIFIED with a
+      concrete authority_source so downstream analytics can filter on
+      authority='VERIFIED' for strict forensic work.
+
+    This helper is the single source of truth for the authority rule. Both
+    `_emit_rescue_event` (live path) and B063 tests import this function to
+    avoid logic drift between prod and test (B063 P1 fix per critic review).
+    """
+    _raw_metric = getattr(position, "temperature_metric", None)
+    if _raw_metric in ("high", "low"):
+        return (_raw_metric, "VERIFIED", "position_materialized")
+    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
+
+
 @dataclass
 class ChainPosition:
     """On-chain position data from CLOB API."""
@@ -257,6 +280,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         )
         if conn is not None:
             import json
+            from src.state.db import log_rescue_event
+            # B063 P1 fix: unify occurred_at across the legacy
+            # CHAIN_RESCUE_AUDIT row and the new rescue_events_v2 row so
+            # post-mortem JOINs on occurred_at correlate correctly and
+            # the v2 UNIQUE(trade_id, occurred_at) key matches whatever
+            # the legacy row recorded. Capture once, use twice.
+            _rescue_ts = datetime.now(timezone.utc).isoformat()
             try:
                 conn.execute(
                     "INSERT INTO position_events (position_id, sequence_no, event_type, occurred_at, payload, source_module) "
@@ -265,7 +295,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         getattr(position, "trade_id", ""),
                         getattr(position, "trade_id", ""),
                         "CHAIN_RESCUE_AUDIT",
-                        datetime.now(timezone.utc).isoformat(),
+                        _rescue_ts,
                         json.dumps({
                             "chain_state": getattr(position, "chain_state", "?"),
                             "shares": getattr(position, "shares", 0.0),
@@ -274,10 +304,35 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         "src.state.chain_reconciliation_audit"
                     )
                 )
+                # B063: also append the Phase 2 v2 audit row. This row
+                # carries temperature_metric + causality_status + provenance
+                # authority, which the legacy CHAIN_RESCUE_AUDIT row above
+                # does NOT. Dual-write pattern: keep the legacy row for
+                # existing consumers (test_live_safety_invariants, etc.),
+                # add rescue_events_v2 for the new audit contract.
+                #
+                # Authority resolution lives in the module-level
+                # `resolve_rescue_authority` helper so live code and tests
+                # share the same rule (no copy-paste drift).
+                _metric, _authority, _authority_source = resolve_rescue_authority(position)
+                log_rescue_event(
+                    conn,
+                    trade_id=getattr(position, "trade_id", ""),
+                    position_id=getattr(position, "trade_id", None),
+                    chain_state=str(getattr(position, "chain_state", "?")),
+                    reason="chain_reconciliation_rescue",
+                    occurred_at=_rescue_ts,
+                    temperature_metric=_metric,
+                    causality_status="UNKNOWN",
+                    authority=_authority,
+                    authority_source=_authority_source,
+                )
                 # INFO(DT#1): This commit is exempt from the commit_then_export
                 # choke point. The CHAIN_RESCUE_AUDIT row is itself the
                 # authoritative observability record (not a derived export),
                 # and durability must survive a subsequent cycle crash.
+                # rescue_events_v2 inherits the same exemption rule — it is
+                # an authoritative audit record, not a derived export.
                 conn.commit()
             except Exception as e:
                 logger.error(f"Failed to durability-log rescue event: {e}")

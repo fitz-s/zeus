@@ -348,6 +348,65 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 ON day0_metric_fact(city, target_date, temperature_metric, utc_timestamp)
         """)
 
+        # ----------------------------------------------------------------
+        # rescue_events_v2 — B063: durable audit row for chain-rescue events.
+        #
+        # `chain_reconciliation._emit_rescue_event` already logs an INFO line
+        # and inserts a `CHAIN_RESCUE_AUDIT` row into position_events, but
+        # that row has no temperature_metric, no causality_status, and no
+        # provenance authority — so post-mortem cannot distinguish:
+        #   (a) a legitimate N/A_CAUSAL_DAY_ALREADY_STARTED low-lane skip,
+        #   (b) a rescue that silently failed to record, or
+        #   (c) a quarantine placeholder whose track identity was never set.
+        #
+        # Per SD-1 (MetricIdentity is binary) and SD-H (provenance authority
+        # tagging), temperature_metric stays {'high','low'} and `authority`
+        # carries the tri-state confidence. Consumer branches that already
+        # assume binary high/low (evaluator.py, day0_signal.py, etc.) remain
+        # correct — an UNVERIFIED rescue row carries a concrete high/low
+        # tag plus an explicit authority_source explaining how it was
+        # inferred.
+        #
+        # Exempt from the DT#1 commit_then_export choke point — this is an
+        # authoritative audit record, not a derived export, and must be
+        # durable across crash recovery (same rule as CHAIN_RESCUE_AUDIT
+        # in position_events per chain_reconciliation.py:276-282).
+        # ----------------------------------------------------------------
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rescue_events_v2 (
+                rescue_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT NOT NULL,
+                position_id TEXT,
+                decision_snapshot_id TEXT,
+                temperature_metric TEXT NOT NULL
+                    CHECK (temperature_metric IN ('high', 'low')),
+                causality_status TEXT NOT NULL DEFAULT 'OK'
+                    CHECK (causality_status IN (
+                        'OK',
+                        'N/A_CAUSAL_DAY_ALREADY_STARTED',
+                        'N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON',
+                        'REJECTED_BOUNDARY_AMBIGUOUS',
+                        'UNKNOWN'
+                    )),
+                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'RECONSTRUCTED')),
+                authority_source TEXT,
+                chain_state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(trade_id, occurred_at)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_trade_time
+                ON rescue_events_v2(trade_id, recorded_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_metric_causality
+                ON rescue_events_v2(temperature_metric, causality_status, recorded_at)
+        """)
+
         conn.execute("COMMIT")
 
     except Exception:

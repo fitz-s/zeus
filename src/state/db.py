@@ -1108,6 +1108,99 @@ def log_microstructure(conn, token_id: str, city: str, target_date: str, range_l
         logging.getLogger(__name__).warning('Failed to log microstructure: %s', e)
 
 
+def log_rescue_event(
+    conn,
+    *,
+    trade_id: str,
+    chain_state: str,
+    reason: str,
+    occurred_at: str,
+    temperature_metric: str,
+    causality_status: str = "OK",
+    authority: str = "UNVERIFIED",
+    authority_source=None,
+    position_id=None,
+    decision_snapshot_id=None,
+) -> None:
+    """B063: append a durable audit row for a chain-rescue event.
+
+    Writes to `rescue_events_v2` (Phase 2 schema). Unlike the existing
+    CHAIN_RESCUE_AUDIT row in position_events, this row carries the
+    temperature_metric, causality_status, and provenance authority
+    needed to distinguish a legitimate low-lane N/A_CAUSAL skip from
+    a silent rescue loss.
+
+    Per SD-1 (MetricIdentity is binary) and SD-H (provenance authority
+    tagging), temperature_metric stays in {'high','low'} and the
+    `authority` column carries the tri-state confidence. Callers must
+    resolve ambiguity via `authority='UNVERIFIED'` + concrete high/low
+    tag rather than introducing a third temperature_metric value.
+
+    Exempt from the DT#1 commit_then_export choke point — the audit row
+    IS the authoritative observability record, not a derived export,
+    and must be durable before the cycle acknowledges the rescue
+    outcome. Same rule the existing CHAIN_RESCUE_AUDIT row follows.
+
+    Fails closed-soft: if the table is missing on legacy DBs or the
+    write raises, the error is logged but NOT re-raised, because the
+    caller (chain_reconciliation._emit_rescue_event) must continue
+    reconciling chain state even when the audit row cannot be
+    persisted. The pre-existing CHAIN_RESCUE_AUDIT row in position_events
+    provides a legacy-path audit trail as fallback.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    if conn is None:
+        _logger.warning(
+            "log_rescue_event: conn is None, skipping rescue_events_v2 write for trade_id=%s",
+            trade_id,
+        )
+        return
+    if temperature_metric not in ("high", "low"):
+        _logger.error(
+            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events_v2 write",
+            temperature_metric,
+            trade_id,
+        )
+        return
+    try:
+        conn.execute(
+            """
+            INSERT INTO rescue_events_v2
+                (trade_id, position_id, decision_snapshot_id,
+                 temperature_metric, causality_status,
+                 authority, authority_source,
+                 chain_state, reason, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade_id,
+                position_id,
+                decision_snapshot_id,
+                temperature_metric,
+                causality_status,
+                authority,
+                authority_source,
+                chain_state,
+                reason,
+                occurred_at,
+            ),
+        )
+    except sqlite3.OperationalError as exc:
+        _logger.warning(
+            "log_rescue_event: rescue_events_v2 write failed for trade_id=%s: %s",
+            trade_id,
+            exc,
+        )
+    except sqlite3.IntegrityError as exc:
+        _logger.info(
+            "log_rescue_event: idempotent duplicate for trade_id=%s occurred_at=%s: %s",
+            trade_id,
+            occurred_at,
+            exc,
+        )
+
+
 def log_shadow_signal(
     conn: sqlite3.Connection,
     *,
