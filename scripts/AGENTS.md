@@ -37,6 +37,16 @@ scripts are registered and safe for their declared class.
 
 - Check the manifest before adding a top-level script; reuse or extend existing
   long-lived tools when possible.
+- Function names in scripts should use `verb + domain object` and include the
+  truth surface when the function reads/writes authority (`validate_receipt_payload`,
+  `build_digest_payload`, `run_closeout_lane`). Do not leave generic helpers
+  named only `process`, `handle`, `fix`, or `update`.
+- Touched or newly created scripts need a header in the first 30 lines:
+  `Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never`,
+  plus `Purpose:` and `Reuse:` lines.
+- Old or unknown scripts must be inspected against this file and
+  `architecture/script_manifest.yaml` before execution; update the freshness
+  header when reusing them as evidence.
 - One-off scripts need `task_YYYY-MM-DD_<purpose>.py` naming plus `delete_by`.
 - Repair/ETL writers must declare write targets and dry-run/apply behavior.
 - Diagnostics and reports must not write canonical DB truth.

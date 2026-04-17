@@ -1,3 +1,8 @@
+"""Tests for topology_doctor compiled topology gates."""
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
+# Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
+
 import pytest
 import json
 from contextlib import redirect_stdout
@@ -155,6 +160,32 @@ def test_cli_json_parity_for_map_maintenance_command():
     }
 
 
+def test_cli_json_parity_for_freshness_metadata_command(monkeypatch, tmp_path):
+    root = tmp_path
+    script = root / "scripts" / "new_tool.py"
+    script.parent.mkdir()
+    script.write_text(
+        '"""Tool."""\n'
+        "# Lifecycle: created=2026-04-16; last_reviewed=2026-04-16; last_reused=never\n"
+        "# Purpose: Test fixture.\n"
+        "# Reuse: Test fixture only.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/new_tool.py": "added"},
+    )
+    payload = run_cli_json(["--freshness-metadata", "--changed-files", "scripts/new_tool.py", "--json"])
+    result = topology_doctor.run_freshness_metadata(["scripts/new_tool.py"])
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
 def test_cli_json_parity_for_closeout_command(monkeypatch):
     payload = {
         "ok": True,
@@ -169,6 +200,70 @@ def test_cli_json_parity_for_closeout_command(monkeypatch):
     monkeypatch.setattr(topology_doctor, "run_closeout", lambda **kwargs: payload)
 
     assert run_cli_json(["closeout", "--json"]) == payload
+
+
+def test_freshness_metadata_rejects_changed_script_without_header(monkeypatch, tmp_path):
+    root = tmp_path
+    script = root / "scripts" / "legacy_probe.py"
+    script.parent.mkdir()
+    script.write_text("print('unsafe old probe')\n", encoding="utf-8")
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/legacy_probe.py": "modified"},
+    )
+
+    result = topology_doctor.run_freshness_metadata(["scripts/legacy_probe.py"])
+
+    assert not result.ok
+    assert any(issue.code == "freshness_header_missing" for issue in result.issues)
+
+
+def test_freshness_metadata_accepts_changed_test_with_header(monkeypatch, tmp_path):
+    root = tmp_path
+    test_file = root / "tests" / "test_current_behavior.py"
+    test_file.parent.mkdir()
+    test_file.write_text(
+        "# Lifecycle: created=2026-04-16; last_reviewed=2026-04-16; last_reused=2026-04-16\n"
+        "# Purpose: Test current behavior.\n"
+        "# Reuse: Inspect test_topology before relying on this file.\n\n"
+        "def test_ok():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"tests/test_current_behavior.py": "modified"},
+    )
+
+    result = topology_doctor.run_freshness_metadata(["tests/test_current_behavior.py"])
+
+    assert_topology_ok(result)
+
+
+def test_freshness_metadata_rejects_missing_purpose_or_reuse(monkeypatch, tmp_path):
+    root = tmp_path
+    script = root / "scripts" / "audit_current.py"
+    script.parent.mkdir()
+    script.write_text(
+        "# Lifecycle: created=2026-04-16; last_reviewed=2026-04-16; last_reused=never\n"
+        "print('missing purpose and reuse')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"scripts/audit_current.py": "modified"},
+    )
+
+    result = topology_doctor.run_freshness_metadata(["scripts/audit_current.py"])
+
+    assert not result.ok
+    assert any(issue.code == "freshness_header_field_missing" for issue in result.issues)
 
 
 def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):

@@ -31,6 +31,16 @@ Top-level `test_*.py` files are intentionally not duplicated here. Query
 
 - Breaking an architecture/law test means the code or plan is wrong, not that
   the test is inconvenient.
+- Touched or newly created top-level `tests/test_*.py` files need a freshness
+  header in the first 30 lines: `Lifecycle: created=YYYY-MM-DD;
+  last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never`, plus `Purpose:` and
+  `Reuse:` lines.
+- Old tests are not proof by age. Before relying on an old/unknown test file as
+  evidence, inspect its current code, `architecture/test_topology.yaml`, skip
+  status, and update `last_reviewed` / `last_reused` as appropriate.
+- Test helper/function names should state the behavior or law being protected;
+  avoid generic names such as `test_process`, `helper`, or `check` unless the
+  surrounding domain noun makes the contract obvious.
 - Do not delete or xfail high-sensitivity tests without a written sunset plan
   and packet evidence.
 - Prefer relationship tests for cross-module work: prove what must remain true

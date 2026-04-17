@@ -125,6 +125,10 @@ strict_issue_codes:
   - change_receipt_file_out_of_scope
   - change_receipt_forbidden_file
   - change_receipt_inadequate_law_coverage
+  - freshness_header_missing
+  - freshness_header_field_missing
+  - freshness_header_date_invalid
+  - freshness_header_git_status_failed
   - context_pack_profiles_manifest_missing
   - context_pack_profile_duplicate_id
   - context_pack_profile_required_field_missing

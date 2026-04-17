@@ -214,6 +214,19 @@ Git safety is summarized by lore card `UNCOMMITTED_AGENT_EDIT_LOSS`: never run
 destructive git commands or overwrite others' dirty work without explicit human
 approval.
 
+## Function Naming and Reuse Freshness
+
+- Function names should expose semantic contract:
+  `<verb>_<domain_object>[_<truth_surface>]`. Avoid bare `process`, `handle`,
+  `fix`, `run`, or `update`; pair them with the thing and authority surface.
+- Rename stale private helpers when behavior changes.
+- Created/modified/reused scripts and top-level tests need a top header:
+  `Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never`,
+  plus `Purpose:` and `Reuse:`.
+- Old/unknown scripts/tests are review-required before execution/evidence use:
+  inspect source + manifest + write/read targets, update freshness metadata,
+  then run `python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
+
 ## Mesh Maintenance
 
 Zeus uses a mesh topology: `workspace_map.md` -> scoped `AGENTS.md` -> files,

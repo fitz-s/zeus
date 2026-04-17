@@ -1,0 +1,62 @@
+{
+  "task": "function naming and script/test freshness metadata",
+  "packet": "docs/operations/task_2026-04-16_function_naming_freshness/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-16_function_naming_freshness/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md"
+  ],
+  "allowed_files": [
+    "AGENTS.md",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "architecture/topology_schema.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-16_function_naming_freshness/**",
+    "scripts/AGENTS.md",
+    "scripts/topology_doctor.py",
+    "scripts/topology_doctor_cli.py",
+    "scripts/topology_doctor_closeout.py",
+    "scripts/topology_doctor_freshness_checks.py",
+    "tests/AGENTS.md",
+    "tests/test_topology_doctor.py"
+  ],
+  "forbidden_files": [
+    ".omx/**",
+    ".omc/**",
+    "docs/archives/**",
+    "state/*.db",
+    "state/*.json"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "architecture/topology_schema.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-16_function_naming_freshness/plan.md",
+    "docs/operations/task_2026-04-16_function_naming_freshness/receipt.json",
+    "docs/operations/task_2026-04-16_function_naming_freshness/work_log.md",
+    "scripts/AGENTS.md",
+    "scripts/topology_doctor.py",
+    "scripts/topology_doctor_cli.py",
+    "scripts/topology_doctor_closeout.py",
+    "scripts/topology_doctor_freshness_checks.py",
+    "tests/AGENTS.md",
+    "tests/test_topology_doctor.py"
+  ],
+  "tests_evidence": [
+    "python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_cli.py scripts/topology_doctor_closeout.py scripts/topology_doctor_freshness_checks.py",
+    "python -m pytest -q tests/test_topology_doctor.py -k freshness_metadata"
+  ]
+}
