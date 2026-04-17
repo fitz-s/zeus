@@ -901,7 +901,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         summary["candidates"] += 1
 
         try:
-            decisions = deps.evaluate_candidate(candidate, conn, portfolio, clob, limits, entry_bankroll=entry_bankroll)
+            # B091: forward the cycle's authoritative decision_time to the
+            # evaluator so per-cycle `recorded_at` timestamps derive from
+            # the cycle boundary rather than being silently re-fabricated
+            # as `datetime.now()` inside the evaluator per-candidate.
+            decisions = deps.evaluate_candidate(
+                candidate, conn, portfolio, clob, limits,
+                entry_bankroll=entry_bankroll,
+                decision_time=decision_time,
+            )
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
                 if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):

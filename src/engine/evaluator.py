@@ -1194,6 +1194,22 @@ def evaluate_candidate(
         filtered = []
     entry_validations.append("fdr_filter")
     try:
+        # B091: if decision_time was not forwarded from the cycle (tests or
+        # degraded callers), DO NOT silently fabricate a fresh `now()` for
+        # `recorded_at` and pretend it is the cycle's decision moment.
+        # Fabrication is permitted as a last resort but MUST be observable.
+        if decision_time is not None:
+            _recorded_at = decision_time.isoformat()
+        else:
+            _fabricated_now = datetime.now(timezone.utc)
+            logger.warning(
+                "DECISION_TIME_FABRICATED_AT_SELECTION_FAMILY: city=%s target_date=%s snapshot_id=%s recorded_at=%s",
+                candidate.city.name,
+                candidate.target_date,
+                snapshot_id,
+                _fabricated_now,
+            )
+            _recorded_at = _fabricated_now.isoformat()
         _record_selection_family_facts(
             conn,
             candidate=candidate,
@@ -1202,7 +1218,7 @@ def evaluate_candidate(
             hypotheses=full_family_hypotheses or None,
             decision_snapshot_id=snapshot_id,
             selected_method=selected_method,
-            recorded_at=(decision_time or datetime.now(timezone.utc)).isoformat(),
+            recorded_at=_recorded_at,
         )
     except Exception as exc:
         logger.warning("Failed to record selection family facts: %s", exc)
@@ -1263,7 +1279,20 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        policy_now = decision_time or datetime.now(timezone.utc)
+        # B091: strategy-policy time reference. Same contract as the
+        # recorded_at fabrication above: fall back to now() when the cycle
+        # did not provide a decision_time, but emit a structured WARNING
+        # so the fabrication is observable and not silently blended into
+        # policy resolution.
+        if decision_time is not None:
+            policy_now = decision_time
+        else:
+            policy_now = datetime.now(timezone.utc)
+            logger.warning(
+                "DECISION_TIME_FABRICATED_AT_STRATEGY_POLICY: strategy_key=%s policy_now=%s",
+                strategy_key,
+                policy_now,
+            )
         policy = (
             resolve_strategy_policy(conn, strategy_key, policy_now)
             if conn is not None

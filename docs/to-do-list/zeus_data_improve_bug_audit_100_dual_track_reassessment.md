@@ -420,3 +420,99 @@ Architect-track items (not amended this session):
   before reaching any of this session's new checks. Flagged for the
   general test-hygiene backlog.
 
+
+---
+
+## Session 2.1 Addendum — B091 + test-rot follow-up + contamination incident #4
+
+### B091 closure — RED → GREEN
+
+- **Scope clarification**: The handoff doc (`zeus_dt_coordination_handoff.md`
+  line 1494-1515) pointed at an emission block that had already been
+  refactored on `main`: `_snapshot_issue_time_value` (L1563) and
+  `_snapshot_valid_time_value` (L1577) already return `None` on failure
+  rather than the old `"UNAVAILABLE_UPSTREAM_ISSUE_TIME"` sentinel string.
+  That part of B091 is therefore **already closed on HEAD** — only the
+  worktree copy under `.claude/worktrees/data-rebuild/src/engine/evaluator.py`
+  still carries the old sentinel strings.
+- **Remaining defect addressed**: the silent `or datetime.now(timezone.utc)`
+  fabrication of `decision_time` at two sites inside `evaluate_candidate`
+  (selection-family `recorded_at` and strategy-policy `policy_now`). In
+  production the sole caller is `src/engine/cycle_runtime.py:904`, which
+  has `decision_time` in scope but was NOT forwarding it to
+  `evaluate_candidate`, so the fallback fired on every cycle. That is the
+  same anti-pattern B064 addressed for `entered_at`.
+- **Fix** (commit below):
+  - `src/engine/cycle_runtime.py`: forward `decision_time=decision_time`
+    into `deps.evaluate_candidate(...)` at the single call site so the
+    cycle's authoritative decision moment reaches the evaluator.
+  - `src/engine/evaluator.py` L1194-L1210 (selection-family): replace
+    `recorded_at=(decision_time or datetime.now(timezone.utc)).isoformat()`
+    with an explicit `decision_time is None` branch that logs
+    `DECISION_TIME_FABRICATED_AT_SELECTION_FAMILY` WARNING before
+    falling back.
+  - `src/engine/evaluator.py` L1256-L1268 (strategy-policy): replace
+    `policy_now = decision_time or datetime.now(timezone.utc)` with
+    an explicit fallback branch that logs
+    `DECISION_TIME_FABRICATED_AT_STRATEGY_POLICY` WARNING.
+- **Verification**: `pytest tests/test_runtime_guards.py
+  tests/test_reality_contracts.py` — 18 pre-existing failures on HEAD,
+  same 18 pre-existing failures after B091 (zero new regressions);
+  100 → 121 passes (gain of 20 from the test-rot fix below unlocking
+  previously-short-circuited paths). Full SD-G typed-companion
+  `time_field_status: Literal[...]` field on a future `EdgeDecision`
+  dataclass is deferred — the current dataclass has no time fields of
+  its own, and extending it to carry structured time metadata is a
+  larger refactor that belongs alongside the Phase 1 MetricIdentity
+  consumer rework, not a 14-bug cleanup commit.
+
+### Test-rot follow-up (ships with B091)
+
+- **tests/test_runtime_guards.py L730**
+  (`test_probability_trace_skip_is_warned_when_decision_id_missing`):
+  missing `env=` kwarg in `execute_discovery_phase(...)` call — same
+  class of rot as the `materialize_position` omissions caught by the
+  critic in session 2 and fixed in `f0c1795`. Adds `env="paper"` to
+  the call.
+
+### Cross-contamination incident #4 — evaluator MetricIdentity type-seam
+
+- **Observed**: While staging the B091 edits, `git diff --stat
+  src/engine/evaluator.py` reported `+64 / -47` after three small
+  `multi_replace_string_in_file` insertions that should have produced
+  roughly `+40 / -4`.
+- **Diff inspection** revealed the working tree had reverted a large
+  block of the Phase 1 MetricIdentity type-seam in evaluator.py:
+  - removed `TYPE_CHECKING` import of `Day0ObservationContext`,
+  - downgraded `_normalize_temperature_metric` return from
+    `MetricIdentity` to `str`,
+  - collapsed `make_hypothesis_family_id` / `make_edge_family_id`
+    back into a single `make_family_id` call,
+  - downgraded `candidate.observation` access from typed
+    `Day0ObservationContext` attributes to `dict.get(...)` calls,
+  - downgraded `temperature_metric.is_low()` to `== "low"` string
+    compare,
+  - stripped the Phase-1 comment markers and the Phase-6 TODO on
+    `member_mins_remaining`.
+- **Recovery**: `git checkout HEAD -- src/engine/evaluator.py`, then
+  re-applied ONLY the 2 B091 edits via `multi_replace_string_in_file`.
+  Post-recovery `git diff --stat` shows `+33 / -2` lines on
+  evaluator.py, matching expectation.
+- **Pattern count**: This is the 4th contamination incident this
+  session (#1 portfolio.py DT#1 `last_committed_artifact_id` revert,
+  #2 day0_signal.py R4/R2 MetricIdentity guard strip, #3 post-push
+  clobber of handoff+audit+test files, #4 evaluator Phase 1 type-seam
+  revert). Antibody (b) — pre-stage `git diff --stat <file>` before
+  every `git add` — caught all 4. Recommend formalising this antibody
+  as a one-line shell alias (`zeus-pre-stage-check`) and documenting
+  it in the data-improve branch README for future agents.
+
+### Commit reference
+
+- `<HASH>` B091 + test-rot `env=` kwarg + contamination #4 log.
+
+### STILL_OPEN trajectory
+
+- Session 2.1 closes: **B091**.
+- Net STILL_OPEN: 14 → 13. Remaining pre-Phase-5 queue: B063, B070,
+  B071, B100 (DT prereqs all satisfied per handoff doc).

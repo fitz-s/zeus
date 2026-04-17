@@ -725,6 +725,7 @@ def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, cap
             summary,
             150.0,
             datetime(2026, 4, 3, tzinfo=timezone.utc),
+            env="paper",
             deps=deps,
         )
     conn.close()
