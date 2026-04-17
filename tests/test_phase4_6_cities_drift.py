@@ -1,8 +1,13 @@
-# Created: 2026-04-17
-# Last reused/audited: 2026-04-17
-# Authority basis: Zeus Dual-Track Metric Spine Refactor Phase 4.6;
-#                  R-AA invariant; docs/operations/.../r_letter_namespace_ruling.md;
-#                  team-lead Phase 4.6 dispatch 2026-04-17.
+# Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
+# Purpose: R-AA pipeline-integration tests for cities cross-validate — verify
+#          scripts/extract_tigge_mx2t6_localday_max.py::_cross_validate_city_manifests
+#          fail-closed on name-set mismatch or lat/lon drift > 0.01°, and pass
+#          silently on aligned manifests. Locks R-AA invariant per Phase 4.6.
+# Reuse: Before running or relying on evidence, confirm (1) config/cities.json
+#        remains Zeus canonical, (2) _CITY_COORDINATE_TOLERANCE_DEG still 0.01,
+#        (3) CityManifestDriftError raise contract stable, (4) the 11 test
+#        scenarios still cover both rejection and acceptance paths (dual-path
+#        per testeng anti-pattern rule). Ruling: docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/r_letter_namespace_ruling.md.
 """Phase 4.6 R-AA tests: cities cross-validate
 
 R-AA: extractor startup must cross-validate config/cities.json (Zeus authority)

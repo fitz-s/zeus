@@ -75,6 +75,7 @@ Prefer these over hand-maintained prose when they exist:
 | `architecture/source_rationale.yaml` | Per-file `src/**` rationale, hazards, write routes |
 | `architecture/test_topology.yaml` | Test categories, law gates, high-sensitivity skips |
 | `architecture/script_manifest.yaml` | Script lifecycle, authority scope, read/write targets |
+| `architecture/naming_conventions.yaml` | Canonical file/function naming and script/test freshness rules |
 | `architecture/data_rebuild_topology.yaml` | Data rebuild certification and non-promotion gates |
 | `architecture/history_lore.yaml` | Dense historical failure lessons and antibodies |
 | `architecture/artifact_lifecycle.yaml` | Artifact classes and minimum work-record contract |
@@ -103,6 +104,7 @@ Prefer these over hand-maintained prose when they exist:
 | Source rationale | `python scripts/topology_doctor.py --source --json` |
 | Test topology | `python scripts/topology_doctor.py --tests --json` |
 | Script safety | `python scripts/topology_doctor.py --scripts --json` |
+| Naming/freshness map | `python scripts/topology_doctor.py --naming-conventions --json` |
 
 ## Do Not Default-Read
 

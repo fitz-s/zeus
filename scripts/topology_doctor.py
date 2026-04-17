@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Topology doctor for Zeus's compiled agent-navigation graph."""
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Main facade for compiled topology, navigation, and closeout checks.
+# Reuse: Prefer adding narrow checker-family modules instead of expanding this facade directly.
 
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ INVARIANTS_PATH = ROOT / "architecture" / "invariants.yaml"
 SOURCE_RATIONALE_PATH = ROOT / "architecture" / "source_rationale.yaml"
 TEST_TOPOLOGY_PATH = ROOT / "architecture" / "test_topology.yaml"
 SCRIPT_MANIFEST_PATH = ROOT / "architecture" / "script_manifest.yaml"
+NAMING_CONVENTIONS_PATH = ROOT / "architecture" / "naming_conventions.yaml"
 DATA_REBUILD_TOPOLOGY_PATH = ROOT / "architecture" / "data_rebuild_topology.yaml"
 HISTORY_LORE_PATH = ROOT / "architecture" / "history_lore.yaml"
 CONTEXT_BUDGET_PATH = ROOT / "architecture" / "context_budget.yaml"
@@ -97,6 +101,10 @@ def load_test_topology() -> dict[str, Any]:
 
 def load_script_manifest() -> dict[str, Any]:
     return _load_yaml(SCRIPT_MANIFEST_PATH)
+
+
+def load_naming_conventions() -> dict[str, Any]:
+    return _load_yaml(NAMING_CONVENTIONS_PATH)
 
 
 def load_data_rebuild_topology() -> dict[str, Any]:
@@ -376,7 +384,7 @@ def _metadata_missing(value: Any) -> bool:
 
 
 def _long_lived_script_name_allowed(manifest: dict[str, Any], name: str) -> bool:
-    return _script_checks().long_lived_script_name_allowed(manifest, name)
+    return _script_checks().long_lived_script_name_allowed(sys.modules[__name__], manifest, name)
 
 
 def _write_target_allowed(target: str, allowed: set[str]) -> bool:
@@ -573,6 +581,23 @@ def _map_maintenance_changes(changed_files: list[str]) -> dict[str, str]:
 
 def run_map_maintenance(changed_files: list[str] | None = None, mode: str = "advisory") -> StrictResult:
     return _map_maintenance_checks().run_map_maintenance(sys.modules[__name__], changed_files, mode)
+
+
+def _freshness_checks():
+    try:
+        from scripts import topology_doctor_freshness_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_freshness_checks
+
+    return topology_doctor_freshness_checks
+
+
+def run_freshness_metadata(changed_files: list[str] | None = None) -> StrictResult:
+    return _freshness_checks().run_freshness_metadata(sys.modules[__name__], changed_files)
+
+
+def run_naming_conventions() -> StrictResult:
+    return _freshness_checks().run_naming_conventions(sys.modules[__name__])
 
 
 def _packet_prefill_checks():

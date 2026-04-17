@@ -30,6 +30,7 @@ Role: single live control-entry surface for the repo.
 - Active checklist/evidence:
   - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
   - `docs/operations/runtime_artifact_inventory.md` — `.omx/.omc` planning artifact inventory and disposition guide
+  - `docs/operations/task_2026-04-16_function_naming_freshness/plan.md` — small completed governance package for function naming and changed-file script/test freshness metadata
 - Next packet: Continue the Dual-Track Metric Spine Refactor unless a higher-priority governance break supersedes it.
 
 ## Runtime

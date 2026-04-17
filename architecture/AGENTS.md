@@ -44,6 +44,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `source_rationale.yaml` | Per-file rationale map for tracked `src/**` files, hazards, and write-route cards |
 | `test_topology.yaml` | Test-suite topology manifest: law gate, categories, high-sensitivity skips, reverse-antibody status |
 | `script_manifest.yaml` | Script manifest with authority class, write targets, dry-run/apply metadata, and safety gates |
+| `naming_conventions.yaml` | Canonical file/function naming and script/test freshness metadata map |
 | `data_rebuild_topology.yaml` | Data/rebuild certification criteria and non-promotion topology |
 | `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
 | `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |

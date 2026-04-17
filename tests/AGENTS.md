@@ -31,6 +31,13 @@ Top-level `test_*.py` files are intentionally not duplicated here. Query
 
 - Breaking an architecture/law test means the code or plan is wrong, not that
   the test is inconvenient.
+- Canonical file/function naming and test freshness rules live in
+  `architecture/naming_conventions.yaml`; do not redefine them here.
+- Touched, newly created, or evidence-reused top-level `tests/test_*.py` files
+  must satisfy the freshness header contract in `architecture/naming_conventions.yaml`.
+- Old tests are not proof by age. Before relying on an old/unknown test file as
+  evidence, inspect its current code, `architecture/test_topology.yaml`, skip
+  status, and update `last_reviewed` / `last_reused` as appropriate.
 - Do not delete or xfail high-sensitivity tests without a written sunset plan
   and packet evidence.
 - Prefer relationship tests for cross-module work: prove what must remain true

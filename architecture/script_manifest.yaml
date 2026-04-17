@@ -49,6 +49,8 @@ allowed_lifecycles:
   - promotion_candidate
   - deprecated_fail_closed
 
+naming_conventions: architecture/naming_conventions.yaml
+
 class_selection_guide:
   enforcement: Repeatable repo policy, topology, structural lint, or contract gate.
   diagnostic: Read-only investigation; output is stdout and cannot authorize live changes.
@@ -58,75 +60,6 @@ class_selection_guide:
   repair: Packet-approved repair with explicit dry-run/apply boundary.
   config_writer: Repeatable config artifact generator from declared inputs.
   stale_deprecated: Retained only to fail closed; canonical_command must be DO_NOT_RUN.
-
-long_lived_naming:
-  allowed_prefixes:
-    - check_
-    - validate_
-    - verify_
-    - audit_
-    - diagnose_
-    - etl_
-    - backfill_
-    - rebuild_
-    - migrate_
-    - repair_
-    - run_
-    - generate_
-    - build_
-    - capture_
-    - post_
-    - resume_
-    - kickoff_
-    - watch_
-  exceptions:
-    _yaml_bootstrap.py: import bootstrap helper for script entrypoints
-    antibody_scan.py: established operator diagnostic name
-    apply_recommended_controls.py: established control-plane repair entrypoint
-    automation_analysis.py: established automation diagnostic report
-    baseline_experiment.py: established diagnostic baseline report
-    cleanup_ghost_positions.py: established repair command name
-    data_completeness_audit.py: legacy word-order exception; keep until renamed
-    deep_heartbeat.py: established runtime heartbeat helper
-    deprecate_legacy_state_files.py: established repair command name
-    _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
-    bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
-    equity_curve.py: established diagnostic report command
-    force_lifecycle.py: established repair command name; dangerous and packet-gated
-    healthcheck.py: established operator entrypoint
-    heartbeat_dispatcher.py: established runtime dispatcher
-    investigate_ecmwf_bias.py: established diagnostic report name
-    live_smoke_test.py: established runtime smoke entrypoint
-    nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
-    onboard_cities.py: established ETL/operator onboarding entrypoint
-    oracle_snapshot_listener.py: oracle snapshot runtime listener retained under cron/operator naming
-    parse_change_log.py: established utility entrypoint
-    post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
-    resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
-    profit_validation_replay.py: established diagnostic report command
-    refit_platt.py: established repair command name
-    replay_parity.py: established diagnostic command
-    semantic_linter.py: established enforcement tool
-    topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
-    topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
-    topology_doctor_closeout.py: compiled closeout checker-family module imported by topology_doctor.py
-    topology_doctor_context_pack.py: context-pack/impact builder-family module imported by topology_doctor.py
-    topology_doctor_core_map.py: core-map/compiled-topology builder-family module imported by topology_doctor.py
-    topology_doctor_data_rebuild_checks.py: data-rebuild checker-family module imported by topology_doctor.py
-    topology_doctor_digest.py: digest builder-family module imported by topology_doctor.py
-    topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
-    topology_doctor_map_maintenance.py: map-maintenance checker-family module imported by topology_doctor.py
-    topology_doctor_packet_prefill.py: packet-prefill/invariant-slice builder-family module imported by topology_doctor.py
-    topology_doctor_policy_checks.py: governance/policy checker-family module imported by topology_doctor.py
-    topology_doctor_registry_checks.py: registry/root/docs-strict checker-family module imported by topology_doctor.py
-    topology_doctor_reference_checks.py: reference/core-claim checker-family module imported by topology_doctor.py
-    topology_doctor_receipt_checks.py: change-receipt checker-family module imported by topology_doctor.py
-    topology_doctor_script_checks.py: script-manifest checker-family module imported by topology_doctor.py
-    topology_doctor_source_checks.py: source-rationale/scoped-AGENTS checker-family module imported by topology_doctor.py
-    topology_doctor_test_checks.py: test-topology checker-family module imported by topology_doctor.py
-    topology_doctor.py: established topology compiler/checker
-    venus_autonomy_gate.py: established Venus boundary gate
-    venus_sensing_report.py: established Venus boundary report
 
 class_defaults:
   enforcement:
@@ -439,6 +372,7 @@ scripts:
   topology_doctor_data_rebuild_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for data-rebuild checker family}
   topology_doctor_digest.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for digest builder family}
   topology_doctor_docs_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for docs checker family}
+  topology_doctor_freshness_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for changed-file script/test freshness metadata checks}
   topology_doctor_map_maintenance.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for map-maintenance checker family}
   topology_doctor_packet_prefill.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for packet-prefill/invariant-slice builder family}
   topology_doctor_policy_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for governance/policy checker family}
