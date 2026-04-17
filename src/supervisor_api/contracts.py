@@ -20,6 +20,13 @@ class SupervisorContractError(ValueError):
     pass
 
 
+# B006: valid environment values for every supervisor-facing object.
+# Matches the docstring promise at the top of this module. Update this
+# tuple (and the tests in test_supervisor_contracts.py) if a new env
+# is introduced; do NOT add ad-hoc env strings at call sites.
+_VALID_ENVS: tuple[str, ...] = ("live", "paper", "test")
+
+
 def _check_env(obj: object) -> None:
     env = getattr(obj, "env", "")
     if not env:
@@ -27,6 +34,11 @@ def _check_env(obj: object) -> None:
             f"{type(obj).__name__}.env must not be empty — "
             "every supervisor object must declare its environment "
             "(e.g. 'live', 'paper', 'test')"
+        )
+    if env not in _VALID_ENVS:
+        raise SupervisorContractError(
+            f"{type(obj).__name__}.env={env!r} is not one of "
+            f"the valid environments {_VALID_ENVS} — B006 contract"
         )
 
 
@@ -59,6 +71,7 @@ class BeliefMismatch:
     severity: Literal["WARN", "CRITICAL"] = "WARN"
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
@@ -75,6 +88,7 @@ class Gap:
     proposed_antibody: Optional[str] = None
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
@@ -93,6 +107,7 @@ class Proposal:
     risk_scope: Literal["paper_only", "live_path", "docs_only"] = "paper_only"
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
@@ -116,6 +131,7 @@ class SupervisorCommand:
     env: str = ""
     source: str = "venus"
     timestamp: str = ""
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
@@ -153,6 +169,7 @@ class ChangeOutcome:
     notes: str = ""
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
@@ -182,6 +199,7 @@ class Antibody:
     recurrence_class: str
     deployed_at: str = ""
     env: str = ""
+    provenance_ref: Optional[str] = None  # B005
 
     def __post_init__(self) -> None:
         _check_env(self)
