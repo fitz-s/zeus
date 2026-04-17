@@ -1655,3 +1655,44 @@ class TestB041FillTrackerBoundaryErrors:
         )
         with pytest.raises(TypeError, match="unexpected keyword"):
             check_pending_entries(portfolio, clob)
+
+
+    def test_b041_keyerror_propagates(self):
+        """Amendment (critic-alice review): KeyError from a malformed
+        CLOB payload shape was omitted from the first-pass re-raise
+        set. ``_normalize_status(payload)`` does ``payload["status"]``;
+        a missing-key payload would have been silently caught as
+        ``still_pending`` before this amendment. KeyError is a code
+        defect and must now propagate.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = KeyError("status")
+        with pytest.raises(KeyError, match="status"):
+            check_pending_entries(portfolio, clob)
+
+    def test_b041_indexerror_propagates(self):
+        """Amendment (critic-alice review): IndexError from
+        malformed list access (e.g. ``payload[0]`` on an empty
+        sequence) is a code defect and must propagate."""
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = IndexError("list index out of range")
+        with pytest.raises(IndexError, match="out of range"):
+            check_pending_entries(portfolio, clob)
