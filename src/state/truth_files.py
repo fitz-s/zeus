@@ -92,11 +92,15 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
                 0.0,
                 (datetime.now(timezone.utc) - gen_dt).total_seconds(),
             )
-        except (ValueError, TypeError, AttributeError) as exc:
-            # B079: narrow the silent-None fallback. fromisoformat raises
-            # ValueError on malformed strings; .replace/str coercion on a
-            # non-str value raises AttributeError/TypeError. Any other
-            # exception is a code defect and must propagate.
+        except (ValueError, TypeError, AttributeError, OverflowError) as exc:
+            # B079 [critic amendment]: narrow the silent-None fallback.
+            # fromisoformat raises ValueError on malformed strings;
+            # .replace/str coercion on a non-str value raises
+            # AttributeError/TypeError; timedelta arithmetic with a
+            # pathological datetime can raise OverflowError. These are
+            # all *data* defects and warrant the None-fallback. Any
+            # other exception (NameError, ImportError, etc.) is a code
+            # defect and must propagate per SD-B.
             logger.warning(
                 "TRUTH_GENERATED_AT_UNPARSEABLE: path=%s generated_at=%r error=%s",
                 path,

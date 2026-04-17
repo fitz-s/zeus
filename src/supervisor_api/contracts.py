@@ -24,7 +24,27 @@ class SupervisorContractError(ValueError):
 # Matches the docstring promise at the top of this module. Update this
 # tuple (and the tests in test_supervisor_contracts.py) if a new env
 # is introduced; do NOT add ad-hoc env strings at call sites.
-_VALID_ENVS: tuple[str, ...] = ("live", "paper", "test")
+#
+# B074 [critic amendment]: "unknown_env" is a provenance-preserving
+# sentinel used by state/portfolio.py when the canonical projection row
+# carries no env field (fallback path). It is a valid contract value
+# but is UNVERIFIED authority-wise; callers should check via
+# `is_unverified_env()` before making any env-scoped authority decision.
+_VALID_ENVS: tuple[str, ...] = ("live", "paper", "test", "unknown_env")
+
+_UNVERIFIED_ENVS: tuple[str, ...] = ("unknown_env",)
+
+
+def is_unverified_env(env: str) -> bool:
+    """B074 helper: True when env is a provenance-sentinel that must be
+    treated as UNVERIFIED authority (row did not carry a real env).
+
+    Callers that make env-scoped decisions (mode-routing, dashboard
+    segmentation, live-vs-paper P&L attribution) should refuse or
+    quarantine rows where this returns True, rather than silently
+    bucketing them into the current runtime mode.
+    """
+    return env in _UNVERIFIED_ENVS
 
 
 def _check_env(obj: object) -> None:
