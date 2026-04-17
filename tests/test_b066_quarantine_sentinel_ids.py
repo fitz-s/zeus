@@ -36,21 +36,41 @@ class TestB066QuarantinePositionSentinelIds:
         )
 
     def test_source_code_does_not_use_empty_string_ids_for_quarantine(self):
-        """B066 regression: scan the file for the legacy empty-string
-        synthesis pattern that was the original bug site."""
+        """B066 regression: scan the WHOLE src/state/ tree for the
+        legacy empty-string synthesis pattern paired with
+        QUARANTINE_SENTINEL. A copy-paste of the original bug into
+        lifecycle_manager.py or portfolio.py would have slipped past
+        the first-pass single-file guard; amendment per critic review.
+        """
         import pathlib
+        import re
 
-        src = pathlib.Path(__file__).resolve().parent.parent / "src" / "state" / "chain_reconciliation.py"
-        text = src.read_text()
-        # The legacy pattern used ``trade_id="",`` and ``market_id="",``
-        # in the chain-only quarantine branch. Neither should reappear.
-        assert 'trade_id=""' not in text, (
-            "B066 regression: chain_reconciliation.py must not synthesize "
-            "trade_id with an empty string for quarantine Position."
+        state_dir = pathlib.Path(__file__).resolve().parent.parent / "src" / "state"
+        # Match any ``Position(...)`` constructor argument list that
+        # sets both ``trade_id=""`` (or market_id="") AND mentions
+        # QUARANTINE_SENTINEL within a 400-char window (same
+        # constructor call). This catches the copy-paste pattern
+        # without flagging legitimate empty-string defaults on
+        # non-quarantine Position instances.
+        pattern = re.compile(
+            r'trade_id\s*=\s*""[^)]{0,400}QUARANTINE_SENTINEL'
+            r'|market_id\s*=\s*""[^)]{0,400}QUARANTINE_SENTINEL'
+            r'|QUARANTINE_SENTINEL[^)]{0,400}trade_id\s*=\s*""'
+            r'|QUARANTINE_SENTINEL[^)]{0,400}market_id\s*=\s*""',
+            re.DOTALL,
         )
-        assert 'market_id=""' not in text, (
-            "B066 regression: chain_reconciliation.py must not synthesize "
-            "market_id with an empty string for quarantine Position."
+        offenders = []
+        for py in state_dir.rglob("*.py"):
+            try:
+                body = py.read_text()
+            except OSError:
+                continue
+            if pattern.search(body):
+                offenders.append(str(py.relative_to(state_dir.parent.parent)))
+        assert not offenders, (
+            "B066 regression: quarantine Position synthesis uses "
+            "empty-string trade_id/market_id in these files "
+            f"(must use QUARANTINE_SENTINEL): {offenders}"
         )
 
     def test_quarantine_position_is_quarantine_predicate_still_works(self):

@@ -224,3 +224,87 @@ The 4-sheet audit xlsx and [zeus_data_improve_bug_audit_100_resolved.md](zeus_da
 - **SEMANTICS_CHANGED**: 2 (B018, B049)
 
 **Total**: 100/100 classified.
+
+
+---
+
+## Session 2026-04-17 addendum — commits and label corrections
+
+Commits landed on `data-improve` this session (oldest first):
+
+| SHA | Bug(s) | Status |
+|---|---|---|
+| `057979c` | B050 | CLOSED |
+| `aab78a5` | B059, B061, B062 | CLOSED |
+| `af331e3` | B043, B045 | CLOSED |
+| `68cbacc` | B041, B009 | CLOSED (amended `389247b`) |
+| `863fd51` | B017 | **PARTIALLY_CLOSED** — see below |
+| `5893756` | B005, B006 | **PARTIALLY_CLOSED** — see below |
+| `1c85d64` | B082 | CLOSED |
+| `fb47af8` | B051 | CLOSED |
+| `6d1a8ab` | B066 | CLOSED |
+| `389247b` | B009+B041 amendment (critic-alice review) | strengthens catch tuples |
+
+### Label corrections per critic review
+
+**B017 (market_scanner cache provenance)** -- classification corrected
+from `CLOSED` to `PARTIALLY_CLOSED`. Commit `863fd51` lands the
+`MarketSnapshot` scaffolding (ScanAuthority literal, read-side API
+`get_last_scan_authority()`, legacy wrapper) but **zero Dual-Track
+callers consume it**. `discover_and_evaluate_candidates` and
+`_refresh_monitoring` can still act on stale cache events because no
+caller fails-closed on `authority != "VERIFIED"`. The provenance
+*type* landed; the *enforcement* is deferred to a Dual-Track-side
+commit outside the scope of this session.
+
+- Follow-up ticket: **B017-b** — make `discover_and_evaluate_candidates`
+  fail-closed when `get_last_scan_authority()` returns a value other
+  than `VERIFIED`. That is the behavior change the audit actually
+  asked for. Blocked on Dual-Track coordination because the caller
+  chain touches `src/engine/cycle_runtime.py`.
+
+**B005 / B006 (supervisor_api contract tightening)** -- classification
+corrected from `CLOSED` to `PARTIALLY_CLOSED`. Commit `5893756`
+centralizes `_VALID_ENVS` and adds `provenance_ref: Optional[str] =
+None` to 6 supervisor dataclasses. This is a **schema widening** (the
+field exists and can be populated); it is **not** enforcement (the
+default-None means contracts without provenance still validate). A
+follow-up must flip `provenance_ref` to required at every call site
+we expect authority to flow through, or add a validation hook that
+rejects `env="live"` contracts with `provenance_ref is None`.
+
+- Follow-up ticket: **B005-b** — audit all producer sites of
+  `SupervisorCommand`, `SupervisorResult`, `SupervisorAck`,
+  `SupervisorRejection`, `SupervisorQuery`, `SupervisorReport` and
+  decide per-producer whether provenance_ref should be required.
+
+### Critic-alice review artefacts
+
+The read-only review also flagged test-quality gaps which were
+patched within the session (not re-labelled):
+
+- B009 gained `test_b009_non_dict_entry_does_not_poison_registry`
+- B041 gained `test_b041_keyerror_propagates` and
+  `test_b041_indexerror_propagates`
+- B051 gained `test_b051_real_sqlite3_row_indexerror_is_isolated`
+  (previously tests used dict MockRow which raised KeyError not
+  IndexError)
+- B066 regression-grep widened from `chain_reconciliation.py`-only
+  to the full `src/state/**/*.py` tree, guarding against copy-paste
+  of the legacy empty-id pattern into sibling state files.
+
+### Deferred bugs (touch Dual-Track or planning-locked zones)
+
+Explicitly NOT attempted this session; require DT coordination:
+
+- **Dual-Track zone**: B063 (db.py), B064 (db.py), B070 (db.py),
+  B071 (db.py), B079 (truth_files.py), B091 (evaluator.py),
+  B094 (replay.py), B100 (db.py)
+- **Planning-locked zone 7c**: B015 (control/*),
+  B053/B055/B069/B073/B077/B078 (truth_files.py / portfolio.py),
+  B074 (portfolio.py), B093 (replay.py), B096/B097/B098/B099
+  (cycle_runtime.py)
+- **Out of scope (widens constructor surface)**: B081
+  (SettlementSemantics injection on MarketAnalysis) -- noted here
+  because the audit estimated it as "small typed mixin" but the
+  actual refactor touches every MarketAnalysis call site.

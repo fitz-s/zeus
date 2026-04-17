@@ -189,3 +189,36 @@ class TestB051MalformedRowIsolation:
         with caplog.at_level(logging.WARNING, logger="src.riskguard.policy"):
             result = _select_rows([bad1, bad2])
         assert result == []  # must NOT raise
+
+
+    def test_b051_real_sqlite3_row_indexerror_is_isolated(self):
+        """Amendment (critic-alice review): the first-pass tests used a
+        dict-based MockRow which raises ``KeyError`` on missing key.
+        Real ``sqlite3.Row`` raises ``IndexError`` on missing column.
+        Both are in the catch tuple, but the production path needs
+        explicit coverage. This test exercises the real data shape via
+        an in-memory sqlite3 connection.
+        """
+        import sqlite3
+        from src.riskguard.policy import _select_rows
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        # Good row has action_type; bad row deliberately omits it.
+        conn.execute("CREATE TABLE good (action_type TEXT, value TEXT, override_id TEXT)")
+        conn.execute("CREATE TABLE bad (value TEXT, override_id TEXT)")
+        conn.execute("INSERT INTO good VALUES ('gate', 'true', 'g1')")
+        conn.execute("INSERT INTO bad VALUES ('true', 'b1')")
+
+        good_row = conn.execute("SELECT * FROM good").fetchone()
+        bad_row = conn.execute("SELECT * FROM bad").fetchone()
+        # Sanity check: real sqlite3.Row raises IndexError on missing column
+        import pytest as _pytest
+        with _pytest.raises(IndexError):
+            _ = bad_row["action_type"]
+
+        # _select_rows must survive the IndexError on bad_row and still
+        # return good_row.
+        result = _select_rows([bad_row, good_row])
+        assert len(result) == 1
+        assert result[0]["override_id"] == "g1"
