@@ -216,16 +216,12 @@ approval.
 
 ## Function Naming and Reuse Freshness
 
-- Function names should expose semantic contract:
-  `<verb>_<domain_object>[_<truth_surface>]`. Avoid bare `process`, `handle`,
-  `fix`, `run`, or `update`; pair them with the thing and authority surface.
-- Rename stale private helpers when behavior changes.
-- Created/modified/reused scripts and top-level tests need a top header:
-  `Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never`,
-  plus `Purpose:` and `Reuse:`.
-- Old/unknown scripts/tests are review-required before execution/evidence use:
-  inspect source + manifest + write/read targets, update freshness metadata,
-  then run `python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
+Canonical file naming, function naming, and script/test freshness rules live in
+`architecture/naming_conventions.yaml`. AGENTS files may summarize the policy
+but must not redefine it. Old/unknown scripts/tests are review-required before
+execution or evidence use. Machine checks:
+`python scripts/topology_doctor.py --naming-conventions` and
+`python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
 
 ## Mesh Maintenance
 

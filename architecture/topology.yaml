@@ -662,16 +662,16 @@ digest_profiles:
       - "tooling"
     required_law:
       - "Check architecture/script_manifest.yaml before adding a top-level script."
+      - "Use architecture/naming_conventions.yaml as the canonical file/function naming and freshness map."
       - "Prefer extending a long_lived script over adding a parallel tool."
       - "One-off scripts must use lifecycle=packet_ephemeral, task_YYYY-MM-DD_<purpose>.py naming, and delete_by=YYYY-MM-DD."
       - "Reusable scripts must use stable naming and lifecycle=long_lived."
-      - "Changed scripts/tests must carry a Lifecycle/Purpose/Reuse freshness header before reuse."
-      - "Function names should expose verb + domain object + truth surface when relevant; stale generic names must be renamed during meaningful edits."
       - "Deprecated scripts must be fail-closed or removed in a cleanup packet."
     allowed_files:
       - "scripts/<script>.py"
       - "scripts/<script>.sh"
       - "architecture/script_manifest.yaml"
+      - "architecture/naming_conventions.yaml"
       - "scripts/AGENTS.md"
       - "tests/test_topology_doctor.py"
       - "scripts/topology_doctor.py"
@@ -683,6 +683,7 @@ digest_profiles:
       - "docs/archives/work_packets/**"
     gates:
       - "python scripts/topology_doctor.py --scripts"
+      - "python scripts/topology_doctor.py --naming-conventions"
       - "python scripts/topology_doctor.py --freshness-metadata --changed-files <files>"
       - "pytest -q tests/test_topology_doctor.py -k scripts"
     downstream:

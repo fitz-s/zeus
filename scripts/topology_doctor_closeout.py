@@ -162,6 +162,7 @@ def run_closeout(
         "change_receipts": api.run_change_receipts(actual_changed, receipt_path),
         "map_maintenance": api.run_map_maintenance(actual_changed, mode="closeout"),
         "artifact_lifecycle": api.run_artifact_lifecycle(),
+        "naming_conventions": api.run_naming_conventions(),
         "freshness_metadata": api.run_freshness_metadata(actual_changed),
     }
     if selected["docs"]:

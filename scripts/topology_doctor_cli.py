@@ -38,6 +38,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--reference-replacement", action="store_true", help="Check reference replacement matrix")
     parser.add_argument("--core-claims", action="store_true", help="Check proof-backed core claim registry")
     parser.add_argument("--core-maps", action="store_true", help="Check core-map profile compilation")
+    parser.add_argument("--naming-conventions", action="store_true", help="Check canonical file/function naming map")
     parser.add_argument("--freshness-metadata", action="store_true", help="Check changed scripts/tests for lifecycle freshness headers")
     parser.add_argument("--map-maintenance", action="store_true", help="Check companion registry updates for added/deleted files")
     parser.add_argument(
@@ -166,6 +167,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("reference_replacement", api.run_reference_replacement),
         ("core_claims", api.run_core_claims),
         ("core_maps", api.run_core_maps),
+        ("naming_conventions", api.run_naming_conventions),
     ]
     for attr, fn in commands:
         if getattr(args, attr):

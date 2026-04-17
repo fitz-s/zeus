@@ -1,4 +1,7 @@
 """Digest builder family for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Build bounded topology digests from machine manifests for agent routing.
+# Reuse: Keep emitted law sourced from manifests; do not hardcode active rules here.
 
 from __future__ import annotations
 
@@ -25,10 +28,13 @@ def data_rebuild_digest(api: Any) -> dict[str, Any]:
 
 def script_lifecycle_digest(api: Any) -> dict[str, Any]:
     manifest = api.load_script_manifest()
+    naming = api.load_naming_conventions() if api.NAMING_CONVENTIONS_PATH.exists() else {}
+    script_naming = (((naming.get("file_naming") or {}).get("scripts") or {}).get("long_lived") or {})
     scripts = manifest.get("scripts") or {}
     return {
         "allowed_lifecycles": manifest.get("allowed_lifecycles", []),
-        "long_lived_naming": manifest.get("long_lived_naming", {}),
+        "long_lived_naming": script_naming or manifest.get("long_lived_naming", {}),
+        "naming_conventions": manifest.get("naming_conventions", "architecture/naming_conventions.yaml"),
         "required_effective_fields": manifest.get("required_effective_fields", []),
         "existing_scripts": {
             name: {

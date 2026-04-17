@@ -160,6 +160,16 @@ def test_cli_json_parity_for_map_maintenance_command():
     }
 
 
+def test_cli_json_parity_for_naming_conventions_command():
+    payload = run_cli_json(["--naming-conventions", "--json"])
+    result = topology_doctor.run_naming_conventions()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
 def test_cli_json_parity_for_freshness_metadata_command(monkeypatch, tmp_path):
     root = tmp_path
     script = root / "scripts" / "new_tool.py"
@@ -264,6 +274,17 @@ def test_freshness_metadata_rejects_missing_purpose_or_reuse(monkeypatch, tmp_pa
 
     assert not result.ok
     assert any(issue.code == "freshness_header_field_missing" for issue in result.issues)
+
+
+def test_naming_conventions_rejects_missing_function_shape(monkeypatch):
+    manifest = topology_doctor.load_naming_conventions()
+    manifest["function_naming"] = {}
+    monkeypatch.setattr(topology_doctor, "load_naming_conventions", lambda: manifest)
+
+    result = topology_doctor.run_naming_conventions()
+
+    assert not result.ok
+    assert any(issue.code == "naming_conventions_rule_invalid" for issue in result.issues)
 
 
 def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):

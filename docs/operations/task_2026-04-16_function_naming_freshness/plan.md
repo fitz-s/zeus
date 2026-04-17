@@ -13,7 +13,8 @@ inviting agents to infer meaning from stale generic names.
 ## Scope
 
 - Root, scripts, and tests AGENTS guidance.
-- `architecture/script_manifest.yaml` naming and freshness contract.
+- `architecture/naming_conventions.yaml` as the canonical naming/freshness map.
+- `architecture/script_manifest.yaml` as script lifecycle registry that points to the naming map instead of redefining naming rules.
 - `topology_doctor` changed-file freshness metadata lane.
 - Targeted tests for the new lane and closeout integration.
 
