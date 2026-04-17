@@ -31,8 +31,17 @@ class GateDecision:
 
     @classmethod
     def from_dict(cls, d: dict) -> "GateDecision":
+        # B015 [YELLOW / flag for K1 packet discipline review]: validate the
+        # `enabled` field is a real bool. A stray 1/0/"true"/None from a
+        # corrupted JSON payload would otherwise silently become a truthy
+        # non-bool, poisoning gate authority decisions.
+        enabled_value = d["enabled"]
+        if not isinstance(enabled_value, bool):
+            raise ValueError(
+                f"GateDecision.enabled must be bool, got {type(enabled_value).__name__}: {enabled_value!r}"
+            )
         return cls(
-            enabled=d["enabled"],
+            enabled=enabled_value,
             reason_code=ReasonCode(d.get("reason_code", "unspecified")),
             reason_snapshot=d.get("reason_snapshot", {}),
             gated_at=d.get("gated_at", ""),

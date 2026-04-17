@@ -803,7 +803,13 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         bin_label=str(row.get("bin_label") or ""),
         direction=str(row.get("direction") or "unknown"),
         unit=str(row.get("unit") or "F"),
-        env=current_mode,
+        # B074 [YELLOW / flag for §7c architect sign-off]: the canonical
+        # projection row may not carry env. Previously we stamped the
+        # current runtime mode, which destroyed the provenance of which
+        # env originally created the position. Preserve the row's env when
+        # present; fall back to the 'unknown_env' sentinel otherwise and
+        # let downstream authority consumers mark the row UNVERIFIED.
+        env=str(row.get("env") or "unknown_env"),
         size_usd=float(row.get("size_usd") or 0.0),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
