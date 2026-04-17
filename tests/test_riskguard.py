@@ -1482,6 +1482,77 @@ class TestStrategyPolicyResolver:
         assert details["settlement_quality_level"] == "RED"
         assert details["settlement_metric_ready_count"] == 0
 
+    # B050 relationship tests — policy resolver must survive duplicate rows.
+    # sqlite3.Row has no .get(); duplicate-detection + bad-row logging both
+    # previously fabricated AttributeError.  The resolver must keep working
+    # (first-in wins) and log the discarded row, never crash the caller.
+    def test_resolve_strategy_policy_survives_duplicate_manual_overrides(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        base = (now - timedelta(minutes=5)).isoformat()
+        expires = (now + timedelta(hours=1)).isoformat()
+        # Two rows with the same action_type → _select_rows must drop one
+        # and log the discarded override_id without raising.
+        _insert_control_override(
+            conn,
+            override_id="ov-dup-a",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="allocation_multiplier",
+            value="0.5",
+            issued_at=base,
+            effective_until=expires,
+        )
+        _insert_control_override(
+            conn,
+            override_id="ov-dup-b",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="allocation_multiplier",
+            value="0.3",
+            issued_at=base,
+            effective_until=expires,
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        # First-in wins (higher precedence then issued_at then override_id DESC).
+        assert policy.allocation_multiplier in (pytest.approx(0.5), pytest.approx(0.3))
+        assert "manual_override:allocation_multiplier" in policy.sources
+        conn.close()
+
+    def test_resolve_strategy_policy_survives_duplicate_risk_actions(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        base = (now - timedelta(minutes=5)).isoformat()
+        expires = (now + timedelta(hours=1)).isoformat()
+        _insert_risk_action(
+            conn,
+            action_id="ra-dup-a",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.5",
+            issued_at=base,
+            effective_until=expires,
+        )
+        _insert_risk_action(
+            conn,
+            action_id="ra-dup-b",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.8",
+            issued_at=base,
+            effective_until=expires,
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.threshold_multiplier in (pytest.approx(1.5), pytest.approx(1.8))
+        assert "risk_action:threshold_multiplier" in policy.sources
+        conn.close()
+
 
 def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     conn = _policy_conn()
