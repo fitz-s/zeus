@@ -518,10 +518,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 tid[-4:],
             )
             quarantine_pos = Position(
-                trade_id="",
-                market_id="",
-                city=QUARANTINE_SENTINEL, cluster="",
-                target_date="", bin_label="",
+                # B066: synthesize IDs with an explicit QUARANTINE_SENTINEL
+                # value rather than empty strings. Empty-string trade_id /
+                # market_id can collide with degraded-but-live positions
+                # elsewhere (e.g. pre-fill pending state where the venue
+                # order_id has not yet been returned). Using the same
+                # sentinel already adopted by portfolio.py void_position()
+                # for city/target_date/bin_label keeps the quarantine-vs-
+                # real classification deterministic: downstream consumers
+                # can match on ``is_quarantine_placeholder`` OR on any of
+                # these sentinel-valued identifier fields.
+                trade_id=QUARANTINE_SENTINEL,
+                market_id=QUARANTINE_SENTINEL,
+                city=QUARANTINE_SENTINEL, cluster=QUARANTINE_SENTINEL,
+                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
                 direction="unknown",
                 size_usd=0.0,
                 entry_price=0.0,
