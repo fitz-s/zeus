@@ -248,3 +248,116 @@ class TestBoundarySensitivity:
         ens = EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
         sensitivity = ens.boundary_sensitivity(40.0)
         assert sensitivity == pytest.approx(10.0 / 51.0, abs=0.01)
+
+
+# =============================================================================
+# B059 / B061 / B062 relationship tests — typed error taxonomy (SD-B).
+#
+# Invariant: ensemble_signal.py must distinguish between
+#   (a) KNOWN degraded states (config missing, KDE numerical failure on
+#       degenerate input) — handled silently with explicit fallback, AND
+#   (b) UNKNOWN code/infrastructure failures (ImportError for stdlib,
+#       AttributeError on wrong object, NameError) — which MUST propagate
+#       so the operator sees a real fault instead of a ghost degraded signal.
+# =============================================================================
+class TestEnsembleBoundaryErrors:
+    def test_b062_is_bimodal_falls_back_on_numerical_failure(self):
+        """Degenerate input (all members identical) makes gaussian_kde fail
+        with LinAlgError. is_bimodal must fall back to the gap heuristic,
+        not raise."""
+        # All 51 members at exactly the same value: covariance is singular →
+        # gaussian_kde raises np.linalg.LinAlgError. The pre-check for
+        # rng < sigma_instrument already returns False, so we need a case
+        # with spread ≥ sigma but still degenerate. Use 2 distinct values
+        # with zero spread in one of the modes is tricky; easier: 3 distinct
+        # values far apart, forcing KDE but the bandwidth-selection path is
+        # still well-defined. Instead we test the fallback directly by
+        # monkeypatching gaussian_kde to raise np.linalg.LinAlgError.
+        import numpy as np
+        from unittest.mock import patch
+
+        members = _make_bimodal_members(40.0, 25, 60.0, 26)
+        times = _make_local_day_times(TARGET_DATE, NYC.timezone)
+        ens = EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
+
+        with patch("src.signal.ensemble_signal.gaussian_kde",
+                   side_effect=np.linalg.LinAlgError("singular covariance")):
+            # Must NOT raise; must fall through to the gap heuristic.
+            result = ens.is_bimodal()
+        assert isinstance(result, bool)
+
+    def test_b062_is_bimodal_propagates_unknown_failures(self):
+        """If gaussian_kde fails with an unexpected exception (e.g. TypeError
+        from a code bug), is_bimodal must NOT silently swallow it. A code
+        defect masquerading as bimodal/unimodal signal is a death-trap."""
+        from unittest.mock import patch
+
+        members = _make_bimodal_members(40.0, 25, 60.0, 26)
+        times = _make_local_day_times(TARGET_DATE, NYC.timezone)
+        ens = EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
+
+        with patch("src.signal.ensemble_signal.gaussian_kde",
+                   side_effect=TypeError("is_bimodal: wrong call signature")):
+            with pytest.raises(TypeError):
+                ens.is_bimodal()
+
+    def test_b061_bias_correction_closes_connection_on_query_failure(self):
+        """If season_from_date raises inside _apply_bias_correction's try
+        block (AFTER get_world_connection but BEFORE conn.close()), the
+        connection must still be closed — not leaked. The current code
+        re-raises RuntimeError but leaves conn un-closed if the failure
+        point is past get_world_connection."""
+        from unittest.mock import MagicMock, patch
+        import numpy as np
+
+        fake_conn = MagicMock()
+        # Simulate a failure inside season_from_date (the call right after
+        # get_world_connection but before fetchone). The conn must still
+        # be closed.
+        with patch("src.signal.ensemble_signal.EnsembleSignal._apply_bias_correction") as _bypass:
+            pass  # placeholder — we exercise the real path below
+
+        with patch("src.state.db.get_world_connection", return_value=fake_conn), \
+             patch("src.calibration.manager.season_from_date",
+                   side_effect=ValueError("bad lat")):
+            maxes = np.full(51, 40.0)
+            with pytest.raises(RuntimeError, match="Bias correction database fault"):
+                EnsembleSignal._apply_bias_correction(maxes, NYC, TARGET_DATE)
+        # After re-raise, the connection must have been closed to avoid
+        # leaking file handles on long-running daemons.
+        assert fake_conn.close.called, (
+            "B061: _apply_bias_correction must close the world-DB "
+            "connection even when an inner call raises"
+        )
+
+    def test_b059_bias_correction_config_failure_is_not_silent(self):
+        """Constructor's bias-correction block previously caught ALL
+        exceptions with `except Exception: pass`. This means an
+        ImportError from a missing dependency, or a RuntimeError raised by
+        _apply_bias_correction itself (signaling DB fault), would be
+        silently swallowed and bias_corrected would remain False — visibly
+        identical to 'bias correction disabled by config'.
+
+        Invariant: an UnknownError path (not the legitimate 'settings
+        attribute missing' path) must propagate. We simulate by making
+        settings.bias_correction_enabled True and having
+        _apply_bias_correction raise RuntimeError; the EnsembleSignal
+        constructor must NOT silently continue with bias_corrected=False."""
+        from unittest.mock import patch
+        import numpy as np
+
+        members = _make_constant_members(40.0)
+        times = _make_local_day_times(TARGET_DATE, NYC.timezone)
+
+        # Force the bias-correction code path on, and have
+        # _apply_bias_correction raise a RuntimeError (simulating the
+        # "Bias correction database fault" path). The constructor must
+        # surface that, not swallow it.
+        with patch("src.config.settings") as fake_settings, \
+             patch.object(
+                 EnsembleSignal, "_apply_bias_correction",
+                 side_effect=RuntimeError("Bias correction database fault"),
+             ):
+            fake_settings.bias_correction_enabled = True
+            with pytest.raises(RuntimeError, match="Bias correction database fault"):
+                EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)

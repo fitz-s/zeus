@@ -288,16 +288,22 @@ class EnsembleSignal:
         # GATED by config flag. Activation requires simultaneous Platt recompute
         # to avoid out-of-domain inference (see cross-module invariant test).
         self.bias_corrected = False
+        # B059: typed error taxonomy (SD-B). Only the legitimate
+        # "settings symbol missing" path is silent; any other exception
+        # (including RuntimeError from _apply_bias_correction signalling a
+        # DB fault) must propagate so the operator sees a real fault
+        # instead of a ghost degraded signal.
         try:
             from src.config import settings
-            if settings.bias_correction_enabled:
-                corrected, applied = self._apply_bias_correction(
-                    self.member_maxes, city, target_date
-                )
-                self.member_maxes = corrected
-                self.bias_corrected = applied
-        except Exception:
-            pass  # Config access failure → no correction, safe fallback
+            bias_enabled = settings.bias_correction_enabled
+        except (ImportError, AttributeError):
+            bias_enabled = False  # config surface genuinely unavailable
+        if bias_enabled:
+            corrected, applied = self._apply_bias_correction(
+                self.member_maxes, city, target_date
+            )
+            self.member_maxes = corrected
+            self.bias_corrected = applied
         
         self.city = city
         self.target_date = target_date
@@ -331,31 +337,33 @@ class EnsembleSignal:
         also have been computed with bias correction. The cross-module test
         test_calibration_pairs_use_same_bias_correction_as_live enforces this.
         """
+        # B061: wrap the world-DB connection in contextlib.closing so any
+        # inner failure (season_from_date, execute, fetchone) still closes
+        # the handle. Long-running daemons would otherwise exhaust the
+        # SQLite connection pool on repeated bias-correction faults.
+        import contextlib
+        from src.state.db import get_world_connection
+        from src.calibration.manager import season_from_date
+
         try:
-            from src.state.db import get_world_connection
+            with contextlib.closing(get_world_connection()) as conn:
+                season = season_from_date(target_date.isoformat(), lat=city.lat)
+                row = conn.execute(
+                    "SELECT bias, discount_factor, n_samples FROM model_bias "
+                    "WHERE city = ? AND season = ? AND source = 'ecmwf'",
+                    (city.name, season),
+                ).fetchone()
 
-            from src.calibration.manager import season_from_date
-
-            season = season_from_date(target_date.isoformat(), lat=city.lat)
-
-            conn = get_world_connection()
-            row = conn.execute(
-                "SELECT bias, discount_factor, n_samples FROM model_bias "
-                "WHERE city = ? AND season = ? AND source = 'ecmwf'",
-                (city.name, season),
-            ).fetchone()
-            conn.close()
-
-            if row and row["n_samples"] >= 20:
-                discount = row["discount_factor"] if row["discount_factor"] is not None else 0.7
-                correction = row["bias"] * discount
-                import logging
-                logging.getLogger(__name__).info(
-                    "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
-                    city.name, season, row["bias"], discount,
-                    correction, row["n_samples"],
-                )
-                return maxes - correction, True
+                if row and row["n_samples"] >= 20:
+                    discount = row["discount_factor"] if row["discount_factor"] is not None else 0.7
+                    correction = row["bias"] * discount
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
+                        city.name, season, row["bias"], discount,
+                        correction, row["n_samples"],
+                    )
+                    return maxes - correction, True
 
         except Exception as e:
             import logging
@@ -435,8 +443,12 @@ class EnsembleSignal:
             density = kde(x)
             peaks = argrelextrema(density, np.greater, order=ensemble_bimodal_kde_order())[0]
             return len(peaks) >= 2
-        except Exception:
-            # Fallback: gap heuristic
+        except (np.linalg.LinAlgError, ValueError):
+            # B062: KDE numerical failures (singular covariance on
+            # degenerate input, bad shape on empty slice) are legitimate
+            # degraded states — fall back to the gap heuristic. Any other
+            # exception (TypeError, AttributeError, ImportError) is a code
+            # bug and must NOT be silently swallowed.
             sorted_maxes = np.sort(maxes)
             gaps = np.diff(sorted_maxes)
             return rng > 0 and float(gaps.max()) / rng > ensemble_bimodal_gap_ratio()
