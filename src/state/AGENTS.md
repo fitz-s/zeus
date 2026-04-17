@@ -45,6 +45,18 @@ The lifecycle manager is the **sole state authority**. No other module may trans
 - Defaulting unknown strategy to a governance bucket → exact-attribution violation
 - Schema or truth-path changes without packet + rollback → architectural drift
 - Bypassing `LEGAL_LIFECYCLE_FOLDS` with direct state assignment → lifecycle authority violation
+- Removing append-only history tables as "dead audit" when a VIEW above them depends on them (see B070 + `e6dd214` incident)
+
+## Event-sourced projections (B070 pattern)
+
+Some small-cardinality, audit-critical tables follow an append-only + VIEW pattern:
+
+- `control_overrides_history` (append-only log) + `control_overrides` (VIEW selecting latest row by `history_id` per `override_id` — `history_id` is AUTOINCREMENT, strictly monotone; `recorded_at` is wall-clock and can tie under microsecond resolution or clock skew)
+- Writes INSERT into the history table. `BEFORE UPDATE` / `BEFORE DELETE` triggers enforce append-only.
+- Reads hit the VIEW — existing `WHERE effective_until IS NULL OR effective_until > now` filter semantics are preserved because `expire_control_override` INSERTs a new history row with `effective_until` set.
+- The history table is **structurally load-bearing**: removing it breaks the VIEW, which breaks every override read. This is the antibody for the prior incident (`e6dd214`) where an unread audit table was deleted as dead code.
+
+Use this pattern only when cardinality is small enough that a correlated MAX subquery per read is fine (<1k distinct keys), and when audit trail is a hard requirement. For high-cardinality event-sourced state, use the canonical `append_event_and_project` pattern (`position_events` → `position_current`) instead.
 
 ## Forbidden
 

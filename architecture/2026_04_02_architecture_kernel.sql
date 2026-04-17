@@ -172,8 +172,19 @@ CREATE TABLE IF NOT EXISTS risk_actions (
     status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked'))
 );
 
-CREATE TABLE IF NOT EXISTS control_overrides (
-    override_id TEXT PRIMARY KEY,
+-- B070: control_overrides is an event-sourced projection.
+-- control_overrides_history is the canonical append-only log; the
+-- control_overrides VIEW projects the latest recorded_at per override_id.
+--
+-- DO NOT add writes that bypass control_overrides_history.
+-- DO NOT remove control_overrides_history: the VIEW depends on it. Removing
+--   the history table breaks every override read (riskguard, control_plane).
+--   See git log e6dd214 ("refactor: remove 2 dead audit tables") for the
+--   prior incident where this history table was cleaned up as 'dead' and had
+--   to be reimplemented as B070.
+CREATE TABLE IF NOT EXISTS control_overrides_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    override_id TEXT NOT NULL,
     target_type TEXT NOT NULL CHECK (target_type IN ('strategy', 'global', 'position')),
     target_key TEXT NOT NULL,
     action_type TEXT NOT NULL,
@@ -182,7 +193,40 @@ CREATE TABLE IF NOT EXISTS control_overrides (
     issued_at TEXT NOT NULL,
     effective_until TEXT,
     reason TEXT NOT NULL,
-    precedence INTEGER NOT NULL
+    precedence INTEGER NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'expire', 'migrated', 'revoke')),
+    recorded_at TEXT NOT NULL
+);
+
+-- Index covers the `MAX(history_id) WHERE override_id = ?` lookup used by the
+-- VIEW and by expire_control_override.
+CREATE INDEX IF NOT EXISTS idx_control_overrides_history_id_time
+    ON control_overrides_history(override_id, history_id DESC);
+
+CREATE TRIGGER IF NOT EXISTS control_overrides_history_no_update
+BEFORE UPDATE ON control_overrides_history
+BEGIN
+    SELECT RAISE(ABORT, 'control_overrides_history is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS control_overrides_history_no_delete
+BEFORE DELETE ON control_overrides_history
+BEGIN
+    SELECT RAISE(ABORT, 'control_overrides_history is append-only');
+END;
+
+-- VIEW orders by `history_id` (AUTOINCREMENT, strictly monotone per writer)
+-- rather than `recorded_at` (wall-clock, microsecond-resolution, vulnerable
+-- to ties and clock skew). `recorded_at` is retained as an observability
+-- field but is not load-bearing for ordering.
+CREATE VIEW IF NOT EXISTS control_overrides AS
+SELECT override_id, target_type, target_key, action_type, value,
+       issued_by, issued_at, effective_until, reason, precedence
+FROM control_overrides_history h1
+WHERE history_id = (
+    SELECT MAX(history_id)
+    FROM control_overrides_history h2
+    WHERE h2.override_id = h1.override_id
 );
 
 CREATE TABLE IF NOT EXISTS token_suppression (

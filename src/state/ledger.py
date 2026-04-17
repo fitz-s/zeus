@@ -125,6 +125,23 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
             "freeze a dedicated migration packet before changing live/runtime schema"
         )
 
+    # B070 legacy collision guard: kernel SQL declares `control_overrides`
+    # as a VIEW backed by `control_overrides_history`. On a legacy DB where
+    # `control_overrides` already exists as a TABLE, `CREATE VIEW IF NOT
+    # EXISTS` silently no-ops (SQLite treats name as already-defined across
+    # both types). Result: writes go to the new history table, reads still
+    # hit the stale legacy table — silent split-brain. Fail-fast and point
+    # at the migration script.
+    co_row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='control_overrides'"
+    ).fetchone()
+    if co_row is not None and str(co_row[0] if isinstance(co_row, tuple) else co_row["type"]) == "table":
+        raise RuntimeError(
+            "legacy control_overrides TABLE blocks B070 event-sourced VIEW "
+            "bootstrap; run scripts/migrate_b070_control_overrides_to_history.py "
+            "--apply with ZEUS_DESTRUCTIVE_CONFIRMED=1 before restarting the daemon"
+        )
+
     conn.executescript(load_architecture_kernel_sql())
     _ensure_token_suppression_reason_schema(conn)
     for column in ("token_id", "no_token_id", "condition_id"):
