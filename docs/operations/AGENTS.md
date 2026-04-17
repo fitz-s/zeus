@@ -11,6 +11,7 @@ Live control surface — current state pointer, active work packets. This is whe
 | `task_2026-04-13_remaining_repair_backlog.md` | Active backlog of remaining repair items after non-DB small-package loop; separates DB/rebuild dependencies from larger strategy/design packets |
 | `task_2026-04-14_session_backlog.md` | End-of-session backlog snapshot from the calibration-refactor session (df13308/45745ba/854cf5d/ed13310); groups open tasks by unblocking condition |
 | `task_2026-04-16_dual_track_metric_spine/` | Active dual-track metric spine refactor packet and evidence |
+| `task_2026-04-16_function_naming_freshness/` | Small governance package for function naming and script/test freshness metadata |
 | `data_rebuild_plan.md` | Active upstream data-rebuild plan; do not execute from topology packets |
 | `runtime_artifact_inventory.md` | Repo-facing inventory for `.omx/.omc` planning artifacts that must not live only in ignored runtime state |
 

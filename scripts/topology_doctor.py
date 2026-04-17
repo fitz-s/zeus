@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Topology doctor for Zeus's compiled agent-navigation graph."""
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Purpose: Main facade for compiled topology, navigation, and closeout checks.
+# Reuse: Prefer adding narrow checker-family modules instead of expanding this facade directly.
 
 from __future__ import annotations
 
@@ -573,6 +576,19 @@ def _map_maintenance_changes(changed_files: list[str]) -> dict[str, str]:
 
 def run_map_maintenance(changed_files: list[str] | None = None, mode: str = "advisory") -> StrictResult:
     return _map_maintenance_checks().run_map_maintenance(sys.modules[__name__], changed_files, mode)
+
+
+def _freshness_checks():
+    try:
+        from scripts import topology_doctor_freshness_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_freshness_checks
+
+    return topology_doctor_freshness_checks
+
+
+def run_freshness_metadata(changed_files: list[str] | None = None) -> StrictResult:
+    return _freshness_checks().run_freshness_metadata(sys.modules[__name__], changed_files)
 
 
 def _packet_prefill_checks():

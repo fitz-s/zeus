@@ -49,6 +49,47 @@ allowed_lifecycles:
   - promotion_candidate
   - deprecated_fail_closed
 
+freshness_header_contract:
+  applies_to:
+    - scripts/*.py
+    - scripts/*.sh
+    - tests/test_*.py
+  rollout: changed_files_only
+  required_header_lines:
+    - "Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never"
+    - "Purpose: <why this script/test exists now>"
+    - "Reuse: <what to inspect before running or relying on it>"
+  stale_unknown_rule: >
+    Scripts and tests with missing or stale freshness metadata are not directly
+    reusable. Inspect source plus the relevant manifest, then update
+    last_reviewed/last_reused before execution or evidence use.
+
+function_naming_contract:
+  principle: >
+    Function names should expose action, domain object, and authority/truth
+    surface where relevant. Rename stale private helpers when behavior changes.
+  preferred_shape: "<verb>_<domain_object>[_<truth_surface>]"
+  allowed_generic_entrypoints:
+    - main
+    - build_parser
+    - run_cycle
+  vague_stems_to_avoid_unqualified:
+    - process
+    - handle
+    - fix
+    - update
+    - data
+    - helper
+  examples:
+    good:
+      - validate_receipt_payload
+      - build_context_pack
+      - run_closeout_lane
+    weak_without_domain:
+      - process
+      - handle
+      - fix_data
+
 class_selection_guide:
   enforcement: Repeatable repo policy, topology, structural lint, or contract gate.
   diagnostic: Read-only investigation; output is stdout and cannot authorize live changes.
@@ -115,6 +156,7 @@ long_lived_naming:
     topology_doctor_data_rebuild_checks.py: data-rebuild checker-family module imported by topology_doctor.py
     topology_doctor_digest.py: digest builder-family module imported by topology_doctor.py
     topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
+    topology_doctor_freshness_checks.py: freshness-metadata checker-family module imported by topology_doctor.py
     topology_doctor_map_maintenance.py: map-maintenance checker-family module imported by topology_doctor.py
     topology_doctor_packet_prefill.py: packet-prefill/invariant-slice builder-family module imported by topology_doctor.py
     topology_doctor_policy_checks.py: governance/policy checker-family module imported by topology_doctor.py
@@ -439,6 +481,7 @@ scripts:
   topology_doctor_data_rebuild_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for data-rebuild checker family}
   topology_doctor_digest.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for digest builder family}
   topology_doctor_docs_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for docs checker family}
+  topology_doctor_freshness_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for changed-file script/test freshness metadata checks}
   topology_doctor_map_maintenance.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for map-maintenance checker family}
   topology_doctor_packet_prefill.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for packet-prefill/invariant-slice builder family}
   topology_doctor_policy_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for governance/policy checker family}
