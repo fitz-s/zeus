@@ -2002,6 +2002,7 @@ def test_materialize_position_preserves_evaluator_strategy_key():
         city,
         DiscoveryMode.UPDATE_REACTION,
         state="entered",
+        env="paper",
         bankroll_at_entry=100.0,
         deps=deps,
     )
@@ -2048,6 +2049,7 @@ def test_materialize_position_rejects_missing_strategy_key():
             city,
             DiscoveryMode.UPDATE_REACTION,
             state="entered",
+            env="paper",
             bankroll_at_entry=100.0,
             deps=deps,
         )
