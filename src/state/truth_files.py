@@ -27,6 +27,11 @@ LEGACY_STATE_FILES = (
     "status_summary.json",
     "positions.json",
     "strategy_tracker.json",
+    "platt_models_low.json",
+    "calibration_pairs_low.json",
+)
+_LOW_LANE_FILES: frozenset[str] = frozenset(
+    f for f in LEGACY_STATE_FILES if "platt_models_low" in f or "calibration_pairs_low" in f
 )
 LEGACY_ARCHIVE_DIR = legacy_state_path("legacy_state_archive")
 
@@ -43,18 +48,30 @@ def build_truth_metadata(
     deprecated: bool = False,
     archived_to: str | None = None,
     authority: str = "UNVERIFIED",
+    temperature_metric: str | None = None,
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     mode = current_mode(mode)
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
-    return {
+    # Fail-closed: low-lane files stamped VERIFIED without temperature_metric silently
+    # misidentify the metric. Downgrade to UNVERIFIED to enforce explicit tagging.
+    resolved_authority = authority
+    if authority == "VERIFIED" and temperature_metric is None and Path(path).name in _LOW_LANE_FILES:
+        resolved_authority = "UNVERIFIED"
+    meta: dict[str, Any] = {
         "mode": mode,
         "generated_at": generated_at,
         "source_path": str(path),
         "stale_age_seconds": 0.0,
         "deprecated": deprecated,
         "archived_to": archived_to,
-        "authority": authority,
+        "authority": resolved_authority,
     }
+    if temperature_metric is not None:
+        meta["temperature_metric"] = temperature_metric
+    if data_version is not None:
+        meta["data_version"] = data_version
+    return meta
 
 
 def infer_mode_from_path(path: Path) -> str | None:
@@ -72,6 +89,8 @@ def annotate_truth_payload(
     mode: str | None = None,
     generated_at: str | None = None,
     authority: str = "UNVERIFIED",
+    temperature_metric: str | None = None,
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     enriched = dict(payload)
     enriched["truth"] = build_truth_metadata(
@@ -79,6 +98,8 @@ def annotate_truth_payload(
         mode=mode,
         generated_at=generated_at,
         authority=authority,
+        temperature_metric=temperature_metric,
+        data_version=data_version,
     )
     return enriched
 

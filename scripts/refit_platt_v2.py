@@ -55,7 +55,7 @@ from src.calibration.store import (
 from src.config import calibration_maturity_thresholds, calibration_n_bootstrap
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
-from src.types.metric_identity import HIGH_LOCALDAY_MAX
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 
 _, _, MIN_DECISION_GROUPS = calibration_maturity_thresholds()  # level3 = refit threshold
 
@@ -78,13 +78,13 @@ def _validate_p_raw_domain(bucket_key: str, p_raw: np.ndarray) -> None:
         )
 
 
-def _fetch_buckets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Fetch high-track buckets with sufficient maturity from calibration_pairs_v2."""
+def _fetch_buckets(conn: sqlite3.Connection, metric_identity: MetricIdentity) -> list[sqlite3.Row]:
+    """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs_v2."""
     return conn.execute("""
         SELECT cluster, season, data_version,
                COUNT(DISTINCT decision_group_id) AS n_eff
         FROM calibration_pairs_v2
-        WHERE temperature_metric = 'high'
+        WHERE temperature_metric = ?
           AND training_allowed = 1
           AND authority = 'VERIFIED'
           AND decision_group_id IS NOT NULL
@@ -92,7 +92,7 @@ def _fetch_buckets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
           AND p_raw IS NOT NULL
         GROUP BY cluster, season, data_version
         HAVING n_eff >= ?
-    """, (MIN_DECISION_GROUPS,)).fetchall()
+    """, (metric_identity.temperature_metric, MIN_DECISION_GROUPS)).fetchall()
 
 
 def _fetch_pairs_for_bucket(
@@ -100,18 +100,19 @@ def _fetch_pairs_for_bucket(
     cluster: str,
     season: str,
     data_version: str,
+    metric_identity: MetricIdentity,
 ) -> list[sqlite3.Row]:
     return conn.execute("""
         SELECT p_raw, lead_days, outcome, range_label, decision_group_id
         FROM calibration_pairs_v2
-        WHERE temperature_metric = 'high'
+        WHERE temperature_metric = ?
           AND training_allowed = 1
           AND authority = 'VERIFIED'
           AND cluster = ? AND season = ? AND data_version = ?
           AND decision_group_id IS NOT NULL
           AND decision_group_id != ''
           AND p_raw IS NOT NULL
-    """, (cluster, season, data_version)).fetchall()
+    """, (metric_identity.temperature_metric, cluster, season, data_version)).fetchall()
 
 
 def _fit_bucket(
@@ -120,12 +121,13 @@ def _fit_bucket(
     season: str,
     data_version: str,
     *,
+    metric_identity: MetricIdentity,
     dry_run: bool,
     stats: RefitStatsV2,
 ) -> None:
-    pairs = _fetch_pairs_for_bucket(conn, cluster, season, data_version)
+    pairs = _fetch_pairs_for_bucket(conn, cluster, season, data_version, metric_identity)
     n_eff = len({p["decision_group_id"] for p in pairs})
-    bucket_key = f"high:{cluster}:{season}:{data_version}"
+    bucket_key = f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}"
 
     if n_eff < MIN_DECISION_GROUPS:
         stats.buckets_skipped_maturity += 1
@@ -174,7 +176,7 @@ def _fit_bucket(
 
     deactivated = deactivate_model_v2(
         conn,
-        metric_identity=HIGH_LOCALDAY_MAX,
+        metric_identity=metric_identity,
         cluster=cluster,
         season=season,
         data_version=data_version,
@@ -184,7 +186,7 @@ def _fit_bucket(
 
     save_platt_model_v2(
         conn,
-        metric_identity=HIGH_LOCALDAY_MAX,
+        metric_identity=metric_identity,
         cluster=cluster,
         season=season,
         data_version=data_version,
@@ -206,29 +208,30 @@ def _fit_bucket(
 def refit_v2(
     conn: sqlite3.Connection,
     *,
+    metric_identity: MetricIdentity = HIGH_LOCALDAY_MAX,
     dry_run: bool,
     force: bool,
 ) -> RefitStatsV2:
     stats = RefitStatsV2()
 
     print("=" * 70)
-    print("PLATT V2 REFIT (high track, calibration_pairs_v2 → platt_models_v2)")
+    print("PLATT V2 REFIT (calibration_pairs_v2 → platt_models_v2)")
     print("=" * 70)
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
-    print(f"MetricIdentity: {HIGH_LOCALDAY_MAX}")
+    print(f"MetricIdentity: {metric_identity}")
     print(f"Min groups:     {MIN_DECISION_GROUPS}")
 
-    buckets = _fetch_buckets(conn)
+    buckets = _fetch_buckets(conn, metric_identity)
     stats.buckets_scanned = len(buckets)
     print(f"Buckets eligible (n_eff >= {MIN_DECISION_GROUPS}): {stats.buckets_scanned}")
 
     if not buckets:
         stats.refused = True
-        raise RuntimeError(
-            "refit_platt_v2 refused: no high-track bucket has at least "
-            f"{MIN_DECISION_GROUPS} distinct decision groups in calibration_pairs_v2. "
-            "Check that 4C rebuild_calibration_pairs_v2.py has been run."
+        print(
+            f"refit_platt_v2: no {metric_identity.temperature_metric}-track bucket has at least "
+            f"{MIN_DECISION_GROUPS} distinct decision groups — nothing to refit."
         )
+        return stats
 
     if not dry_run and not force:
         raise RuntimeError(
@@ -243,9 +246,9 @@ def refit_v2(
             cluster = bucket["cluster"]
             season = bucket["season"]
             data_version = bucket["data_version"]
-            bucket_key = f"high:{cluster}:{season}:{data_version}"
+            bucket_key = f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}"
             try:
-                _fit_bucket(conn, cluster, season, data_version, dry_run=dry_run, stats=stats)
+                _fit_bucket(conn, cluster, season, data_version, metric_identity=metric_identity, dry_run=dry_run, stats=stats)
             except Exception as e:
                 print(f"ERR {bucket_key}: {e}")
                 stats.buckets_failed += 1

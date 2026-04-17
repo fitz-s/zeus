@@ -1,223 +1,229 @@
-# Team-Lead Handoff (for post-compact main-thread)
+# Team-Lead Handoff (post-compact 2026-04-17)
 
-**Written**: 2026-04-16 pre-compact. Main-thread context reached ~85%; user decided to compact at natural Phase 4 close.
+**Written**: 2026-04-17 17:30+ local, post Phase 5A commit, pre-compact.
+**Prior versions archived in git history.** This file supersedes all earlier handoffs.
 
-## IMMEDIATE NEXT ACTIONS (in order)
+## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
-1. Read `~/.claude/agent-team-methodology.md` (the reusable playbook — your operating manual).
-2. Read THIS file.
-3. Read `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md` (master packet plan).
-4. Read the four final dumps in `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/`:
-   - `exec_bob_final_dump.md` (observation client, validate_members_unit)
-   - `exec_carol_final_dump.md` (cities.json, rebuild/refit scaffolding)
-   - `testeng_emma_final_dump.md` (R-letters catalog, antibody patterns)
-   - `scout_dave_final_dump.md` (directory cheat-sheet, hazard taxonomy)
-5. `git log --oneline -15` — confirm commit state.
+1. Read `~/.claude/agent-team-methodology.md` — your operating manual.
+2. Read `~/.claude/CLAUDE.md` § "Code Provenance: Legacy Is Untrusted Until Audited".
+3. Read THIS file IN FULL.
+4. Read `docs/authority/zeus_dual_track_architecture.md` (§2/§5/§6/§8 minimum).
+5. `git log --oneline -10` to confirm state.
+6. If team `zeus-dual-track` still exists (check `~/.claude/teams/`), resume with SendMessage re-intros. Otherwise re-create per template in § "Team Bootstrap".
 
 ## Branch + commit state
 
 Branch: `data-improve`
-Last 8 commits:
+Last relevant commits:
 
 ```
-5d0e191 Phase 4C + 4D: rebuild_calibration_pairs_v2 + refit_platt_v2 + team-lead dumps
-5c48847 Phase 4B: GRIB→v2 ingest pipeline implemented (task #53) + M1/M2a/M3/M5/M6/M7
-dcf6ca3 Phase 4A: foundation commits — API signatures + schema + quarantine + tests
-6e5de84 Phase 3: observation_client low_so_far + source registry collapse — Gate B open
-16e7385 Phase 2: World DB v2 schema + DT#1 commit ordering + DT#4 chain three-state
-b025883 Phase 1: MetricIdentity spine + FDR family scope split
-943e74d governance: Phase 0 dual-track constitution + death-trap law
-df12d9c governance: Phase 0b machine manifests for dual-track + death-trap law
+977d9ae Phase 5A: truth-authority spine + MetricIdentity view layer  ← NEEDS PUSH
+94cc1f9 fix(B063): rescue_events_v2 audit table with provenance authority
+177ae8b fix(B091): forward decision_time to evaluator + explicit fabrication warnings
+ef09dc3 docs(handoff): DT coordination handoff for 12 truly-RED bugs (Phase-5 split)
+7732701 Merge remote-tracking branch 'origin/data-improve'  ← earlier merge
+3b82dd5 Phase 4.5: GRIB→JSON extractor + R-L tightening + legacy-audit protocol
+cf85ca6 Phase 4.6: R-AA cities cross-validate — anchor on config/cities.json
 ```
 
-Working tree has pre-existing dirt from other agents (`state/*`, `docs/to-do-list/*.xlsx`, `README.md`, `raw/`, `zeus_dual_track_refactor_package_v2_2026-04-16/`, `.claude/worktrees/data-rebuild`) — NOT your concern. Ignore.
+Remote (`origin/data-improve` at push time): `94cc1f9`. `977d9ae` is local-only; **push if user approves**.
 
-## Gates status
+## Gate status (updated post-5B)
 
-- **Gate A** open (Phase 2): same-(city, target_date) carries high + low in v2 tables.
-- **Gate B** open (Phase 3): evaluator no longer rejects low Day0 for cities with working providers.
-- **Gate C** PENDING (Phase 4E): high canonical cutover parity. Blocked on Phase 4.5 extractor producing real JSON.
+- **Gate A, B, C** open (Phases 2-4 closed).
+- **Phase 5A** committed at `977d9ae` — truth authority + MetricIdentity view layer seam.
+- **Phase 5B** committed — low historical lane: extractor + ingest contract gate + rebuild/refit metric-aware + B078 absorbed. 41/41 R-AF..R-AO GREEN; full regression flat at 117 failed (baseline). critic-alice PASS verdict at `phase5_evidence/critic_alice_5B_verdict.md`.
+- **Phase 5C** next — replay MetricIdentity half-1 + Gate D (low-purity parity) + B093 half-1.
+- **Phase 6-9** future (Day0 split, shadow, limited activation).
 
-## Team state at compact
+## R-letter namespace update (5B lock)
 
-| Name | Role | Model | Compacts | Status | Action |
-|---|---|---|---|---|---|
-| critic-alice | adversarial critic | opus | 0 | **IDLE, retain** | resume after re-intro |
-| exec-bob | executor | sonnet | 3 | idle, dump written, awaiting shutdown | shutdown_request + spawn fresh `exec-dan` |
-| exec-carol | executor | sonnet | 2 | idle, dump written, awaiting shutdown | shutdown_request + spawn fresh `exec-emma` |
-| testeng-emma | test-engineer | sonnet | 2 | idle, dump written, awaiting shutdown | shutdown_request + spawn fresh `testeng-grace` |
-| scout-dave | scout | sonnet | 0-1 | idle, dump written, awaiting shutdown | shutdown_request + spawn fresh `scout-finn` |
+- R-AF..R-AO locked at 5B commit:
+  - R-AF (6): `validate_snapshot_contract` 3-law gating
+  - R-AG (5): extractor 5-function public API
+  - R-AH (2): Kelvin `members_unit` explicit
+  - R-AI (3): `data_version` exact + cross-metric rejection
+  - R-AJ (2): causality first-class
+  - R-AK (6): `CalibrationMetricSpec` + `METRIC_SPECS` 2-tuple
+  - R-AL (3): `iter_training_snapshots` metric isolation
+  - R-AM (3): ingest unblock + R-AM.4 scanner-isolation antibody
+  - R-AN (6): B078 low-lane truth metadata registry
+  - R-AO (5): `refit_platt_v2` low-metric isolation
+- R-AP reserved for 5B-follow-up (extractor behavioral coverage; see backlog).
 
-Team name: `zeus-dual-track` (config at `~/.claude/teams/zeus-dual-track/config.json`).
+## 5B-follow-up backlog (post-commit, fresh-team-owned)
 
-## Compact protocol + phantom-work protocol (standing, applies to you too)
+1. **R-AP** (testeng-grace's replacement): behavioral tests for `classify_boundary_low` — 3 synthetic cases (cross-midnight steal, safe boundary, inner-None-only). Currently R-AG only asserts importability; polarity-swap footgun still live.
+2. **`scripts/_tigge_common.py` extraction**: duplicated utilities (`compute_manifest_hash`, `_now_utc_iso`, `_city_slug`, `_overlap_seconds`) across mx2t6 + mn2t6 extractors. Drift-warning audit from critic.
+3. **Dead-code audit for `_extract_causality_status`** in `ingest_grib_to_snapshots.py` — unreachable post-5B contract wiring; safe to delete.
+4. **`scripts/scan_tigge_mn2t6_localday_coverage.py`** (deferred from 5B main scope): diagnostic scanner per remediation §8 (per-city quarantine rate alarm >20%). Not gating, diagnostic-only; scanner-isolation antibody R-AM.4 already installed.
 
-- You are main-thread; same rules apply. After compact: re-read `~/.claude/CLAUDE.md`, `~/.claude/agent-team-methodology.md`, root `AGENTS.md`, the plan.md.
-- Disk-verify every claim before acting. `git status` / `git diff` / real pytest output.
-- When you brief fresh teammates, they inherit the phantom-work + compact protocols from the methodology doc.
+## Team retirement protocol (post-5B, standing directive)
 
-## Phase 4 summary
+Per user directive (2026-04-17 pre-compact): team `zeus-dual-track` is **5B-only**. After commit:
+1. Each teammate writes `phase5b_to_phase5c_<name>_learnings.md` (500-800 words).
+2. Team-lead compact.
+3. Fresh team spawn for Phase 5C (new names; briefs carry methodology §"Critic role" as background but not as corrective patches).
 
-Phase 4 broke into 5 sub-phases + 1 new intermediary:
+## Zero-Data Golden Window (STANDING until user lifts)
 
-- **4A** (`dcf6ca3`): foundation — API signatures, schema `members_unit`, quarantine `peak_window` tag, INV-15 hotfix, 5 R-test files.
-- **4B** (`5c48847`): `ingest_grib_to_snapshots.py` implementation (stub→real). Reads pre-extracted JSON; writes `ensemble_snapshots_v2` with all provenance. Fails loudly on empty input dir (no-op until 4.5 produces JSON).
-- **4C + 4D** (`5d0e191`): `rebuild_calibration_pairs_v2.py` + `refit_platt_v2.py`. Pipeline architecturally complete; awaiting real data.
-- **4.5** (NOT STARTED): GRIB→JSON extractor. Assigned to fresh `exec-dan` (NOT exec-bob — bob retiring).
-- **4E** (PENDING): parity_diff.md + Gate C verification. Runs ONLY after 4.5 produces real JSON.
-
-## Phase 4.5 brief (for exec-dan)
-
-When you spawn `exec-dan`, give this brief:
-
-```
-You are exec-dan, FRESH sonnet executor for Zeus Phase 4.5 — GRIB→JSON
-extractor for the mx2t6 (high track) raw archive.
-
-## Mandatory reads (all)
-1. ~/.claude/agent-team-methodology.md (your operating manual)
-2. Repo root: AGENTS.md
-3. docs/authority/zeus_current_architecture.md §13-§22 + zeus_dual_track_architecture.md §2/§5/§6/§8
-4. Scoped AGENTS.md for src/data, src/contracts, scripts
-5. docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md
-6. docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_plan.md
-7. docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/exec_bob_final_dump.md ← TEACHES YOU what JSON shape to produce
-8. /Users/leofitz/.openclaw/workspace-venus/51 source data/TIGGE_LOCAL_CALENDAR_DAY_DUAL_TRACK_PLAN.md
-9. /Users/leofitz/.openclaw/workspace-venus/51 source data/TIGGE_MN2T6_LOCALDAY_MIN_REMEDIATION_PLAN.md (§3, §4, §5, §6 especially)
-
-## Your task
-Create scripts/extract_tigge_mx2t6_localday_max.py (high track).
-- Input: raw GRIB files at ~/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mx2t6/ (420 files, ~65GB, 2024-01-01..2025-09-24).
-- Output: JSON at ~/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_mx2t6_localday_max/{city_slug}/{issue_date}/tigge_ecmwf_mx2t6_localday_max_target_{target_date}_lead_{lead_day}.json
-- Schema MUST match what ingest_grib_to_snapshots.py expects (read exec_bob_final_dump.md for exact fields).
-- Dynamic step horizon per city (west-coast day7 may need step_204).
-- Boundary classification (inner / outside / boundary) with boundary_ambiguous flag.
-- Causality framework: pure_forecast_valid check; status defaults 'OK' for high.
-- Per-member mx2t6 local-calendar-day max aggregation.
-- manifest_hash = SHA-256 of content-addressed fields.
-- members_unit = 'degC' or 'degF' (NEVER 'K' — NO silent default).
-
-## R-invariants (testeng-grace drafts)
-- R-Q: extraction never produces members_unit='K'.
-- R-R: dynamic step horizon respects west-coast day7 > step_180.
-- R-S: boundary_ambiguous=true snapshots land with training_allowed=false.
-- R-T: causality N/A slots are labeled, not dropped.
-- R-U: manifest_hash stable across re-extractions of the same GRIB.
-
-## Cross-coordinate
-Read exec_bob_final_dump for JSON shape. Match EXACTLY. If you deviate, ingest_grib_to_snapshots.py will silently drop fields.
-
-## Dependencies
-cfgrib or pygrib library. If missing, add to requirements.txt (not pinned in repo today — exec-bob's dump may have notes).
-
-## Disk-verify + compact protocol
-Per methodology doc. Every edit: grep + git status + test output.
-
-## Deliver
-Report to team-lead when script + extraction smoke-test on 3 GRIB files passes. Do NOT run full 420-file extraction without critic-alice verdict.
-```
-
-## Zero-Data Golden Window (STANDING, issued 2026-04-17 by user)
-
-Zeus is in a one-time zero-data refactor state:
+Still active:
 - v2 tables zero rows (ensemble_snapshots_v2, calibration_pairs_v2, platt_models_v2).
-- TIGGE GRIB archive still downloading (420 files observed is NOT terminal).
-- legacy v1 tables have data but will not flip to v2 until all refactor phases + user approval.
+- TIGGE GRIB archive still downloading.
+- **No real ingest into any v2 table until user lifts**.
+- **Smoke tests = unit first, then ≤1 GRIB file for structural validation**. Output to `/tmp/`, never committed.
+- **No full-batch extraction runs**. 420+ file runs require user approval + download complete + critic PASS.
+- **Structural fixes are free now**. Bias every decision toward "fix structurally now, ingest later".
 
-### Standing rules until user lifts
+## Key philosophical lesson from 2026-04-17 (encode, don't lose)
 
-1. **No real ingest** into any v2 table. JSON on disk OK; DB row writes NOT OK.
-2. **Smoke tests = unit tests first, then ≤1 GRIB file for structural validation**. Output to `/tmp/`, not committed.
-3. **No full-batch extraction runs**. Full 420+ runs require user approval + complete download + prior critic PASS.
-4. **Structural fixes are free right now**. Any bug caught pre-ingest saves a data audit + rebuild later. Bias every decision toward "fix structurally now, ingest later."
-5. **Legacy code is untrusted until audited** (separate standing rule, methodology doc): any existing file in `scripts/` / `src/**` / outside-repo reference requires critic provenance audit before reuse.
+### Critic critiques the TASK and the TARGET, not the TEAMMATE
 
-### Why golden-window thinking matters
+Tonight's cascading problems came from critic reaching for "teammate violation / discipline breach" as the default hypothesis whenever disk state disagreed with a report. The actual cause was almost always:
+1. **Concurrent writes** flipping disk state between an agent's edit and critic's grep.
+2. **Compound grep patterns** (`"A\|B"`) failing shell escape.
+3. **Stale context** on the critic's side being presented as fresh.
 
-Translation loss applies: "this is the moment to do structural fixes for free" has ~20% intent-survival. Encode as on-disk standing rules (this section + methodology doc section "legacy code untrusted until audited"), not as prose intent.
+All of these are technical/timing artifacts — not teammate dishonesty.
 
-## Open scope rulings (issued during Phase 4)
+**Standing rule for next critic onboarding**:
+- Critic's job is to critique the CODE, the TEST COVERAGE, the STRUCTURAL SEAMS — not the teammate.
+- When disk disagrees with a teammate report, default hypothesis ordering:
+  1. Concurrent dispatch timing (another teammate's write between your reads).
+  2. Memory/report-state lag on the agent's side (pre-compact context, stale snapshot).
+  3. Genuine mistake (benign).
+  4. **Discipline breach — last resort, requires triple-verification**.
+- "Grep reveals X at line Y" is a disk-verifiable claim. If you claim it, run a FRESH bash grep right before you write the claim. Paste the bash output in your verdict as evidence.
+- Teammates are peers, not suspects. Language: "the diff shows", "the disk reveals", "the test needs" — NOT "exec-emma lied" or "exec-emma silently reverted".
 
-| Question | Ruling | Rationale |
-|---|---|---|
-| data_version tag: peak_window or calendar_day? | calendar_day (phase0 authority) | Phase 0 §2.2 is authoritative; remediation plan supersedes peak_window. |
-| members_unit DEFAULT 'degC' acceptable? | Yes + validate_members_unit guard | Structural defense > default avoidance when writer-seam guard exists. |
-| Parity Gate C thresholds | Accept critic proposal | median |Δp|≤0.005, p99≤0.02, Brier reg ≤2%, |ΔA|+|ΔB|≤0.10/bucket. |
-| INV-15 hotfix: fold or standalone? | Standalone precursor | 4A.0 separate commit boundary. |
-| causality_status field on Day0ObservationContext? | DENIED — Phase 6 scope | INV-16 binding but implementation seam is Day0LowNowcastSignal split. |
-| temperature_metric on Day0ObservationContext? | DENIED — runtime object ≠ DB row | INV-14 governs canonical tables, not runtime context. |
-| GRIB→JSON extractor: fold into 4B or separate? | SEPARATE (Phase 4.5) | Not a bolt-on; ~500 lines, own R-invariants, fresh agent context. |
-| Dead-table drop in 4A bundle | YES for 3 (promotion_registry, model_eval_point, model_eval_run); NO for model_skill (live writer in etl_historical_forecasts.py). | v2 migration transaction is cleanest moment. |
-| Phase 4 commit strategy | 5 sub-phase commits minimum | Critic review quality; rollback granularity; post-mortem precision. |
+**Standing rule for team-lead**:
+- If critic files a "discipline breach" finding, team-lead independently disk-verifies BEFORE escalating to the executor. Probably caught me ~3 times tonight as I echoed critic's framing at exec-emma before verifying.
+- When an instruction to an executor turns out to be scope creep by team-lead (e.g. tonight's `paper` mode addition), acknowledge AT ONCE. Don't let the executor carry the blame.
 
-## Open forward risks
+This rule should be encoded in the next critic's brief verbatim.
 
-- **Kelvin/degC drift**: pre-mortem identified as most-likely silent 2-week failure. validate_members_unit guard is the antibody; R-O + R-Q integration tests exercise it.
-- **Gate C parity meaningful ONLY after Phase 4.5**: today 4E would "PASS" on zero data. Block Gate C declaration until 4.5 produces real JSON.
-- **Phase 5 (low historical lane)** depends on the SAME extractor pattern + ingest pipeline. exec-bob's dump maps the symmetry; exec-carol's identifies where the low path diverges (causality N/A handling, boundary quarantine).
-- **Phase 6 (Day0 split)** depends on Phase 5 data + causality_status being populated correctly by the extractor.
-- **Scripts-tier CITY_STATIONS in backfill_wu_daily_all.py + oracle_snapshot_listener.py** — Phase C chore, not blocking any main phase.
-- **db.py god-object split** — Phase 2 architect recommended; chore after Phase 4E.
+## Team state at Phase 5A close
+
+| Name | Role | Model | Status | Action post-compact |
+|---|---|---|---|---|
+| critic-alice | opus critic | opus | active, 0 compacts | RETAIN. Add peer-not-suspect rule to her L0. |
+| scout-finn | sonnet scout | sonnet | active, idle | RETAIN. Phase 5B inventory next. |
+| testeng-grace | sonnet testeng | sonnet | active, idle | RETAIN. R-letters for 5B next. |
+| exec-emma | sonnet executor, Phase 5 owner | sonnet | active, idle | **RETAIN** (probation withdrawn after recalibration). |
+| exec-dan | sonnet executor, 5B lead | sonnet | active, idle (was standby) | RETAIN. Activate for 5B `extract_tigge_mn2t6_localday_min.py`. |
+
+No replacements needed. No retires. Team stays.
+
+## R-letter namespace ledger
+
+- R-A..R-P: Phases 1-4 (locked).
+- R-Q..R-U: Phase 4.5 (locked).
+- R-AA: Phase 4.6 cities cross-validate (locked).
+- R-AB/R-AC/R-AD/R-AE: Phase 5A (locked at `977d9ae`).
+  - R-AB: PortfolioState.authority field + 3 exit paths.
+  - R-AC: ModeMismatchError + mode threading.
+  - R-AD: MetricIdentity view layer (row + top-level emission).
+  - R-AE: canonical writer authority stamping (MAJOR-4 regression).
+- R-AF onward: Phase 5B low extractor R-invariants (to be drafted).
+
+Full ruling + namespace policy: `phase4_evidence/r_letter_namespace_ruling.md`.
+
+## Phase 5B opening brief (for exec-dan)
+
+### Scope
+- New file: `scripts/extract_tigge_mn2t6_localday_min.py` (~500-700 LOC).
+  - Mirror Phase 4.5 mx2t6 structural pattern, but with MIN aggregation semantics.
+  - **NOT a polarity swap**: boundary is **semantically different for MIN** (boundary can steal the minimum via cross-midnight leakage, not just be "close to edge"). Write `classify_boundary_low` from Phase 0 spec.
+  - `causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED"` emitted first-class for positive-offset cities where day0 local-midnight < issue_utc.
+  - 5 exported functions testeng-grace anchors R-letters against (signatures per exec-dan's pre-alignment sketch in his earlier a2a).
+- Unblock `scripts/ingest_grib_to_snapshots.py:253` `NotImplementedError` for low track.
+- `scripts/rebuild_calibration_pairs_v2.py` + `scripts/refit_platt_v2.py`: add `--track` arg.
+- `LEGACY_STATE_FILES` + `build_truth_metadata` low-lane extension (B078 absorption).
+- File-provenance headers on all new files (canonical format per `architecture/naming_conventions.yaml`).
+
+### Do NOT
+- Vendor from 51-source common module (critic's Phase 4.5 audit STALE_REWRITE verdict stands).
+- Touch truth authority seam (5A work; don't re-edit).
+- Add paper-mode anything (retired; antibody msg protects).
+- Run any real batch extraction (zero-data window; smoke ≤1 GRIB).
+
+### Section B absorption for 5B
+- **B078** lands IN the 5B commit (LEGACY_STATE_FILES low-lane entries + `temperature_metric`/`data_version` metadata requirements).
+
+### Critic posture for 5B onboarding (verbatim for her)
+> "You are critic-alice. Your job is to critique CODE QUALITY, TEST COVERAGE, STRUCTURAL SEAMS. Teammates are peers. When disk disagrees with a report, default hypothesis is concurrent timing or memory-lag, not teammate dishonesty. Fresh bash grep is the evidence currency. Discipline findings require triple-verification + team-lead concurrence."
+
+## Phase 5C brief (after 5B commits)
+
+### Scope
+- `src/engine/replay.py::_forecast_reference_for` — sentinel→typed-status fields (B093 half-1):
+  - `decision_reference_source: Literal["historical_decision","forecasts_table_synthetic"]`
+  - `decision_time_status: Literal["OK","SYNTHETIC_MIDDAY","UNAVAILABLE"]`
+  - `agreement: Literal["AGREE","DISAGREE","UNKNOWN"]`
+- Add code comment referencing Phase 7 for half-2 (table migration to `historical_forecasts_v2`).
+- Gate D test: `tests/test_phase5_gate_d_low_purity.py` — asserts high and low Platt models do not share buckets; asserts no cross-metric leakage in `calibration_pairs_v2`.
+
+### Do NOT (5C specifically)
+- Migrate replay's query source to `historical_forecasts_v2` — that's Phase 7 (requires v2 populated after full batch extraction).
+
+## Pending items / cleanups for later sub-phases
+
+- **5B MINOR-1**: delete unused `_RUNTIME_MODES` constant in `src/config.py:42` (now that paper is retired, the constant is dead).
+- **5B MINOR-2**: `src/state/db.py` view result `str(row["temperature_metric"] or "high")` — the `or "high"` is defensive dead code (column is NOT NULL via CHECK). Remove.
+
+## Legacy-code-untrusted-until-audited rule (standing, global)
+
+Per `~/.claude/CLAUDE.md § "Code Provenance: Legacy Is Untrusted Until Audited"` + Zeus `AGENTS.md § "Function Naming and Reuse Freshness"`. Enforcement:
+- Every new/touched `scripts/*.py` + `tests/test_*.py` requires `# Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never` header + `Purpose:` + `Reuse:`.
+- Machine check: `python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
+- Canonical source: `architecture/naming_conventions.yaml`.
+
+## OMC session-end hook state
+
+`~/.claude/plugins/marketplaces/omc/scripts/session-end.mjs` patched 2026-04-17 to early-return by default (preserves native teams across session boundaries). Env var `OMC_ENABLE_SESSION_END=1` restores original behavior. If `omc update` runs, re-apply the patch. Noted in `~/.claude/CLAUDE.md`.
+
+## Worktree state
+
+- Main tree (team-lead): `/Users/leofitz/.openclaw/workspace-venus/zeus` on `data-improve`.
+- Debug agent tree (isolated): `/Users/leofitz/.openclaw/workspace-venus/zeus-debug` on `data-improve-debug`. Peer path, not nested.
+- `.claude/worktrees/data-rebuild` nested worktree — user migrated debug agent out to peer path; nested one had activity during Phase 5A but per subagent inspection was safe to leave pending removal.
+
+5 `/tmp/zeus_*` worktrees + 1 stale entry were cleaned in `docs/operations/.../phase4_evidence/` sub-cleanup run.
+
+## Known forward risks
+
+- **MINOR cleanups listed above** — land in 5B or 5C as convenience.
+- **Replay table migration (B093 half-2)** deferred Phase 7. Phase 7 requires v2 populated by actual batch extraction (not yet authorized).
+- **`temperature_metric` CHECK in position_current** currently allows `'high'` DEFAULT; once Phase 5B starts writing `'low'` rows from low-track runtime, verify no caller silently accepts the DEFAULT.
 
 ## Phase roadmap post-compact
 
 ```
-Phase 4.5 — exec-dan implements scripts/extract_tigge_mx2t6_localday_max.py
-            critic-alice wide review
-            commit
-Phase 4E  — parity_diff_v2_vs_legacy.py + Gate C verification on real data
-            critic review
-            commit
-Phase 5   — low historical lane: reuse extract script (mn2t6) + ingest (already low-ready) + rebuild (refit metric='low') + Gate D low-purity verification
-Phase 6   — Day0 runtime split: Day0HighSignal + Day0LowNowcastSignal + router
-Phase 7   — metric-aware rebuild full cutover + Platt refit for both tracks
-Phase 8   — low shadow mode
-Phase 9   — low limited activation (Gate F) — risk-critical; DT#2/DT#5/DT#7 implementations land here
+Phase 5B — low extractor + ingest unblock + rebuild/refit --track (B078 absorbed)
+Phase 5C — replay half-1 + Gate D (B093 half-1 absorbed)
+Phase 6 — Day0HighSignal / Day0LowNowcastSignal split + DT#6 graceful-degradation (B055 absorbed)
+Phase 7 — metric-aware rebuild full cutover; replay migrates to historical_forecasts_v2 (B093 half-2)
+Phase 8 — low-lane shadow mode
+Phase 9 — low-lane limited activation (Gate F); risk-critical DT#2/DT#5/DT#7 land here
 ```
 
-## Fresh team composition recommendation
+## Do NOT (standing list for post-compact main-thread)
 
-Keep critic-alice (opus, zero compacts, multi-phase memory). Replace 4 sonnets:
+- Trust any critic "discipline breach" finding without independent disk-verify.
+- Treat concurrent-write timing artifacts as scope-creep violations.
+- Let paper mode back into `src/config.py` (retired; Zeus is live-only).
+- Push `977d9ae` without user confirmation (still unpushed as of this handoff).
+- Spawn new agents when existing ones are idle; resume the team.
+- Skip `architecture/naming_conventions.yaml` header format on new scripts/tests.
+- Do full-batch extraction without user approval + critic PASS.
 
-- `exec-dan` (sonnet, fresh) — Phase 4.5 GRIB→JSON extractor owner
-- `exec-emma` (sonnet, fresh) — Phase 5 low lane + Phase 7 rebuild (parallel to dan for cross-validation)
-- `testeng-grace` (sonnet, fresh) — R-Q..R-U for Phase 4.5/5/6/7
-- `scout-finn` (sonnet, fresh) — inventory + hazard catalog for Phase 5 onward
+## Status files on disk
 
-Each fresh spawn's brief must include:
-1. Mandatory reads (methodology + authority + plan + predecessor's final dump).
-2. Role (persistent across multiple phases).
-3. First small warmup task so discipline calibrates before high-stakes work.
+- This file: `docs/operations/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md`.
+- Phase 5 evidence: `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/`.
+- Coordination handoff: `docs/to-do-list/zeus_dt_coordination_handoff.md` (B069/B073/B077 flagged RESOLVED; B078/B093 open).
+- Methodology (global): `~/.claude/agent-team-methodology.md`.
+- Global rules: `~/.claude/CLAUDE.md` (Fitz methodology + Code Provenance + OMC session-end patch note).
 
-## Do NOT
-
-- Spawn any new work pre-compact (user instruction: stop).
-- Send shutdown_request to the 4 sonnets yet (they stay idle; post-compact you shutdown + replace as one coordinated round).
-- Commit anything else. Working tree has other-agent dirt; do not stage it.
-
-## First actions post-compact (concrete)
-
-1. Re-read the handoff above.
-2. Read `~/.claude/agent-team-methodology.md`.
-3. Read the 4 teammate final dumps (cite specific pages).
-4. `git log --oneline -10` to confirm commit state matches this doc.
-5. SendMessage critic-alice: "main-thread compacted and re-loaded. critic-alice, you stay. confirm authority chain still loaded and L0-L5 checklist intact."
-6. SendMessage the 4 sonnets (one by one): shutdown_request with `request_id`.
-7. Spawn fresh `exec-dan` + `exec-emma` + `testeng-grace` + `scout-finn` with briefs above.
-8. Dispatch scout-finn + testeng-grace for Phase 4.5 pre-work (inventory of extraction scripts that already exist in `scripts/` but don't implement the full contract; R-Q..R-U drafting).
-9. Dispatch exec-dan for Phase 4.5 main body.
-10. critic-alice reviews when exec-dan reports.
-
-## Status files on disk right now
-
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_plan.md` — Phase 4 plan
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4a_critic_verdicts.md` — 4A review
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4b_critic_verdicts.md` — 4B review
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4cd_critic_verdicts.md` — 4C+4D review
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/scout_inventory.md` — Phase 4 scout findings
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/low_data_gap_audit.md` — scientist one-shot audit (TIGGE + DB state)
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase4_architect_preread.md` — critic-alice's Phase 4 pre-read
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/phase3_to_phase4_*_learnings.md` × 4 — between-phase value extraction
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/phase4_evidence/*_final_dump.md` × 4 — retirement knowledge
-
-Nothing is unsaved. Everything that matters is on disk or in the remote branch.
+Phase 5A is a clean milestone. Post-compact continues from here with team intact, paper mode retired, truth-authority seam installed. Harmonious teammate relations restored.
