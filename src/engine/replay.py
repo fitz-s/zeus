@@ -370,7 +370,16 @@ class ReplayContext:
         for log_row in log_rows:
             try:
                 artifact = json.loads(log_row["artifact_json"])
-            except Exception:
+            except (json.JSONDecodeError, TypeError) as exc:
+                # B094 [YELLOW / flag for DT merge review]: narrow from bare
+                # Exception. A corrupt artifact_json must not kill the
+                # whole batch; log and continue so the rest of decision_log
+                # can still replay.
+                logger.warning(
+                    "REPLAY_ARTIFACT_JSON_CORRUPT: started_at=%s error=%s",
+                    log_row["started_at"],
+                    exc,
+                )
                 continue
 
             for trade_case in artifact.get("trade_cases", []) or []:
@@ -435,17 +444,44 @@ class ReplayContext:
             if shadow is not None and shadow["decision_snapshot_id"]:
                 try:
                     edges_payload = json.loads(shadow["edges_json"]) if shadow["edges_json"] else []
-                except Exception:
+                except (json.JSONDecodeError, TypeError) as exc:
+                    logger.warning(
+                        "REPLAY_SHADOW_EDGES_JSON_CORRUPT: timestamp=%s error=%s",
+                        shadow["timestamp"],
+                        exc,
+                    )
                     edges_payload = []
                 bin_labels = [edge.get("bin_label", "") for edge in edges_payload if edge.get("bin_label")]
+                # B094 [YELLOW / flag for DT merge review]: protect the two
+                # previously-unwrapped json.loads calls below; corrupt
+                # p_raw_json/p_cal_json must yield an empty vector rather
+                # than crash the entire reference-synthesis path.
+                try:
+                    p_raw_vector = json.loads(shadow["p_raw_json"]) if shadow["p_raw_json"] else []
+                except (json.JSONDecodeError, TypeError) as exc:
+                    logger.warning(
+                        "REPLAY_SHADOW_P_RAW_JSON_CORRUPT: timestamp=%s error=%s",
+                        shadow["timestamp"],
+                        exc,
+                    )
+                    p_raw_vector = []
+                try:
+                    p_cal_vector = json.loads(shadow["p_cal_json"]) if shadow["p_cal_json"] else []
+                except (json.JSONDecodeError, TypeError) as exc:
+                    logger.warning(
+                        "REPLAY_SHADOW_P_CAL_JSON_CORRUPT: timestamp=%s error=%s",
+                        shadow["timestamp"],
+                        exc,
+                    )
+                    p_cal_vector = []
                 best = {
                     "trade_id": "",
                     "decision_time": shadow["timestamp"],
                     "snapshot_id": int(shadow["decision_snapshot_id"]) if str(shadow["decision_snapshot_id"]).isdigit() else shadow["decision_snapshot_id"],
                     "source": "shadow_signals",
                     "bin_labels": bin_labels,
-                    "p_raw_vector": json.loads(shadow["p_raw_json"]) if shadow["p_raw_json"] else [],
-                    "p_cal_vector": json.loads(shadow["p_cal_json"]) if shadow["p_cal_json"] else [],
+                    "p_raw_vector": p_raw_vector,
+                    "p_cal_vector": p_cal_vector,
                     "p_market_vector": [],
                 }
 

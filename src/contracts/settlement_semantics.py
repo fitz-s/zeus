@@ -29,6 +29,24 @@ def round_wmo_half_up_value(value: float, precision: float = 1.0) -> float:
     return float(round_wmo_half_up_values([value], precision)[0])
 
 
+def apply_settlement_rounding(values, round_fn, precision: float = 1.0) -> np.ndarray:
+    """B081: shared settlement-rounding dispatch.
+
+    Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
+    otherwise falls back to WMO asymmetric half-up: floor(x + 0.5).
+    Result is float, not int - callers use >= / <= comparisons on Bin bounds.
+
+    Consolidates duplicated logic previously in
+    `src/strategy/market_analysis.py::MarketAnalysis._settle` and
+    `src/signal/day0_signal.py::Day0Signal._settle`. Flagged YELLOW because
+    a future unification with EnsembleSignal's SettlementSemantics-injected
+    round_values() path should route through here too.
+    """
+    if round_fn is not None:
+        return round_fn(values)
+    return round_wmo_half_up_values(values, precision)
+
+
 @dataclass(frozen=True)
 class SettlementSemantics:
     """Every market's unique resolution rules. Drifts in rounding/precision are fatal errors.
