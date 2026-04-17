@@ -313,14 +313,22 @@ def _check_entry_fill(
     #      the exchange state is genuinely unknown this cycle \u2014 the
     #      correct answer is ``still_pending`` so we retry next cycle.
     #   2. code defects (AttributeError on a wrong-shape clob, TypeError
-    #      from a regression, ImportError) which must NOT be silently
-    #      retried forever. These are exchange-silent latent bugs.
+    #      from a regression, ImportError, KeyError / IndexError from
+    #      ``_normalize_status`` reading a missing field) which must NOT
+    #      be silently retried forever. These are exchange-silent latent
+    #      bugs.
     # Re-raise the code-defect classes; legitimate IO failures still map
     # to ``still_pending``.
+    #
+    # Amendment (critic-alice review): KeyError / IndexError were omitted
+    # from the first pass. ``_normalize_status(payload)`` reads
+    # ``payload["status"]``; a malformed CLOB response shape would raise
+    # KeyError which was silently caught as ``still_pending``. Those two
+    # are now in the re-raise set.
     try:
         payload = clob.get_order_status(pos.entry_order_id)
         status = _normalize_status(payload)
-    except (AttributeError, TypeError, ImportError, NameError):
+    except (AttributeError, TypeError, ImportError, NameError, KeyError, IndexError):
         raise
     except Exception as exc:
         logger.warning("Fill check failed for %s: %s", pos.trade_id, exc)

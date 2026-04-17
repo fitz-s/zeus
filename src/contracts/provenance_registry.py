@@ -133,7 +133,18 @@ def _load_registry(yaml_path: Path) -> tuple[dict[str, ProvenanceRecord], bool]:
                         f"Duplicate provenance constant_name: {record.constant_name}"
                     )
                 registry[record.constant_name] = record
-            except (KeyError, ValueError, TypeError) as exc:
+            except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
+                # Amendment (critic-alice review): AttributeError was
+                # omitted from the first pass. A non-dict YAML entry
+                # (e.g. a bare string ``- "just text"`` in the
+                # constants list) calls ``entry.get("cascade_bound")``
+                # which raises AttributeError, falling through to the
+                # outer ``except Exception`` and poisoning the ENTIRE
+                # registry \u2014 exactly the failure B009 claimed to
+                # prevent. Live repro confirmed: a single string entry
+                # with 3 valid dict entries returned an empty registry
+                # and degraded=True. AttributeError + IndexError now
+                # in the per-entry tuple.
                 entries_skipped += 1
                 logger.error(
                     "provenance_registry.yaml entry skipped (%s): %s",

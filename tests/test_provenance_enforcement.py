@@ -252,3 +252,40 @@ constants:
         registry, degraded = _load_registry(f)
         assert registry == {}
         assert degraded is True
+
+
+    def test_b009_non_dict_entry_does_not_poison_registry(self, tmp_path):
+        """Amendment (critic-alice review): a bare string entry in the
+        ``constants`` list raises AttributeError on entry.get(...).
+        Before the amendment this would fall through to the outer
+        ``except Exception`` and poison the ENTIRE registry (empty +
+        degraded=True), defeating B009. With AttributeError in the
+        per-entry catch tuple, the string entry is logged and skipped
+        while valid sibling entries survive.
+        """
+        from src.contracts.provenance_registry import _load_registry
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(
+            "constants:\n"
+            "  - \"i am a bare string not a dict\"\n"
+            "  - constant_name: good1\n"
+            "    file_location: src/x.py:1\n"
+            "    declared_target: ev\n"
+            "    data_basis: calib_v1\n"
+            "    validated_at: 2026-01-01\n"
+            "    replacement_criteria: review\n"
+            "  - constant_name: good2\n"
+            "    file_location: src/y.py:2\n"
+            "    declared_target: risk_cap\n"
+            "    data_basis: calib_v1\n"
+            "    validated_at: 2026-01-01\n"
+            "    replacement_criteria: review\n"
+        )
+        registry, degraded = _load_registry(f)
+        assert degraded is False, (
+            "A non-dict entry must NOT mark the whole registry degraded; "
+            "per-entry isolation should log-and-skip. Got degraded=True."
+        )
+        assert "good1" in registry, "sibling valid entry must survive"
+        assert "good2" in registry, "sibling valid entry must survive"
+        assert len(registry) == 2
