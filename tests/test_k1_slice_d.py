@@ -146,3 +146,46 @@ def test_override_precedence_constant_exists():
     from src.riskguard.policy import OVERRIDE_PRECEDENCE
     assert OVERRIDE_PRECEDENCE["hard_safety"] > OVERRIDE_PRECEDENCE["manual_override"]
     assert OVERRIDE_PRECEDENCE["manual_override"] > OVERRIDE_PRECEDENCE["risk_action"]
+
+
+
+class TestB051MalformedRowIsolation:
+    """B051: _select_rows must isolate per-row parse failures.
+
+    Symptom before fix: a single malformed policy row (e.g. missing
+    ``action_type`` column) raised inside ``_select_rows`` before any
+    parsing began, killing strategy resolution for every other row in
+    the same batch.
+    """
+
+    def _make_row(self, **kwargs):
+        class MockRow(dict):
+            def __getitem__(self, key):
+                return dict.__getitem__(self, key)  # raises KeyError on miss
+            def keys(self):
+                return list(dict.keys(self))
+        return MockRow(**kwargs)
+
+    def test_malformed_row_isolated_good_rows_survive(self, caplog):
+        from src.riskguard.policy import _select_rows
+
+        good = self._make_row(action_type="gate", value="true", override_id="ok")
+        # Missing 'action_type' column -> KeyError on row["action_type"]
+        bad = self._make_row(value="true", override_id="bad")
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="src.riskguard.policy"):
+            result = _select_rows([bad, good])
+        assert len(result) == 1, "good row must survive when sibling row is malformed"
+        assert result[0]["override_id"] == "ok"
+        assert "malformed" in caplog.text.lower() or "skipped" in caplog.text.lower()
+        assert "bad" in caplog.text
+
+    def test_all_malformed_rows_returns_empty_not_crash(self, caplog):
+        from src.riskguard.policy import _select_rows
+        import logging
+        bad1 = self._make_row(value="x", override_id="b1")
+        bad2 = self._make_row(value="y", action_id="b2")
+        with caplog.at_level(logging.WARNING, logger="src.riskguard.policy"):
+            result = _select_rows([bad1, bad2])
+        assert result == []  # must NOT raise
