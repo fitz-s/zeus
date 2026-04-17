@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.config import ACTIVE_MODES, get_mode, legacy_state_path, mode_state_path
+
+logger = logging.getLogger(__name__)
 
 
 LEGACY_STATE_FILES = (
@@ -89,7 +92,17 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
                 0.0,
                 (datetime.now(timezone.utc) - gen_dt).total_seconds(),
             )
-        except Exception:
+        except (ValueError, TypeError, AttributeError) as exc:
+            # B079: narrow the silent-None fallback. fromisoformat raises
+            # ValueError on malformed strings; .replace/str coercion on a
+            # non-str value raises AttributeError/TypeError. Any other
+            # exception is a code defect and must propagate.
+            logger.warning(
+                "TRUTH_GENERATED_AT_UNPARSEABLE: path=%s generated_at=%r error=%s",
+                path,
+                generated_at,
+                exc,
+            )
             stale_age_seconds = None
     truth = dict(data.get("truth", {})) if isinstance(data.get("truth"), dict) else {}
     truth.setdefault("mode", infer_mode_from_path(path))

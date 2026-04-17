@@ -413,11 +413,29 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 chain_state=getattr(rescued, "chain_state", ""),
             )
             if not rescued.entered_at:
+                # B064: entered_at is fabricated because the pending position
+                # arrived at rescue with no real entry timestamp. Emit a
+                # structured warning so operators can notice + backfill, and
+                # avoid feeding the sentinel into temporal consumers below.
+                logger.warning(
+                    "ENTERED_AT_FABRICATED: trade_id=%s token=%s chain_state=%s rescued_at=%s",
+                    getattr(rescued, "trade_id", "?"),
+                    tid,
+                    getattr(rescued, "chain_state", "?"),
+                    now,
+                )
                 rescued.entered_at = "unknown_entered_at"
+                _entered_at_was_fabricated = True
+            else:
+                _entered_at_was_fabricated = False
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
             _sync_reconciled_trade_lifecycle(rescued)
-            _emit_rescue_event(rescued, rescued_at=rescued.entered_at or now)
+            # B064: when entered_at is the fabrication sentinel, the rescue
+            # event's display timestamp must be the reconcile `now`, not the
+            # sentinel string.
+            _rescue_display_ts = now if _entered_at_was_fabricated else (rescued.entered_at or now)
+            _emit_rescue_event(rescued, rescued_at=_rescue_display_ts)
             pos.entry_order_id = rescued.entry_order_id
             pos.order_id = rescued.order_id
             pos.chain_state = rescued.chain_state
