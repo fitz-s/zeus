@@ -34,6 +34,7 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "order_id",
     "order_status",
     "updated_at",
+    "temperature_metric",
 )
 
 
@@ -117,7 +118,8 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
             condition_id=excluded.condition_id,
             order_id=excluded.order_id,
             order_status=excluded.order_status,
-            updated_at=excluded.updated_at
+            updated_at=excluded.updated_at,
+            temperature_metric=excluded.temperature_metric
         """,
         ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
     )

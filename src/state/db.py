@@ -833,6 +833,26 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
 
     _ensure_runtime_bootstrap_support_tables(conn)
 
+    # Phase 5A (B069 / SD-1): add temperature_metric to position_current so the
+    # portfolio_loader_view can emit per-row metric identity.
+    # Zero-Data Golden Window precondition: this ALTER must only run on an empty table.
+    try:
+        row_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        logger.info(
+            "phase5a_alter_position_current: row_count=%d before ADD COLUMN temperature_metric",
+            row_count,
+        )
+        assert row_count == 0, (
+            f"Phase 5A ALTER expects empty position_current (Zero-Data Golden Window); "
+            f"found {row_count} rows"
+        )
+        conn.execute(
+            "ALTER TABLE position_current ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high' "
+            "CHECK (temperature_metric IN ('high', 'low'));"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn)
@@ -3131,36 +3151,54 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     }
 
 
-def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
+def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_metric: str | None = None) -> dict:
     if conn is None:
         return {
             "status": "skipped_no_connection",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
     if not _table_exists(conn, "position_current"):
         return {
             "status": "missing_table",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
 
+    actual_cols = {row[1] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()}
+    if "temperature_metric" not in actual_cols:
+        raise RuntimeError(
+            "position_current.temperature_metric column missing; "
+            "init_schema ALTER must have failed. Re-run init or check DB integrity."
+        )
+
+    where_clause = ""
+    params: tuple = ()
+    if temperature_metric is not None:
+        where_clause = "WHERE temperature_metric = ?"
+        params = (temperature_metric,)
+
     rows = conn.execute(
-        """
+        f"""
         SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
                direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-               chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
-        FROM position_current
+               chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
+               temperature_metric
+        FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
-        """
+        """,
+        params,
     ).fetchall()
     if not rows:
         return {
             "status": "empty",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
@@ -3209,12 +3247,14 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "exit_state": str(hints.get("exit_state") or ""),
                 "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
                 "entry_fill_verified": bool(hints.get("entry_fill_verified", False)),
+                "temperature_metric": str(row["temperature_metric"] or "high"),
             }
         )
     return {
         "status": "ok" if positions else "empty",
         "table": "position_current",
         "positions": positions,
+        "temperature_metric": temperature_metric,
     }
 
 

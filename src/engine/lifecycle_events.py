@@ -96,6 +96,7 @@ def build_position_current_projection(position: Any) -> dict:
         "order_id": _nullable(getattr(position, "order_id", "")),
         "order_status": _nullable(getattr(position, "order_status", "")),
         "updated_at": projection_updated_at(position),
+        "temperature_metric": getattr(position, "temperature_metric", "high"),
     }
 
 

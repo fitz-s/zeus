@@ -44,6 +44,12 @@ CANONICAL_STRATEGY_KEYS = {
 
 POSITIONS_PATH = state_path("positions.json")
 
+_TRUTH_AUTHORITY_MAP: dict[str, str] = {
+    "canonical_db": "VERIFIED",
+    "degraded": "VERIFIED",
+    "unverified": "UNVERIFIED",
+}
+
 
 @dataclass
 class ExitDecision:
@@ -671,6 +677,11 @@ class PortfolioState:
     # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
     # Cycle runner must suppress new entries when this flag is set.
     portfolio_loader_degraded: bool = False
+    # Phase 5A (B069/B073): truth authority of this state snapshot.
+    # "canonical_db"=loaded from authoritative DB projection.
+    # "degraded"=DB reachable but projection non-canonical.
+    # "unverified"=DB connection failed; callers must not trust this as authority.
+    authority: str = "unverified"
 
     @property
     def initial_bankroll(self) -> float:
@@ -955,6 +966,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             daily_baseline_total=bankroll,
             weekly_baseline_total=bankroll,
             portfolio_loader_degraded=True,
+            authority="unverified",
         )
 
     settlement_rows: list[dict] = []
@@ -999,6 +1011,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             weekly_baseline_total=bankroll,
             ignored_tokens=ignored_tokens,
             portfolio_loader_degraded=True,
+            authority="degraded",
         )
 
     positions = [
@@ -1028,6 +1041,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         weekly_baseline_total=bankroll,
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
         ignored_tokens=ignored_tokens,
+        authority="canonical_db",
     )
 
 
@@ -1068,7 +1082,13 @@ def save_portfolio(
     }
     if last_committed_artifact_id is not None:
         data["last_committed_artifact_id"] = last_committed_artifact_id
-    data = annotate_truth_payload(data, path, mode=get_mode(), generated_at=state.updated_at)
+    data = annotate_truth_payload(
+        data,
+        path,
+        mode=get_mode(),
+        generated_at=state.updated_at,
+        authority=_TRUTH_AUTHORITY_MAP.get(state.authority, "UNVERIFIED"),
+    )
 
     # Atomic write pattern per OpenClaw conventions
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")

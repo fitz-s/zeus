@@ -24,17 +24,20 @@ def legacy_state_path(filename: str) -> Path:
 
 
 def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
-    """State path — Zeus is live-only.
+    """State path — Zeus is live-only; mode is first-class routing param (B077 / SD-A).
 
-    The mode parameter is accepted for call-site compatibility but MUST be
-    None or 'live'. Any other value raises ValueError immediately.
+    The mode parameter is first-class (threaded through read_mode_truth_json)
+    but only "live" (or None) is accepted. Any other value raises ValueError.
+    Paper mode was retired; do not re-add without explicit scope decision.
     """
-    if mode is not None and mode != "live":
-        raise ValueError(f"mode_state_path called with invalid mode={mode!r} — Zeus state paths are live-only.")
+    resolved = mode or get_mode()
+    if resolved not in ACTIVE_MODES:
+        raise ValueError(f"mode_state_path called with invalid mode={resolved!r} — Zeus is live-only; paper retired.")
     return STATE_DIR / filename
 
 
 ACTIVE_MODES = ("live",)
+
 
 def get_mode() -> str:
     """Mode accessor. Reads from ZEUS_MODE env var (validated at startup)."""

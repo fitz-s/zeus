@@ -396,7 +396,7 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
         bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
         bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
-    status = annotate_truth_payload(status, STATUS_PATH, mode=get_mode(), generated_at=generated_at)
+    status = annotate_truth_payload(status, STATUS_PATH, mode=get_mode(), generated_at=generated_at, authority="VERIFIED")
     status["truth"]["db_primary_inputs"] = {
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",

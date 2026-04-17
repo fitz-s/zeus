@@ -14,6 +14,15 @@ from src.config import ACTIVE_MODES, get_mode, legacy_state_path, mode_state_pat
 logger = logging.getLogger(__name__)
 
 
+class ModeMismatchError(ValueError):
+    """Raised when a truth file's mode tag does not match the caller's requested mode.
+
+    B077 / SD-A: read_mode_truth_json must validate that the file on disk was
+    written for the same mode the caller expects. Live-vs-paper truth-file
+    collisions produce this error rather than silently serving wrong-mode data.
+    """
+
+
 LEGACY_STATE_FILES = (
     "status_summary.json",
     "positions.json",
@@ -33,6 +42,7 @@ def build_truth_metadata(
     generated_at: str | None = None,
     deprecated: bool = False,
     archived_to: str | None = None,
+    authority: str = "UNVERIFIED",
 ) -> dict[str, Any]:
     mode = current_mode(mode)
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
@@ -43,6 +53,7 @@ def build_truth_metadata(
         "stale_age_seconds": 0.0,
         "deprecated": deprecated,
         "archived_to": archived_to,
+        "authority": authority,
     }
 
 
@@ -60,12 +71,14 @@ def annotate_truth_payload(
     *,
     mode: str | None = None,
     generated_at: str | None = None,
+    authority: str = "UNVERIFIED",
 ) -> dict[str, Any]:
     enriched = dict(payload)
     enriched["truth"] = build_truth_metadata(
         path,
         mode=mode,
         generated_at=generated_at,
+        authority=authority,
     )
     return enriched
 
@@ -116,8 +129,18 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return data, truth
 
 
-def read_mode_truth_json(filename: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    return read_truth_json(mode_state_path(filename))
+def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = mode_state_path(filename, mode=mode)
+    data, truth = read_truth_json(path)
+    if mode is not None:
+        file_mode = truth.get("mode")
+        if file_mode is not None and file_mode != mode:
+            raise ModeMismatchError(
+                f"Truth file mode mismatch: caller requested mode={mode!r} but "
+                f"file at {path} is tagged mode={file_mode!r}. "
+                "This indicates a live-vs-paper routing error (B077 / SD-A)."
+            )
+    return data, truth
 
 
 def legacy_tombstone_payload(
