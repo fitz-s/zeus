@@ -1,8 +1,9 @@
 # Created: 2026-04-17
 # Last reused/audited: 2026-04-17
-# Authority basis: Zeus Dual-Track Metric Spine Refactor Phase 4.5;
+# Authority basis: Zeus Dual-Track Metric Spine Refactor Phase 4.5 + Phase 4.6;
 #                  docs/authority/zeus_dual_track_architecture.md §2/§5/§6/§8;
-#                  R-Q..R-U in tests/test_phase4_5_extractor.py.
+#                  R-Q..R-U in tests/test_phase4_5_extractor.py;
+#                  R-AA (cities cross-validate) in tests/test_phase4_6_cities_drift.py.
 #!/usr/bin/env python3
 """GRIB→JSON extractor for mx2t6 local-calendar-day max (high track only).
 
@@ -70,6 +71,15 @@ MEMBER_COUNT = 51
 
 _STEP_HOURS = 6
 _CEIL_EPSILON_HOURS = 1e-9
+_CITY_COORDINATE_TOLERANCE_DEG = 0.01
+
+
+class CityManifestDriftError(RuntimeError):
+    """Raised when Zeus cities.json and TIGGE manifest disagree on city names or coordinates.
+
+    Prevents silent wrong-grid extraction when canonical city config diverges from
+    the TIGGE manifest used to define bounding boxes.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +345,10 @@ def extract_track(
             f"Pass --manifest-path or ensure DEFAULT_MANIFEST={DEFAULT_MANIFEST} exists."
         )
 
+    # MAJOR-4 / Phase 4.6: fail-closed cross-validation before any extraction begins
+    if manifest_path is not None:
+        _cross_validate_city_manifests(cities_config, manifest_path)
+
     city_map = {c["name"]: c for c in cities_config}
     if cities:
         city_map = {k: v for k, v in city_map.items() if k in cities}
@@ -485,6 +499,50 @@ def _get_city_config(city_name: str, cities_config: list[dict] | None) -> dict:
         if c.get("city") == city_name or c.get("name") == city_name:
             return c
     raise ValueError(f"City {city_name!r} not found in cities config")
+
+
+def _cross_validate_city_manifests(cities_config: list[dict], manifest_path: Path) -> None:
+    """Assert Zeus cities.json and TIGGE manifest agree on city names and coordinates.
+
+    Authoritative source for city names: config/cities.json (Zeus canonical).
+    Fail-closed: raises CityManifestDriftError on any mismatch.
+    Tolerance: ±0.01° for lat/lon. Cities without lat/lon in Zeus cities.json
+    (11 US °F cities) are skipped for coordinate check — manifest is authoritative
+    for their grid coordinates.
+    """
+    zeus_map = {row.get("name") or row.get("city", ""): row for row in cities_config}
+    zeus_names = set(zeus_map.keys())
+
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_map = {row["city"]: row for row in manifest_data["cities"]}
+    manifest_names = set(manifest_map.keys())
+
+    only_in_zeus = zeus_names - manifest_names
+    only_in_manifest = manifest_names - zeus_names
+    if only_in_zeus or only_in_manifest:
+        raise CityManifestDriftError(
+            f"City name sets differ between Zeus cities.json and TIGGE manifest. "
+            f"Only in Zeus: {sorted(only_in_zeus)}. "
+            f"Only in manifest: {sorted(only_in_manifest)}."
+        )
+
+    tol = _CITY_COORDINATE_TOLERANCE_DEG
+    for city_name in zeus_names:
+        zeus_row = zeus_map[city_name]
+        if "lat" not in zeus_row or "lon" not in zeus_row:
+            continue
+        zeus_lat = float(zeus_row["lat"])
+        zeus_lon = float(zeus_row["lon"])
+        mfst_lat = float(manifest_map[city_name]["lat"])
+        mfst_lon = float(manifest_map[city_name]["lon"])
+        lat_drift = abs(zeus_lat - mfst_lat)
+        lon_drift = abs(zeus_lon - mfst_lon)
+        if lat_drift > tol or lon_drift > tol:
+            raise CityManifestDriftError(
+                f"Coordinate drift for {city_name!r}: "
+                f"zeus=({zeus_lat}, {zeus_lon}) manifest=({mfst_lat}, {mfst_lon}) "
+                f"drift=({lat_drift:.4f}°, {lon_drift:.4f}°) tolerance=±{tol}°"
+            )
 
 
 def _load_cities_config() -> list[dict]:
