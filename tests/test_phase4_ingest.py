@@ -359,3 +359,66 @@ class TestIngestJsonFileIntegration:
                     model_version="ecmwf_ens",
                     overwrite=False,
                 )
+
+    def test_ingest_json_file_writes_local_day_start_utc_and_step_horizon_hours(self):
+        """R-L: local_day_start_utc and step_horizon_hours must land as scalar DB columns.
+
+        Verifies the extractor→ingest hand-off: _finalize_record emits these two fields;
+        ingest_json_file must bind them to the named INSERT parameters, not silently drop them.
+        """
+        from scripts.ingest_grib_to_snapshots import ingest_json_file
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = self._make_conn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_extracted_json(Path(tmpdir))
+            # Inject R-L fields into the payload on disk
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["local_day_start_utc"] = "2026-04-16T05:00:00+00:00"
+            payload["step_horizon_hours"] = 204.0
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            status = ingest_json_file(
+                conn, path,
+                metric=HIGH_LOCALDAY_MAX,
+                model_version="ecmwf_ens",
+                overwrite=False,
+            )
+
+        assert status == "written", f"Expected 'written', got {status!r}"
+        row = conn.execute(
+            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots_v2"
+        ).fetchone()
+        assert row is not None, "No row written"
+        ldu, shh = row
+        assert ldu == "2026-04-16T05:00:00+00:00", (
+            f"local_day_start_utc not persisted as DB column, got {ldu!r}"
+        )
+        assert shh == 204.0, (
+            f"step_horizon_hours not persisted as DB column, got {shh!r}"
+        )
+
+    def test_ingest_json_file_handles_missing_local_day_start_utc_and_step_horizon_hours(self):
+        """R-L acceptance: payload without new fields must not crash — ingest defaults to NULL."""
+        from scripts.ingest_grib_to_snapshots import ingest_json_file
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = self._make_conn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_extracted_json(Path(tmpdir))  # no R-L fields
+            status = ingest_json_file(
+                conn, path,
+                metric=HIGH_LOCALDAY_MAX,
+                model_version="ecmwf_ens",
+                overwrite=False,
+            )
+
+        assert status == "written"
+        row = conn.execute(
+            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots_v2"
+        ).fetchone()
+        assert row is not None
+        # Both columns may be NULL when extractor omits them — that is acceptable
+        ldu, shh = row
+        assert ldu is None or isinstance(ldu, str), f"local_day_start_utc unexpected type: {type(ldu)}"
+        assert shh is None or isinstance(shh, (int, float)), f"step_horizon_hours unexpected type: {type(shh)}"

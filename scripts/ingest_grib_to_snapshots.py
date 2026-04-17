@@ -189,6 +189,10 @@ def ingest_json_file(
     prov_json = _provenance_json(payload, metric)
     lead_hours = _lead_hours(payload)
     now = _now_utc_iso()
+    # R-L: new provenance fields from local-calendar-day extractor (Phase 4.5)
+    local_day_start_utc = payload.get("local_day_start_utc") or None
+    step_horizon_hours = payload.get("step_horizon_hours")
+    step_horizon_hours = float(step_horizon_hours) if step_horizon_hours is not None else None
 
     row = dict(
         city=city,
@@ -211,6 +215,8 @@ def ingest_json_file(
         manifest_hash=manifest_hash,
         provenance_json=prov_json,
         members_unit=members_unit,
+        local_day_start_utc=local_day_start_utc,
+        step_horizon_hours=step_horizon_hours,
     )
 
     insert_verb = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
@@ -223,13 +229,13 @@ def ingest_json_file(
              issue_time, valid_time, available_at, fetch_time, lead_hours,
              members_json, model_version, data_version, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
-             members_unit)
+             members_unit, local_day_start_utc, step_horizon_hours)
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
              :members_json, :model_version, :data_version, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
-             :members_unit)
+             :members_unit, :local_day_start_utc, :step_horizon_hours)
             """,
             row,
         )

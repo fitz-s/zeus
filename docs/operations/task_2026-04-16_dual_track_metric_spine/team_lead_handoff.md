@@ -117,6 +117,25 @@ Per methodology doc. Every edit: grep + git status + test output.
 Report to team-lead when script + extraction smoke-test on 3 GRIB files passes. Do NOT run full 420-file extraction without critic-alice verdict.
 ```
 
+## Zero-Data Golden Window (STANDING, issued 2026-04-17 by user)
+
+Zeus is in a one-time zero-data refactor state:
+- v2 tables zero rows (ensemble_snapshots_v2, calibration_pairs_v2, platt_models_v2).
+- TIGGE GRIB archive still downloading (420 files observed is NOT terminal).
+- legacy v1 tables have data but will not flip to v2 until all refactor phases + user approval.
+
+### Standing rules until user lifts
+
+1. **No real ingest** into any v2 table. JSON on disk OK; DB row writes NOT OK.
+2. **Smoke tests = unit tests first, then ≤1 GRIB file for structural validation**. Output to `/tmp/`, not committed.
+3. **No full-batch extraction runs**. Full 420+ runs require user approval + complete download + prior critic PASS.
+4. **Structural fixes are free right now**. Any bug caught pre-ingest saves a data audit + rebuild later. Bias every decision toward "fix structurally now, ingest later."
+5. **Legacy code is untrusted until audited** (separate standing rule, methodology doc): any existing file in `scripts/` / `src/**` / outside-repo reference requires critic provenance audit before reuse.
+
+### Why golden-window thinking matters
+
+Translation loss applies: "this is the moment to do structural fixes for free" has ~20% intent-survival. Encode as on-disk standing rules (this section + methodology doc section "legacy code untrusted until audited"), not as prose intent.
+
 ## Open scope rulings (issued during Phase 4)
 
 | Question | Ruling | Rationale |

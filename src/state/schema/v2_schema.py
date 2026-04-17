@@ -160,6 +160,9 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         for alter_sql in [
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
+            # 4.5: R-L provenance fields for local-calendar-day extractor
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
         ]:
             try:
                 conn.execute(alter_sql)
