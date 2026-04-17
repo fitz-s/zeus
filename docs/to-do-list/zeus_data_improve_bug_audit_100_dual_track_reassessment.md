@@ -308,3 +308,115 @@ Explicitly NOT attempted this session; require DT coordination:
   (SettlementSemantics injection on MarketAnalysis) -- noted here
   because the audit estimated it as "small typed mixin" but the
   actual refactor touches every MarketAnalysis call site.
+
+---
+
+## Session 2026-04-18 addendum — DT dependency verification + GREEN/YELLOW unblock
+
+A follow-up DT dependency verification (classifying each deferred
+bug by *actual* Dual-Track coupling vs. coincidence-with-a-sensitive-
+file) revealed that several "deferred" bugs were either (a) already
+closed by earlier commits, or (b) not actually DT-coupled. Targeted
+fixes landed for GREEN + YELLOW items.
+
+### False-positive deferrals (already CLOSED — removed from pool)
+
+| Bug | Actual state per CSV |
+|---|---|
+| B011 | PRE_EXISTING_FIX `f6f612e` (control_plane.py loader defaults) |
+| B013 | PRE_EXISTING_FIX `f6f612e` (control_plane.py DB exception) |
+| B096 | ABSORBED_DUAL_TRACK `b025883` (cycle_runtime Phase 1 MetricIdentity) |
+| B098 | PRE_EXISTING_FIX (cycle_runtime) |
+
+### Additional commits this session-2
+
+| Commit | Bugs | Label |
+|---|---|---|
+| `cf9c148` | B064 (chain_reconciliation fabrication log) + B079 (truth_files parse narrow) | CLOSED (GREEN) |
+| `dd59c88` | B015 (GateDecision.enabled bool check) + B074 (portfolio projection env provenance) | CLOSED (YELLOW) |
+| `b815e9c` | B053 (riskguard mismatch ERROR) + B097 (cycle_runtime bankroll None reject) | CLOSED (YELLOW) |
+| `1d75bcf` | B094 (replay json.loads per-row isolation) + B081 (settlement_rounding helper extract) | CLOSED (YELLOW) |
+| `b4d140f` | Critic amendments (B079 OverflowError; B094 Unicode/Recursion; B074 unknown_env valid env + is_unverified_env helper + 5 tests) | strengthens previous 4 commits |
+
+**Net STILL_OPEN trajectory**: 37 → 22 (session 1) → **14** (session 2).
+
+### Updated zone-coupling reclassification
+
+The audit's original "Dual-Track zone" list was in part conservative
+rather than true DT coupling. Per the subagent DT dependency report:
+
+- **B064**: file is `chain_reconciliation.py`, NOT in the DT patch
+  map. Closed GREEN. (Audit §7c addendum incorrectly listed it as
+  db.py; the CSV correctly names chain_reconciliation.py.)
+- **B079**: §7a explicitly listed as "independent, land anytime".
+  The §7c conservative deferral was supersedable. Closed GREEN.
+- **B015, B074, B097, B053, B094, B081**: closed with YELLOW
+  sign-off markers in each commit message.
+
+### Truly RED — blocked on specific DT phases
+
+Documented in a dedicated follow-up: see
+`docs/to-do-list/zeus_dt_coordination_handoff.md` (to be written
+if the user elects that path).
+
+- **After DT schema v2**: B063, B070, B071, B100 (db.py family)
+- **After DT Phase 5 truth flag**: B073, B078, B077
+- **After DT Phase 5 low-lane MetricIdentity**: B069, B093
+- **After DT Phase 1/2 evaluator rewrite**: B091
+- **After DT Phase 6 graceful-degradation**: B055
+- **Requires architect packet (DT#1 commit-ordering)**: B099
+
+### Cross-contamination incidents this session-2
+
+The **`git diff --stat` pre-stage antibody** (added to
+`/memories/vscode_tooling_antibodies.md` after the first session-1
+incident on B066) fired twice during the YELLOW bundle and prevented
+unrelated other-agent edits from being staged into these commits:
+
+1. **`src/state/portfolio.py`** (during commit `dd59c88` prep):
+   another agent's in-workspace edit had silently reverted
+   `save_portfolio(..., last_committed_artifact_id=None)` kwarg
+   (DT#1 / INV-17 stale-detection feature at L1038-1069) and
+   removed a DT#1 exemption comment in `_track_exit`. Reset via
+   `git checkout HEAD -- src/state/portfolio.py` and single-edit
+   re-apply. Verified intact in HEAD after the reset.
+2. **`src/signal/day0_signal.py`** (during commit `1d75bcf` prep):
+   another agent's edit had stripped Phase-6 DT code — the
+   R4 bare-str rejection guard (`raise TypeError` on str
+   temperature_metric), the None rejection, and the R2 low-track
+   `raise NotImplementedError`. Stat showed 39-line diff for a
+   10-line intended edit; reset + re-apply cleaned it. Verified
+   intact in HEAD.
+
+Antibody remains effective; no contamination reached origin.
+
+### Critic review pass (post-commit)
+
+A second critic dispatch over the 8 bugs closed in session-2
+returned **zero MUST-FIX**. Five YELLOW nits were raised, of which
+two were immediately amendable and landed as `b4d140f`:
+
+- B079 now also excepts `OverflowError` (timedelta arithmetic
+  overflow on pathological datetime) — data defect, not code defect.
+- B094 now also excepts `UnicodeDecodeError` and `RecursionError`
+  on every narrowed `json.loads` site in replay.py — persisted
+  JSON is untrusted data.
+- B074 `"unknown_env"` is now a valid `_VALID_ENVS` member plus
+  `is_unverified_env()` module helper so downstream authority
+  consumers can distinguish UNVERIFIED rows rather than silently
+  bucketing them into the current runtime mode.
+
+Architect-track items (not amended this session):
+
+- **B097**: commit-message claim that "subsequent P&L is corrupted"
+  overstates risk — current prod caller at
+  `src/engine/cycle_runner.py:286` already traps `bankroll is None`
+  at L270 via `entries_blocked_reason`, so the new ValueError is
+  belt-and-suspenders. Remains a legitimate defense for future
+  refactors that remove the L270 guard.
+- **tests/test_runtime_guards.py L1968/L2013** pre-existing rot:
+  calls to `materialize_position(...)` missing the required-keyword
+  `env=` argument. Not this session's regression; raises TypeError
+  before reaching any of this session's new checks. Flagged for the
+  general test-hygiene backlog.
+
