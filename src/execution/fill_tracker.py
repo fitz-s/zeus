@@ -307,9 +307,21 @@ def _check_entry_fill(
     deps=None,
 ) -> tuple[str, bool, bool]:
     """Check CLOB status for a single pending entry. Returns outcome + dirty bits."""
+    # B041: typed error taxonomy (SD-B). The previous ``except Exception``
+    # conflated two distinct states under ``still_pending``:
+    #   1. legitimate transient IO errors (network / timeout / auth) where
+    #      the exchange state is genuinely unknown this cycle \u2014 the
+    #      correct answer is ``still_pending`` so we retry next cycle.
+    #   2. code defects (AttributeError on a wrong-shape clob, TypeError
+    #      from a regression, ImportError) which must NOT be silently
+    #      retried forever. These are exchange-silent latent bugs.
+    # Re-raise the code-defect classes; legitimate IO failures still map
+    # to ``still_pending``.
     try:
         payload = clob.get_order_status(pos.entry_order_id)
         status = _normalize_status(payload)
+    except (AttributeError, TypeError, ImportError, NameError):
+        raise
     except Exception as exc:
         logger.warning("Fill check failed for %s: %s", pos.trade_id, exc)
         return "still_pending", False, False
