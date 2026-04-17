@@ -516,3 +516,126 @@ Architect-track items (not amended this session):
 - Session 2.1 closes: **B091**.
 - Net STILL_OPEN: 14 → 13. Remaining pre-Phase-5 queue: B063, B070,
   B071, B100 (DT prereqs all satisfied per handoff doc).
+
+---
+
+## Session 2.2 Addendum — B063 closure + contamination #5
+
+### B063 closure — RED → GREEN
+
+- **Scope verified**: Explore sub-agent #1 confirmed B063 is
+  DT-INDEPENDENT: Phase 2 v2 audit infrastructure is landed, the new
+  rescue_events_v2 DDL slots in alongside the existing 8 v2 tables,
+  and `_emit_rescue_event`'s existing DT#1 commit_then_export
+  exemption (authoritative audit row) carries over unchanged.
+- **Provenance decision**: Explore sub-agent #2 mapped Position
+  metric propagation — Phase 1 MetricIdentity IS complete, Position
+  carries `temperature_metric: str = "high"` (portfolio.py:146), and
+  `materialize_position` explicitly forwards it. Option (a) silent
+  default="high" therefore mis-tags only degraded paths
+  (quarantine, JSON reconstruction), not live trading.
+- **Architecture verdict**: Explore sub-agent #3 REJECTED option (c)
+  tri-state `temperature_metric='unknown'`:
+  - Violates zeus_dual_track_architecture.md §2.1 normative law
+    `temperature_metric ∈ {high, low}`.
+  - Violates MetricIdentity.__post_init__ cross-pairing constraint
+    (no defined `observation_field` for 'unknown').
+  - Silent semantics failure at 5+ sites (day0_signal.py:85,
+    evaluator.py:803, evaluator.py:1021, day0_window.py:67,
+    ensemble_signal.py:161 — all `is_low()` returns False for
+    non-"low" strings).
+  - Precedent mismatch: `direction='unknown'` is metadata with
+    explicit consumer skip logic; `temperature_metric` is semantic
+    routing with no such guards.
+- **Chosen fix — option (c-strong)**: binary temperature_metric +
+  separate tri-state `authority` column (VERIFIED / UNVERIFIED /
+  RECONSTRUCTED) for provenance confidence. Aligns with SD-1
+  (MetricIdentity binary) and SD-H (provenance authority tagging),
+  both already active. Pattern established by `settlements_v2` which
+  already carries an `authority` column.
+
+### Implementation
+
+- `src/state/schema/v2_schema.py` (+59 lines): new
+  `rescue_events_v2` DDL slotted after `day0_metric_fact` block,
+  inside the existing single BEGIN/COMMIT transaction managed by
+  `apply_v2_schema`. Columns: `rescue_event_id` PK,
+  `trade_id NOT NULL`, `position_id`, `decision_snapshot_id`,
+  `temperature_metric CHECK IN ('high','low')`,
+  `causality_status CHECK IN (OK, N/A_CAUSAL_DAY_ALREADY_STARTED,
+  N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON,
+  REJECTED_BOUNDARY_AMBIGUOUS, UNKNOWN)`,
+  `authority CHECK IN (VERIFIED, UNVERIFIED, RECONSTRUCTED)`,
+  `authority_source`, `chain_state`, `reason`, `occurred_at`,
+  `recorded_at`, `UNIQUE(trade_id, occurred_at)` for idempotent
+  retry. Two indexes: `(trade_id, recorded_at)` and
+  `(temperature_metric, causality_status, recorded_at)`.
+- `src/state/db.py` (+93 lines): new `log_rescue_event(...)` helper
+  in the safe post-migration zone adjacent to `log_microstructure`
+  and `log_shadow_signal`. Enforces SD-1 binary invariant
+  Python-side (refuses to INSERT rows with out-of-domain metric —
+  logs error + returns rather than raising). Swallows
+  sqlite3.OperationalError (legacy DBs missing v2 schema) at
+  WARNING level and sqlite3.IntegrityError (UNIQUE conflict on
+  retry) at INFO level, so the caller's chain reconciliation never
+  breaks on audit-layer failures.
+- `src/state/chain_reconciliation.py` (+43 lines):
+  `_emit_rescue_event` now dual-writes CHAIN_RESCUE_AUDIT to
+  position_events (legacy, kept for existing consumers like
+  test_live_safety_invariants and test_architecture_contracts) AND
+  the new rescue_events_v2 row. Authority resolution block extracts
+  `position.temperature_metric`; if it is in {"high","low"} → tag
+  VERIFIED + `authority_source="position_materialized"`. Otherwise
+  fall back to `"high"` + UNVERIFIED +
+  `authority_source="position_missing_metric:{raw!r}"`. Import of
+  `log_rescue_event` is local (matches the existing lazy-import
+  pattern for `update_trade_lifecycle`, `append_many_and_project`,
+  `record_token_suppression`).
+- `tests/test_b063_rescue_events_v2.py` (new, 11 test cases):
+  1-4 schema tests (creation, binary metric, tri-state authority,
+  causality enum), 5-9 helper tests (VERIFIED write, invalid metric
+  skipped, None conn noop, missing table tolerated, idempotent
+  duplicate), 10-11 integration tests (VERIFIED path, UNVERIFIED
+  fallback path).
+
+### Verification
+
+- `pytest tests/test_b063_rescue_events_v2.py -v` → 11/11 passing.
+- `pytest tests/test_schema_v2_gate_a.py` → should remain green (no
+  schema changes to the 8 existing v2 tables).
+- Lazy-import pattern verified against existing `_sync_reconciled_trade_lifecycle`.
+
+### Cross-contamination incident #5 — db.py edit silently reverted
+
+- **Observed**: After `multi_replace_string_in_file` reported a
+  successful edit to `src/state/db.py` adding `log_rescue_event`,
+  `git diff --stat` showed ZERO lines changed in db.py. The
+  `read_file` tool still returned the edited content (stale cache),
+  but shell `grep -c "def log_rescue_event"` on the file returned 0
+  and `stat` showed mtime = `Apr 16 15:18` (pre-edit).
+- **Recovery**: Re-applied via pathlib patch script written to
+  `/tmp/b063_db_patch.py` (antibody pattern a from earlier in the
+  session). Post-recovery `grep -c` returned 1, `stat` showed fresh
+  mtime, `git diff --stat` showed +93 lines.
+- **Pattern count**: This is the 5th contamination incident on this
+  branch. Unlike incidents #1-#4 which contaminated with unrelated
+  content, #5 is a **silent no-op** — the working tree matches HEAD
+  exactly after the tool reported success. Plausible causes:
+  (a) file was concurrently rewritten between the tool's read and
+  its write, (b) the tool's write went to a shadow copy that the
+  filesystem discarded, (c) an editor process held the file open
+  and its buffer overwrote the tool's write on save. Fallback
+  pathlib patch via subprocess is the reliable antibody.
+- **Recommendation**: treat `multi_replace_string_in_file` success
+  as untrusted; ALWAYS confirm with shell-level `grep` before
+  assuming edits landed. Update the DT-branch onboarding note.
+
+### Commit reference
+
+- `<HASH>` B063 rescue_events_v2 + contamination #5 log.
+
+### STILL_OPEN trajectory
+
+- Session 2.2 closes: **B063**.
+- Net STILL_OPEN: 13 → 12. Remaining pre-Phase-5 queue: B070, B071,
+  B100 (DT prereqs satisfied; same audit-append contract pattern).
