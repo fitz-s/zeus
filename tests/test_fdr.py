@@ -429,10 +429,11 @@ class TestSelectionFamilySubstrate:
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
         monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
         monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
             evaluator_module,
-            "remaining_member_maxes_for_day0",
-            lambda *args, **kwargs: (np.array([70.0, 71.0, 72.0, 73.0]), 2.0),
+            "remaining_member_extrema_for_day0",
+            lambda *args, **kwargs: (_REM(maxes=np.array([70.0, 71.0, 72.0, 73.0]), mins=None), 2.0),
         )
         monkeypatch.setattr(
             evaluator_module,
@@ -572,10 +573,11 @@ class TestSelectionFamilySubstrate:
             "_get_day0_temporal_context",
             lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=now),
         )
+        from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
             evaluator_module,
-            "remaining_member_maxes_for_day0",
-            lambda *args, **kwargs: (np.array([70.0, 71.0, 72.0, 73.0]), 2.0),
+            "remaining_member_extrema_for_day0",
+            lambda *args, **kwargs: (_REM(maxes=np.array([70.0, 71.0, 72.0, 73.0]), mins=None), 2.0),
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
@@ -716,10 +718,11 @@ class TestSelectionFamilySubstrate:
             "_get_day0_temporal_context",
             lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=now),
         )
+        from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
             evaluator_module,
-            "remaining_member_maxes_for_day0",
-            lambda *args, **kwargs: (np.array([70.0, 71.0, 72.0, 73.0]), 2.0),
+            "remaining_member_extrema_for_day0",
+            lambda *args, **kwargs: (_REM(maxes=np.array([70.0, 71.0, 72.0, 73.0]), mins=None), 2.0),
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)

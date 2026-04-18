@@ -54,7 +54,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
-from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, METRIC_SPECS
+from src.calibration.metric_specs import CalibrationMetricSpec, METRIC_SPECS
 
 
 def _parse_range_label(label: str) -> tuple[Optional[float], Optional[float]]:

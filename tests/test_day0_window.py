@@ -2,7 +2,19 @@ from datetime import date, datetime, timezone
 
 import numpy as np
 
-from src.signal.day0_window import remaining_member_maxes_for_day0
+from src.signal.day0_window import remaining_member_extrema_for_day0
+
+
+def _maxes_for_day0(*args, **kwargs):
+    """Shim for test ergonomics — returns (maxes_array, hours) from the new dataclass API.
+    HIGH-track callers only (uses .maxes). Migrated from removed
+    `remaining_member_maxes_for_day0` alias in Phase 7B.
+    """
+    extrema, hours = remaining_member_extrema_for_day0(*args, **kwargs)
+    if extrema is None:
+        import numpy as _np
+        return _np.array([]), hours
+    return extrema.maxes, hours
 
 
 def test_day0_window_respects_target_local_date_for_tokyo():
@@ -14,7 +26,7 @@ def test_day0_window_respects_target_local_date_for_tokyo():
         "2025-03-10T03:00:00+00:00",  # 12:00 JST on 03-10
     ]
 
-    remaining, hours = remaining_member_maxes_for_day0(
+    remaining, hours = _maxes_for_day0(
         members,
         times,
         "Asia/Tokyo",
@@ -36,7 +48,7 @@ def test_day0_window_respects_dst_transition_for_new_york():
         "2025-03-09T12:00:00+00:00",  # 08:00 EDT
     ]
 
-    remaining, hours = remaining_member_maxes_for_day0(
+    remaining, hours = _maxes_for_day0(
         members,
         times,
         "America/New_York",
@@ -56,7 +68,7 @@ def test_day0_window_returns_empty_when_target_day_has_no_remaining_hours():
         "2025-03-09T08:00:00+00:00",  # 04:00 EDT
     ]
 
-    remaining, hours = remaining_member_maxes_for_day0(
+    remaining, hours = _maxes_for_day0(
         members,
         times,
         "America/New_York",

@@ -71,20 +71,8 @@ def remaining_member_extrema_for_day0(
     return RemainingMemberExtrema.for_metric(arr, temperature_metric), float(len(remaining_idxs))
 
 
-# Backward-compat alias — callers migrated to remaining_member_extrema_for_day0 in Phase 6.
-# Remove after all callsites confirmed updated.
-def remaining_member_maxes_for_day0(
-    members_hourly: np.ndarray,
-    times: list[str],
-    timezone_name: str,
-    target_d: date,
-    *,
-    now: datetime | None = None,
-    temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
-) -> tuple[np.ndarray, float]:
-    extrema, hours = remaining_member_extrema_for_day0(
-        members_hourly, times, timezone_name, target_d, now=now, temperature_metric=temperature_metric
-    )
-    if extrema is None:
-        return np.array([]), hours
-    return (extrema.mins if temperature_metric.is_low() else extrema.maxes), hours
+# Backward-compat alias `remaining_member_maxes_for_day0` REMOVED in Phase 7B.
+# All production callers migrated to remaining_member_extrema_for_day0 in Phase 6.
+# All test callers migrated in Phase 7B. Use the dataclass-returning entry point:
+#     extrema, hours = remaining_member_extrema_for_day0(...)
+#     arr = extrema.maxes  # HIGH — use .mins for LOW
