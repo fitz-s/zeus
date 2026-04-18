@@ -287,16 +287,22 @@ class TestR_BL_BackfillMetricScoped:
             """
             INSERT INTO ensemble_snapshots_v2
             (city, target_date, issue_time, lead_hours, available_at,
-             temperature_metric, observation_field, data_version, authority,
+             temperature_metric, physical_quantity, observation_field,
+             fetch_time, model_version,
+             data_version, authority,
              training_allowed, causality_status, members_json, p_raw_json,
              contract_version, boundary_ambiguous, boundary_min_value, unit)
             VALUES
             ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
-             'high', 'high_temp', ?, 'VERIFIED', 1, 'OK',
+             'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+             '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
+             ?, 'VERIFIED', 1, 'OK',
              '[78.0, 80.5, 82.1, 83.2, 84.5]', NULL,
              'ingest-v2.1', 0, NULL, 'F'),
             ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
-             'low', 'low_temp', ?, 'VERIFIED', 1, 'OK',
+             'low', 'mn2t6_local_calendar_day_min', 'low_temp',
+             '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
+             ?, 'VERIFIED', 1, 'OK',
              '[60.0, 62.0, 63.5, 64.0, 65.2]', NULL,
              'ingest-v2.1', 0, NULL, 'F')
             """,
@@ -319,4 +325,164 @@ class TestR_BL_BackfillMetricScoped:
         assert low_row["p_raw_json"] is None, (
             "LOW snapshot must NOT be written to during HIGH-spec backfill — "
             "bin lookup 永不跨 metric union"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R-BM: _fetch_verified_observation is metric-aware (CRITICAL-1 antibody)
+# ---------------------------------------------------------------------------
+
+class TestR_BM_FetchObservationMetricAware:
+    """R-BM: _fetch_verified_observation(spec=LOW) reads low_temp column, not high_temp."""
+
+    def _setup_observations(self, conn):
+        conn.execute(
+            """
+            INSERT INTO observations
+            (city, target_date, high_temp, low_temp, unit, authority, source)
+            VALUES
+            ('Chicago', '2026-06-15', 82.0, 60.0, 'F', 'VERIFIED', 'wu'),
+            ('NYC', '2026-07-01', 88.0, NULL, 'F', 'VERIFIED', 'wu'),
+            ('Boston', '2026-07-01', NULL, 55.0, 'F', 'VERIFIED', 'wu')
+            """
+        )
+
+    def test_R_BM_1_fetch_observation_high_spec_returns_high_temp(self, conn):
+        """spec=HIGH yields observed_value from high_temp column."""
+        from scripts.rebuild_calibration_pairs_v2 import (
+            _fetch_verified_observation, METRIC_SPECS,
+        )
+        self._setup_observations(conn)
+        high_spec = METRIC_SPECS[0]
+
+        obs = _fetch_verified_observation(conn, "Chicago", "2026-06-15", spec=high_spec)
+
+        assert obs is not None, "HIGH observation must be returned for Chicago 2026-06-15"
+        assert obs["observed_value"] == 82.0, (
+            f"HIGH-spec fetch must return high_temp=82.0, got {dict(obs)}"
+        )
+
+    def test_R_BM_2_fetch_observation_low_spec_returns_low_temp(self, conn):
+        """spec=LOW yields observed_value from low_temp column (CRITICAL-1 fix)."""
+        from scripts.rebuild_calibration_pairs_v2 import (
+            _fetch_verified_observation, METRIC_SPECS,
+        )
+        self._setup_observations(conn)
+        low_spec = METRIC_SPECS[1]
+
+        obs = _fetch_verified_observation(conn, "Chicago", "2026-06-15", spec=low_spec)
+
+        assert obs is not None, "LOW observation must be returned for Chicago 2026-06-15"
+        assert obs["observed_value"] == 60.0, (
+            f"LOW-spec fetch must return low_temp=60.0, got {dict(obs) if obs else None}"
+        )
+
+    def test_R_BM_3_fetch_observation_low_ignores_high_only_rows(self, conn):
+        """spec=LOW must NOT return rows where low_temp IS NULL (even if high_temp present)."""
+        from scripts.rebuild_calibration_pairs_v2 import (
+            _fetch_verified_observation, METRIC_SPECS,
+        )
+        self._setup_observations(conn)
+        low_spec = METRIC_SPECS[1]
+
+        obs = _fetch_verified_observation(conn, "NYC", "2026-07-01", spec=low_spec)
+
+        assert obs is None, (
+            "LOW-spec fetch must refuse rows with low_temp IS NULL — no cross-metric "
+            "fallback onto high_temp. NYC only has high_temp."
+        )
+
+
+# ---------------------------------------------------------------------------
+# R-BN: schema observation_field has NO silent default (MAJOR-1 antibody)
+# ---------------------------------------------------------------------------
+
+class TestR_BN_SchemaRefusesMinimalInsert:
+    """R-BN: ensemble_snapshots_v2 INSERT without observation_field must raise
+    (category-impossibility preserved at SQL seam)."""
+
+    def test_R_BN_1_insert_without_observation_field_raises(self, conn):
+        """INSERT with temperature_metric='low' but NO observation_field must fail NOT NULL."""
+        with pytest.raises(sqlite3.IntegrityError, match="observation_field"):
+            conn.execute(
+                """
+                INSERT INTO ensemble_snapshots_v2
+                (city, target_date, temperature_metric, issue_time, available_at,
+                 lead_hours, members_json, data_version, authority, training_allowed,
+                 causality_status, physical_quantity, fetch_time, model_version)
+                VALUES
+                ('NYC', '2026-01-15', 'low',
+                 '2026-01-14T00:00:00+00:00', '2026-01-14T06:00:00+00:00', 24,
+                 '[5.0, 6.0, 7.0, 8.0, 9.0]',
+                 'tigge_mn2t6_local_calendar_day_min_v1',
+                 'VERIFIED', 1, 'OK',
+                 'mn2t6_local_calendar_day_min',
+                 '2026-01-14T06:05:00+00:00', 'tigge-ens-51')
+                """
+            )
+
+    def test_R_BN_2_insert_without_physical_quantity_raises(self, conn):
+        """Same antibody on physical_quantity — no silent default."""
+        with pytest.raises(sqlite3.IntegrityError, match="physical_quantity"):
+            conn.execute(
+                """
+                INSERT INTO ensemble_snapshots_v2
+                (city, target_date, temperature_metric, issue_time, available_at,
+                 lead_hours, members_json, data_version, authority, training_allowed,
+                 causality_status, observation_field, fetch_time, model_version)
+                VALUES
+                ('NYC', '2026-01-15', 'high',
+                 '2026-01-14T00:00:00+00:00', '2026-01-14T06:00:00+00:00', 24,
+                 '[270.0, 271.0, 272.0]',
+                 'tigge_mx2t6_local_calendar_day_max_v1',
+                 'VERIFIED', 1, 'OK', 'high_temp',
+                 '2026-01-14T06:05:00+00:00', 'tigge-ens-51')
+                """
+            )
+
+
+# ---------------------------------------------------------------------------
+# R-BO: backfill_v2 enforces assert_data_version_allowed (MAJOR-2 antibody)
+# ---------------------------------------------------------------------------
+
+class TestR_BO_BackfillDataVersionContract:
+    """R-BO: backfill_v2 must call assert_data_version_allowed before UPDATE."""
+
+    def test_R_BO_1_backfill_rejects_quarantined_data_version(self, conn):
+        """Synthetic row with quarantined data_version → backfill raises DataVersionQuarantinedError."""
+        from scripts.backfill_tigge_snapshot_p_raw_v2 import backfill_v2, METRIC_SPECS
+        from src.contracts.ensemble_snapshot_provenance import DataVersionQuarantinedError
+
+        _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
+                               temperature_metric="high", range_label="80-84")
+        # Insert snapshot with a NON-canonical data_version (not in _CANONICAL_DATA_VERSIONS)
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2
+            (city, target_date, issue_time, lead_hours, available_at,
+             temperature_metric, physical_quantity, observation_field,
+             fetch_time, model_version,
+             data_version, authority,
+             training_allowed, causality_status, members_json, p_raw_json,
+             contract_version, boundary_ambiguous, boundary_min_value, unit)
+            VALUES
+            ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
+             'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+             '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
+             'tigge_experimental_v99', 'VERIFIED', 1, 'OK',
+             '[78.0, 80.5, 82.1, 83.2, 84.5]', NULL,
+             'ingest-v2.1', 0, NULL, 'F')
+            """
+        )
+
+        high_spec = METRIC_SPECS[0]
+        with pytest.raises(DataVersionQuarantinedError, match="tigge_experimental_v99"):
+            backfill_v2(conn, dry_run=False, force=True, spec=high_spec)
+
+        # Row must not have been updated (rollback / no write)
+        row = conn.execute(
+            "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE data_version = 'tigge_experimental_v99'"
+        ).fetchone()
+        assert row["p_raw_json"] is None, (
+            "Backfill must NOT write p_raw to quarantined-data_version rows"
         )

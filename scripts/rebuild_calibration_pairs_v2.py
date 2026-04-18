@@ -171,14 +171,24 @@ def _fetch_verified_observation(
     conn: sqlite3.Connection,
     city: str,
     target_date: str,
+    *,
+    spec: CalibrationMetricSpec,
 ) -> Optional[sqlite3.Row]:
-    """One VERIFIED high_temp observation per (city, target_date)."""
+    """One VERIFIED metric-specific observation per (city, target_date).
+
+    Phase 7A CRITICAL-1 fix: column dispatch by spec.identity.temperature_metric
+    ("high" → high_temp column; "low" → low_temp column). Return shape aliases
+    the metric-specific column to ``observed_value`` so callers are uniform.
+    The derived column name is safe against SQL injection because it comes from
+    a dataclass ``Literal["high", "low"]``, not user input.
+    """
+    obs_column = "high_temp" if spec.identity.temperature_metric == "high" else "low_temp"
     return conn.execute(
-        """
-        SELECT city, target_date, high_temp, unit, authority, source
+        f"""
+        SELECT city, target_date, {obs_column} AS observed_value, unit, authority, source
         FROM observations
         WHERE city = ? AND target_date = ? AND authority = 'VERIFIED'
-          AND high_temp IS NOT NULL
+          AND {obs_column} IS NOT NULL
         ORDER BY source DESC
         LIMIT 1
         """,
@@ -227,7 +237,7 @@ def _process_snapshot_v2(
     # training_allowed=1, but data_version quarantine is a write-time contract)
     assert_data_version_allowed(data_version, context="rebuild_calibration_pairs_v2")
 
-    obs = _fetch_verified_observation(conn, city.name, target_date)
+    obs = _fetch_verified_observation(conn, city.name, target_date, spec=spec)
     if obs is None:
         stats.snapshots_no_observation += 1
         return
@@ -246,7 +256,7 @@ def _process_snapshot_v2(
     sem = SettlementSemantics.for_city(city)
     try:
         settlement_value = sem.assert_settlement_value(
-            float(obs["high_temp"]),
+            float(obs["observed_value"]),
             context="rebuild_calibration_pairs_v2",
         )
     except Exception as e:

@@ -116,19 +116,19 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL
                     CHECK (temperature_metric IN ('high', 'low')),
-                physical_quantity TEXT NOT NULL DEFAULT '',
-                observation_field TEXT NOT NULL DEFAULT 'high_temp'
+                physical_quantity TEXT NOT NULL,
+                observation_field TEXT NOT NULL
                     CHECK (observation_field IN ('high_temp', 'low_temp')),
                 issue_time TEXT,
                 valid_time TEXT,
                 available_at TEXT NOT NULL,
-                fetch_time TEXT NOT NULL DEFAULT '',
+                fetch_time TEXT NOT NULL,
                 lead_hours REAL NOT NULL,
                 members_json TEXT NOT NULL,
                 p_raw_json TEXT,
                 spread REAL,
                 is_bimodal INTEGER,
-                model_version TEXT NOT NULL DEFAULT '',
+                model_version TEXT NOT NULL,
                 data_version TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),

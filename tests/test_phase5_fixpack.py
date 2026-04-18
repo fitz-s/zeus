@@ -573,6 +573,9 @@ class TestRebuildDataVersionAssertion:
             target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
             physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL,
+            fetch_time TEXT NOT NULL,
+            model_version TEXT NOT NULL,
             data_version TEXT NOT NULL,
             members_unit TEXT NOT NULL DEFAULT 'degC',
             training_allowed INTEGER NOT NULL DEFAULT 1,
@@ -601,14 +604,18 @@ class TestRebuildDataVersionAssertion:
         conn.execute("""
             INSERT INTO ensemble_snapshots_v2 (
                 city, target_date, temperature_metric, physical_quantity,
+                observation_field, fetch_time, model_version,
                 data_version, members_unit, training_allowed,
                 issue_time, available_at, lead_hours,
                 causality_status, authority, members_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             "New York", "2026-01-15",
             "high",
             "mx2t6_local_calendar_day_max",
+            "high_temp",
+            "2026-01-15T06:05:00+00:00",
+            "tigge-ens-51",
             data_version,
             "degC",
             1,
