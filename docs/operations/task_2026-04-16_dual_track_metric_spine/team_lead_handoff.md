@@ -1,6 +1,6 @@
-# Team-Lead Handoff (post-P6, 2026-04-18)
+# Team-Lead Handoff (post-P7A, 2026-04-18)
 
-**Written**: 2026-04-18 post Phase 5 complete + Phase 6 complete (sniper mode). Team `zeus-dual-upgrade-v3` retained (sniper-mode composition: exec-kai + critic-beth + team-lead + ephemeral subagents). Supersedes all earlier handoffs.
+**Written**: 2026-04-18 post Phase 5 + 6 + 7A complete (Gen-Verifier mode). Team infrastructure RETIRED — `TeamDelete` applied. New composition: team-lead (Opus, main context) + critic-beth (Opus, persistent via disk-durable learnings + fresh spawn per phase) + ephemeral subagents (Sonnet/Haiku per task shape). Supersedes all earlier handoffs.
 
 ## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
@@ -48,12 +48,56 @@ Defense-in-depth: router seam (Day0Router always dispatches LOW→Day0LowNowcast
 
 critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_review.md` (includes ITERATE finding + re-verify PASS addendum). Superseded initial PASS at `phase6_evidence/critic_beth_phase6_wide_review.md` preserved for audit trail.
 
-## Phase order post-P6
+## Phase order post-P7A
 
-1. ~~**Phase 6**~~ **COMPLETE** at `e3a4700`. Day0 split delivered + critic PASS. See "Phase 6 closure" below.
-2. **Phase 7** ← NEXT. Metric-aware rebuild cutover: `rebuild_v2` full METRIC_SPECS operator-facing iteration (spec param landed P5 post-5C; iteration still HIGH-only at L389), B093 half-2 (replay table migration to `historical_forecasts_v2`), `_tigge_common.py` helper extraction, **chore**: remove `remaining_member_maxes_for_day0` backward-compat alias (critic's P6 forward-log).
-3. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability). **ADDED SCOPE** (critic's P6 forward-log): `cycle_runner.py:180-181` DT#6 rewiring — currently `raise RuntimeError` on `portfolio_loader_degraded=True`; must route through `riskguard.tick_with_portfolio` instead. Mechanism exists; routing missing.
-4. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7. **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low).
+1. ~~**Phase 6**~~ **COMPLETE** at `413d5e0`. Day0 split delivered + critic PASS. See "Phase 6 closure" below.
+2. ~~**Phase 7A**~~ **COMPLETE** at `c496c36` + `a872e50`. Metric-aware rebuild cutover + delete_slice metric scoping + CRITICAL-1 read-side fix + MAJOR-1 schema DEFAULT restoration + MAJOR-2 backfill contract gate. See "Phase 7A closure" below.
+3. **Phase 7B** ← NEXT. Naming hygiene:
+   - remove `remaining_member_maxes_for_day0` backward-compat alias (P6 forward-log)
+   - `_tigge_common.py` helper extraction (15 safe mechanical helpers)
+   - `architecture/script_manifest.yaml` registration for 5 scripts (incl. new `backfill_tigge_snapshot_p_raw_v2.py` from P7A)
+   - Replace `test_R_AZ_2_low_rebuild_writes_only_low_rows` mirror test with real end-to-end LOW fixture (critic's MAJOR-3 from P7A)
+   - Extract `CalibrationMetricSpec` + `METRIC_SPECS` to `src/calibration/metric_specs.py` (critic's MINOR-2)
+   - Document or drop `contract_version` / `boundary_min_value` schema columns (critic's MINOR-1)
+4. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability). **ADDED SCOPE** (critic's P6 forward-log): `cycle_runner.py:180-181` DT#6 rewiring — currently `raise RuntimeError` on `portfolio_loader_degraded=True`; must route through `riskguard.tick_with_portfolio` instead. Mechanism exists; routing missing. **ADDED SCOPE** (P7A deferral): B093 half-2 replay migration to `historical_forecasts_v2` — requires Zero-Data Golden Window lift + v2 table population.
+5. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7. **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low).
+
+## Phase 7A closure
+
+**Commits**: `a872e50` (impl) + `c496c36` (ITERATE fix).
+
+**Delivered**:
+- `scripts/rebuild_calibration_pairs_v2.py`: METRIC_SPECS iteration via new `rebuild_all_v2` driver; `_delete_canonical_v2_slice` + `_collect_pre_delete_count` metric-scoped; `_process_snapshot_v2` L298 write-time `metric_identity=spec.identity` (not hardcoded HIGH); `_fetch_verified_observation` read-side metric dispatch (`observed_value` alias); outer SAVEPOINT atomicity
+- `scripts/refit_platt_v2.py`: `refit_all_v2` driver, METRIC_SPECS iteration, explicit `metric_identity` required
+- `scripts/backfill_tigge_snapshot_p_raw_v2.py` NEW (351 LOC): metric-aware p_raw_json backfill, `assert_data_version_allowed` contract gate, dry-run safety pattern
+- `src/state/schema/v2_schema.py`: 3 new columns (contract_version, boundary_min_value, unit); cross-pairing NOT NULL category-impossibility restored on 4 columns (observation_field / physical_quantity / fetch_time / model_version)
+- `tests/test_phase7a_metric_cutover.py` NEW: R-BH..R-BO (17 tests) — 3 bug-class + 5 antibodies + 3 iteration antibodies
+
+**Acceptance delivered** (user's master-plan criteria):
+- bucket key / query / unique key 都带 metric ✓ (write + read + delete + count)
+- high / low 可以同城同日共存 ✓ (per-metric scoping all paths)
+- bin lookup 永不跨 metric union ✓ (category-impossibility at SQL seam + Python seam + function signatures)
+
+**Structural antibodies installed**:
+- `_fetch_verified_observation` column dispatch (CRITICAL-1 at read seam)
+- Schema NOT-NULL on cross-pairing columns (MAJOR-1 at SQL seam)
+- `assert_data_version_allowed` gate in backfill (MAJOR-2, belt-and-suspenders pattern inherited)
+- R-BM: `_fetch_verified_observation(spec=LOW)` end-to-end SQL dispatch proven
+- R-BN: schema INSERT without required columns → IntegrityError
+- R-BO: backfill quarantined data_version → DataVersionQuarantinedError
+
+**Critic-beth durable memory** (Gen-Verifier insight):
+- P3.1 methodology extended with forward-facing vocabulary: `_requires_explicit_|_must_specify_|_no_default_` — caught new-contract antibodies beyond just stale-guard antibodies
+- "Two-seam principle" learned: when fixing a write-side bug, ALWAYS audit the symmetric read-side. L0.0 self-correction surfaced CRITICAL-1 read-side only on second look
+- Mirror-test detection heuristic: `try/except: pass` + positive assertion = structurally accidental green
+
+**Regression**: 125 failed / 1805 passed / 90 skipped (+6 passed vs pre-P7A 125/1799 baseline; zero new failures).
+
+**Forward-log (to P7B)**:
+- MAJOR-3 (pre-existing from P5C): `test_R_AZ_2_low_rebuild_writes_only_low_rows` mirror test
+- MINOR-1: contract_version / boundary_min_value schema columns undocumented
+- MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
+- P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
 
 ## Phase 6 closure
 
