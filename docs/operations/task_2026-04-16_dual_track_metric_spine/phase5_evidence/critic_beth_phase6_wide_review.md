@@ -157,3 +157,65 @@ A2A to exec-kai with the MAJOR-1 fix shape. One cycle, ~5 LOC delta (test rewrit
 *Authored*: critic-beth (opus, persistent, sniper-mode, extra-strict)
 *Disk-verified*: 2026-04-18, cwd `/Users/leofitz/.openclaw/workspace-venus/zeus`, fresh `git show e3a4700`, fresh pytest 19/19 on phase6 file, fresh pytest MAJOR-1 reproduction (`test_day0signal_low_metric_refuses_until_phase6` FAILED in test_metric_identity_spine.py), fresh AST walk on R-BE, fresh `tick_with_portfolio` trace for read-only verification.
 *Supersedes*: prior PASS verdict at `phase6_evidence/critic_beth_phase6_wide_review.md`.
+
+---
+
+## ITERATE re-verify verdict (addendum, 2026-04-18)
+
+**Commit reviewed**: `413d5e0 fix(phase6): re-guard Day0Signal(LOW) with TypeError + repurpose R2 antibody` (data-improve, pushed). Team-lead staged + committed per new P2.1. Scope: 4 files touched (+326/-10): src/signal/day0_signal.py (+7 LOC re-guard), tests/test_metric_identity_spine.py (renamed + dual-assertion upgrade), both review docs preserved for audit.
+
+**VERDICT: PASS — Phase 6 closes**.
+
+### MAJOR-1 resolution
+
+[DISK-VERIFIED fresh, 2026-04-18:]
+```
+$ git log --oneline -1 → 413d5e0 fix(phase6): re-guard Day0Signal(LOW) with TypeError + repurpose R2 antibody
+$ pytest tests/test_metric_identity_spine.py::TestDay0SignalLowMetricRefuses -v
+  test_day0signal_low_metric_refused_post_phase6 PASSED
+  test_day0signal_high_metric_still_constructs_successfully PASSED
+$ pytest tests/test_phase6_day0_split.py tests/test_metric_identity_spine.py -q
+  31 passed in 0.89s
+$ pytest tests/ --tb=no -q → 137 failed / 1802 passed (-1 failure vs prior 138/1801)
+```
+
+The fix implements BOTH options I recommended:
+- **Code re-guard** at day0_signal.py L83-89: `if temperature_metric.is_low(): raise TypeError(...)` with message "Day0Signal is HIGH-only. Use Day0Router.route() for metric-dispatched construction, or Day0LowNowcastSignal directly." TypeError semantics (wrong type, permanent) cleanly distinct from the Phase 1 NotImplementedError semantics (not-yet-built, temporal).
+- **Test rewrite** with DUAL assertion at test L154-188:
+  - Part 1: `Day0Signal(LOW)` raises TypeError (class-level invariant).
+  - Part 2: `Day0Router.route(LOW_inputs)` returns `Day0LowNowcastSignal`, not `Day0Signal` (router-level invariant).
+
+Both invariants now expressed as test antibodies. Fitz P4 category-impossibility preserved at two layers: class seam (TypeError on direct construction) + router seam (never routes LOW to Day0Signal output type). Defense-in-depth shape matches 5B per-spec + global allowlist precedent.
+
+### Test-naming-vocabulary heuristic check
+
+[DISK-VERIFIED: Grep `_refuses_|_does_not_|_until_phase|_rejects_` across tests/ → 40+ hits across 15 files.] Sampled the hits against Phase 6's guard-removal scope:
+- `test_observation_atom.py`, `test_ingestion_guard.py`, `test_data_rebuild_relationships.py`, `test_kelly_cascade_bounds.py`, `test_live_safety_invariants.py` — all antibodies for unrelated contracts (observation provenance, ingestion bounds, rebuild, kelly cap, lifecycle). None tied to Phase 6 contract inversions.
+- `test_metric_identity_spine.py`: the one guard-regression case, now resolved.
+- `test_phase4_5_extractor.py::test_acceptance_default_track_does_not_raise_not_implemented`: could have been affected if Day0Signal's NotImplementedError was the subject — but that test is for an extractor default-track path, not Day0Signal. Separate contract, untouched.
+
+No other stale antibodies surfaced.
+
+### Other callers of `Day0Signal(LOW)` that could trip the new TypeError
+
+[DISK-VERIFIED: Grep `Day0Signal\(.*LOW|Day0Signal\(.*temperature_metric=LOW` repo-wide → only 1 hit, the test itself at test_metric_identity_spine.py:155 (intentional assertion).]
+
+Production code only constructs Day0Signal via `Day0HighSignal._day0_signal()` at day0_high_signal.py:68 with `temperature_metric=HIGH_LOCALDAY_MAX` hardcoded. No other callers. New TypeError cannot trip unexpectedly.
+
+### Forward-log items (unchanged, captured in handoff)
+
+1. Phase 8: wire `cycle_runner.py:180-181` RuntimeError → `tick_with_portfolio` for full DT#6 runtime compliance.
+2. Phase 9: implement `Day0LowNowcastSignal.p_vector` + validate `_remaining_weight` blend formula against cold-snap data before Gate F.
+3. Phase 7 naming-pass: remove `remaining_member_maxes_for_day0` backward-compat alias after test callers migrate.
+4. Methodology candidate: "critic MUST grep test-naming vocabulary (`_refuses_`/`_does_not_`/`_until_`) against any commit that removes/inverts a guard, before PASS" — noted by team-lead, will land in operating contract.
+
+### Phase 6 closure
+
+`413d5e0` completes Phase 6. Two commits total: `e3a4700` (implementation + microplan via coordination-error) + `413d5e0` (MAJOR-1 fix). Both pushed. P2-compliance still technically 2 commits vs 1, captured as learning in handoff. Both review docs (the stale PASS at `phase6_evidence/` and the authoritative ITERATE+PASS at `phase5_evidence/`) committed for audit trail.
+
+Sniper protocol honored: one ITERATE cycle only, one-shot fix, clean close. Phase 6 is DONE. Standing by for Phase 7 onboarding.
+
+---
+
+*Re-verify authored*: critic-beth (opus, persistent, sniper-mode)
+*Disk-verified*: 2026-04-18, cwd `/Users/leofitz/.openclaw/workspace-venus/zeus`, fresh pytest 31/31 on phase6+metric_identity_spine, fresh full-suite 137/1802 (-1 vs prior), fresh Grep on Day0Signal(LOW) production callers, fresh test-naming-vocabulary scan.

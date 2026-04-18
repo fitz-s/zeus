@@ -48,6 +48,11 @@ Rationale: decouples "work done" from "commit created." Exec can complete-and-an
 - No → methodology file (but periodically prune when automation possible).
 - Don't use text rules to fight text problems.
 
+#### P3.1 (added post-P6, critic-beth methodology contribution)
+Any commit that INVERTS a contract or REMOVES a guard (e.g. deletes `NotImplementedError`, enables a previously-gated codepath, relaxes a type constraint) MUST be cross-checked against test-naming vocabulary before critic PASS. Critic greps tests for names containing `_refuses_`, `_does_not_`, `_until_phase`, `_rejects_`, `_refused_`, `_forbidden_`, `_blocks_` and verifies each matching test is either (a) updated/repurposed to assert the new invariant, (b) deleted if the old invariant is intentionally retired, or (c) documented as still-valid-but-disjoint. Stale antibody tests that silently flip from GREEN to RED are a Fitz P4 category-impossibility regression even when runtime is unaffected — the class-level structural antibody is lost.
+
+Rationale: in P6, the Phase 1 R2 antibody `test_day0signal_low_metric_refuses_until_phase6` was a stale assertion against a guard Phase 6 intentionally removed. critic's first PASS missed the test-RED state; extra-strict re-review caught it. The heuristic is cheap (one grep per contract-inverting commit) and prevents an entire class of "mechanism-without-matching-antibody" bugs. This is the same diagnostic category as critic-alice's fix-pack miss (`test_read_mode_truth_json_none_mode_does_not_raise`) — two instances establish a pattern worth automating later (P3 prefers automation).
+
 ### P4. Spec-first TDD, testeng doesn't grep impl
 - R-letter = input/output contract in handoff/scope doc.
 - Testeng reads contract, synthesizes inputs, asserts outputs.
