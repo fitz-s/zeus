@@ -36,7 +36,17 @@ c327872 Phase 5B: low historical lane + ingest contract gate + B078 absorbed
 ```
 
 **Phase 5 COMPLETE.** Gate D PASSED via R-AZ-3 structural antibody.
-**Phase 6 COMPLETE** at `e3a4700`. Silent-corruption category eliminated via `RemainingMemberExtrema` dataclass (both-None raises at construction → wrong code unconstructable). critic-beth PASS verdict at `phase6_evidence/critic_beth_phase6_wide_review.md`.
+**Phase 6 COMPLETE** at `413d5e0` (impl + ITERATE fix). Closure journey:
+- `e3a4700`: full Phase 6 implementation (mislabeled "docs(phase6): microplan" via team-lead git-index coordination error — user-ruled accept cosmetic mislabeling, no force-push amend)
+- `413d5e0`: ITERATE MAJOR-1 fix — Day0Signal class-level TypeError re-guard + R2 antibody test upgrade to dual-assertion
+
+Silent-corruption category eliminated at TWO layers:
+1. `RemainingMemberExtrema` dataclass (`__post_init__` raises on both-None → MAX/MIN alias unconstructable)
+2. `Day0Signal.__init__` class guard (`TypeError` on LOW → direct construction with wrong metric refused)
+
+Defense-in-depth: router seam (Day0Router always dispatches LOW→Day0LowNowcastSignal) + class seam (Day0Signal refuses LOW directly). Fitz P4 category-impossibility preserved at both layers.
+
+critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_review.md` (includes ITERATE finding + re-verify PASS addendum). Superseded initial PASS at `phase6_evidence/critic_beth_phase6_wide_review.md` preserved for audit trail.
 
 ## Phase order post-P6
 
