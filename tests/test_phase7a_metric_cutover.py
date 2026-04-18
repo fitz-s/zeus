@@ -291,20 +291,20 @@ class TestR_BL_BackfillMetricScoped:
              fetch_time, model_version,
              data_version, authority,
              training_allowed, causality_status, members_json, p_raw_json,
-             contract_version, boundary_ambiguous, boundary_min_value, unit)
+             boundary_ambiguous, unit)
             VALUES
             ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
              'high', 'mx2t6_local_calendar_day_max', 'high_temp',
              '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
              ?, 'VERIFIED', 1, 'OK',
              '[78.0, 80.5, 82.1, 83.2, 84.5]', NULL,
-             'ingest-v2.1', 0, NULL, 'F'),
+             0, 'F'),
             ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
              'low', 'mn2t6_local_calendar_day_min', 'low_temp',
              '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
              ?, 'VERIFIED', 1, 'OK',
              '[60.0, 62.0, 63.5, 64.0, 65.2]', NULL,
-             'ingest-v2.1', 0, NULL, 'F')
+             0, 'F')
             """,
             (HIGH_LOCALDAY_MAX.data_version, LOW_LOCALDAY_MIN.data_version),
         )
@@ -464,14 +464,14 @@ class TestR_BO_BackfillDataVersionContract:
              fetch_time, model_version,
              data_version, authority,
              training_allowed, causality_status, members_json, p_raw_json,
-             contract_version, boundary_ambiguous, boundary_min_value, unit)
+             boundary_ambiguous, unit)
             VALUES
             ('Chicago', '2026-06-15', '2026-06-14T00:00:00+00:00', 24, '2026-06-14T06:00:00+00:00',
              'high', 'mx2t6_local_calendar_day_max', 'high_temp',
              '2026-06-14T06:05:00+00:00', 'tigge-ens-51',
              'tigge_experimental_v99', 'VERIFIED', 1, 'OK',
              '[78.0, 80.5, 82.1, 83.2, 84.5]', NULL,
-             'ingest-v2.1', 0, NULL, 'F')
+             0, 'F')
             """
         )
 

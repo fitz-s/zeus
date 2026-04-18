@@ -184,34 +184,40 @@ class TestGateDLowPurityIsolation:
         )
 
     def test_R_AZ_2_low_rebuild_writes_only_low_rows(self):
-        """R-AZ-2 (RED): rebuild_v2 with LOW_SPEC must not write any temperature_metric='high' rows."""
-        from scripts.rebuild_calibration_pairs_v2 import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
-        from src.types.metric_identity import LOW_LOCALDAY_MIN
+        """R-AZ-2: LOW-spec eligible-snapshot query returns ONLY LOW rows.
+
+        Phase 7B rewrite (was mirror test with try/except: pass swallowing
+        TypeError from stale stats= kwarg). Now tests the structural invariant
+        directly via _fetch_eligible_snapshots_v2: LOW spec must select only
+        LOW snapshots from the mixed high+low fixture. This is the seam where
+        cross-metric leakage would first appear — if the SQL WHERE clause drops
+        or mishandles temperature_metric, LOW rebuild would process HIGH rows.
+        """
+        from scripts.rebuild_calibration_pairs_v2 import (
+            _fetch_eligible_snapshots_v2, CalibrationMetricSpec,
+        )
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
         conn = _make_gate_d_db()
+        high_spec = CalibrationMetricSpec(HIGH_LOCALDAY_MAX, HIGH_LOCALDAY_MAX.data_version)
         low_spec = CalibrationMetricSpec(LOW_LOCALDAY_MIN, LOW_LOCALDAY_MIN.data_version)
-        stats = RebuildStatsV2()
 
-        import inspect
-        sig = inspect.signature(rebuild_v2)
-        if "spec" not in sig.parameters:
-            pytest.fail(
-                "rebuild_v2 has no 'spec' parameter. "
-                "Cannot run LOW-spec rebuild in isolation. "
-                "Fix: add spec: CalibrationMetricSpec param to rebuild_v2."
-            )
+        high_eligible = _fetch_eligible_snapshots_v2(conn, city_filter=None, spec=high_spec)
+        low_eligible = _fetch_eligible_snapshots_v2(conn, city_filter=None, spec=low_spec)
 
-        try:
-            rebuild_v2(conn, spec=low_spec, n_mc=None, rng=np.random.default_rng(0), stats=stats)
-        except Exception:
-            pass
+        # Structural invariant #1: spec.metric filters eligible snapshots.
+        assert len(high_eligible) == 1, f"HIGH spec got {len(high_eligible)} snapshots, want 1"
+        assert len(low_eligible) == 1, f"LOW spec got {len(low_eligible)} snapshots, want 1"
 
-        high_rows = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'high'"
-        ).fetchone()[0]
-        assert high_rows == 0, (
-            f"LOW rebuild wrote {high_rows} temperature_metric='high' rows to calibration_pairs_v2. "
-            "Cross-metric leakage confirmed."
+        # Structural invariant #2: no cross-metric leakage — LOW eligibility excludes HIGH.
+        low_temp_metrics = {row["data_version"] for row in low_eligible}
+        assert low_temp_metrics == {LOW_LOCALDAY_MIN.data_version}, (
+            f"LOW spec eligible snapshots include non-LOW data_versions: {low_temp_metrics}. "
+            "Cross-metric leakage at the eligibility-filter seam."
+        )
+        high_temp_metrics = {row["data_version"] for row in high_eligible}
+        assert high_temp_metrics == {HIGH_LOCALDAY_MAX.data_version}, (
+            f"HIGH spec eligible snapshots include non-HIGH data_versions: {high_temp_metrics}."
         )
 
     def test_R_AZ_3_platt_model_keys_scoped_per_metric(self):

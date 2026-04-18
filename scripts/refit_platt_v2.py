@@ -56,7 +56,7 @@ from src.config import calibration_maturity_thresholds, calibration_n_bootstrap
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
-from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+from src.calibration.metric_specs import METRIC_SPECS
 
 _, _, MIN_DECISION_GROUPS = calibration_maturity_thresholds()  # level3 = refit threshold
 

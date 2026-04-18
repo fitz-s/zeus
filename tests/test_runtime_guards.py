@@ -889,7 +889,7 @@ def test_day0_no_remaining_forecast_hours_is_pre_vector_traceable(tmp_path, monk
         "_get_day0_temporal_context",
         lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=datetime(2026, 4, 1, 16, tzinfo=timezone.utc)),
     )
-    monkeypatch.setattr(evaluator_module, "remaining_member_maxes_for_day0", lambda *args, **kwargs: (np.array([]), 0.0))
+    monkeypatch.setattr(evaluator_module, "remaining_member_extrema_for_day0", lambda *args, **kwargs: (None, 0.0))
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",
@@ -3179,10 +3179,11 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "Day0Signal", DummyDay0Signal)
+    from src.signal.day0_extrema import RemainingMemberExtrema as _REM
     def _remaining_for_day0(members_hourly, times, timezone_name, target_d, now=None, **kwargs):
         calls["day0_now"] = now
-        return np.full(51, 44.0), 6.0
-    monkeypatch.setattr(evaluator_module, "remaining_member_maxes_for_day0", _remaining_for_day0)
+        return _REM(maxes=np.full(51, 44.0), mins=None), 6.0
+    monkeypatch.setattr(evaluator_module, "remaining_member_extrema_for_day0", _remaining_for_day0)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-day0")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))

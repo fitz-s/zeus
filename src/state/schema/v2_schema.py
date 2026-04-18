@@ -163,9 +163,9 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             # 4.5: R-L provenance fields for local-calendar-day extractor
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
-            # Phase 7A: contract_version, boundary_min_value, unit for metric-aware backfill
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contract_version TEXT",
-            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN boundary_min_value REAL",
+            # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
+            # contract_version + boundary_min_value columns dropped in P7B (no live
+            # consumer; P8 will re-add if needed when shadow-activation consumers land).
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
         ]:
             try:

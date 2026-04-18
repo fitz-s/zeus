@@ -286,6 +286,7 @@ scripts:
   backfill_semantic_snapshots.py: {class: etl_writer, write_targets: [state/zeus_trades.db, state/zeus-world.db], target_db: state}
   backfill_solar_openmeteo.py: {class: etl_writer}
   backfill_tigge_snapshot_p_raw.py: {class: etl_writer}
+  backfill_tigge_snapshot_p_raw_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware p_raw backfill; safety gates mirror rebuild_v2 (--dry-run default, --no-dry-run + --force required)."}
   backfill_trade_decision_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_truth_metadata.py: {class: etl_writer}
   backfill_wu_daily_all.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
@@ -317,6 +318,8 @@ scripts:
   etl_tigge_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: legacy unaudited TIGGE direct calibration path superseded by canonical rebuild pipeline}
   etl_tigge_direct_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: legacy unaudited TIGGE direct calibration path superseded by canonical rebuild pipeline}
   etl_tigge_ens.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: partial single-step TIGGE path is unaudited and superseded by canonical rebuild pipeline}
+  extract_tigge_mn2t6_localday_min.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
+  extract_tigge_mx2t6_localday_max.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
   generate_calibration_pairs.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy market_events calibration-pair generator retired}
   generate_monthly_bounds.py: {class: config_writer}
@@ -357,8 +360,10 @@ scripts:
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
   rebuild_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy simplified-p_raw rebuild retired}
   rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
+  refit_platt_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 refit; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
   refresh_paper_runtime_artifacts.py: {class: repair, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/status_summary-paper.json, state/risk_state-paper.db], apply_flag: implicit, target_db: state/status_summary-paper.json + state/risk_state-paper.db, archive_reason: paper runtime artifacts are obsolete in live-only phase, unguarded_write_rationale: "Paper runtime artifact refresh writes obsolete paper status and paper risk DB rows; manifest marks it dangerous pending archive."}
   replay_parity.py: {class: diagnostic}
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}

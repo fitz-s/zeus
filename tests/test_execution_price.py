@@ -367,10 +367,11 @@ class TestEvaluatorWiring:
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
         monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
         monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
             evaluator_module,
-            "remaining_member_maxes_for_day0",
-            lambda *args, **kwargs: (np.ones(51) * 40.0, 2.0),
+            "remaining_member_extrema_for_day0",
+            lambda *args, **kwargs: (_REM(maxes=np.ones(51) * 40.0, mins=None), 2.0),
         )
         monkeypatch.setattr(
             evaluator_module,
