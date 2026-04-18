@@ -63,6 +63,13 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+
+CANONICAL_DATA_VERSIONS: frozenset[str] = frozenset({
+    HIGH_LOCALDAY_MAX.data_version,
+    LOW_LOCALDAY_MIN.data_version,
+})
+
 
 class DataVersionQuarantinedError(RuntimeError):
     """Raised when a writer tries to persist a quarantined data_version."""
@@ -109,12 +116,17 @@ def is_quarantined(data_version: str | None) -> bool:
 
 
 def assert_data_version_allowed(data_version: str | None, *, context: str = "") -> None:
-    """Raise ``DataVersionQuarantinedError`` if ``data_version`` is quarantined.
+    """Raise ``DataVersionQuarantinedError`` if ``data_version`` is quarantined or unknown.
 
     Call this from every writer of ``ensemble_snapshots`` — live ingest,
     backfill, test fixtures, rebuild. The ``context`` parameter is
     appended to the error message so operators can see which caller
     tripped the guard.
+
+    Two-stage check:
+    1. Quarantine block — rejects known-bad versions by exact name or prefix.
+    2. Positive allowlist — rejects any version NOT in the canonical set.
+       Prevents unknown/experimental versions from silently entering training.
     """
     if is_quarantined(data_version):
         ctx = f" (context={context})" if context else ""
@@ -125,6 +137,13 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
             f"peak-window max (superseded by local-calendar-day semantics). "
             f"Use tigge_mx2t6_local_calendar_day_max_v1 (high track canonical, "
             f"Phase 4+) instead.{ctx}"
+        )
+    if data_version not in CANONICAL_DATA_VERSIONS:
+        ctx = f" (context={context})" if context else ""
+        raise DataVersionQuarantinedError(
+            f"ensemble_snapshots write refused: data_version={data_version!r} "
+            f"is not in the canonical allowlist {sorted(CANONICAL_DATA_VERSIONS)}. "
+            f"Only canonical dual-track versions are permitted in ensemble_snapshots_v2.{ctx}"
         )
 
 

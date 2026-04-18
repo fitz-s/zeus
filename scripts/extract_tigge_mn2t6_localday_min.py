@@ -260,7 +260,11 @@ def build_low_snapshot_json(
     """
     day_start_utc, day_end_utc = _local_day_bounds_utc(target_date, city_tz)
 
-    dst_offset_h = int(ZoneInfo(city_tz).utcoffset(issue_utc).total_seconds() / 3600)
+    # R-AS: use offset at target-date local midnight, not at issue_utc.
+    # For DST-boundary crossings (e.g. issue_utc=winter, target_date=summer), the offset
+    # at issue_utc is stale and produces a 1h step-horizon drift.
+    target_midnight_local = datetime.combine(target_date, dt_time.min, tzinfo=ZoneInfo(city_tz))
+    dst_offset_h = int(ZoneInfo(city_tz).utcoffset(target_midnight_local).total_seconds() / 3600)
     causality = _compute_causality_low(issue_utc, target_date, dst_offset_h)
 
     # Per-member boundary classification
@@ -284,8 +288,10 @@ def build_low_snapshot_json(
     for m in range(MEMBER_COUNT):
         clf = member_classifications[m]
         if any_boundary_ambiguous:
-            # Whole snapshot quarantined; don't emit effective_min as if clean
-            val_k = clf.inner_min  # still emit inner_min for diagnostics
+            # R-AR: whole snapshot quarantined — emit None, not inner_min.
+            # A non-null value would let downstream consumers read it without
+            # checking training_allowed and get contaminated data.
+            val_k = None
         else:
             val_k = clf.effective_min
         if val_k is None:

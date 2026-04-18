@@ -83,8 +83,9 @@ class Day0ObservationContext:
 logger = logging.getLogger(__name__)
 
 WU_API_KEY = os.environ.get("WU_API_KEY", "")
-if not WU_API_KEY:
-    raise SystemExit("CRITICAL ERROR: WU_API_KEY environment variable is missing.")
+# Guard moved from module level to callsite: module must be importable without the key
+# so that transitive importers (tests, monitor_refresh) don't crash on missing env var.
+# Callers that need WU must call _require_wu_api_key() before making requests.
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 
@@ -204,6 +205,13 @@ def get_current_observation(
     raise ObservationUnavailableError(f"All observation providers failed for {city.name}/{target_day.isoformat()}")
 
 
+def _require_wu_api_key() -> None:
+    """Raise at callsite if WU_API_KEY is missing. Module-level guard was moved here so
+    transitive importers (tests, monitor_refresh) don't crash on missing env var."""
+    if not WU_API_KEY:
+        raise SystemExit("CRITICAL ERROR: WU_API_KEY environment variable is missing.")
+
+
 def _fetch_wu_observation(
     city: City,
     *,
@@ -211,6 +219,7 @@ def _fetch_wu_observation(
     reference_local: datetime,
     tz: ZoneInfo,
 ) -> Optional[Day0ObservationContext]:
+    _require_wu_api_key()
     try:
         url = WU_OBS_URL.format(lat=city.lat, lon=city.lon)
         unit = "e" if city.settlement_unit == "F" else "m"

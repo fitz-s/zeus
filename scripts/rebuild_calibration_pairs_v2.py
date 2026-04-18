@@ -65,6 +65,7 @@ from src.contracts.calibration_bins import (
     validate_members_vs_observation,
 )
 from src.contracts.ensemble_snapshot_provenance import (
+    DataVersionQuarantinedError,
     assert_data_version_allowed,
     is_quarantined,
 )
@@ -202,6 +203,7 @@ def _process_snapshot_v2(
     snapshot: sqlite3.Row,
     city: City,
     *,
+    spec: CalibrationMetricSpec,
     n_mc: Optional[int],
     rng: np.random.Generator,
     stats: RebuildStatsV2,
@@ -210,6 +212,14 @@ def _process_snapshot_v2(
     target_date = snapshot["target_date"]
     data_version = snapshot["data_version"] or ""
     source = ""  # ensemble_snapshots_v2 has no source column; INV-15 gates on data_version prefix
+
+    # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
+    if data_version != spec.allowed_data_version:
+        raise DataVersionQuarantinedError(
+            f"rebuild_calibration_pairs_v2: snapshot data_version={data_version!r} "
+            f"does not match spec.allowed_data_version={spec.allowed_data_version!r}. "
+            "Cross-metric contamination refused."
+        )
 
     # Quarantine guard (belt-and-suspenders: eligibility query already filters
     # training_allowed=1, but data_version quarantine is a write-time contract)
@@ -376,6 +386,7 @@ def rebuild_v2(
                 continue
             _process_snapshot_v2(
                 conn, snap, city,
+                spec=METRIC_SPECS[0],
                 n_mc=n_mc,
                 rng=rng,
                 stats=stats,

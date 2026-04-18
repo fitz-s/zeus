@@ -104,23 +104,6 @@ def _provenance_json(payload: dict, metric: MetricIdentity) -> str:
     return json.dumps(prov, ensure_ascii=False)
 
 
-def _extract_causality_status(payload: dict) -> str:
-    """Extract causality_status; default 'OK' for high track (low track uses JSON field)."""
-    causality = payload.get("causality")
-    if isinstance(causality, dict):
-        status = str(causality.get("status", "OK"))
-        allowed = {
-            "OK",
-            "N/A_CAUSAL_DAY_ALREADY_STARTED",
-            "N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON",
-            "REJECTED_BOUNDARY_AMBIGUOUS",
-            "RUNTIME_ONLY_FALLBACK",
-            "UNKNOWN",
-        }
-        return status if status in allowed else "UNKNOWN"
-    return "OK"
-
-
 def _extract_boundary_fields(payload: dict) -> tuple[int, int]:
     """Return (boundary_ambiguous: 0|1, ambiguous_member_count: int)."""
     bp = payload.get("boundary_policy")
@@ -181,7 +164,7 @@ def ingest_json_file(
     contract_payload.setdefault("causality", {"status": "OK"})
     decision = validate_snapshot_contract(contract_payload)
     if not decision.accepted:
-        logger.warning(
+        logger.error(
             "ingest_json_file contract_rejected: path=%s reason=%s",
             path,
             decision.reason,

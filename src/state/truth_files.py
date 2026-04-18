@@ -151,6 +151,11 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    if mode is None:
+        raise ModeMismatchError(
+            "mode=None is not allowed — pass an explicit mode string (e.g. mode=get_mode()). "
+            "Implicit None bypasses the ModeMismatchError live-vs-paper guard (B077 / SD-A)."
+        )
     path = mode_state_path(filename, mode=mode)
     data, truth = read_truth_json(path)
     if mode is not None:
