@@ -131,14 +131,23 @@ From critic's final verdict + cross-team learnings:
 - **`evaluator.py:825` MAX→MIN fix** MUST land in the same Phase 6 commit that removes `Day0Signal.__init__` low-metric NotImplementedError guard. Silent corruption risk if decoupled.
 - **DST step-horizon fix** (fix-pack #3) MUST land before any real-data batch run. Zero-data window protects us today.
 
-## Gate status post-5B-fix-pack
+## Gate status post-5C
 
 - Gate A, B, C open (Phases 2-4 closed).
 - Phase 5A committed at `977d9ae`.
 - Phase 5B committed at `c327872`.
-- Phase 5B-fix-pack committed — 14/14 R-AP..R-AU GREEN; regression +12 passing vs pre-fix (R-AT observation_client lazy-import unblocked SystemExit-poisoned collection). True post-unblock baseline: 138 failed / 1716 passed. critic-beth PASS at `phase5_evidence/critic_beth_phase5fix_wide_review.md`.
-- Phase 5C next (replay MetricIdentity half-1 + Gate D + B093 half-1).
-- Phase 6 after 5C (Day0 split + DT#6 + B055) — co-landing imperative: `evaluator.py:825` MAX→MIN fix with guard removal.
+- Phase 5B-fix-pack committed at `3f42842` — 14/14 R-AP..R-AU GREEN.
+- Phase 5C committed — replay MetricIdentity half-1 (B093 half-1) + Gate D core antibody. 10/12 GREEN + 2 xfailed (R-AZ-1/2 Phase 7 scope). Regression improved 138→115 failed, 1716→1747 passed (net -23 failed / +31 passing). Gate D satisfied by R-AZ-3 (Platt model_key per-metric).
+- Phase 5 complete. **Gate D passed via R-AZ-3 structural antibody.**
+- Phase 6 next (Day0 split + DT#6 + B055) — co-landing imperative: `evaluator.py:825` MAX→MIN fix with guard removal.
+- Phase 7 absorbs: `rebuild_v2` spec param + METRIC_SPECS iteration (R-AZ-1/2 un-xfail), B093 half-2 (replay table migration to `historical_forecasts_v2`).
+- Phase 8-9: shadow + limited activation.
+
+## 5C deferred forward-log
+
+- `run_replay` public entry (replay.py L1933 + L2002) defaults to HIGH; Phase 8 threads metric from operator invocation.
+- `rebuild_v2` full METRIC_SPECS iteration → Phase 7.
+- R-AZ-1/2 xfail(strict=True) → un-xfail Phase 7.
 
 ## R-letter namespace ledger (locked + available)
 

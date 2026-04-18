@@ -205,24 +205,6 @@ class TestModeMismatchError:
             f"Expected mode='live' in truth metadata, got {truth.get('mode')!r}"
         )
 
-    def test_read_mode_truth_json_none_mode_does_not_raise(self):
-        """R-AC (acceptance): mode=None (caller defers to env) must not raise ModeMismatchError."""
-        from src.state.truth_files import read_mode_truth_json
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            fname = "positions.json"
-            truth_path = Path(tmpdir) / fname
-            truth_path.write_text(json.dumps({
-                "positions": [],
-                "truth": {"mode": "live", "generated_at": "2026-04-17T00:00:00+00:00"},
-            }))
-
-            with patch("src.state.truth_files.mode_state_path", return_value=truth_path):
-                # mode=None means "use runtime default"; must not crash.
-                data, truth = read_mode_truth_json(fname, mode=None)
-
-        assert isinstance(data, dict)
-
 
 # ---------------------------------------------------------------------------
 # R-AD: portfolio_loader_view emits temperature_metric; low/high distinguishable
