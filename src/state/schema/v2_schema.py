@@ -116,19 +116,19 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL
                     CHECK (temperature_metric IN ('high', 'low')),
-                physical_quantity TEXT NOT NULL,
-                observation_field TEXT NOT NULL
+                physical_quantity TEXT NOT NULL DEFAULT '',
+                observation_field TEXT NOT NULL DEFAULT 'high_temp'
                     CHECK (observation_field IN ('high_temp', 'low_temp')),
                 issue_time TEXT,
                 valid_time TEXT,
                 available_at TEXT NOT NULL,
-                fetch_time TEXT NOT NULL,
+                fetch_time TEXT NOT NULL DEFAULT '',
                 lead_hours REAL NOT NULL,
                 members_json TEXT NOT NULL,
                 p_raw_json TEXT,
                 spread REAL,
                 is_bimodal INTEGER,
-                model_version TEXT NOT NULL,
+                model_version TEXT NOT NULL DEFAULT '',
                 data_version TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),
@@ -163,6 +163,10 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             # 4.5: R-L provenance fields for local-calendar-day extractor
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
+            # Phase 7A: contract_version, boundary_min_value, unit for metric-aware backfill
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contract_version TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN boundary_min_value REAL",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
         ]:
             try:
                 conn.execute(alter_sql)

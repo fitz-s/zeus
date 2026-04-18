@@ -365,7 +365,7 @@ class TestRebuildV2PipelineIntegration:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        from rebuild_calibration_pairs_v2 import rebuild_v2
+        from rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_v2
 
         conn = self._make_conn()
         self._insert_snapshot(conn)
@@ -373,7 +373,12 @@ class TestRebuildV2PipelineIntegration:
 
         import numpy as np
         rng = np.random.default_rng(42)
-        stats = rebuild_v2(conn, dry_run=False, force=True, n_mc=200, rng=rng)
+        # Phase 7A: rebuild_v2 no longer defaults spec to HIGH; caller iterates METRIC_SPECS.
+        # This Phase-4 regression test exercises only the HIGH track; pass HIGH spec explicitly.
+        stats = rebuild_v2(
+            conn, dry_run=False, force=True, n_mc=200, rng=rng,
+            spec=METRIC_SPECS[0],
+        )
 
         assert stats.pairs_written > 0, (
             f"rebuild_v2 wrote 0 pairs — pipeline integration failed (MAJOR-2). "
