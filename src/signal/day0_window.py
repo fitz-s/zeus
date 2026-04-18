@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from src.signal.day0_extrema import RemainingMemberExtrema
 from src.signal.ensemble_signal import select_hours_for_target_date
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 
@@ -18,7 +19,7 @@ def _parse_forecast_timestamp(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def remaining_member_maxes_for_day0(
+def remaining_member_extrema_for_day0(
     members_hourly: np.ndarray,
     times: list[str],
     timezone_name: str,
@@ -26,20 +27,19 @@ def remaining_member_maxes_for_day0(
     *,
     now: datetime | None = None,
     temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
-) -> tuple[np.ndarray, float]:
+) -> tuple[RemainingMemberExtrema | None, float]:
     """Select remaining target-date local hours for Day0 observation logic.
 
-    For low-temperature markets, returns per-member daily mins.
+    Returns (RemainingMemberExtrema, hours_remaining). Returns (None, 0.0) when
+    no remaining hours exist. HIGH sets maxes; LOW sets mins.
 
     Args:
         temperature_metric: MetricIdentity instance. Bare strings are rejected;
-            callers holding a string (e.g. ``monitor_refresh`` reading from
-            portfolio state) must convert at their own seam via
-            ``MetricIdentity.from_raw()``.
+            callers holding a string must convert via MetricIdentity.from_raw().
     """
     if isinstance(temperature_metric, str):
         raise TypeError(
-            f"remaining_member_maxes_for_day0 requires a MetricIdentity instance "
+            f"remaining_member_extrema_for_day0 requires a MetricIdentity instance "
             f"for temperature_metric, got str {temperature_metric!r}. "
             f"Convert via MetricIdentity.from_raw() at the caller seam."
         )
@@ -53,7 +53,7 @@ def remaining_member_maxes_for_day0(
             times=times,
         )
     except ValueError:
-        return np.array([]), 0.0
+        return None, 0.0
 
     remaining_idxs = [
         int(idx)
@@ -61,9 +61,30 @@ def remaining_member_maxes_for_day0(
         if _parse_forecast_timestamp(times[int(idx)]).astimezone(tz) >= now_local
     ]
     if not remaining_idxs:
-        return np.array([]), 0.0
+        return None, 0.0
 
     slice_data = members_hourly[:, remaining_idxs]
     if temperature_metric.is_low():
-        return slice_data.min(axis=1), float(len(remaining_idxs))
-    return slice_data.max(axis=1), float(len(remaining_idxs))
+        arr = slice_data.min(axis=1)
+    else:
+        arr = slice_data.max(axis=1)
+    return RemainingMemberExtrema.for_metric(arr, temperature_metric), float(len(remaining_idxs))
+
+
+# Backward-compat alias — callers migrated to remaining_member_extrema_for_day0 in Phase 6.
+# Remove after all callsites confirmed updated.
+def remaining_member_maxes_for_day0(
+    members_hourly: np.ndarray,
+    times: list[str],
+    timezone_name: str,
+    target_d: date,
+    *,
+    now: datetime | None = None,
+    temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
+) -> tuple[np.ndarray, float]:
+    extrema, hours = remaining_member_extrema_for_day0(
+        members_hourly, times, timezone_name, target_d, now=now, temperature_metric=temperature_metric
+    )
+    if extrema is None:
+        return np.array([]), hours
+    return (extrema.mins if temperature_metric.is_low() else extrema.maxes), hours

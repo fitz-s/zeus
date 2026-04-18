@@ -34,8 +34,8 @@ from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
-from src.signal.day0_signal import Day0Signal
-from src.signal.day0_window import remaining_member_maxes_for_day0
+from src.signal.day0_router import Day0Router, Day0SignalInputs
+from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
 from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
@@ -781,7 +781,7 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "solar_context"],
             )]
 
-        remaining_member_extrema, hours_remaining = remaining_member_maxes_for_day0(
+        extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],
             city.timezone,
@@ -789,7 +789,7 @@ def evaluate_candidate(
             now=temporal_context.current_utc_timestamp,
             temperature_metric=temperature_metric,
         )
-        if remaining_member_extrema.size == 0:
+        if extrema is None:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
@@ -811,30 +811,25 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
-        day0 = Day0Signal(
-            observed_high_so_far=float(candidate.observation.high_so_far),
-            observed_low_so_far=float(candidate.observation.low_so_far),
+        day0 = Day0Router.route(Day0SignalInputs(
+            temperature_metric=temperature_metric,
+            observed_high_so_far=float(candidate.observation.high_so_far) if candidate.observation.high_so_far is not None else None,
+            observed_low_so_far=float(candidate.observation.low_so_far) if candidate.observation.low_so_far is not None else None,
             current_temp=float(candidate.observation.current_temp),
             hours_remaining=hours_remaining,
-            member_maxes_remaining=remaining_member_extrema,
-            # Phase 1: Day0Signal.__init__ raises NotImplementedError on low metrics,
-            # so member_mins_remaining is dead code today. When Phase 6 lands the
-            # Day0LowNowcastSignal split, the extrema producer must be re-split to
-            # emit separate max/min arrays — passing the max array here as mins is
-            # a Phase-6 TODO marker, not a valid low-track implementation.
-            member_mins_remaining=remaining_member_extrema,
+            member_maxes_remaining=extrema.maxes,
+            member_mins_remaining=extrema.mins,
             unit=city.settlement_unit,
             observation_source=str(candidate.observation.source),
             observation_time=candidate.observation.observation_time,
-            current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
             temporal_context=temporal_context,
-            temperature_metric=temperature_metric,
             round_fn=settlement_semantics.round_values,
-        )
+        ))
         p_raw = day0.p_vector(bins)
         day0_forecast_context = day0.forecast_context()
+        raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
         ensemble_spread = TemperatureDelta(
-            float(np.std(remaining_member_extrema)), city.settlement_unit
+            float(np.std(raw_arr)), city.settlement_unit
         )
         entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0

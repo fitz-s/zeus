@@ -24,8 +24,8 @@ from src.data.market_scanner import _parse_temp_range, get_current_yes_price, ge
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.time_context import lead_days_to_date_start
-from src.signal.day0_signal import Day0Signal
-from src.signal.day0_window import remaining_member_maxes_for_day0
+from src.signal.day0_router import Day0Router, Day0SignalInputs
+from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.portfolio import Position
 from src.strategy.market_fusion import compute_alpha, vwmp
@@ -291,7 +291,7 @@ def _refresh_day0_observation(
         getattr(position, "temperature_metric", "high")
     )
 
-    remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
+    extrema, hours_remaining = remaining_member_extrema_for_day0(
         ens_result["members_hourly"],
         ens_result["times"],
         city.timezone,
@@ -299,24 +299,23 @@ def _refresh_day0_observation(
         now=temporal_context.current_utc_timestamp,
         temperature_metric=temperature_metric,
     )
-    if remaining_member_maxes.size == 0:
+    if extrema is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
-    day0 = Day0Signal(
-        observed_high_so_far=float(obs.high_so_far),
-        observed_low_so_far=float(obs.low_so_far),
+    day0 = Day0Router.route(Day0SignalInputs(
+        temperature_metric=temperature_metric,
+        observed_high_so_far=float(obs.high_so_far) if obs.high_so_far is not None else None,
+        observed_low_so_far=float(obs.low_so_far) if obs.low_so_far is not None else None,
         current_temp=float(obs.current_temp),
         hours_remaining=hours_remaining,
-        member_maxes_remaining=remaining_member_maxes,
-        member_mins_remaining=remaining_member_maxes,
+        member_maxes_remaining=extrema.maxes,
+        member_mins_remaining=extrema.mins,
         unit=city.settlement_unit,
         observation_source=str(obs.source),
         observation_time=obs.observation_time,
-        current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
         temporal_context=temporal_context,
-        temperature_metric=temperature_metric,
-    )
+    ))
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
     all_bins, held_idx = _build_all_bins(position, city)
 

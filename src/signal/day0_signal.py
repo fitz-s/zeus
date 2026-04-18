@@ -80,15 +80,6 @@ class Day0Signal:
                 "None is not a valid default. Pass HIGH_LOCALDAY_MAX or LOW_LOCALDAY_MIN "
                 "from src.types.metric_identity."
             )
-        # R2: low-track not yet implemented — refuse rather than silently produce
-        # high-semantics output. Phase 6 replaces this guard with a real low nowcast.
-        if temperature_metric.is_low():
-            raise NotImplementedError(
-                "Day0Signal does not yet implement the low-temperature nowcast path. "
-                "Constructing Day0Signal with LOW_LOCALDAY_MIN is forbidden until Phase 6 "
-                "lands a dedicated low-track Day0 class. See Phase 6 of the dual-track "
-                "metric spine refactor plan."
-            )
         self.obs_high = observed_high_so_far
         self.obs_low = observed_low_so_far
         self.current_temp = current_temp

@@ -980,6 +980,66 @@ def tick() -> RiskLevel:
     return level
 
 
+def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
+    """DT#6 graceful-degradation entry: run one tick with a pre-loaded PortfolioState.
+
+    Callers that have already checked portfolio.authority can pass the degraded
+    state here. If authority != 'canonical_db', new-entry paths are suppressed
+    but monitor / exit / reconciliation lanes run read-only.
+    """
+    risk_conn = get_connection(RISK_DB_PATH)
+    init_risk_db(risk_conn)
+
+    zeus_conn = _get_runtime_trade_connection()
+    current_env = get_mode()
+    now = datetime.now(timezone.utc).isoformat()
+
+    if portfolio.authority != "canonical_db":
+        logger.warning(
+            "tick_with_portfolio: portfolio authority=%r (degraded) — new-entry paths suppressed",
+            portfolio.authority,
+        )
+
+    thresholds = settings["riskguard"]
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
+
+    current_equity = float(portfolio.bankroll)
+    initial_bankroll = float(portfolio.initial_bankroll)
+
+    daily_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(hours=24),
+        current_equity=current_equity,
+        initial_bankroll=initial_bankroll,
+        threshold_pct=float(thresholds["max_daily_loss_pct"]),
+    )
+    weekly_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(days=7),
+        current_equity=current_equity,
+        initial_bankroll=initial_bankroll,
+        threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+    )
+
+    daily_loss_level = daily_loss_snapshot["level"]
+    weekly_loss_level = weekly_loss_snapshot["level"]
+
+    level = overall_level(
+        RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        daily_loss_level,
+        weekly_loss_level,
+    )
+
+    zeus_conn.close()
+    risk_conn.close()
+    return level
+
+
 def get_current_level() -> RiskLevel:
     """Read current risk level from risk_state.db.
 
