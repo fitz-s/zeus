@@ -3272,26 +3272,21 @@ def upsert_control_override(
     effective_until: str | None = None,
     precedence: int = DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
 ) -> dict:
+    """Append a control override event. Writes into the append-only
+    `control_overrides_history` log; the `control_overrides` VIEW projects
+    the latest row (by `history_id`, AUTOINCREMENT) per `override_id`. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides"}
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides"}
+    recorded_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT INTO control_overrides (
+        INSERT INTO control_overrides_history (
             override_id, target_type, target_key, action_type, value,
-            issued_by, issued_at, effective_until, reason, precedence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(override_id) DO UPDATE SET
-            target_type=excluded.target_type,
-            target_key=excluded.target_key,
-            action_type=excluded.action_type,
-            value=excluded.value,
-            issued_by=excluded.issued_by,
-            issued_at=excluded.issued_at,
-            effective_until=excluded.effective_until,
-            reason=excluded.reason,
-            precedence=excluded.precedence
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upsert', ?)
         """,
         (
             override_id,
@@ -3304,6 +3299,7 @@ def upsert_control_override(
             effective_until,
             reason,
             precedence,
+            recorded_at,
         ),
     )
     return {"status": "written", "table": "control_overrides", "override_id": override_id}
@@ -3428,18 +3424,36 @@ def expire_control_override(
     override_id: str,
     expired_at: str,
 ) -> dict:
+    """Append an 'expire' event to `control_overrides_history` that sets
+    `effective_until = expired_at` on the latest row for this override_id.
+    No-op if no currently-active row exists. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides", "expired_count": 0}
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides", "expired_count": 0}
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    # Use history_id (AUTOINCREMENT) not recorded_at for the latest-row
+    # lookup: strictly monotone, no clock/tie dependency.
     cur = conn.execute(
         """
-        UPDATE control_overrides
-        SET effective_until = ?
-        WHERE override_id = ?
-          AND (effective_until IS NULL OR effective_until > ?)
+        INSERT INTO control_overrides_history (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        )
+        SELECT h.override_id, h.target_type, h.target_key, h.action_type, h.value,
+               h.issued_by, h.issued_at, ?, h.reason, h.precedence,
+               'expire', ?
+        FROM control_overrides_history h
+        WHERE h.override_id = ?
+          AND h.history_id = (
+              SELECT MAX(h2.history_id)
+              FROM control_overrides_history h2
+              WHERE h2.override_id = ?
+          )
+          AND (h.effective_until IS NULL OR h.effective_until > ?)
         """,
-        (expired_at, override_id, expired_at),
+        (expired_at, recorded_at, override_id, override_id, expired_at),
     )
     return {
         "status": "expired" if cur.rowcount else "noop",
@@ -3464,7 +3478,7 @@ def query_control_override_state(
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {
             "status": "missing_table",
             "entries_paused": False,

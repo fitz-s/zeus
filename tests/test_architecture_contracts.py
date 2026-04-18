@@ -63,7 +63,9 @@ def test_strategy_policy_tables_exist_in_schema():
     assert "CREATE TABLE IF NOT EXISTS risk_actions" in sql
     assert "threshold_multiplier" in sql
     assert "allocation_multiplier" in sql
-    assert "CREATE TABLE IF NOT EXISTS control_overrides" in sql
+    # B070: control_overrides is an event-sourced VIEW over control_overrides_history
+    assert "CREATE TABLE IF NOT EXISTS control_overrides_history" in sql
+    assert "CREATE VIEW IF NOT EXISTS control_overrides AS" in sql
 
 
 def test_token_suppression_table_exists_in_kernel_schema():
