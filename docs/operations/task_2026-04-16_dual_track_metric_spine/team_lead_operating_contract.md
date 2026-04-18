@@ -26,11 +26,21 @@ Was: **wrong environment model**. Team-lead treated a distributed-concurrency pr
 - Concurrency consistency = git merge semantics, not filesystem reads.
 - Corollary: team-lead does NOT disk-verify teammate claims mid-flight. Verify at commit boundary only.
 
+#### P1.1 (added post-P6, coordination-error lesson)
+Git INDEX is shared mutable state between team-lead and executors — NOT team-lead private state. Before every `git add`, team-lead runs `git status --short` to see what else is already staged or modified. Any unexpected content in the index is isolated via `git stash -u` or `git reset HEAD -- <file>` BEFORE intentional stage. Never assume `git add <my-file>` operates on a clean index.
+
+Rationale: in P6, team-lead `git add`-ed a doc, not noticing exec-kai had parallel-staged the full Phase 6 implementation. The subsequent `git commit` captured both, landing impl+doc as a single commit mislabeled "docs(...)". Critic review was bypassed accidentally. Root cause was NOT exec discipline failure — exec correctly staged per instructions. Root cause was team-lead mental model: "index is mine". This is the same class of error as the P5 "disk as atomic oracle" failure, one layer down.
+
 ### P2. Contract-based scope, not stream protocol
 - Phase open = SINGLE contract: "this commit delivers {X, Y, Z} with acceptance = {pytest N/N GREEN + regression ≤ baseline}". Nothing else.
 - During phase: team-lead SILENT. No intermediate check-ins. No scope adjustments.
 - Phase close = receive {commit hash, pytest output, critic verdict}. Rule PASS or ITERATE.
 - Scope adjustment rule: only at phase boundaries. Mid-phase drift = defer to next phase.
+
+#### P2.1 (added post-P6, commit-boundary protocol)
+Exec does NOT `git add` or `git commit`. Exec completes work, writes all files, runs tests, then SendMessage team-lead with: (a) list of files to stage, (b) `git diff --stat HEAD` output, (c) pytest tally, (d) full regression delta. Team-lead verifies the announcement, then (per P1.1) runs `git status --short`, isolates unexpected content, stages the announced files, and commits with accurate message. Commit boundary is team-lead's sole responsibility.
+
+Rationale: decouples "work done" from "commit created." Exec can complete-and-announce even if team-lead is still thinking; team-lead creates commit with full scope-accurate message; critic wide-review happens on team-lead's staged candidate BEFORE commit (not after, as P6 accidentally did). Restores the P2 invariant "ONE commit, reviewed, committed, pushed" as sequential steps under team-lead control.
 
 ### P3. Checks as code, not rules
 - Every rule gets first-asked: "can this be automated?"
