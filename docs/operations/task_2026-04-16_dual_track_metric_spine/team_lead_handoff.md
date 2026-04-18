@@ -1,6 +1,6 @@
-# Team-Lead Handoff (post-P5, pre-compact, 2026-04-18)
+# Team-Lead Handoff (post-P6, 2026-04-18)
 
-**Written**: 2026-04-18 after Phase 5 complete. 5 commits total across 5A/5B/5B-fix-pack/5C/5C-followup. Team `zeus-dual-upgrade-v3` retained through compact via OMC patch. Supersedes all earlier handoffs.
+**Written**: 2026-04-18 post Phase 5 complete + Phase 6 complete (sniper mode). Team `zeus-dual-upgrade-v3` retained (sniper-mode composition: exec-kai + critic-beth + team-lead + ephemeral subagents). Supersedes all earlier handoffs.
 
 ## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
@@ -16,25 +16,68 @@
 
 ## Branch + commit state
 
-Branch: `data-improve`. Top of `origin/data-improve` = `59e271c`. All pushed.
+Branch: `data-improve`. Top of `origin/data-improve` = `e3a4700`. All pushed.
 
 ```
+e3a4700 docs(phase6): microplan — Strategy A internal M1-M4 milestones
+        ^ ACTUAL CONTENT: full Phase 6 implementation (Day0 split + DT#6 + B055
+          absorption). Commit-message mislabeling via team-lead git coordination
+          error; content reviewed + PASS by critic-beth.
+          User-deferred commit-msg amend (force-push decision).
+df1cc71 docs(phase6): contract — Day0 split + two-file co-landing
+c001dda docs(operating-contract): P5 structural learnings → Phase 6 protocol
+5e5fbf6 docs(phase5-close): handoff text consistency
+ecf50bd docs(phase5-close): rebuild_v2 spec kwarg + R-AZ un-xfail + learnings
 59e271c fix(phase5C): remove SQL metric filter from legacy forecasts query
 821959e Phase 5C: replay MetricIdentity + Gate D core antibody + B093 half-1
 3f42842 fix(phase5B-pack): 7 cross-team findings + R-AP..R-AU antibodies
 c327872 Phase 5B: low historical lane + ingest contract gate + B078 absorbed
 977d9ae Phase 5A: truth-authority spine + MetricIdentity view layer
-94cc1f9 fix(B063): rescue_events_v2 audit table with provenance authority
 ```
 
 **Phase 5 COMPLETE.** Gate D PASSED via R-AZ-3 structural antibody.
+**Phase 6 COMPLETE** at `e3a4700`. Silent-corruption category eliminated via `RemainingMemberExtrema` dataclass (both-None raises at construction → wrong code unconstructable). critic-beth PASS verdict at `phase6_evidence/critic_beth_phase6_wide_review.md`.
 
-## Phase order post-P5
+## Phase order post-P6
 
-1. **Phase 6** ← NEXT. Day0 split (`Day0HighSignal` / `Day0LowNowcastSignal` / `Day0Router`) + DT#6 graceful-degradation law + B055 absorption.
-2. **Phase 7** — metric-aware rebuild cutover: `rebuild_v2` full METRIC_SPECS operator-facing iteration (spec param landed P5 post-5C by exec-ida; iteration still HIGH-only at L389), B093 half-2 (replay table migration to `historical_forecasts_v2`), `_tigge_common.py` helper extraction.
-3. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability).
-4. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7.
+1. ~~**Phase 6**~~ **COMPLETE** at `e3a4700`. Day0 split delivered + critic PASS. See "Phase 6 closure" below.
+2. **Phase 7** ← NEXT. Metric-aware rebuild cutover: `rebuild_v2` full METRIC_SPECS operator-facing iteration (spec param landed P5 post-5C; iteration still HIGH-only at L389), B093 half-2 (replay table migration to `historical_forecasts_v2`), `_tigge_common.py` helper extraction, **chore**: remove `remaining_member_maxes_for_day0` backward-compat alias (critic's P6 forward-log).
+3. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability). **ADDED SCOPE** (critic's P6 forward-log): `cycle_runner.py:180-181` DT#6 rewiring — currently `raise RuntimeError` on `portfolio_loader_degraded=True`; must route through `riskguard.tick_with_portfolio` instead. Mechanism exists; routing missing.
+4. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7. **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low).
+
+## Phase 6 closure
+
+**Commit**: `e3a4700` (misnamed "docs(phase6): microplan" — content is full impl; amend pending user force-push ruling).
+
+**Delivered**:
+- 3 new signal classes: `Day0HighSignal`, `Day0LowNowcastSignal`, `Day0Router`
+- `RemainingMemberExtrema` dataclass with `for_metric` constructor + both-None guard
+- `day0_window.py`: renamed `remaining_member_maxes_for_day0` → `remaining_member_extrema_for_day0` (legacy alias kept for backward-compat, removal is P7 chore)
+- `evaluator.py:784` + `monitor_refresh.py:294` callsites migrated to `Day0Router.route(Day0SignalInputs(...))`
+- `day0_signal.py:85-91` LOW NotImplementedError guard REMOVED
+- `riskguard.py`: `tick_with_portfolio` DT#6 + B055 absorption path
+- `portfolio.py`: existing degraded-path coverage confirmed correct (no new code needed)
+- `tests/test_phase6_day0_split.py`: 19 tests, R-BA..R-BG, all GREEN
+
+**Acceptance**:
+- R-BA..R-BG: 19/19 GREEN
+- Full regression: 138 failed / 1801 passed (flat vs P5 baseline 137/1783; net +18 passed via dead-guard unblock, no new failures)
+- `grep NotImplementedError src/signal/day0_signal.py` → zero hits
+- AST walk on `day0_low_nowcast_signal.py` → only `__future__` + `numpy` imports (R-BE clean)
+- critic-beth wide-review PASS
+
+**Structural antibodies installed**:
+- `RemainingMemberExtrema.__post_init__` — both-None raises → MAX/MIN alias unconstructable (Fitz P4 category-impossibility)
+- `Day0Router.route` — causality-guard at construction; LOW + `N/A_CAUSAL_*` routes through nowcast, not historical Platt
+- `Day0LowNowcastSignal` — does not import `day0_high_signal` (R-BE AST invariant)
+- `riskguard.tick_with_portfolio` — DT#6 single-degraded-state transition (not two paths for authority-loss + B055-staleness)
+
+**Coordination-error learning**:
+Team-lead accidentally `git add` + `git commit` captured exec-kai's parallel-staged WIP into a commit intended only for the microplan doc. Root cause: git index is shared mutable state between team-lead and exec; team-lead assumed private. Lesson logged for operating contract amendment:
+
+> **P1.1 (to be added)**: Before `git add`, team-lead runs `git status --short`. Any unexpected staged or modified files in index are isolated via `git stash -u` or `git reset HEAD -- <file>` before intentional stage. Shared git index requires explicit coordination, not assumption.
+
+> **P2.1 (to be added)**: Exec "ready for commit" announcement precedes any `git add`. Team-lead owns the commit boundary; exec hands over a staged-file list + diff in SendMessage, team-lead verifies then stages + commits. No parallel staging.
 
 ## Phase 6 scope
 
