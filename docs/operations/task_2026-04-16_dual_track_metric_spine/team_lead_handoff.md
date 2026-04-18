@@ -52,13 +52,7 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 
 1. ~~**Phase 6**~~ **COMPLETE** at `413d5e0`. Day0 split delivered + critic PASS. See "Phase 6 closure" below.
 2. ~~**Phase 7A**~~ **COMPLETE** at `c496c36` + `a872e50`. Metric-aware rebuild cutover + delete_slice metric scoping + CRITICAL-1 read-side fix + MAJOR-1 schema DEFAULT restoration + MAJOR-2 backfill contract gate. See "Phase 7A closure" below.
-3. **Phase 7B** ← NEXT. Naming hygiene:
-   - remove `remaining_member_maxes_for_day0` backward-compat alias (P6 forward-log)
-   - `_tigge_common.py` helper extraction (15 safe mechanical helpers)
-   - `architecture/script_manifest.yaml` registration for 5 scripts (incl. new `backfill_tigge_snapshot_p_raw_v2.py` from P7A)
-   - Replace `test_R_AZ_2_low_rebuild_writes_only_low_rows` mirror test with real end-to-end LOW fixture (critic's MAJOR-3 from P7A)
-   - Extract `CalibrationMetricSpec` + `METRIC_SPECS` to `src/calibration/metric_specs.py` (critic's MINOR-2)
-   - Document or drop `contract_version` / `boundary_min_value` schema columns (critic's MINOR-1)
+3. ~~**Phase 7B**~~ **COMPLETE (5/6)** at `6fc41ec`. Naming hygiene: metric_specs extracted + alias removed + manifest registered + schema dropped + R-AZ-2 rewritten. See "Phase 7B closure" below. Item 2 (_tigge_common extract) deferred to P7B-followup — planner's "15 safe helpers" claim was inaccurate (module-level constants differ).
 4. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability). **ADDED SCOPE** (critic's P6 forward-log): `cycle_runner.py:180-181` DT#6 rewiring — currently `raise RuntimeError` on `portfolio_loader_degraded=True`; must route through `riskguard.tick_with_portfolio` instead. Mechanism exists; routing missing. **ADDED SCOPE** (P7A deferral): B093 half-2 replay migration to `historical_forecasts_v2` — requires Zero-Data Golden Window lift + v2 table population.
 5. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7. **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low).
 
@@ -98,6 +92,46 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-1: contract_version / boundary_min_value schema columns undocumented
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
+
+## Phase 7B closure
+
+**Commit**: `6fc41ec` feat(phase7b): naming hygiene (5/6). critic-beth PASS first-try (cycle 3, sniper Gen-Verifier 3-for-3).
+
+**Delivered (5/6)**:
+- Item 1: NEW `src/calibration/metric_specs.py` — CalibrationMetricSpec + METRIC_SPECS central home; 3 scripts (rebuild/refit/backfill) import from here; cross-script import via `scripts.rebuild_calibration_pairs_v2` eliminated
+- Item 3: `remaining_member_maxes_for_day0` shim deleted; 9 callers migrated (including 5 silently-broken monkeypatch sites from pre-P7B — they were patching a non-existent attribute post-P6 rename; now patching the real `remaining_member_extrema_for_day0` with correct `RemainingMemberExtrema` dataclass return)
+- Item 4: 5 scripts registered in `architecture/script_manifest.yaml` (extract_tigge_mx2t6/mn2t6, rebuild_calibration_pairs_v2, refit_platt_v2, backfill_tigge_snapshot_p_raw_v2)
+- Item 5: `contract_version` + `boundary_min_value` ADD COLUMN dropped from v2_schema (no live consumer); `unit` retained (backfill uses)
+- Item 6: `test_R_AZ_2_low_rebuild_writes_only_low_rows` rewritten as real invariant check via `_fetch_eligible_snapshots_v2` (was try/except:pass mirror test)
+
+**Deferred (1/6)**:
+- Item 2: `_tigge_common.py` extraction. Planner's "15 safe mechanical helpers" was overstated — `_output_path` depends on `OUTPUT_FILENAME_PREFIX`/`OUTPUT_SUBDIR`, `_find_region_pairs` depends on `PARAM`, all of which DIFFER per extractor. Safe subset = 9 or 13 helpers + shared constants + `CityManifestDriftError` class. Deserves own focused commit (P7B-followup) before P8 opens.
+
+**Acceptance**:
+- 14 files +167/-76
+- Full regression: 125 failed / 1805 passed / 90 skipped (flat vs pre-P7B baseline; zero new failures)
+- P5/P6/P7A targeted tests unaffected
+- critic-beth PASS first-try (first phase this happens in sniper Gen-Verifier era)
+
+**Forward-log (from critic's P7B review — 4 MINOR + 1 deferred)**:
+1. P7B-followup: Item 2 (_tigge_common 9-or-13-safe-helpers extract). Suggested owner: team-lead. Suggested ETA: before P8 opens.
+2. P7B-followup or P8 hygiene: add `extract_` to `architecture/naming_conventions.yaml` `allowed_prefixes` OR add explicit exceptions for `extract_tigge_mx2t6_localday_max.py` + `extract_tigge_mn2t6_localday_min.py` + `refit_platt_v2.py` (3 new `script_long_lived_bad_name` errors surfaced post-manifest-registration).
+3. P8 test-debt: `test_runtime_guards::test_day0_no_remaining_forecast_hours_is_pre_vector_traceable` now fails at a DEEPER assertion (SIGNAL_QUALITY vs MARKET_FILTER) — real latent bug exposed by P7B monkeypatch repair. Trace Day0 rejection ordering.
+4. Optional cosmetic: rename R-AZ-2 test from "writes only low rows" to "low eligibility excludes high rows" (tests the eligibility seam per new impl).
+
+**Structural antibodies installed**:
+- Central `src/calibration/metric_specs.py` (INV: one source of truth for METRIC_SPECS iteration)
+- Zero-cross-script-import in `scripts/` (architectural discipline restored)
+- Alias-removal enforced by grep (INV: `remaining_member_maxes_for_day0` symbol nonexistent outside comments)
+- 5 new scripts audit-registered (dangerous_if_run + target_db + apply_flag metadata)
+- Schema category-impossibility preserved at SQL seam (4 NOT NULL columns, no silent DEFAULTs)
+- R-AZ-2 no longer a mirror test (try/except:pass + stale kwarg antipattern eliminated)
+
+**Gen-Verifier cycle stats**:
+- P6: 1 ITERATE + 1 re-review (2 cycles)
+- P7A: 1 ITERATE (3 findings) + 1 re-review (2 cycles)
+- P7B: 1 PASS on first review (1 cycle)
+- Trend: critic-accumulating-memory + team-lead-discipline → fewer cycles per phase
 
 ## Phase 6 closure
 
