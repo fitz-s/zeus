@@ -41,7 +41,7 @@ PROBABILITY_EPS = 1e-12
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     "shadow_signals",
     "ensemble_snapshots.available_at",
-    "forecasts_table",
+    "forecasts_table_synthetic",
 })
 
 
@@ -227,7 +227,7 @@ class ReplayContext:
         self.overrides = overrides or {}
         self.allow_snapshot_only_reference = allow_snapshot_only_reference
         self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
-        self._decision_ref_cache: dict[tuple[str, str], Optional[dict]] = {}
+        self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
         import sqlite3
         try:
             self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
@@ -239,8 +239,13 @@ class ReplayContext:
             except sqlite3.OperationalError:
                 raise RuntimeError("Replay topology error: ensemble_snapshots neither in world attach nor local main schema.") from exc
 
-    def _forecast_rows_for(self, city_name: str, target_date: str) -> list[dict]:
-        """Load diagnostic historical forecast rows for a replay fallback."""
+    def _forecast_rows_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> list[dict]:
+        """Load diagnostic historical forecast rows for a replay fallback.
+
+        Phase 7: migrate from legacy 'forecasts' table to 'historical_forecasts_v2'
+        (which carries a 'temperature_metric' column) and add 'AND temperature_metric = ?'
+        to the WHERE clause at that point (B093 half-2).
+        """
         try:
             rows = self.conn.execute(
                 f"""
@@ -258,8 +263,8 @@ class ReplayContext:
             return []
         return [dict(row) for row in rows]
 
-    def _forecast_reference_for(self, city_name: str, target_date: str) -> Optional[dict]:
-        rows = self._forecast_rows_for(city_name, target_date)
+    def _forecast_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
+        rows = self._forecast_rows_for(city_name, target_date, temperature_metric=temperature_metric)
         if not rows:
             return None
         positive_leads = [float(row["lead_days"]) for row in rows if float(row["lead_days"] or 0) > 0]
@@ -272,35 +277,34 @@ class ReplayContext:
         bins = _typed_bins_for_city_date(self, city, target_date)
         if not bins:
             return None
-        member_values = [float(row["forecast_high"]) for row in selected]
+        forecast_col = "forecast_low" if temperature_metric == "low" else "forecast_high"
+        member_values = [float(row[forecast_col]) for row in selected if row.get(forecast_col) is not None]
         p_raw = _probability_vector_from_values(member_values, bins, city.settlement_unit)
-        basis_dates = sorted({str(row.get("forecast_basis_date") or "") for row in selected if row.get("forecast_basis_date")})
-        decision_time = (
-            f"{basis_dates[-1]}T12:00:00+00:00"
-            if basis_dates else f"{target_date}T00:00:00+00:00"
-        )
         sources = sorted({str(row["source"]) for row in selected})
         return {
             "trade_id": "",
-            "decision_time": decision_time,
+            "decision_time": None,
             "snapshot_id": f"forecast_rows:{city_name}:{target_date}:lead={selected_lead:g}",
-            "source": "forecasts_table",
+            "source": "forecasts_table_synthetic",
+            "decision_reference_source": "forecasts_table_synthetic",
+            "decision_time_status": "SYNTHETIC_MIDDAY",
             "bin_labels": [bin.label for bin in bins],
             "p_raw_vector": p_raw.tolist(),
             "p_cal_vector": [],
             "p_market_vector": [],
-            "agreement": "AGREE",
+            "agreement": "UNKNOWN",
             "forecast_rows": selected,
             "forecast_sources": sources,
             "lead_days": selected_lead,
         }
 
-    def _forecast_snapshot_for(self, city_name: str, target_date: str, snapshot_id: str) -> Optional[dict]:
-        ref = self._forecast_reference_for(city_name, target_date)
+    def _forecast_snapshot_for(self, city_name: str, target_date: str, snapshot_id: str, temperature_metric: str = "high") -> Optional[dict]:
+        ref = self._forecast_reference_for(city_name, target_date, temperature_metric=temperature_metric)
         if ref is None or ref["snapshot_id"] != snapshot_id:
             return None
+        forecast_col = "forecast_low" if temperature_metric == "low" else "forecast_high"
         member_values = np.array(
-            [float(row["forecast_high"]) for row in ref["forecast_rows"]],
+            [float(row[forecast_col]) for row in ref["forecast_rows"] if row.get(forecast_col) is not None],
             dtype=np.float64,
         )
         if len(member_values) == 0:
@@ -323,14 +327,14 @@ class ReplayContext:
             "n_members": len(member_values),
         }
 
-    def get_decision_reference_for(self, city_name: str, target_date: str) -> Optional[dict]:
+    def get_decision_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
         """Get an actual decision-time reference for replay.
 
         Replay must not invent a decision timestamp. If no actual decision exists
         for this settlement, replay returns no coverage rather than peeking at
         future-available data.
         """
-        key = (city_name, target_date)
+        key = (city_name, target_date, temperature_metric)
         if key in self._decision_ref_cache:
             return self._decision_ref_cache[key]
 
@@ -355,6 +359,8 @@ class ReplayContext:
                 "snapshot_id": row["snapshot_id"],
                 "market_hours_open": row["market_hours_open"],
                 "source": "trade_decisions",
+                "decision_reference_source": "historical_decision",
+                "decision_time_status": "OK",
             }
             self._decision_ref_cache[key] = result
             return result
@@ -507,7 +513,7 @@ class ReplayContext:
                 }
 
         if best is None and self.allow_snapshot_only_reference:
-            best = self._forecast_reference_for(city_name, target_date)
+            best = self._forecast_reference_for(city_name, target_date, temperature_metric=temperature_metric)
 
         result = best
         self._decision_ref_cache[key] = result
@@ -1103,6 +1109,7 @@ def _replay_one_settlement(
     city: City,
     target_date: str,
     settlement: dict,
+    temperature_metric: str = "high",
 ) -> Optional[ReplayOutcome]:
     """Replay the evaluator pipeline for one city × target_date.
 
@@ -1124,7 +1131,7 @@ def _replay_one_settlement(
     _sem = SettlementSemantics.for_city(city)
     _round_fn = _sem.round_values
 
-    decision_ref = ctx.get_decision_reference_for(city.name, target_date)
+    decision_ref = ctx.get_decision_reference_for(city.name, target_date, temperature_metric=temperature_metric)
     if decision_ref is None:
         return None
     decision_reference_source = str(decision_ref.get("source") or "UNKNOWN")

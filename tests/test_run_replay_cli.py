@@ -106,7 +106,7 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     assert strict.n_replayed == 0
     assert relaxed.n_replayed == 1
     assert relaxed.outcomes[0].snapshot_id.startswith("forecast_rows:Ankara")
-    assert relaxed.limitations["decision_reference_source_counts"] == {"forecasts_table": 1}
+    assert relaxed.limitations["decision_reference_source_counts"] == {"forecasts_table_synthetic": 1}
     assert relaxed.limitations["diagnostic_replay_subjects"] == 1
     assert relaxed.limitations["diagnostic_replay_subject_rate"] == 1.0
     assert any(
