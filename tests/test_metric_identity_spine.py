@@ -151,20 +151,21 @@ class TestDay0SignalLowMetricRefuses:
     Day0Signal simply raises on all inputs.
     """
 
-    def test_day0signal_low_metric_refuses_until_phase6(self):
-        """R2: Day0Signal(temperature_metric=LOW_LOCALDAY_MIN, ...) raises NotImplementedError.
+    def test_day0signal_low_metric_refused_post_phase6(self):
+        """Phase 6 re-guard: Day0Signal(LOW) raises TypeError; Day0Router.route(LOW) returns Day0LowNowcastSignal.
 
-        Phase 6 replaces this guard with a real low nowcast class.  Until then the
-        constructor must refuse rather than silently produce high-semantics output.
+        Phase 1 R2 antibody refused LOW with NotImplementedError ("not yet built").
+        Phase 6 upgrades the boundary: Day0Signal is HIGH-only (TypeError),
+        and the router-level invariant ensures LOW never produces Day0Signal output.
+        Fitz P4 category-impossibility preserved at both the class and router seam.
         """
-        try:
-            from src.types.metric_identity import LOW_LOCALDAY_MIN
-        except ImportError:
-            pytest.fail("Phase 1 module not yet implemented: LOW_LOCALDAY_MIN not found")
-
+        from src.types.metric_identity import LOW_LOCALDAY_MIN
         from src.signal.day0_signal import Day0Signal
+        from src.signal.day0_router import Day0Router, Day0SignalInputs
+        from src.signal.day0_low_nowcast_signal import Day0LowNowcastSignal
 
-        with pytest.raises(NotImplementedError):
+        # Part 1: direct Day0Signal construction with LOW raises TypeError (class-level guard)
+        with pytest.raises(TypeError):
             Day0Signal(
                 observed_high_so_far=80.0,
                 current_temp=78.0,
@@ -172,6 +173,21 @@ class TestDay0SignalLowMetricRefuses:
                 member_maxes_remaining=np.array([85.0, 84.0, 82.0]),
                 temperature_metric=LOW_LOCALDAY_MIN,
             )
+
+        # Part 2: router never returns Day0Signal for LOW (router-level guard)
+        inputs = Day0SignalInputs(
+            temperature_metric=LOW_LOCALDAY_MIN,
+            current_temp=32.0,
+            hours_remaining=6.0,
+            observed_high_so_far=None,
+            observed_low_so_far=30.0,
+            member_maxes_remaining=None,
+            member_mins_remaining=np.array([26.0, 28.0]),
+            causality_status="OK",
+        )
+        signal = Day0Router.route(inputs)
+        assert isinstance(signal, Day0LowNowcastSignal)
+        assert not isinstance(signal, Day0Signal)
 
     def test_day0signal_high_metric_still_constructs_successfully(self):
         """R2 paired assertion: Day0Signal(temperature_metric=HIGH_LOCALDAY_MAX, ...) must NOT raise.

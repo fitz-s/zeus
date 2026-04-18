@@ -80,6 +80,13 @@ class Day0Signal:
                 "None is not a valid default. Pass HIGH_LOCALDAY_MAX or LOW_LOCALDAY_MIN "
                 "from src.types.metric_identity."
             )
+        # Phase 6 re-guard: Day0Signal is HIGH-only. LOW has its own class (Day0LowNowcastSignal).
+        # Direct construction with LOW bypasses Day0Router and would produce HIGH-math labeled LOW.
+        if temperature_metric.is_low():
+            raise TypeError(
+                "Day0Signal is HIGH-only. Use Day0Router.route() for metric-dispatched construction, "
+                "or Day0LowNowcastSignal directly. See Phase 6 of the dual-track metric spine refactor."
+            )
         self.obs_high = observed_high_so_far
         self.obs_low = observed_low_so_far
         self.current_temp = current_temp
