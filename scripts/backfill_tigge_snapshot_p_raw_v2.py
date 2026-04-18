@@ -51,6 +51,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, METRIC_SPECS
@@ -205,7 +206,7 @@ def backfill_v2(
         params.append(city_filter)
 
     sql = f"""
-        SELECT snapshot_id, city, target_date, members_json, p_raw_json, unit
+        SELECT snapshot_id, city, target_date, members_json, p_raw_json, unit, data_version
         FROM ensemble_snapshots_v2
         WHERE temperature_metric = ?
           AND p_raw_json IS NULL
@@ -227,6 +228,13 @@ def backfill_v2(
         members_json_str = row["members_json"] if hasattr(row, "keys") else row[3]
         snapshot_id = row["snapshot_id"] if hasattr(row, "keys") else row[0]
         unit = row["unit"] if hasattr(row, "keys") else row[5]
+        data_version = row["data_version"] if hasattr(row, "keys") else row[6]
+
+        # MAJOR-2 fix: belt-and-suspenders contract gate before any UPDATE.
+        # Even though the SELECT filters authority='VERIFIED' + training_allowed=1,
+        # the explicit data_version allowlist is the contract this script inherits
+        # from rebuild_calibration_pairs_v2's P5-era pattern.
+        assert_data_version_allowed(data_version, context="backfill_tigge_snapshot_p_raw_v2")
 
         bins = typed_bins_for_city_date_metric(
             conn,
