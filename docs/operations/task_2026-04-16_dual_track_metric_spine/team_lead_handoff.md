@@ -106,7 +106,7 @@ Locked:
 - R-AB..R-AE: Phase 5A (locked at `977d9ae`)
 - R-AF..R-AO: Phase 5B (locked at `c327872`)
 - R-AP..R-AU: Phase 5B-fix-pack (locked at `3f42842`)
-- R-AV..R-AZ: Phase 5C (locked at `821959e` / `59e271c`); R-AZ-1/2 xfail(strict=True) → Phase 7 un-xfail
+- R-AV..R-AZ: Phase 5C (locked at `821959e` / `59e271c` / `ecf50bd`). **R-AZ-1/2 GREEN on merit** via `rebuild_v2(spec=...)` landed in `ecf50bd`; xfail markers removed. No Phase 7 un-xfail work remains.
 
 Reserved:
 - R-V..R-Z: future Phase 6/7/9 drafts per emma final_dump rename (pre-P5 ruling)
