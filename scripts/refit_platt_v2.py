@@ -56,6 +56,7 @@ from src.config import calibration_maturity_thresholds, calibration_n_bootstrap
 from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
+from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
 
 _, _, MIN_DECISION_GROUPS = calibration_maturity_thresholds()  # level3 = refit threshold
 
@@ -208,7 +209,7 @@ def _fit_bucket(
 def refit_v2(
     conn: sqlite3.Connection,
     *,
-    metric_identity: MetricIdentity = HIGH_LOCALDAY_MAX,
+    metric_identity: MetricIdentity,
     dry_run: bool,
     force: bool,
 ) -> RefitStatsV2:
@@ -283,9 +284,32 @@ def refit_v2(
     return stats
 
 
+def refit_all_v2(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> dict[str, RefitStatsV2]:
+    """Refit Platt v2 models for ALL METRIC_SPECS in one invocation.
+
+    Returns per-metric stats dict keyed by temperature_metric string.
+    Any spec that fails propagates the exception; caller sees non-zero exit.
+    """
+    per_metric: dict[str, RefitStatsV2] = {}
+    for spec in METRIC_SPECS:
+        stats = refit_v2(
+            conn,
+            metric_identity=spec.identity,
+            dry_run=dry_run,
+            force=force,
+        )
+        per_metric[spec.identity.temperature_metric] = stats
+    return per_metric
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Refit Platt v2 models from calibration_pairs_v2 (high track).",
+        description="Refit Platt v2 models from calibration_pairs_v2 (both tracks).",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true", default=True,
@@ -315,14 +339,15 @@ def main() -> int:
     apply_v2_schema(conn)
 
     try:
-        stats = refit_v2(conn, dry_run=args.dry_run, force=args.force)
+        per_metric = refit_all_v2(conn, dry_run=args.dry_run, force=args.force)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     finally:
         conn.close()
 
-    return 1 if stats.refused else 0
+    any_refused = any(s.refused for s in per_metric.values())
+    return 1 if any_refused else 0
 
 
 if __name__ == "__main__":

@@ -186,17 +186,17 @@ def _fetch_verified_observation(
     ).fetchone()
 
 
-def _collect_pre_delete_count(conn: sqlite3.Connection) -> int:
+def _collect_pre_delete_count(conn: sqlite3.Connection, *, spec: CalibrationMetricSpec) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE bin_source = ?",
-        (CANONICAL_BIN_SOURCE_V2,),
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE bin_source = ? AND temperature_metric = ?",
+        (CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric),
     ).fetchone()[0]
 
 
-def _delete_canonical_v2_slice(conn: sqlite3.Connection) -> None:
+def _delete_canonical_v2_slice(conn: sqlite3.Connection, *, spec: CalibrationMetricSpec) -> None:
     conn.execute(
-        "DELETE FROM calibration_pairs_v2 WHERE bin_source = ?",
-        (CANONICAL_BIN_SOURCE_V2,),
+        "DELETE FROM calibration_pairs_v2 WHERE bin_source = ? AND temperature_metric = ?",
+        (CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric),
     )
 
 
@@ -295,7 +295,7 @@ def _process_snapshot_v2(
             season=season,
             cluster=city.cluster,
             forecast_available_at=available_at,
-            metric_identity=HIGH_LOCALDAY_MAX,
+            metric_identity=spec.identity,
             training_allowed=True,
             data_version=data_version,
             source=source,
@@ -318,12 +318,17 @@ def rebuild_v2(
     *,
     dry_run: bool,
     force: bool,
-    spec: CalibrationMetricSpec = METRIC_SPECS[0],
+    spec: CalibrationMetricSpec,
     city_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
+    _skip_commit: bool = False,
 ) -> RebuildStatsV2:
-    """Run the v2 rebuild end-to-end. Returns accounting stats."""
+    """Run the v2 rebuild end-to-end. Returns accounting stats.
+
+    _skip_commit: internal flag used by rebuild_all_v2 to suppress the inner
+    conn.commit() — the outer SAVEPOINT + commit is managed by the caller.
+    """
     if rng is None:
         rng = np.random.default_rng()
 
@@ -357,7 +362,7 @@ def rebuild_v2(
     print(f"  quarantined:        {stats.snapshots_quarantined}")
     print(f"  eligible:           {stats.snapshots_eligible}")
 
-    stats.pre_delete_v2_pairs = _collect_pre_delete_count(conn)
+    stats.pre_delete_v2_pairs = _collect_pre_delete_count(conn, spec=spec)
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
     if dry_run:
@@ -379,7 +384,7 @@ def rebuild_v2(
 
     conn.execute("SAVEPOINT v2_rebuild")
     try:
-        _delete_canonical_v2_slice(conn)
+        _delete_canonical_v2_slice(conn, spec=spec)
         start = time.monotonic()
         missing_city_count = 0
         for snap in eligible:
@@ -437,7 +442,8 @@ def rebuild_v2(
             )
 
         conn.execute("RELEASE SAVEPOINT v2_rebuild")
-        conn.commit()
+        if not _skip_commit:
+            conn.commit()
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild")
         conn.execute("RELEASE SAVEPOINT v2_rebuild")
@@ -457,6 +463,48 @@ def rebuild_v2(
             print(f"  {city_name:20s}  {n}")
 
     return stats
+
+
+def rebuild_all_v2(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool,
+    force: bool,
+    city_filter: Optional[str] = None,
+    n_mc: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> dict[str, RebuildStatsV2]:
+    """Rebuild calibration_pairs_v2 for ALL METRIC_SPECS under one outer SAVEPOINT.
+
+    LOW-side failure rolls back HIGH writes — no orphan rows on partial failure.
+    Returns per-metric stats dict keyed by temperature_metric string.
+    """
+    per_metric: dict[str, RebuildStatsV2] = {}
+
+    conn.execute("SAVEPOINT v2_rebuild_all")
+    try:
+        for spec in METRIC_SPECS:
+            stats = rebuild_v2(
+                conn,
+                dry_run=dry_run,
+                force=force,
+                spec=spec,
+                city_filter=city_filter,
+                n_mc=n_mc,
+                rng=rng,
+                _skip_commit=True,
+            )
+            per_metric[spec.identity.temperature_metric] = stats
+
+        conn.execute("RELEASE SAVEPOINT v2_rebuild_all")
+        if not dry_run:
+            conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild_all")
+        conn.execute("RELEASE SAVEPOINT v2_rebuild_all")
+        raise
+
+    return per_metric
 
 
 def _print_rebuild_estimate_v2(eligible: list[sqlite3.Row]) -> None:
@@ -523,7 +571,7 @@ def main() -> int:
     apply_v2_schema(conn)
 
     try:
-        stats = rebuild_v2(
+        per_metric = rebuild_all_v2(
             conn,
             dry_run=args.dry_run,
             force=args.force,
@@ -536,7 +584,8 @@ def main() -> int:
     finally:
         conn.close()
 
-    return 1 if stats.refused else 0
+    any_refused = any(s.refused for s in per_metric.values())
+    return 1 if any_refused else 0
 
 
 if __name__ == "__main__":
