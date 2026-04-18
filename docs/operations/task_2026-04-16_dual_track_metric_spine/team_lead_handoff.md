@@ -1,229 +1,199 @@
-# Team-Lead Handoff (post-compact 2026-04-17)
+# Team-Lead Handoff (post-5B commit, pre-compact, 2026-04-17)
 
-**Written**: 2026-04-17 17:30+ local, post Phase 5A commit, pre-compact.
-**Prior versions archived in git history.** This file supersedes all earlier handoffs.
+**Written**: 2026-04-17 after Phase 5B commit `c327872` pushed + team `zeus-dual-track` retired with full learnings extracted. Supersedes all earlier handoffs.
 
 ## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
-1. Read `~/.claude/agent-team-methodology.md` — your operating manual.
-2. Read `~/.claude/CLAUDE.md` § "Code Provenance: Legacy Is Untrusted Until Audited".
+1. Read `~/.claude/agent-team-methodology.md` — operating manual. Pay attention to §"Critic role" (L0.0 peer-not-suspect) and §"Value extraction".
+2. Read `~/.claude/CLAUDE.md` § "Code Provenance" + § "Fitz's Core Methodology" + § "Four Constraints of Delegated Intelligence".
 3. Read THIS file IN FULL.
-4. Read `docs/authority/zeus_dual_track_architecture.md` (§2/§5/§6/§8 minimum).
-5. `git log --oneline -10` to confirm state.
-6. If team `zeus-dual-track` still exists (check `~/.claude/teams/`), resume with SendMessage re-intros. Otherwise re-create per template in § "Team Bootstrap".
+4. Read `docs/authority/zeus_dual_track_architecture.md` §2/§5/§6/§8.
+5. Read the 5 learnings docs at `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_*_learnings.md` — these are the multi-phase mental model of the retired team, your only bridge to 5A+5B context without a live teammate.
+6. Read `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_5B_verdict.md` — final PASS verdict + 6 forward-backlog items.
+7. `git log --oneline -5` to confirm state: `c327872 Phase 5B` should be top.
+8. Check `~/.claude/teams/` — team `zeus-dual-track` should be DELETED (retired). If still present, user didn't trigger retirement yet; ask.
+9. Spawn FRESH team for Phase 5B-fix-pack (see § "Fresh team bootstrap" below).
 
 ## Branch + commit state
 
-Branch: `data-improve`
-Last relevant commits:
+Branch: `data-improve`. Recent commits (top of `origin/data-improve` is `c327872`):
 
 ```
-977d9ae Phase 5A: truth-authority spine + MetricIdentity view layer  ← NEEDS PUSH
+c327872 Phase 5B: low historical lane + ingest contract gate + B078 absorbed
+977d9ae Phase 5A: truth-authority spine + MetricIdentity view layer
 94cc1f9 fix(B063): rescue_events_v2 audit table with provenance authority
 177ae8b fix(B091): forward decision_time to evaluator + explicit fabrication warnings
 ef09dc3 docs(handoff): DT coordination handoff for 12 truly-RED bugs (Phase-5 split)
-7732701 Merge remote-tracking branch 'origin/data-improve'  ← earlier merge
-3b82dd5 Phase 4.5: GRIB→JSON extractor + R-L tightening + legacy-audit protocol
-cf85ca6 Phase 4.6: R-AA cities cross-validate — anchor on config/cities.json
 ```
 
-Remote (`origin/data-improve` at push time): `94cc1f9`. `977d9ae` is local-only; **push if user approves**.
+Both 5A + 5B pushed. No pending commits.
 
-## Gate status (updated post-5B)
+## Phase order (revised post-learnings)
 
-- **Gate A, B, C** open (Phases 2-4 closed).
-- **Phase 5A** committed at `977d9ae` — truth authority + MetricIdentity view layer seam.
-- **Phase 5B** committed — low historical lane: extractor + ingest contract gate + rebuild/refit metric-aware + B078 absorbed. 41/41 R-AF..R-AO GREEN; full regression flat at 117 failed (baseline). critic-alice PASS verdict at `phase5_evidence/critic_alice_5B_verdict.md`.
-- **Phase 5C** next — replay MetricIdentity half-1 + Gate D (low-purity parity) + B093 half-1.
-- **Phase 6-9** future (Day0 split, shadow, limited activation).
+1. **Phase 5B-fix-pack** ← NEW, fresh team's FIRST commit. Addresses 8 items from cross-team learnings (CRITICAL + MAJOR severity, fix-pack-appropriate scope). See § "Phase 5B-fix-pack scope" below.
+2. **Phase 5C** ← after fix-pack. Replay MetricIdentity half-1 + Gate D test + B093 half-1.
+3. **Phase 6** — Day0 split (`Day0HighSignal` / `Day0LowNowcastSignal`) + DT#6 graceful-degradation law + B055 absorption. CRITICAL co-landing hazard: `evaluator.py:825` MAX-array-passed-as-MIN MUST be fixed in the same commit that removes the `Day0Signal.__init__` guard for low metric.
+4. **Phase 7** — metric-aware rebuild + model cutover. Migrate replay to `historical_forecasts_v2` (B093 half-2).
+5. **Phase 8** — low shadow mode.
+6. **Phase 9** — low limited activation (Gate F).
 
-## R-letter namespace update (5B lock)
+## Phase 5B-fix-pack scope (8 items, ~500 LOC target)
 
-- R-AF..R-AO locked at 5B commit:
-  - R-AF (6): `validate_snapshot_contract` 3-law gating
-  - R-AG (5): extractor 5-function public API
-  - R-AH (2): Kelvin `members_unit` explicit
-  - R-AI (3): `data_version` exact + cross-metric rejection
-  - R-AJ (2): causality first-class
-  - R-AK (6): `CalibrationMetricSpec` + `METRIC_SPECS` 2-tuple
-  - R-AL (3): `iter_training_snapshots` metric isolation
-  - R-AM (3): ingest unblock + R-AM.4 scanner-isolation antibody
-  - R-AN (6): B078 low-lane truth metadata registry
-  - R-AO (5): `refit_platt_v2` low-metric isolation
-- R-AP reserved for 5B-follow-up (extractor behavioral coverage; see backlog).
+The fresh team's FIRST commit. Scope consolidated from the 5 learnings docs; omits items that are Phase 7+ or too big for a fix-pack.
 
-## 5B-follow-up backlog (post-commit, fresh-team-owned)
+### CRITICAL-severity (4 items)
 
-1. **R-AP** (testeng-grace's replacement): behavioral tests for `classify_boundary_low` — 3 synthetic cases (cross-midnight steal, safe boundary, inner-None-only). Currently R-AG only asserts importability; polarity-swap footgun still live.
-2. **`scripts/_tigge_common.py` extraction**: duplicated utilities (`compute_manifest_hash`, `_now_utc_iso`, `_city_slug`, `_overlap_seconds`) across mx2t6 + mn2t6 extractors. Drift-warning audit from critic.
-3. **Dead-code audit for `_extract_causality_status`** in `ingest_grib_to_snapshots.py` — unreachable post-5B contract wiring; safe to delete.
-4. **`scripts/scan_tigge_mn2t6_localday_coverage.py`** (deferred from 5B main scope): diagnostic scanner per remediation §8 (per-city quarantine rate alarm >20%). Not gating, diagnostic-only; scanner-isolation antibody R-AM.4 already installed.
+1. **`mode=None` bypasses ModeMismatchError** (exec-emma finding). `src/state/truth_files.py::read_mode_truth_json` — explicit `None` should be rejected, not silently accepted. Fix: reject at entry + update R-AC regression test to cover.
+2. **Quarantined members `value_native_unit` silent trap** (exec-dan finding). `scripts/extract_tigge_mn2t6_localday_min.py` — when `training_allowed=False`, member-level `value_native_unit` must be `None`, not inner-bucket min. Prevents downstream consumer who reads value-but-skips-training_allowed from seeing wrong data. Add assertion to extractor JSON + matching test.
+3. **DST step-horizon 1h drift** (exec-dan finding). `scripts/extract_tigge_mn2t6_localday_min.py::_compute_required_max_step` uses point-in-time offset; must use target-date local offset. Add R-letter test with DST-boundary synthetic city.
+4. **`observation_client.py:87` module-level SystemExit** (testeng-grace finding). Move the guard to callsite / lazy import so transitive importers don't crash on missing `WU_API_KEY`. This topology land mine is blocking proper regression testing — fixing it unblocks `test_phase6_causality_status.py` + many dev-env tests.
 
-## Team retirement protocol (post-5B, standing directive)
+### MAJOR-severity (4 items)
 
-Per user directive (2026-04-17 pre-compact): team `zeus-dual-track` is **5B-only**. After commit:
-1. Each teammate writes `phase5b_to_phase5c_<name>_learnings.md` (500-800 words).
-2. Team-lead compact.
-3. Fresh team spawn for Phase 5C (new names; briefs carry methodology §"Critic role" as background but not as corrective patches).
+5. **Rebuild `data_version` not asserted against spec** (exec-emma finding). `scripts/rebuild_calibration_pairs_v2.py` — assert snapshot `data_version` is in `{HIGH_LOCALDAY_MAX.data_version, LOW_LOCALDAY_MIN.data_version}` before processing. Reject rows with stale/unknown data_version.
+6. **Contract rejection log level WARNING → ERROR** (exec-emma finding). `scripts/ingest_grib_to_snapshots.py::ingest_json_file` — `decision.accepted=False` path should log at ERROR level for operational visibility. One-line change.
+7. **`_extract_causality_status` dead code delete** (triple-confirmed: scout + exec-emma + critic). `scripts/ingest_grib_to_snapshots.py:107` — function defined but never called post-contract-wiring. Delete.
+8. **`wu_daily_collector.py` DEAD_DELETE** (scout finding). `main.py:73` lazy-guard still makes it importable. Delete module + update import site.
 
-## Zero-Data Golden Window (STANDING until user lifts)
+### OUT of fix-pack scope (defer)
 
-Still active:
-- v2 tables zero rows (ensemble_snapshots_v2, calibration_pairs_v2, platt_models_v2).
-- TIGGE GRIB archive still downloading.
-- **No real ingest into any v2 table until user lifts**.
-- **Smoke tests = unit first, then ≤1 GRIB file for structural validation**. Output to `/tmp/`, never committed.
-- **No full-batch extraction runs**. 420+ file runs require user approval + download complete + critic PASS.
-- **Structural fixes are free now**. Bias every decision toward "fix structurally now, ingest later".
+- `_tigge_common.py` extraction (12-helper refactor, ~300 LOC, cross-cuts 2 extractors) — separate chore commit after 5C.
+- INV-21 / INV-22 zero coverage (architectural packet, not fix-pack scope) — Phase 9 risk-layer work.
+- `evaluator.py:825` MAX→MIN silent corruption — dead-code today (guarded by NotImplementedError); **co-landing imperative with Phase 6 guard removal**, not fix-pack.
+- Hardcoded absolute paths in Zeus core (2 sites) — separate env-var refactor.
+- Phase 2-4 tests missing provenance headers — bulk retrofit commit.
+- `test_cross_module_invariants.py` vacuously-true — needs structural fix + real data, post Phase 9.
+- Naming drift (`p_raw_vector_from_maxes`) — Phase 7 naming pass.
+- `setdefault` trust-boundary weakener (critic MINOR-NEW-1) — structural hardening in 5C/Phase 6.
 
-## Key philosophical lesson from 2026-04-17 (encode, don't lose)
+## Phase 5C scope (after fix-pack)
 
-### Critic critiques the TASK and the TARGET, not the TEAMMATE
-
-Tonight's cascading problems came from critic reaching for "teammate violation / discipline breach" as the default hypothesis whenever disk state disagreed with a report. The actual cause was almost always:
-1. **Concurrent writes** flipping disk state between an agent's edit and critic's grep.
-2. **Compound grep patterns** (`"A\|B"`) failing shell escape.
-3. **Stale context** on the critic's side being presented as fresh.
-
-All of these are technical/timing artifacts — not teammate dishonesty.
-
-**Standing rule for next critic onboarding**:
-- Critic's job is to critique the CODE, the TEST COVERAGE, the STRUCTURAL SEAMS — not the teammate.
-- When disk disagrees with a teammate report, default hypothesis ordering:
-  1. Concurrent dispatch timing (another teammate's write between your reads).
-  2. Memory/report-state lag on the agent's side (pre-compact context, stale snapshot).
-  3. Genuine mistake (benign).
-  4. **Discipline breach — last resort, requires triple-verification**.
-- "Grep reveals X at line Y" is a disk-verifiable claim. If you claim it, run a FRESH bash grep right before you write the claim. Paste the bash output in your verdict as evidence.
-- Teammates are peers, not suspects. Language: "the diff shows", "the disk reveals", "the test needs" — NOT "exec-emma lied" or "exec-emma silently reverted".
-
-**Standing rule for team-lead**:
-- If critic files a "discipline breach" finding, team-lead independently disk-verifies BEFORE escalating to the executor. Probably caught me ~3 times tonight as I echoed critic's framing at exec-emma before verifying.
-- When an instruction to an executor turns out to be scope creep by team-lead (e.g. tonight's `paper` mode addition), acknowledge AT ONCE. Don't let the executor carry the blame.
-
-This rule should be encoded in the next critic's brief verbatim.
-
-## Team state at Phase 5A close
-
-| Name | Role | Model | Status | Action post-compact |
-|---|---|---|---|---|
-| critic-alice | opus critic | opus | active, 0 compacts | RETAIN. Add peer-not-suspect rule to her L0. |
-| scout-finn | sonnet scout | sonnet | active, idle | RETAIN. Phase 5B inventory next. |
-| testeng-grace | sonnet testeng | sonnet | active, idle | RETAIN. R-letters for 5B next. |
-| exec-emma | sonnet executor, Phase 5 owner | sonnet | active, idle | **RETAIN** (probation withdrawn after recalibration). |
-| exec-dan | sonnet executor, 5B lead | sonnet | active, idle (was standby) | RETAIN. Activate for 5B `extract_tigge_mn2t6_localday_min.py`. |
-
-No replacements needed. No retires. Team stays.
-
-## R-letter namespace ledger
-
-- R-A..R-P: Phases 1-4 (locked).
-- R-Q..R-U: Phase 4.5 (locked).
-- R-AA: Phase 4.6 cities cross-validate (locked).
-- R-AB/R-AC/R-AD/R-AE: Phase 5A (locked at `977d9ae`).
-  - R-AB: PortfolioState.authority field + 3 exit paths.
-  - R-AC: ModeMismatchError + mode threading.
-  - R-AD: MetricIdentity view layer (row + top-level emission).
-  - R-AE: canonical writer authority stamping (MAJOR-4 regression).
-- R-AF onward: Phase 5B low extractor R-invariants (to be drafted).
-
-Full ruling + namespace policy: `phase4_evidence/r_letter_namespace_ruling.md`.
-
-## Phase 5B opening brief (for exec-dan)
-
-### Scope
-- New file: `scripts/extract_tigge_mn2t6_localday_min.py` (~500-700 LOC).
-  - Mirror Phase 4.5 mx2t6 structural pattern, but with MIN aggregation semantics.
-  - **NOT a polarity swap**: boundary is **semantically different for MIN** (boundary can steal the minimum via cross-midnight leakage, not just be "close to edge"). Write `classify_boundary_low` from Phase 0 spec.
-  - `causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED"` emitted first-class for positive-offset cities where day0 local-midnight < issue_utc.
-  - 5 exported functions testeng-grace anchors R-letters against (signatures per exec-dan's pre-alignment sketch in his earlier a2a).
-- Unblock `scripts/ingest_grib_to_snapshots.py:253` `NotImplementedError` for low track.
-- `scripts/rebuild_calibration_pairs_v2.py` + `scripts/refit_platt_v2.py`: add `--track` arg.
-- `LEGACY_STATE_FILES` + `build_truth_metadata` low-lane extension (B078 absorption).
-- File-provenance headers on all new files (canonical format per `architecture/naming_conventions.yaml`).
-
-### Do NOT
-- Vendor from 51-source common module (critic's Phase 4.5 audit STALE_REWRITE verdict stands).
-- Touch truth authority seam (5A work; don't re-edit).
-- Add paper-mode anything (retired; antibody msg protects).
-- Run any real batch extraction (zero-data window; smoke ≤1 GRIB).
-
-### Section B absorption for 5B
-- **B078** lands IN the 5B commit (LEGACY_STATE_FILES low-lane entries + `temperature_metric`/`data_version` metadata requirements).
-
-### Critic posture for 5B onboarding (verbatim for her)
-> "You are critic-alice. Your job is to critique CODE QUALITY, TEST COVERAGE, STRUCTURAL SEAMS. Teammates are peers. When disk disagrees with a report, default hypothesis is concurrent timing or memory-lag, not teammate dishonesty. Fresh bash grep is the evidence currency. Discipline findings require triple-verification + team-lead concurrence."
-
-## Phase 5C brief (after 5B commits)
-
-### Scope
-- `src/engine/replay.py::_forecast_reference_for` — sentinel→typed-status fields (B093 half-1):
+- `src/engine/replay.py::_forecast_reference_for` — sentinel strings → typed status fields (B093 half-1):
   - `decision_reference_source: Literal["historical_decision","forecasts_table_synthetic"]`
   - `decision_time_status: Literal["OK","SYNTHETIC_MIDDAY","UNAVAILABLE"]`
   - `agreement: Literal["AGREE","DISAGREE","UNKNOWN"]`
-- Add code comment referencing Phase 7 for half-2 (table migration to `historical_forecasts_v2`).
-- Gate D test: `tests/test_phase5_gate_d_low_purity.py` — asserts high and low Platt models do not share buckets; asserts no cross-metric leakage in `calibration_pairs_v2`.
+- `_forecast_rows_for` SQL: add `AND temperature_metric = ?` filter (per scout's Phase 5 inventory §5C).
+- `_forecast_reference_for` branching: metric-conditional value read (`forecast_high` vs `forecast_low`).
+- `_decision_ref_cache` cache key MUST include `temperature_metric` (scout's learning doc flag).
+- Gate D test: `tests/test_phase5_gate_d_low_purity.py` — asserts high + low Platt models don't share buckets; no cross-metric leakage in `calibration_pairs_v2`.
+- Leave `historical_forecasts_v2` table migration to Phase 7 (B093 half-2).
 
-### Do NOT (5C specifically)
-- Migrate replay's query source to `historical_forecasts_v2` — that's Phase 7 (requires v2 populated after full batch extraction).
+## Fresh team bootstrap (post-compact)
 
-## Pending items / cleanups for later sub-phases
+### Team name
+`zeus-phase5fix-5c` or similar. Fresh from `zeus-dual-track`.
 
-- **5B MINOR-1**: delete unused `_RUNTIME_MODES` constant in `src/config.py:42` (now that paper is retired, the constant is dead).
-- **5B MINOR-2**: `src/state/db.py` view result `str(row["temperature_metric"] or "high")` — the `or "high"` is defensive dead code (column is NOT NULL via CHECK). Remove.
+### Team composition (5 roles, same structure as retired team)
+- `critic-beth` (opus critic) — wide adversarial review at sub-phase boundaries.
+- `scout-gary` (sonnet explore) — inventory + landing-zone scan.
+- `testeng-hank` (sonnet test-engineer) — R-letter drafting (next namespace: R-AP onward).
+- `exec-ida` (sonnet executor) — fix-pack owner; 5C co-owner.
+- `exec-juan` (sonnet executor) — 5C co-owner; takes replay_metric + Gate D.
 
-## Legacy-code-untrusted-until-audited rule (standing, global)
+(Names are arbitrary; what matters is fresh identity + clean onboarding.)
 
-Per `~/.claude/CLAUDE.md § "Code Provenance: Legacy Is Untrusted Until Audited"` + Zeus `AGENTS.md § "Function Naming and Reuse Freshness"`. Enforcement:
-- Every new/touched `scripts/*.py` + `tests/test_*.py` requires `# Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD|never` header + `Purpose:` + `Reuse:`.
-- Machine check: `python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
-- Canonical source: `architecture/naming_conventions.yaml`.
+### Mandatory reads for every fresh teammate
 
-## OMC session-end hook state
+Put this in every brief, no exceptions:
 
-`~/.claude/plugins/marketplaces/omc/scripts/session-end.mjs` patched 2026-04-17 to early-return by default (preserves native teams across session boundaries). Env var `OMC_ENABLE_SESSION_END=1` restores original behavior. If `omc update` runs, re-apply the patch. Noted in `~/.claude/CLAUDE.md`.
+1. `~/.claude/agent-team-methodology.md` — full.
+2. `~/.claude/CLAUDE.md` (global Fitz methodology + Four Constraints + Code Provenance).
+3. `/Users/leofitz/.openclaw/workspace-venus/zeus/AGENTS.md` — root law + §"Function Naming" + §"Forbidden Moves".
+4. `architecture/naming_conventions.yaml` — file-header format, R-letter rules.
+5. `docs/authority/zeus_dual_track_architecture.md` §2/§5/§6/§8.
+6. THIS handoff file IN FULL.
+7. **All 5 learnings docs** at `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/phase5b_to_phase5c_*_learnings.md` — they are the retired team's multi-phase mental model; read ALL of them, not just the one matching your role.
+8. `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/critic_alice_5B_verdict.md` — PASS verdict + 6 forward-backlog items.
+9. Role-specific reads (e.g. critic reads prior critic products; testeng reads R-letter ruling).
 
-## Worktree state
+### Leadership notes (from 5B self-review, for your post-compact self)
 
-- Main tree (team-lead): `/Users/leofitz/.openclaw/workspace-venus/zeus` on `data-improve`.
-- Debug agent tree (isolated): `/Users/leofitz/.openclaw/workspace-venus/zeus-debug` on `data-improve-debug`. Peer path, not nested.
-- `.claude/worktrees/data-rebuild` nested worktree — user migrated debug agent out to peer path; nested one had activity during Phase 5A but per subagent inspection was safe to leave pending removal.
+- **testeng R-letter mapping**: in 5B, testeng-grace silently reshuffled R-letters (my R-AJ=B078 became her R-AJ=causality). Caught late. Fresh testeng brief: include explicit R-letter → test-class mapping; require testeng to confirm mapping BEFORE drafting; reject silent reshuffles.
+- **Concurrent-write timing**: in 5B, executors took testeng's initial-RED broadcast as implicit green-light; HOLD messages arrived late. Fresh team brief: explicit "do not start implementation until [X confirmation event]". Gate execution on positive confirmation, not absence of stop.
+- **peer-not-suspect L0.0**: already in methodology file. Fresh critic inherits it as background context, not as corrective patch. Reference the file; don't reprint the whole §.
+- **Citation prefix**: universal rule, non-negotiable. Every Edit/Write status needs `[AUTHORIZED by: ...]` + `[DISK-VERIFIED: ...]`.
+- **Disk is truth**: main thread always disk-verifies before accepting a teammate claim as fact.
+- **Fix-pack first, 5C second**: DO NOT let fresh team try to bundle fix-pack + 5C in one commit. Critic wide-review quality drops past ~500 LOC.
 
-5 `/tmp/zeus_*` worktrees + 1 stale entry were cleaned in `docs/operations/.../phase4_evidence/` sub-cleanup run.
+## 5B-follow-up backlog not in fix-pack (for 5C+ owners)
 
-## Known forward risks
+From critic's final verdict + cross-team learnings:
 
-- **MINOR cleanups listed above** — land in 5B or 5C as convenience.
-- **Replay table migration (B093 half-2)** deferred Phase 7. Phase 7 requires v2 populated by actual batch extraction (not yet authorized).
-- **`temperature_metric` CHECK in position_current** currently allows `'high'` DEFAULT; once Phase 5B starts writing `'low'` rows from low-track runtime, verify no caller silently accepts the DEFAULT.
+1. **R-AP** (testeng-hank): behavioral tests for `classify_boundary_low`.
+2. **`_tigge_common.py` extraction** (exec-dan's list): 12 shared helpers across mx2t6 + mn2t6 extractors. Post-5C or Phase 7.
+3. **MINOR-NEW-1**: caller `metric` arg as contract authority (unconditional assignment, not `setdefault`) in `ingest_grib_to_snapshots.py::ingest_json_file`.
+4. **MINOR-NEW-2**: causality `setdefault` gated on `metric.temperature_metric == "high"`.
+5. **`scripts/scan_tigge_mn2t6_localday_coverage.py`**: diagnostic scanner per remediation §8. Scanner-isolation antibody R-AM.4 protects ingest.
+6. **INV-21 / INV-22 coverage**: DT#5 + DT#3 machine-check gap. Phase 9 risk-layer packet.
 
-## Phase roadmap post-compact
+## Critical co-landing imperatives (do not decouple)
 
-```
-Phase 5B — low extractor + ingest unblock + rebuild/refit --track (B078 absorbed)
-Phase 5C — replay half-1 + Gate D (B093 half-1 absorbed)
-Phase 6 — Day0HighSignal / Day0LowNowcastSignal split + DT#6 graceful-degradation (B055 absorbed)
-Phase 7 — metric-aware rebuild full cutover; replay migrates to historical_forecasts_v2 (B093 half-2)
-Phase 8 — low-lane shadow mode
-Phase 9 — low-lane limited activation (Gate F); risk-critical DT#2/DT#5/DT#7 land here
-```
+- **`evaluator.py:825` MAX→MIN fix** MUST land in the same Phase 6 commit that removes `Day0Signal.__init__` low-metric NotImplementedError guard. Silent corruption risk if decoupled.
+- **DST step-horizon fix** (fix-pack #3) MUST land before any real-data batch run. Zero-data window protects us today.
 
-## Do NOT (standing list for post-compact main-thread)
+## Gate status post-5B-fix-pack
 
-- Trust any critic "discipline breach" finding without independent disk-verify.
-- Treat concurrent-write timing artifacts as scope-creep violations.
-- Let paper mode back into `src/config.py` (retired; Zeus is live-only).
-- Push `977d9ae` without user confirmation (still unpushed as of this handoff).
-- Spawn new agents when existing ones are idle; resume the team.
-- Skip `architecture/naming_conventions.yaml` header format on new scripts/tests.
-- Do full-batch extraction without user approval + critic PASS.
+- Gate A, B, C open (Phases 2-4 closed).
+- Phase 5A committed at `977d9ae`.
+- Phase 5B committed at `c327872`.
+- Phase 5B-fix-pack committed — 14/14 R-AP..R-AU GREEN; regression +12 passing vs pre-fix (R-AT observation_client lazy-import unblocked SystemExit-poisoned collection). True post-unblock baseline: 138 failed / 1716 passed. critic-beth PASS at `phase5_evidence/critic_beth_phase5fix_wide_review.md`.
+- Phase 5C next (replay MetricIdentity half-1 + Gate D + B093 half-1).
+- Phase 6 after 5C (Day0 split + DT#6 + B055) — co-landing imperative: `evaluator.py:825` MAX→MIN fix with guard removal.
+
+## R-letter namespace ledger (locked + available)
+
+- R-A..R-P: Phases 1-4 (locked).
+- R-Q..R-U: Phase 4.5 (locked).
+- R-AA: Phase 4.6 (locked).
+- R-AB..R-AE: Phase 5A (locked at 977d9ae).
+- R-AF..R-AO: Phase 5B (locked at c327872).
+- **R-AP onward: available for fix-pack + 5C + later.**
+- R-V..R-Z: reserved per emma final_dump (Phase 6/7/9).
+
+Full ledger: `phase4_evidence/r_letter_namespace_ruling.md`.
+
+## Zero-Data Golden Window (STANDING)
+
+- v2 tables: zero rows.
+- No real ingest/batch extraction until user lifts.
+- Smoke tests ≤ 1 GRIB file, output `/tmp/`, never commit.
+- Full batch requires: user approval + download complete + critic PASS.
+- Structural fixes are free now (exploit this window).
+
+## Paper mode retired (STANDING antibody)
+
+`src/config.py::ACTIVE_MODES = ("live",)`. `mode_state_path` carries "paper retired" antibody msg. **DO NOT re-add paper mode.** Zeus is live-only.
+
+## Retired team final disposition
+
+- critic-alice (opus): retired. Learning doc: `phase5b_to_phase5c_critic_alice_learnings.md`. Contribution: L0.0 peer-not-suspect refinement; PASS verdict on 5B with 1 CRITICAL + 2 MAJOR caught + all addressed.
+- scout-finn (sonnet): retired. Learning doc: `phase5b_to_phase5c_scout_finn_learnings.md`. Contribution: DT-v2 package triage + 6 latent-issue flags including `evaluator.py:825` co-landing hazard.
+- testeng-grace (sonnet): retired. Learning doc: `phase5b_to_phase5c_testeng_grace_learnings.md`. Contribution: 41 R-letter tests (spec-anchored, no fixture-bypass). One memory-lag incident handled cleanly via peer-not-suspect.
+- exec-dan (sonnet): retired. Learning doc: `phase5b_to_phase5c_exec_dan_learnings.md`. Contribution: mn2t6 extractor (~835 LOC) + ingest unblock + 5 sharp GRIB/DST flags. Probation withdrawn.
+- exec-emma (sonnet): retired. Learning doc: `phase5b_to_phase5c_exec_emma_learnings.md`. Contribution: contract module + rebuild/refit refactor + B078 + 11 latent-issue flags.
+
+All learnings filed in `phase5_evidence/`. Team config cleaned from `~/.claude/teams/zeus-dual-track/`.
+
+## Standing do-nots (post-compact reminders)
+
+- Do not trust any teammate's claim without disk-verify.
+- Do not re-add paper mode (antibody in place).
+- Do not push full-batch extraction without user approval.
+- Do not bundle fix-pack + 5C in one commit.
+- Do not decouple `evaluator.py:825` fix from Phase 6 guard removal.
+- Do not skip the 5 learnings docs on fresh-team onboarding.
+- Do not let fresh testeng silently reshuffle R-letter spec — confirm mapping first.
+
+## OMC session-end hook
+
+Still patched (`~/.claude/plugins/marketplaces/omc/scripts/session-end.mjs` early-returns by default). `OMC_ENABLE_SESSION_END=1` restores legacy behavior. Re-apply if `omc update` runs.
 
 ## Status files on disk
 
-- This file: `docs/operations/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md`.
+- This file (authoritative post-compact handoff).
 - Phase 5 evidence: `docs/operations/task_2026-04-16_dual_track_metric_spine/phase5_evidence/`.
-- Coordination handoff: `docs/to-do-list/zeus_dt_coordination_handoff.md` (B069/B073/B077 flagged RESOLVED; B078/B093 open).
+- Coordination handoff (bug-fix agent): `docs/to-do-list/zeus_dt_coordination_handoff.md` (B069/B073/B077/B078 ✅ RESOLVED; B093 bifurcated).
 - Methodology (global): `~/.claude/agent-team-methodology.md`.
-- Global rules: `~/.claude/CLAUDE.md` (Fitz methodology + Code Provenance + OMC session-end patch note).
+- Global rules: `~/.claude/CLAUDE.md`.
 
-Phase 5A is a clean milestone. Post-compact continues from here with team intact, paper mode retired, truth-authority seam installed. Harmonious teammate relations restored.
+Phase 5B is a clean milestone. Team retired per plan. Fresh team will pick up with fix-pack then 5C. Zero forward discipline concerns.

@@ -67,17 +67,6 @@ def _harvester_cycle():
         logger.error("Harvester failed: %s", e, exc_info=True)
 
 
-def _wu_daily_collection():
-    """Daily WU observation collection (all cities). Must run daily — data is ephemeral (~36h)."""
-    try:
-        from src.data.wu_daily_collector import collect_daily_highs
-        result = collect_daily_highs()
-        logger.info("WU daily collection: collected=%d, skipped=%d, errors=%d",
-                    result["collected"], result["skipped"], result["errors"])
-    except Exception as e:
-        logger.error("WU daily collection failed: %s", e, exc_info=True)
-
-
 def _k2_daily_obs_tick():
     """K2 daily-observations tick — replaces legacy wu_daily_collector.
 
@@ -323,6 +312,7 @@ _heartbeat_fails = 0
 
 def _write_heartbeat() -> None:
     """Write a heartbeat JSON to state/ every 60s so operators can detect silent crashes."""
+    global _heartbeat_fails
     from src.config import state_path
     path = state_path("daemon-heartbeat.json")
     try:
@@ -335,10 +325,8 @@ def _write_heartbeat() -> None:
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
-        global _heartbeat_fails
         _heartbeat_fails = 0
     except Exception as exc:
-        global _heartbeat_fails
         _heartbeat_fails += 1
         logger.error("Heartbeat write failed (%d/3): %s", _heartbeat_fails, exc)
         try:
