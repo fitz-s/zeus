@@ -141,11 +141,13 @@ class RebuildStatsV2:
 def _fetch_eligible_snapshots_v2(
     conn: sqlite3.Connection,
     city_filter: Optional[str],
+    spec: "CalibrationMetricSpec | None" = None,
 ) -> list[sqlite3.Row]:
-    """Pull eligible high-track snapshots from ensemble_snapshots_v2."""
-    params: list = [MIN_TRAINING_DATE]
+    """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
+    track = spec.identity.temperature_metric if spec is not None else "high"
+    params: list = [track, MIN_TRAINING_DATE]
     where = (
-        "WHERE temperature_metric = 'high' "
+        "WHERE temperature_metric = ? "
         "AND training_allowed = 1 "
         "AND causality_status = 'OK' "
         "AND authority = 'VERIFIED' "
@@ -316,6 +318,7 @@ def rebuild_v2(
     *,
     dry_run: bool,
     force: bool,
+    spec: CalibrationMetricSpec = METRIC_SPECS[0],
     city_filter: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
@@ -327,16 +330,16 @@ def rebuild_v2(
     stats = RebuildStatsV2()
 
     print("=" * 70)
-    print("CALIBRATION PAIRS V2 REBUILD (high track, canonical_v2)")
+    print(f"CALIBRATION PAIRS V2 REBUILD ({spec.identity.temperature_metric} track, {CANONICAL_BIN_SOURCE_V2})")
     print("=" * 70)
     print(f"Mode:              {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     if city_filter:
         print(f"City filter:       {city_filter}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
-    print(f"MetricIdentity:    {HIGH_LOCALDAY_MAX}")
+    print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {n_mc or 'default (ensemble_n_mc())'}")
 
-    snapshots = _fetch_eligible_snapshots_v2(conn, city_filter=city_filter)
+    snapshots = _fetch_eligible_snapshots_v2(conn, city_filter=city_filter, spec=spec)
     stats.snapshots_scanned = len(snapshots)
 
     eligible: list[sqlite3.Row] = []
@@ -386,7 +389,7 @@ def rebuild_v2(
                 continue
             _process_snapshot_v2(
                 conn, snap, city,
-                spec=METRIC_SPECS[0],
+                spec=spec,
                 n_mc=n_mc,
                 rng=rng,
                 stats=stats,

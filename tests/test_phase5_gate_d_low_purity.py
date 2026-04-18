@@ -144,10 +144,6 @@ def _make_gate_d_db() -> sqlite3.Connection:
 class TestGateDLowPurityIsolation:
     """R-AZ: calibration_pairs_v2 and platt_models_v2 must have zero cross-metric leakage."""
 
-    @pytest.mark.xfail(
-        reason="rebuild_v2 spec param + metric-loop iteration lands Phase 7 (B093 half-2 + scout-finn forward-log)",
-        strict=True,
-    )
     def test_R_AZ_1_high_rebuild_writes_only_high_rows(self):
         """R-AZ-1 (RED): rebuild_v2 with HIGH_SPEC must not write any temperature_metric='low' rows.
 
@@ -187,10 +183,6 @@ class TestGateDLowPurityIsolation:
             "Cross-metric leakage confirmed. Fix: spec param must filter to HIGH data_version only."
         )
 
-    @pytest.mark.xfail(
-        reason="rebuild_v2 spec param + metric-loop iteration lands Phase 7 (B093 half-2 + scout-finn forward-log)",
-        strict=True,
-    )
     def test_R_AZ_2_low_rebuild_writes_only_low_rows(self):
         """R-AZ-2 (RED): rebuild_v2 with LOW_SPEC must not write any temperature_metric='high' rows."""
         from scripts.rebuild_calibration_pairs_v2 import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
