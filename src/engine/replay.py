@@ -239,7 +239,7 @@ class ReplayContext:
             except sqlite3.OperationalError:
                 raise RuntimeError("Replay topology error: ensemble_snapshots neither in world attach nor local main schema.") from exc
 
-    def _forecast_rows_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> list[dict]:
+    def _forecast_rows_for(self, city_name: str, target_date: str) -> list[dict]:
         """Load diagnostic historical forecast rows for a replay fallback.
 
         Phase 7: migrate from legacy 'forecasts' table to 'historical_forecasts_v2'
@@ -264,7 +264,7 @@ class ReplayContext:
         return [dict(row) for row in rows]
 
     def _forecast_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
-        rows = self._forecast_rows_for(city_name, target_date, temperature_metric=temperature_metric)
+        rows = self._forecast_rows_for(city_name, target_date)
         if not rows:
             return None
         positive_leads = [float(row["lead_days"]) for row in rows if float(row["lead_days"] or 0) > 0]
