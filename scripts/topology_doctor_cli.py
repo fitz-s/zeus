@@ -40,6 +40,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--core-maps", action="store_true", help="Check core-map profile compilation")
     parser.add_argument("--naming-conventions", action="store_true", help="Check canonical file/function naming map")
     parser.add_argument("--freshness-metadata", action="store_true", help="Check changed scripts/tests for lifecycle freshness headers")
+    parser.add_argument("--code-review-graph-status", action="store_true", help="Check local Code Review Graph cache freshness")
     parser.add_argument("--map-maintenance", action="store_true", help="Check companion registry updates for added/deleted files")
     parser.add_argument(
         "--map-maintenance-mode",
@@ -191,6 +192,10 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         return 0 if result.ok else 1
     if args.freshness_metadata:
         result = api.run_freshness_metadata(args.changed_files)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        return 0 if result.ok else 1
+    if args.code_review_graph_status:
+        result = api.run_code_review_graph_status(args.changed_files)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.navigation:

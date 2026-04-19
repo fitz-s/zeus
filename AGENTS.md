@@ -223,6 +223,10 @@ execution or evidence use. Machine checks:
 `python scripts/topology_doctor.py --naming-conventions` and
 `python scripts/topology_doctor.py --freshness-metadata --changed-files <files>`.
 
+## Code Review Graph
+
+`code-review-graph` is a local derived code-impact cache, not authority. Use it only after topology routing for source/test/script impact; low graph risk never waives planning-lock, manifests, receipts, topology, authority order, or truth rules. Check: `python scripts/topology_doctor.py --code-review-graph-status --changed-files <files>`.
+
 ## Mesh Maintenance
 
 Zeus uses a mesh topology: `workspace_map.md` -> scoped `AGENTS.md` -> files,

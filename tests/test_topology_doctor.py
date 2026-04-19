@@ -196,6 +196,110 @@ def test_cli_json_parity_for_freshness_metadata_command(monkeypatch, tmp_path):
     }
 
 
+def _write_code_review_graph_db(path, *, branch="data-improve", head="HEADSHA", file_hash=None, file_path=None):
+    import sqlite3
+
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT NOT NULL UNIQUE,
+                file_path TEXT NOT NULL,
+                file_hash TEXT
+            );
+            CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE communities (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE risk_index (node_id INTEGER PRIMARY KEY);
+            """
+        )
+        conn.executemany(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            [
+                ("git_branch", branch),
+                ("git_head_sha", head),
+                ("last_updated", "2026-04-19T00:00:00"),
+                ("schema_version", "9"),
+            ],
+        )
+        if file_path:
+            conn.execute(
+                "INSERT INTO nodes (kind, name, qualified_name, file_path, file_hash) VALUES (?, ?, ?, ?, ?)",
+                ("File", file_path, file_path, file_path, file_hash),
+            )
+            conn.execute("INSERT INTO edges DEFAULT VALUES")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_cli_json_parity_for_code_review_graph_status(monkeypatch, tmp_path):
+    root = tmp_path
+    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    _write_code_review_graph_db(root / ".code-review-graph" / "graph.db")
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+
+    payload = run_cli_json(["--code-review-graph-status", "--json"])
+    result = topology_doctor.run_code_review_graph_status()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_code_review_graph_status_warns_on_dirty_file_hash_mismatch(monkeypatch, tmp_path):
+    root = tmp_path
+    script = root / "scripts" / "example.py"
+    script.parent.mkdir()
+    script.write_text("print('new')\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    _write_code_review_graph_db(
+        root / ".code-review-graph" / "graph.db",
+        file_path=script.resolve().as_posix(),
+        file_hash="old-hash",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {"scripts/example.py": "modified"})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+
+    result = topology_doctor.run_code_review_graph_status(["scripts/example.py"])
+
+    assert result.ok
+    assert any(issue.code == "code_review_graph_dirty_file_stale" for issue in result.issues)
+
+
+def test_code_review_graph_status_blocks_tracked_graph_db(monkeypatch, tmp_path):
+    root = tmp_path
+    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    _write_code_review_graph_db(root / ".code-review-graph" / "graph.db")
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+
+    result = topology_doctor.run_code_review_graph_status()
+
+    assert not result.ok
+    assert any(issue.code == "code_review_graph_tracked_db" for issue in result.issues)
+
+
 def test_cli_json_parity_for_closeout_command(monkeypatch):
     payload = {
         "ok": True,
