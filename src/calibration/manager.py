@@ -168,7 +168,10 @@ def get_calibrator(
         model_data = load_platt_model(conn, bk)
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
-            refit = _fit_from_pairs(conn, cluster, season, unit=city.settlement_unit)
+            refit = _fit_from_pairs(
+                conn, cluster, season, unit=city.settlement_unit,
+                temperature_metric=temperature_metric,
+            )
             if refit is not None:
                 level = maturity_level(refit.n_samples)
                 return refit, level
@@ -186,7 +189,10 @@ def get_calibrator(
     n = get_decision_group_count(conn, cluster, season)
     _, _, level3 = calibration_maturity_thresholds()
     if n >= level3:
-        cal = _fit_from_pairs(conn, cluster, season, unit=city.settlement_unit)
+        cal = _fit_from_pairs(
+            conn, cluster, season, unit=city.settlement_unit,
+            temperature_metric=temperature_metric,
+        )
         if cal is not None:
             level = maturity_level(n)
             return cal, level
@@ -237,8 +243,31 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
 
 def _fit_from_pairs(
     conn, cluster: str, season: str, *, unit: str | None = None,
+    temperature_metric: str = "high",
 ) -> Optional[ExtendedPlattCalibrator]:
-    """Fit a new calibrator from stored pairs."""
+    """Fit a new calibrator from stored pairs.
+
+    Phase 9C.1 ITERATE-fix (critic-dave cycle-1 MAJOR-2 "latent bomb"):
+    on-the-fly refit is HIGH-only. LOW on-the-fly would call the legacy
+    metric-blind `save_platt_model` below, polluting `platt_models` with
+    a LOW-fitted model that a future HIGH v2-miss could silently read
+    back through the legacy-fallback branch at L165-168 — a two-seam
+    violation (write-side twin of the L3 read-side fix).
+
+    LOW refits must land via the dedicated v2 pipeline
+    (scripts/refit_platt_v2.py → save_platt_model_v2), which is
+    Golden-Window-gated. Fast-path on-the-fly refit is unsafe for LOW
+    until a metric-aware on-the-fly-to-v2 writer is added (post-dual-
+    track cleanup packet).
+    """
+    if temperature_metric != "high":
+        logger.debug(
+            "_fit_from_pairs skipped for %s_%s (temperature_metric=%s): "
+            "on-the-fly refit is HIGH-only per Phase 9C.1 two-seam law. "
+            "LOW refits must use scripts/refit_platt_v2.py.",
+            cluster, season, temperature_metric,
+        )
+        return None
     pairs = get_pairs_for_bucket(conn, cluster, season, bin_source_filter="canonical_v1")
     _, _, level3 = calibration_maturity_thresholds()
     if len(pairs) < level3:
