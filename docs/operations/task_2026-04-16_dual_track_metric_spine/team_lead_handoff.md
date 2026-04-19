@@ -57,7 +57,7 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 5. ~~**Phase 8 route A**~~ **COMPLETE** at `6ffefa4` (critic-carol first-try PASS, 2026-04-18). Scope: S1 `run_replay` public-entry `temperature_metric` threading + S2 `cycle_runner.py:180-181` DT#6 rewire to `riskguard.tick_with_portfolio`. 4/4 R-BP/R-BQ antibodies GREEN. Full regression 144/1846 (zero new failures vs 144/1842 baseline; +4 from antibodies). Contract: `phase8_contract.md`. Route A honored: code-only, no TIGGE data import, v2 tables zero-row, Golden Window preserved. See "Phase 8 closure" below. Gate E code-prerequisites complete; Gate E data-evidence blocks on future Golden Window lift (P9/later).
 6. ~~**Phase 9A**~~ **COMPLETE** at `7081634` (critic-carol cycle 2 first-try PASS, 2026-04-18). Absorbs all 4 P8 MAJOR observability forward-log items + adopts DT#6 Interpretation B in authority doc. Scope: S1 `entries_blocked_reason` DATA_DEGRADED + S2 L195 overwrite comment + S3 run_replay mode+metric warning + S4 R-BQ.1 structural hardening (drops silent-return + text-match) + S5 DT#6 §B law clarification + S6 R-BS.1/2 save_portfolio roundtrip + S7 R-BT entries_blocked_reason antibody + S8 R-BU.1/2 mode+metric warning pair. 9/9 antibodies GREEN. Full regression 144/1851 (+5 exact match, zero new failures). 2 MINOR (R-BS.2 vacuous assert + DT#6 §B aspirational doc) patched in phase9a-close commit. See "Phase 9A closure" below.
 7. ~~**Phase 9B**~~ **COMPLETE** at `0974a62` (impl) + `b73927c` (ITERATE fix). critic-carol cycle 3 — **streak broke as predicted** (P7B+P8+P9A=3 PASS, P9B=ITERATE). Adversarial opening surfaced CRITICAL-1: DT#2 marker was inert (no runtime consumer read `exit_reason="red_force_exit"`). ITERATE fix wired marker into `evaluate_exit` short-circuit + added R-BY/R-BY.2 relationship antibody pair. Re-verify PASS. 5/5 antibodies GREEN (R-BV/R-BW/R-BX/R-BY/R-BY.2). Regression 144/1856/93 (+5 from P9B antibodies, zero new failures). critic-carol **retires** after 3 cycles (P8/P9A/P9B); P9C opens with critic-dave. See "Phase 9B closure" below.
-8. **Phase 9C** — Gate F activation prep: `Day0LowNowcastSignal.p_vector` proper implementation (currently lazy HIGH delegate — unacceptable for live LOW), `monitor_refresh.py` LOW wiring (non-Day0), B093 half-2 (`_forecast_rows_for` → `historical_forecasts_v2`; blocks on Golden Window lift), `--temperature-metric` CLI flag, second-seam data-closure tests. critic-dave cycle 1 (fresh spawn) with critic-carol learnings inherited.
+8. ~~**Phase 9C**~~ **COMPLETE** at `114a0f5` (feat) + `d516e6b` (ITERATE fix). **DUAL-TRACK MAIN LINE CLOSED** (per critic-dave cycle-1 re-verify). Scope delivered: S1 L3 CRITICAL `get_calibrator` metric-aware + new `load_platt_model_v2` reader + 4 callers (**the blocker that made LOW deployment impossible pre-P9C** — calibration read side was metric-blind) + S2 A3 `Day0LowNowcastSignal.p_vector` + S3 A1 `_forecast_rows_for` conditional v2 read + S4 A4 DT#7 gate wired to evaluator + S5 B1 `--temperature-metric` CLI flag + S6 B3 `save_portfolio` source audit tag + S7 C2 R-BY.2 strengthen + S8 L2 dedicated `tests/test_phase9c_gate_f_prep.py` + S9 L1 settlements_v2 external-only policy doc. critic-dave cycle 1 returned ITERATE with 2 MAJOR findings (R-CC.2 checkbox antibody at helper boundary + `_fit_from_pairs` legacy-save latent bomb — write-side twin of L3); ITERATE fix at `d516e6b` added `_fit_from_pairs` metric-aware guard (LOW → None early-return, write-side two-seam closed) + R-CC.3 AST-walk structural antibody (evaluator gate wire) + R-CG.1/2/3 paired antibodies (LOW-skip positive/surgical/HIGH-unchanged). Re-verify PASS. 17 P9C antibodies GREEN. Full regression 144/1873/93 (+17 from pre-P9B; zero new failures). See "Phase 9C closure" below.
 
 ## Phase 7A closure
 
@@ -95,6 +95,78 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-1: contract_version / boundary_min_value schema columns undocumented
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
+
+## Phase 9C closure — DUAL-TRACK MAIN LINE CLOSED
+
+**Commits**: `114a0f5` feat(phase9c) → `d516e6b` fix(phase9c): ITERATE resolution. critic-dave cycle 1 (fresh spawn, general-purpose agent type per carol cycle-3 methodology fix, adversarial-opening per rotation convention) delivered ITERATE → team-lead fixed → re-verify PASS.
+
+**Delivered (9 structural items + 4 ITERATE-fix items)**:
+
+Core structural gaps closed:
+- **S1 L3 CRITICAL** — `get_calibrator` metric-aware + new `load_platt_model_v2` reader. Pre-P9C state: calibration write side (save_platt_model_v2) was metric-aware since Phase 5 but the read side was metric-BLIND — LOW candidates would silently receive HIGH Platt models. This was THE structural blocker that made LOW deployment impossible regardless of what other pieces landed. 4 callers updated (monitor_refresh×2, replay, evaluator).
+- **S2 A3** — `Day0LowNowcastSignal.p_vector(bins, n_mc, rng)` added; AST-parsed antibody R-CA.2 locks the non-import from day0_high_signal (R-BE invariant).
+- **S3 A1** — `_forecast_rows_for` conditional historical_forecasts_v2 read + schema translation (v2 per-row metric-partitioned → legacy dual-column shape for downstream compat); B093 half-2 code-ready.
+- **S4 A4** — DT#7 `boundary_ambiguous_refuses_signal` wired into evaluator candidate gate via new `_read_v2_snapshot_metadata` helper; pre-Golden-Window v2-empty → gate dormant; post-data-lift → gate fires on boundary-ambiguous rows.
+- **S5 B1** — `--temperature-metric` CLI flag on `scripts/run_replay.py`.
+- **S6 B3** — `save_portfolio(source="internal")` param + 2 callers tagged ("cycle_housekeeping" + "harvester_settlement"); DT#6 §B Interpretation B observability.
+- **S7 C2** — R-BY.2 strengthen (Day0 without red marker runs normal logic; closes asymmetric-discrimination gap from critic-carol cycle-3 L15).
+- **S8 L2** — dedicated `tests/test_phase9c_gate_f_prep.py` file (per critic-carol cycle-3 L2 convention correction).
+- **S9 L1** — settlements_v2 external-only policy doc appended to `zeus_dual_track_architecture.md §4` (Zeus code does NOT contain internal settlements_v2 writer; live settlement truth arrives via Polymarket oracle + WU observations through existing legacy writers).
+
+Write-side two-seam closure (critic-dave cycle-1 MAJOR-2 fix, commit d516e6b):
+- **`_fit_from_pairs` metric-aware guard** — early-return None for non-HIGH; LOW on-the-fly refit CANNOT reach legacy metric-blind `save_platt_model`. Pre-fix: a LOW refit would pollute legacy `platt_models`; a HIGH v2-miss legacy fallback could silently read that LOW model AS HIGH. Classic two-seam violation (beth L1 pattern). 2 call sites in get_calibrator updated to pass metric.
+
+Relationship antibody upgrade (critic-dave cycle-1 MAJOR-1 fix, commit d516e6b):
+- **R-CC.3** — AST-walk structural antibody: inspects evaluate_candidate function body, requires `_read_v2_snapshot_metadata` + `boundary_ambiguous_refuses_signal` call sites + DT7 rejection reason string. Replaces the previous R-CC.2 checkbox antibody at the helper boundary; now the evaluator wire seam itself is guarded.
+- **R-CG.1/2/3** — paired antibodies: LOW returns None + monkeypatched save_platt_model captures zero LOW calls + HIGH path unchanged.
+
+**Antibodies installed (17 total for P9C)**:
+- R-BZ.1/2/3: get_calibrator metric discrimination (positive / paired / backward-compat default)
+- R-CA.1/2: Day0LowNowcastSignal.p_vector behavior + no-HIGH-import
+- R-CB.1/2: _forecast_rows_for v2 + legacy fallback
+- R-CC.1/2: _read_v2_snapshot_metadata helper boundary
+- R-CC.3 (ITERATE-fix): AST-walk evaluator DT#7 wire structural
+- R-CD.1: CLI flag
+- R-CE.1/2: save_portfolio source tag
+- R-BY.2 (strengthened): Day0 without marker runs normal logic
+- R-CG.1/2/3 (ITERATE-fix): _fit_from_pairs LOW-skip paired (negative/surgical/positive)
+
+**Regression evidence (2026-04-19)**:
+- Full: 144 failed / 1873 passed / 93 skipped / 7 subtests
+- Pre-P9C baseline 144/1856/93 → post-P9C (feat only) 144/1869/93 (+13) → post-ITERATE-fix 144/1873/93 (+4 from R-CC.3 + R-CG.1/2/3; zero new failures at each step)
+- Deltas exact match to antibody counts at every commit
+
+**Hard constraints preserved**:
+- No TIGGE data import
+- No v2 table writes (v2 remains zero-row per Golden Window)
+- No SQL DDL
+- No breaking kelly_size signature (B2 deferred)
+- No _TRUTH_AUTHORITY_MAP value change (B4 deferred)
+- No monitor_refresh logic changes (already metric-aware via position.temperature_metric)
+- Golden Window intact
+
+**critic-dave cycle-1 PASS rationale (re-verify)**:
+- All probes passed: R-CC.3 surgical-revert fires correctly (structural); _fit_from_pairs guard is first statement in function body (load-bearing); regression math exact 144/1873/93; redundancy grep confirms only one legacy `save_platt_model` caller (now guarded); no secondary LOW→legacy leak paths
+- Direct answer to "Is dual-track main line actually closed?": YES. READ side (L3 metric-aware) + WRITE side (`_fit_from_pairs` guard) + DT#7 evaluator wire all have structural antibodies.
+
+**critic rotation status**: critic-dave cycle 1 complete. 2 cycles remaining before her rotation per 3-cycle convention. Next critic cycle opens at post-dual-track cleanup packet (if scoped) or any new non-dual-track phase.
+
+**Methodology trend across 9 phases**:
+- P6 (beth cycle 1): ITERATE on MAJOR-1 → fix → PASS
+- P7A (beth cycle 2): ITERATE on 3 findings → fix → PASS
+- P7B (beth cycle 3): first-try PASS
+- P8 (carol cycle 1): first-try PASS
+- P9A (carol cycle 2): first-try PASS
+- P9B (carol cycle 3): ITERATE on CRITICAL-1 (streak broke at 3 exactly as predicted) → fix → PASS
+- P9C (dave cycle 1): ITERATE on 2 MAJOR (adversarial opening found two-seam violation static review would miss) → fix → PASS
+
+**Post-dual-track forward-log** (explicit deferrals, not gaps):
+- B2 strict ExecutionPrice-only kelly_size migration (polymorphic preserved; 10+ bare-float callers still in repo)
+- B4 `_TRUTH_AUTHORITY_MAP["degraded"]="VERIFIED"` semantic re-decision
+- DT#7 clauses 1+2 (leverage reduction + oracle penalty isolation) — require runtime boundary_ambiguous plumbing not yet present
+- On-the-fly refit metric-aware write path (currently LOW returns None; future phase may route to save_platt_model_v2 if LOW pairs + v2 migration align)
+- B093 full (legacy forecasts table deprecation) — requires v2 data population
+- Day0 low limited activation (Gate F) — requires Golden Window lift + live data stream
 
 ## Phase 9B closure
 
