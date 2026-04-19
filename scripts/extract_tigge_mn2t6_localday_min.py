@@ -1,10 +1,14 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
+# Lifecycle: created=2026-04-17; last_reviewed=2026-04-18; last_reused=2026-04-18
 # Purpose: GRIB→JSON extractor for mn2t6 local-calendar-day min (low track);
 #          emits canonical payload per 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §5;
 #          implements Phase 5B R-AG (boundary quarantine), R-AH (causality N/A), R-AI (data_version).
 # Reuse: Before running, confirm (1) config/cities.json canonical source,
 #        (2) 51 source data/docs/tigge_city_coordinate_manifest_full_latest.json aligns,
 #        (3) eccodes installed. Test contract: tests/test_phase5b_low_historical_lane.py.
+#        Phase 7B-followup (2026-04-18): 13 private helpers + CityManifestDriftError
+#        relocated to scripts/_tigge_common.py; imported below. Backward-compat
+#        aliases _compute_required_max_step / _compute_manifest_hash kept for
+#        tests/test_phase5_fixpack.py import path.
 #!/usr/bin/env python3
 """GRIB→JSON extractor for mn2t6 local-calendar-day min (low track only).
 
@@ -35,11 +39,8 @@ Dependencies: eccodes (system library; must be installed: brew install eccodes)
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
-import math
-import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -59,11 +60,38 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.types.metric_identity import LOW_LOCALDAY_MIN  # noqa: E402
 
+# Phase 7B-followup: shared helpers relocated to scripts/_tigge_common.py
+from scripts._tigge_common import (  # noqa: E402
+    AGGREGATION_WINDOW_HOURS,
+    CityManifestDriftError,
+    DEFAULT_MANIFEST,
+    FIFTY_ONE_ROOT,
+    MEMBER_COUNT,
+    RAW_ROOT,
+    _city_slug,
+    _cross_validate_city_manifests,
+    _file_sha256,
+    _issue_utc_from_fields,
+    _iter_overlap_local_dates,
+    _load_cities_config,
+    _local_day_bounds_utc,
+    _now_utc_iso,
+    _overlap_seconds,
+    _parse_dates_from_dirname,
+    _parse_steps_from_filename,
+    compute_manifest_hash,
+    compute_required_max_step,
+)
+
+# Backward-compat aliases: tests/test_phase5_fixpack.py imports these private
+# names (pre-P7B-followup naming). Re-export at module level preserves the
+# test import surface without requiring test-file edits in this commit.
+_compute_required_max_step = compute_required_max_step
+_compute_manifest_hash = compute_manifest_hash
+
 logger = logging.getLogger(__name__)
 
-FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
-RAW_ROOT = FIFTY_ONE_ROOT / "raw"
-DEFAULT_MANIFEST = FIFTY_ONE_ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+# Per-extractor divergent constants (stay local — differ between high/low tracks)
 GRIB_SUBDIR = "tigge_ecmwf_ens_regions_mn2t6"
 OUTPUT_SUBDIR = "tigge_ecmwf_ens_mn2t6_localday_min"
 OUTPUT_FILENAME_PREFIX = "tigge_ecmwf_mn2t6_localday_min"
@@ -75,17 +103,7 @@ PARAM = "122.128"
 PARAM_ID = 122
 SHORT_NAME = "mn2t6"
 STEP_TYPE = "min"
-AGGREGATION_WINDOW_HOURS = 6
-MEMBER_COUNT = 51
 MEMBERS_UNIT = "K"
-
-_STEP_HOURS = 6
-_CEIL_EPSILON_HOURS = 1e-9
-_CITY_COORDINATE_TOLERANCE_DEG = 0.01
-
-
-class CityManifestDriftError(RuntimeError):
-    """Raised when Zeus cities.json and TIGGE manifest disagree on city names or coordinates."""
 
 
 @dataclass
@@ -127,7 +145,7 @@ class BoundaryClassification:
 
 
 # ---------------------------------------------------------------------------
-# Public API — testeng-grace's 5-function surface
+# Low-track public surface
 # ---------------------------------------------------------------------------
 
 
@@ -298,7 +316,7 @@ def build_low_snapshot_json(
             missing.append(m)
         members_out.append({"member": m, "value_native_unit": val_k})
 
-    step_horizon_hours = _compute_required_max_step(issue_utc, target_date, dst_offset_h)
+    step_horizon_hours = compute_required_max_step(issue_utc, target_date, dst_offset_h)
     all_step_ranges: set[str] = set()
     for step_vals in member_step_values.values():
         all_step_ranges.update(step_vals.keys())
@@ -329,7 +347,7 @@ def build_low_snapshot_json(
         "city": city_name,
         "target_date_local": target_date.isoformat(),
     }
-    manifest_hash = _compute_manifest_hash(provenance_fields)
+    manifest_hash = compute_manifest_hash(provenance_fields)
 
     return {
         "generated_at": _now_utc_iso(),
@@ -521,27 +539,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal helpers (low-track-specific; shared helpers live in _tigge_common)
 # ---------------------------------------------------------------------------
-
-
-def _compute_required_max_step(
-    issue_utc: datetime,
-    target_date: date,
-    city_utc_offset_hours: int,
-) -> int:
-    """Return minimum step hours to cover end of target_date in city's local day."""
-    fixed_tz = timezone(timedelta(hours=city_utc_offset_hours))
-    next_day = target_date + timedelta(days=1)
-    local_day_end_local = datetime.combine(next_day, dt_time.min, tzinfo=fixed_tz)
-    local_day_end_utc = local_day_end_local.astimezone(timezone.utc)
-    delta_hours = (local_day_end_utc - issue_utc).total_seconds() / 3600.0
-    return _ceil_to_next_6h(delta_hours)
-
-
-def _compute_manifest_hash(fields: dict) -> str:
-    canon = json.dumps(fields, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(canon.encode()).hexdigest()
 
 
 def _compute_causality_low(
@@ -560,50 +559,6 @@ def _compute_causality_low(
     pure_forecast_valid = issue_utc <= local_day_start_utc
     status = "OK" if pure_forecast_valid else "N/A_CAUSAL_DAY_ALREADY_STARTED"
     return {"pure_forecast_valid": pure_forecast_valid, "status": status}
-
-
-def _ceil_to_next_6h(hours: float) -> int:
-    adjusted = float(hours) - _CEIL_EPSILON_HOURS
-    return max(_STEP_HOURS, int(math.ceil(adjusted / _STEP_HOURS) * _STEP_HOURS))
-
-
-def _local_day_bounds_utc(target_date: date, timezone_name: str) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(str(timezone_name))
-    start_local = datetime.combine(target_date, dt_time.min, tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
-
-def _overlap_seconds(
-    window_start: datetime,
-    window_end: datetime,
-    target_start: datetime,
-    target_end: datetime,
-) -> int:
-    latest_start = max(window_start, target_start)
-    earliest_end = min(window_end, target_end)
-    seconds = (earliest_end - latest_start).total_seconds()
-    return max(0, int(seconds))
-
-
-def _issue_utc_from_fields(data_date: int, data_time: int) -> datetime:
-    d = datetime.strptime(str(data_date), "%Y%m%d").date()
-    time_str = f"{int(data_time):04d}"
-    hh = int(time_str[:2])
-    mm = int(time_str[2:])
-    return datetime.combine(d, dt_time(hour=hh, minute=mm), tzinfo=timezone.utc)
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _city_slug(city_name: str) -> str:
-    return str(city_name).strip().lower().replace(" ", "-")
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _max_step_from_ranges(step_ranges: set[str]) -> int:
@@ -631,82 +586,6 @@ def _output_path(
     return output_root / OUTPUT_SUBDIR / slug / issue_compact / filename
 
 
-def _get_city_config(city_name: str, cities_config: list[dict] | None) -> dict:
-    if cities_config is None:
-        cities_config = _load_cities_config()
-    for c in cities_config:
-        if c.get("city") == city_name or c.get("name") == city_name:
-            return c
-    raise ValueError(f"City {city_name!r} not found in cities config")
-
-
-def _cross_validate_city_manifests(cities_config: list[dict], manifest_path: Path) -> None:
-    zeus_map = {row.get("name") or row.get("city", ""): row for row in cities_config}
-    zeus_names = set(zeus_map.keys())
-
-    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest_map = {row["city"]: row for row in manifest_data["cities"]}
-    manifest_names = set(manifest_map.keys())
-
-    only_in_zeus = zeus_names - manifest_names
-    only_in_manifest = manifest_names - zeus_names
-    if only_in_zeus or only_in_manifest:
-        raise CityManifestDriftError(
-            f"City name sets differ. Only in Zeus: {sorted(only_in_zeus)}. "
-            f"Only in manifest: {sorted(only_in_manifest)}."
-        )
-
-    tol = _CITY_COORDINATE_TOLERANCE_DEG
-    for city_name in zeus_names:
-        zeus_row = zeus_map[city_name]
-        if "lat" not in zeus_row or "lon" not in zeus_row:
-            continue
-        zeus_lat = float(zeus_row["lat"])
-        zeus_lon = float(zeus_row["lon"])
-        mfst_lat = float(manifest_map[city_name]["lat"])
-        mfst_lon = float(manifest_map[city_name]["lon"])
-        lat_drift = abs(zeus_lat - mfst_lat)
-        lon_drift = abs(zeus_lon - mfst_lon)
-        if lat_drift > tol or lon_drift > tol:
-            raise CityManifestDriftError(
-                f"Coordinate drift for {city_name!r}: "
-                f"zeus=({zeus_lat}, {zeus_lon}) manifest=({mfst_lat}, {mfst_lon}) "
-                f"drift=({lat_drift:.4f}°, {lon_drift:.4f}°) tolerance=±{tol}°"
-            )
-
-
-def _load_cities_config() -> list[dict]:
-    data = json.loads(DEFAULT_MANIFEST.read_text(encoding="utf-8"))
-    rows = data["cities"]
-    out = []
-    for row in rows:
-        entry = dict(row)
-        entry.setdefault("name", entry.get("city", ""))
-        out.append(entry)
-    return out
-
-
-def _parse_steps_from_filename(path: Path) -> list[int]:
-    match = re.search(r"_steps_([0-9-]+)\.grib$", path.name)
-    if not match:
-        raise ValueError(f"Could not parse step slug from {path.name!r}")
-    return [int(p) for p in match.group(1).split("-")]
-
-
-def _parse_dates_from_dirname(dirname: str) -> list[date]:
-    if "_" not in dirname:
-        return [datetime.strptime(dirname, "%Y%m%d").date()]
-    start_s, end_s = dirname.split("_", 1)
-    start = datetime.strptime(start_s, "%Y%m%d").date()
-    end = datetime.strptime(end_s, "%Y%m%d").date()
-    out: list[date] = []
-    cur = start
-    while cur <= end:
-        out.append(cur)
-        cur += timedelta(days=1)
-    return out
-
-
 def _find_region_pairs(grib_subdir: Path) -> list[dict]:
     param_slug = PARAM.replace(".", "_")
     control_pattern = f"tigge_ecmwf_control_param_{param_slug}_steps_*.grib"
@@ -727,17 +606,6 @@ def _find_region_pairs(grib_subdir: Path) -> list[dict]:
             }
         )
     return pairs
-
-
-def _iter_overlap_local_dates(
-    window_start_utc: datetime,
-    window_end_utc: datetime,
-    timezone_name: str,
-) -> list[date]:
-    tz = ZoneInfo(str(timezone_name))
-    local_start = window_start_utc.astimezone(tz)
-    local_end_excl = (window_end_utc - timedelta(microseconds=1)).astimezone(tz)
-    return sorted({local_start.date(), local_end_excl.date()})
 
 
 def _collect_grib_file_low(

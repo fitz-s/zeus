@@ -254,6 +254,7 @@ scripts:
   _verify_isolation.py: {class: stale_deprecated, reason: legacy isolation probe against old DB layout}
   _build_pm_truth.py: {class: config_writer, write_targets: [data/pm_settlements_full.json], target_db: data/pm_settlements_full.json, external_inputs: [Polymarket Gamma API], apply_flag: implicit, unguarded_write_rationale: "Existing packet-generated builder writes a data artifact directly; output is evidence and must be reviewed before promotion.", promotion_barrier: "Generated PM settlement export is evidence and must not become canonical truth without a dedicated settlement authority packet."}
   _yaml_bootstrap.py: {class: utility}
+  _tigge_common.py: {class: utility}
   analyze_paper_trading.py: {class: diagnostic_report_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/paper_trading_analysis.json, stdout], replacement: run_replay.py, reason: paper-era report}
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
