@@ -94,14 +94,16 @@ class TestSelectionFamilySubstrate:
     def test_family_id_is_stable(self):
         # Phase 1 (2026-04-16): migrated from make_family_id to make_edge_family_id.
         # The canonical ID now carries the "edge|" scope prefix.
+        # S4 R9 P10B: temperature_metric added as required kwarg; tuple shape updated.
         assert make_edge_family_id(
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             strategy_key="center_buy",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
-        ) == "edge|opening_hunt|NYC|2026-04-01|center_buy|opening_hunt|snap-1"
+        ) == "edge|opening_hunt|NYC|2026-04-01|high|center_buy|opening_hunt|snap-1"
 
     def test_bh_mask_uses_full_tested_family(self):
         mask = benjamini_hochberg_mask([0.001, 0.020, 0.080, 0.500], q=0.10)
@@ -142,6 +144,7 @@ class TestSelectionFamilySubstrate:
         candidate = types.SimpleNamespace(
             city=types.SimpleNamespace(name="NYC"),
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             event_id="event-1",
             slug="",
@@ -217,7 +220,8 @@ class TestSelectionFamilySubstrate:
 
         assert result == {"status": "written", "families": 1, "hypotheses": 3}
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
-        assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|opening_hunt|snap-1"
+        # S4 R9 P10B: temperature_metric inserted after target_date.
+        assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|high|opening_hunt|snap-1"
         family_meta = json.loads(family["meta_json"])
         assert family_meta["active_fdr_selected"] == 1
         assert family_meta["passed_prefilter"] == 2
@@ -238,6 +242,7 @@ class TestSelectionFamilySubstrate:
         candidate = types.SimpleNamespace(
             city=types.SimpleNamespace(name="NYC"),
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             event_id="event-1",
             slug="",
@@ -275,6 +280,7 @@ class TestSelectionFamilySubstrate:
         candidate = types.SimpleNamespace(
             city=types.SimpleNamespace(name="NYC"),
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="update_reaction",
             event_id="event-1",
             slug="",
@@ -339,7 +345,8 @@ class TestSelectionFamilySubstrate:
 
         assert result == {"status": "written", "families": 1, "hypotheses": 2}
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
-        assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|update_reaction|snap-1"]
+        # S4 R9 P10B: temperature_metric inserted after target_date.
+        assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap-1"]
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
             "center_buy",
             "shoulder_sell",

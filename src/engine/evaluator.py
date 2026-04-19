@@ -458,6 +458,8 @@ def _record_selection_family_facts(
             cycle_mode=cycle_mode,
             city=candidate.city.name,
             target_date=candidate.target_date,
+            # S4 R9 P10B: pass metric so HIGH and LOW candidates never share a budget
+            temperature_metric=candidate.temperature_metric or "high",
             discovery_mode=discovery_mode,
             decision_snapshot_id=decision_snapshot_id,
         )
@@ -496,6 +498,8 @@ def _record_selection_family_facts(
                 cycle_mode=cycle_mode,
                 city=candidate.city.name,
                 target_date=candidate.target_date,
+                # S4 R9 P10B: pass metric so HIGH and LOW edges never share a budget
+                temperature_metric=candidate.temperature_metric or "high",
                 strategy_key=strategy_key,
                 discovery_mode=discovery_mode,
                 decision_snapshot_id=decision_snapshot_id,
@@ -631,6 +635,8 @@ def _selected_edge_keys_from_full_family(
         cycle_mode=cycle_mode,
         city=candidate.city.name,
         target_date=candidate.target_date,
+        # S4 R9 P10B: pass metric so HIGH and LOW candidates never share a budget
+        temperature_metric=candidate.temperature_metric or "high",
         discovery_mode=discovery_mode,
         decision_snapshot_id=decision_snapshot_id,
     )
@@ -1443,7 +1449,8 @@ def evaluate_candidate(
             continue
 
         # Oracle penalty gate — blacklisted cities skip trading entirely
-        oracle = get_oracle_info(city.name)
+        # S2 R4 P10B: pass temperature_metric so LOW candidates use separate oracle info
+        oracle = get_oracle_info(city.name, temperature_metric.temperature_metric)
         if oracle.status == OracleStatus.BLACKLIST:
             decisions.append(EdgeDecision(
                 False,
