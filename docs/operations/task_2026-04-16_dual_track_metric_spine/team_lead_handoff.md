@@ -55,7 +55,9 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 3. ~~**Phase 7B**~~ **COMPLETE (5/6)** at `6fc41ec`. Naming hygiene: metric_specs extracted + alias removed + manifest registered + schema dropped + R-AZ-2 rewritten. See "Phase 7B closure" below. Item 2 (_tigge_common extract) deferred to P7B-followup — planner's "15 safe helpers" claim was inaccurate (module-level constants differ).
 4. ~~**Phase 7B-followup**~~ **COMPLETE** at `2adcbc9`. Item 2 (_tigge_common extract — 13 helpers + CityManifestDriftError + compute_required_max_step/compute_manifest_hash) + naming_conventions hygiene (extract_ prefix + refit_platt_v2 exception + _tigge_common manifest entry). Net +318/-364 LOC. 89/89 targeted tests GREEN. Scout 2026-04-18 confirmed: `run_replay` actually lives at `src/engine/replay.py:1932` (not `src/main.py` as earlier handoff said); evaluator is already metric-aware (no P8 work there); `monitor_refresh.py` has zero `temperature_metric` references (non-Day0 LOW wiring still owed); settlement writer does not exist in code (settlements arrive externally).
 5. ~~**Phase 8 route A**~~ **COMPLETE** at `6ffefa4` (critic-carol first-try PASS, 2026-04-18). Scope: S1 `run_replay` public-entry `temperature_metric` threading + S2 `cycle_runner.py:180-181` DT#6 rewire to `riskguard.tick_with_portfolio`. 4/4 R-BP/R-BQ antibodies GREEN. Full regression 144/1846 (zero new failures vs 144/1842 baseline; +4 from antibodies). Contract: `phase8_contract.md`. Route A honored: code-only, no TIGGE data import, v2 tables zero-row, Golden Window preserved. See "Phase 8 closure" below. Gate E code-prerequisites complete; Gate E data-evidence blocks on future Golden Window lift (P9/later).
-6. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7 + **P8 observability forward-log absorption** (4 MAJOR items from critic-carol). **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low). **ADDED SCOPE** (P7A deferral): B093 half-2 replay migration to `historical_forecasts_v2`. **ADDED SCOPE** (critic-carol P8 MAJORs): see §"Phase 8 closure" forward-log.
+6. ~~**Phase 9A**~~ **COMPLETE** at `7081634` (critic-carol cycle 2 first-try PASS, 2026-04-18). Absorbs all 4 P8 MAJOR observability forward-log items + adopts DT#6 Interpretation B in authority doc. Scope: S1 `entries_blocked_reason` DATA_DEGRADED + S2 L195 overwrite comment + S3 run_replay mode+metric warning + S4 R-BQ.1 structural hardening (drops silent-return + text-match) + S5 DT#6 §B law clarification + S6 R-BS.1/2 save_portfolio roundtrip + S7 R-BT entries_blocked_reason antibody + S8 R-BU.1/2 mode+metric warning pair. 9/9 antibodies GREEN. Full regression 144/1851 (+5 exact match, zero new failures). 2 MINOR (R-BS.2 vacuous assert + DT#6 §B aspirational doc) patched in phase9a-close commit. See "Phase 9A closure" below.
+7. **Phase 9B** — DT#2 RED force-exit + DT#5 Kelly executable-price + DT#7 boundary-day antibodies. critic-carol cycle 3 (final before dave rotation). Her cycle-2 learnings recommend **explicit adversarial-mode 15-min hunt** to counter 3-pass streak complacency.
+8. **Phase 9C** — Gate F activation prep: `Day0LowNowcastSignal.p_vector` proper implementation (currently lazy HIGH delegate — unacceptable for live LOW), `monitor_refresh.py` LOW wiring (non-Day0), B093 half-2 (`_forecast_rows_for` → `historical_forecasts_v2`; blocks on Golden Window lift), `--temperature-metric` CLI flag, second-seam data-closure tests. critic-dave cycle 1 (fresh spawn) with critic-carol learnings inherited.
 
 ## Phase 7A closure
 
@@ -93,6 +95,46 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-1: contract_version / boundary_min_value schema columns undocumented
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
+
+## Phase 9A closure
+
+**Commit**: `7081634` feat(phase9a): P8 observability absorption + DT#6 Interpretation B clarified (plus close-fix micro-edits for critic-carol cycle-2 MINORs). critic-carol **cycle 2 first-try PASS**.
+
+**Delivered (8 items, all GREEN first-cycle)**:
+- S1 — `cycle_runner.py:281` widens elif tuple to include `RiskLevel.DATA_DEGRADED` → closes MAJOR-1 observability gap
+- S2 — `cycle_runner.py:195` intentional-overwrite comment → closes MINOR-4
+- S3 — `replay.py` mode+metric mismatch warning when `temperature_metric != "high"` with sweep/audit lanes → closes MINOR-2
+- S4 — R-BQ.1 structural hardening: drops silent-return + replaces literal-text-match with "ANY RuntimeError = violation" → closes MAJOR-3 + MAJOR-4 (critic-carol's cycle-1 two text-match translation-loss concerns)
+- S5 — `zeus_dual_track_architecture.md §6 DT#6` appends "Interpretation B" section: "read-only" ≠ "no cache refresh"; `PortfolioState.authority` runtime-derived; `tick_with_portfolio` ephemeral-advisory; three-signal redundancy (portfolio_degraded + entries_blocked_reason + risk_level); `_TRUTH_AUTHORITY_MAP["degraded"]="VERIFIED"` flagged for periodic review → closes MAJOR-2
+- S6 — R-BS.1/2 save_portfolio(degraded) roundtrip antibodies (R-BS.2 strengthened post-cycle-2 critique to actually assert truth_found, not just save_path.exists)
+- S7 — R-BT entries_blocked_reason DATA_DEGRADED antibody (probed by surgical-revert: test correctly fails when fix is reverted)
+- S8 — R-BU.1/2 mode+metric warning pair (paired negative/positive, per critic-carol cycle-1 L7 paired-antibody pattern)
+
+**Acceptance delivered**:
+- 9/9 P8+P9A antibodies GREEN (4 original + R-BS.1, R-BS.2 strengthened, R-BT, R-BU.1, R-BU.2)
+- Targeted P5/P6/P7A/P7B/P8 suites unchanged-green
+- Full regression 144/1851 (post-P8 baseline 144/1846; +5 exact match to new antibodies; zero new failures)
+- Hard constraints preserved: no TIGGE import, no v2 writes, no DDL, no evaluator/monitor_refresh changes, Golden Window intact
+- DT#2/#5/#7 (P9B) + Gate F (P9C) scope-bleed: zero
+
+**critic-carol cycle-2 PASS rationale**:
+- 0 CRITICAL / 0 MAJOR / 2 MINOR / 4 gaps (all P9B/P9C-scoped or intentional trade-offs)
+- Pre-commitment predictions 2.5/5 hit — cycle-2 lower rate reflects that commit was specifically engineered to close her cycle-1 concerns (L5 learning: low hit-rate is signal commit is strong)
+- Self-audit on cycle-1 findings: 4/4 MAJORs addressed with structural fixes (not patch stand-ins) per surgical-revert probes
+- Empirical probe validation: R-BQ.1 hardening CONFIRMED structural (novel RuntimeError text correctly triggers test fail; reverting fix correctly breaks R-BT)
+- 2 cycle-2 MINORs (R-BS.2 vacuous + DT#6 §B aspirational doc) fixed in-commit via close-patch: R-BS.2 now asserts `truth_found` unconditionally; DT#6 §B language softened "MAY...PROVIDED" → "MAY... SHOULD restrict..." + explicit "no runtime enforcement" + design-debt note
+
+**Methodology trend — 3-pass streak noted**:
+- P7B (critic-beth cycle 3) + P8 (critic-carol cycle 1) + P9A (critic-carol cycle 2) = 3 consecutive first-try PASSes
+- critic-carol cycle-1 learnings explicitly warned about 3+ streak complacency risk
+- cycle-2 learnings add 8 durable patterns (empirical-probe text-match skepticism, checkbox-antibody fingerprint, aspirational-doc translation-loss, self-audit bias, predictions-missing-is-signal, surgical-revert > baseline-restore)
+- **Explicit recommendation to cycle 3 (critic-carol P9B)**: open in ADVERSARIAL mode for first 15 minutes to counter streak complacency before falling back to THOROUGH
+- **Explicit recommendation for P9C rotation to critic-dave**: fresh spawn with cycle-beth + cycle-carol learnings inherited; brief must include note "3-pass streak from carol — prior not evidence"
+
+**Evidence dir convention clarified** (cycle-2 artifact discovery):
+- `phase7_evidence/` — critic-beth cycles 1-3 (P5fix, P5C, P7A, P7B)
+- `phase8_evidence/` — critic-carol cycle 1 (P8)
+- `phase9_evidence/` — critic-carol cycle 2+ (P9A, P9B) + critic-dave cycle 1+ (P9C)
 
 ## Phase 8 closure
 
