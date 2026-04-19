@@ -40,6 +40,7 @@ plan.
 | `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |
 | `state/` | Runtime DB/cache artifacts, mostly gitignored | classify before treating as truth |
 | `data/` | Oracle error rates, PM settlement truth JSON | `data/oracle_error_rates.json` |
+| `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
 
 ## Source Packages
 
@@ -88,6 +89,7 @@ Prefer these over hand-maintained prose when they exist:
 | `architecture/runtime_modes.yaml` | Discovery mode index and shared CycleRunner path |
 | `architecture/reference_replacement.yaml` | Reference-doc replacement evidence and deletion eligibility |
 | `architecture/map_maintenance.yaml` | Added/deleted-file companion registry rules |
+| `raw/AGENTS.md` | Raw evidence capture routing for local/generated input artifacts |
 
 ## High-Signal Commands
 
