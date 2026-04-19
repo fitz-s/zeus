@@ -132,7 +132,13 @@ def _refresh_ens_member_counting(
 
     p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
 
-    cal, cal_level = get_calibrator(conn, city, position.target_date)
+    # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
+    # its own Platt model (pre-P9C this was metric-blind and LOW silently
+    # received HIGH calibration — critical blocker for LOW deployment).
+    cal, cal_level = get_calibrator(
+        conn, city, position.target_date,
+        temperature_metric=getattr(position, "temperature_metric", "high"),
+    )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
             p_raw_vector,
@@ -321,7 +327,11 @@ def _refresh_day0_observation(
 
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
-    cal, cal_level = get_calibrator(conn, city, position.target_date)
+    # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
+    cal, cal_level = get_calibrator(
+        conn, city, position.target_date,
+        temperature_metric=getattr(position, "temperature_metric", "high"),
+    )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
             p_raw_vector,

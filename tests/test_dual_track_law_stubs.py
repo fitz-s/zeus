@@ -422,6 +422,56 @@ def test_red_force_exit_marker_does_not_override_day0_evaluation():
     assert "dt2_red_force_exit_sweep_actuated" not in decision.applied_validations
 
 
+# DT#2 — Phase 9C strengthening of R-BY.2 (critic-carol cycle-3 L15 asymmetric
+# discrimination observation): the original R-BY.2 fixture had an asymmetric
+# blind spot — it caught Day0→RED misrouting but did NOT catch the inverse
+# case where a Day0 position WITHOUT the red_force_exit marker should run
+# its own Day0 logic unchanged. This paired-negative extension locks it.
+def test_day0_without_red_marker_runs_day0_logic_normally():
+    """R-BY.2 strengthening (Phase 9C C2): Day0 position without the red
+    marker must go through the normal Day0 evaluator path (not short-
+    circuited to RED_FORCE_EXIT, not stuck returning None). Completes the
+    paired antibody symmetry per critic-carol cycle-3 L15 + cycle-1 L7
+    paired-antibody pattern."""
+    from src.state.portfolio import Position, ExitContext
+
+    # Position WITHOUT red marker (exit_reason="") — normal active position
+    normal_pos = Position(
+        trade_id="t3", market_id="m3", city="Boston", cluster="US-Northeast",
+        target_date="2026-04-17", bin_label="45-46°F", direction="buy_yes",
+        unit="F", state="holding",
+        exit_reason="",  # NO red marker — must go through normal Day0 logic
+        size_usd=10.0, entry_price=0.40, p_posterior=0.60, shares=25.0,
+        cost_basis_usd=10.0,
+    )
+    # Day0-active ExitContext with all fields populated
+    day0_context = ExitContext(
+        fresh_prob=0.60,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.40,
+        current_market_price_is_fresh=True,
+        best_bid=0.39,
+        best_ask=0.41,
+        market_vig=0.02,
+        hours_to_settlement=2.0,
+        position_state="holding",
+        day0_active=True,
+        whale_toxicity=False,
+        chain_is_fresh=True,
+    )
+    decision = normal_pos.evaluate_exit(day0_context)
+    # Must NOT short-circuit to RED — no marker was set
+    assert decision.trigger != "RED_FORCE_EXIT", (
+        f"R-BY.2 strengthened: without red marker, Day0 position must not "
+        f"short-circuit to RED_FORCE_EXIT; got trigger={decision.trigger!r}"
+    )
+    # Day0 path must have executed (observable via applied_validations)
+    assert "day0_observation_authority" in decision.applied_validations, (
+        f"R-BY.2 strengthened: Day0 path must execute for unmarked day0 "
+        f"position; applied_validations={decision.applied_validations!r}"
+    )
+
+
 # DT#7 — NEW Phase 9B (R-BX)
 def test_boundary_ambiguous_refuses_signal_contract():
     """DT#7 clause 3: boundary_ambiguous_refuses_signal() must return True

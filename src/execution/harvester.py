@@ -398,7 +398,7 @@ def run_harvester() -> dict:
 
     def _export_portfolio_h() -> None:
         if _portfolio_settled:
-            save_portfolio(portfolio)
+            save_portfolio(portfolio, source="harvester_settlement")  # Phase 9C B3 audit tag
 
     def _export_tracker_h() -> None:
         if _tracker_dirty:

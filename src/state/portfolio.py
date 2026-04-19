@@ -1082,11 +1082,24 @@ def save_portfolio(
     path: Optional[Path] = None,
     *,
     last_committed_artifact_id: Optional[int] = None,
+    source: str = "internal",
 ) -> None:
     """Atomic write: write to tmp, then os.replace(). Spec: atomic write pattern.
 
     last_committed_artifact_id: when provided, written into the JSON payload
     as "last_committed_artifact_id" for DT#1 / INV-17 stale-detection (D5).
+
+    source: Phase 9C B3 observability hook (DT#6 §B Interpretation B). Tags
+    the persistence event with the caller's origin so the JSON audit
+    trail shows what drove the write. Convention:
+      - "internal" (default): normal cycle housekeeping
+      - "reconciliation": chain/CLOB reconciliation write
+      - "fill_event": order-fill / exit-fill event
+      - "settlement": settlement terminalization
+      - "admin": operator-manual intervention
+    NO runtime enforcement of the DT#6 §B "external-authority origin"
+    rule — this is caller-side discipline logged to the JSON for audit.
+    Future phase may add a `source: Literal[...]` contract + runtime check.
     """
     path = path or POSITIONS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1114,6 +1127,9 @@ def save_portfolio(
     }
     if last_committed_artifact_id is not None:
         data["last_committed_artifact_id"] = last_committed_artifact_id
+    # Phase 9C B3: record save source for audit trail (observability only;
+    # no runtime enforcement of DT#6 §B "external-authority origin" rule).
+    data["save_source"] = str(source)
     data = annotate_truth_payload(
         data,
         path,

@@ -19,6 +19,7 @@ from src.calibration.store import (
     get_pairs_for_bucket,
     get_decision_group_count,
     load_platt_model,
+    load_platt_model_v2,
     save_platt_model,
 )
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
@@ -124,8 +125,24 @@ def get_calibrator(
     conn,
     city: City,
     target_date: str,
+    temperature_metric: str = "high",
 ) -> tuple[Optional[ExtendedPlattCalibrator], int]:
-    """Get the best available calibrator for a city+date.
+    """Get the best available calibrator for a city+date+metric.
+
+    Phase 9C L3 CRITICAL (2026-04-18): added `temperature_metric` param +
+    metric-aware hierarchical fallback. Pre-P9C, this function was metric-
+    blind and read exclusively from legacy `platt_models` table — a LOW
+    candidate would silently receive a HIGH Platt model. Post-P9C:
+
+      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season)
+      2. If v2 miss, fall back to legacy platt_models (HIGH historical continuity)
+      3. Remaining hierarchical fallback (pool clusters / seasons / global) is
+         preserved; v2 lookup is tried first at each tier.
+
+    Law: docs/authority/zeus_dual_track_architecture.md §4 (World DB v2 table
+    family keyed on temperature_metric). Writes to platt_models_v2 landed
+    Phase 5 (save_platt_model_v2 + refit_platt_v2.py); reads were unwired
+    until Phase 9C.
 
     Implements hierarchical fallback (spec §3.4):
     1. cluster+season (primary bucket)
@@ -138,9 +155,17 @@ def get_calibrator(
     season = season_from_date(target_date, lat=city.lat)
     cluster = city.cluster
 
-    # Try primary bucket
-    bk = bucket_key(cluster, season)
-    model_data = load_platt_model(conn, bk)
+    # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC)
+    model_data = load_platt_model_v2(
+        conn,
+        temperature_metric=temperature_metric,
+        cluster=cluster,
+        season=season,
+    )
+    if model_data is None and temperature_metric == "high":
+        # Legacy fallback only for HIGH — LOW has never existed in legacy
+        bk = bucket_key(cluster, season)
+        model_data = load_platt_model(conn, bk)
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(conn, cluster, season, unit=city.settlement_unit)
@@ -166,17 +191,25 @@ def get_calibrator(
             level = maturity_level(n)
             return cal, level
 
-    # Fallback: season-only (pool all clusters)
+    # Fallback: season-only (pool all clusters). v2 FIRST per metric,
+    # legacy only for HIGH backward compat (Phase 9C L3).
     for fallback_cluster in calibration_clusters():
         if fallback_cluster == cluster:
             continue
-        bk_fb = bucket_key(fallback_cluster, season)
-        model_data = load_platt_model(conn, bk_fb)
+        model_data = load_platt_model_v2(
+            conn,
+            temperature_metric=temperature_metric,
+            cluster=fallback_cluster,
+            season=season,
+        )
+        if model_data is None and temperature_metric == "high":
+            bk_fb = bucket_key(fallback_cluster, season)
+            model_data = load_platt_model(conn, bk_fb)
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":
                 logger.warning(
-                    "Skipping stale raw-probability fallback Platt model for %s",
-                    bk_fb,
+                    "Skipping stale raw-probability fallback Platt model for %s_%s",
+                    fallback_cluster, season,
                 )
                 continue
             cal = _model_data_to_calibrator(model_data)

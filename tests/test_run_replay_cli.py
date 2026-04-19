@@ -613,7 +613,7 @@ def test_cli_formats_unpriced_replay_pnl_as_unavailable():
 def test_cli_prints_replay_provenance_counts(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "cli-provenance.db"
 
-    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False, temperature_metric="high"):
         return SimpleNamespace(
             run_id="run-2",
             n_settlements=2,
@@ -742,7 +742,7 @@ def test_cli_formats_partial_market_linkage_pnl_as_unavailable():
 def test_cli_prints_partial_market_linkage_as_na(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "cli.db"
 
-    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False, temperature_metric="high"):
         return SimpleNamespace(
             run_id="run-1",
             n_settlements=2,
@@ -795,7 +795,7 @@ def test_cli_trade_history_audit_routes_to_backtest_lane(tmp_path, monkeypatch, 
     db_path = tmp_path / "cli.db"
     called = {}
 
-    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False):
+    def _run_replay(*, start_date, end_date, mode, overrides=None, allow_snapshot_only_reference=False, temperature_metric="high"):
         called.update(
             start_date=start_date,
             end_date=end_date,

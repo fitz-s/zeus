@@ -47,3 +47,37 @@ class Day0LowNowcastSignal:
     def p_bin(self, low: float, high: float) -> float:
         samples = self.settlement_samples()
         return float(np.mean((samples >= low) & (samples <= high)))
+
+    def p_vector(self, bins, n_mc=None, rng=None) -> np.ndarray:
+        """Phase 9C A3: per-bin probability vector for LOW Day0 nowcast.
+
+        Returns np.ndarray of shape (len(bins),) — probability mass in each
+        bin under the LOW ceiling-semantics sample distribution. Caller
+        interface matches Day0HighSignal.p_vector signature (bins, n_mc, rng)
+        so Day0Router dispatch is type-compatible.
+
+        Notes:
+          - `n_mc` and `rng` are ACCEPTED for signature symmetry with
+            Day0HighSignal but NOT USED — LOW nowcast samples are
+            deterministic (anchored blend of ens_remaining + current_temp,
+            clipped by obs_ceiling). No Monte Carlo needed; the sample set
+            IS the distribution.
+          - DOES NOT delegate to day0_high_signal (R-BE invariant — no
+            HIGH→LOW cross-import). Pre-P9C handoff flagged "lazy-
+            construction delegating to HIGH" concern; the current impl is
+            the proper LOW-specific path derived from settlement_samples().
+
+        Caller (evaluator/monitor_refresh Day0 paths) passes a Bin-like
+        sequence with `.low` and `.high` numeric attributes (or fallback
+        keys). See src/contracts/calibration_bins.py for Bin shape.
+        """
+        probs = []
+        for b in bins:
+            lo = getattr(b, "low", None)
+            hi = getattr(b, "high", None)
+            if lo is None:
+                lo = b["low"] if hasattr(b, "__getitem__") else None
+            if hi is None:
+                hi = b["high"] if hasattr(b, "__getitem__") else None
+            probs.append(self.p_bin(float(lo), float(hi)))
+        return np.asarray(probs, dtype=np.float64)

@@ -226,6 +226,15 @@ def main():
         action="store_true",
         help="Allow replay to use snapshot-only fallback references when no trade/decision_log reference exists.",
     )
+    # Phase 9C B1: expose temperature_metric at CLI. Pre-P9C the kwarg
+    # was Python-API-only; operators could not select the LOW audit lane
+    # from shell.
+    parser.add_argument(
+        "--temperature-metric",
+        choices=["high", "low"],
+        default="high",
+        help="Replay metric lane: 'high' (canonical; pre-P9C default) or 'low' (LOW audit lane).",
+    )
 
     args = parser.parse_args()
 
@@ -251,6 +260,7 @@ def main():
         mode=args.mode,
         overrides=overrides,
         allow_snapshot_only_reference=args.allow_snapshot_only_reference,
+        temperature_metric=args.temperature_metric,  # Phase 9C B1
     )
 
     # Report

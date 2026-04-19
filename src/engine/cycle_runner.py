@@ -408,7 +408,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     def _export_portfolio() -> None:
         if portfolio_should_save:
-            save_portfolio(portfolio, last_committed_artifact_id=_artifact_id_box[0])
+            save_portfolio(
+                portfolio,
+                last_committed_artifact_id=_artifact_id_box[0],
+                source="cycle_housekeeping",  # Phase 9C B3 audit tag
+            )
 
     def _export_tracker() -> None:
         if tracker_dirty:

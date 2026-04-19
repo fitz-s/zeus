@@ -449,6 +449,69 @@ def load_platt_model(
     }
 
 
+def load_platt_model_v2(
+    conn: sqlite3.Connection,
+    *,
+    temperature_metric: str,
+    cluster: str,
+    season: str,
+    input_space: str = "width_normalized_density",
+) -> Optional[dict]:
+    """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
+
+    Read-side counterpart to save_platt_model_v2 (P5). Pre-P9C: get_calibrator
+    read exclusively from legacy platt_models table, bypassing metric
+    discrimination — a LOW candidate would silently receive a HIGH Platt
+    model. This function closes that gap at the read seam.
+
+    Filters by (temperature_metric, cluster, season, input_space) + is_active=1
+    + authority='VERIFIED'. Returns None if no matching row exists — caller
+    (get_calibrator) falls back to legacy or on-the-fly fit.
+
+    Args:
+        conn: SQLite connection (must have platt_models_v2 table applied).
+        temperature_metric: "high" | "low" — matches CHECK constraint at
+            v2_schema.py:229-230.
+        cluster: per K3, equals the city name (one-cluster-per-city).
+        season: e.g. "DJF", "MAM", "JJA", "SON" (hemisphere-flipped already).
+        input_space: defaults to "width_normalized_density" (canonical post-P9
+            space); legacy input_space="raw_probability" is legal but stale.
+
+    Returns:
+        Same dict shape as load_platt_model, or None.
+    """
+    row = conn.execute(
+        """
+        SELECT param_A, param_B, param_C, bootstrap_params_json,
+               n_samples, brier_insample, fitted_at, input_space
+        FROM platt_models_v2
+        WHERE temperature_metric = ?
+          AND cluster = ?
+          AND season = ?
+          AND input_space = ?
+          AND is_active = 1
+          AND authority = 'VERIFIED'
+        ORDER BY fitted_at DESC
+        LIMIT 1
+        """,
+        (temperature_metric, cluster, season, input_space),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "A": row["param_A"],
+        "B": row["param_B"],
+        "C": row["param_C"],
+        "bootstrap_params": json.loads(row["bootstrap_params_json"]),
+        "n_samples": row["n_samples"],
+        "brier_insample": row["brier_insample"],
+        "fitted_at": row["fitted_at"],
+        "input_space": row["input_space"] or "raw_probability",
+    }
+
+
 def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
     """Mark a model as inactive (for refit/replacement)."""
     conn.execute("""

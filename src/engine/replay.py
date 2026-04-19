@@ -239,13 +239,65 @@ class ReplayContext:
             except sqlite3.OperationalError:
                 raise RuntimeError("Replay topology error: ensemble_snapshots neither in world attach nor local main schema.") from exc
 
-    def _forecast_rows_for(self, city_name: str, target_date: str) -> list[dict]:
+    def _forecast_rows_for(
+        self, city_name: str, target_date: str,
+        temperature_metric: str = "high",
+    ) -> list[dict]:
         """Load diagnostic historical forecast rows for a replay fallback.
 
-        Phase 7: migrate from legacy 'forecasts' table to 'historical_forecasts_v2'
-        (which carries a 'temperature_metric' column) and add 'AND temperature_metric = ?'
-        to the WHERE clause at that point (B093 half-2).
+        Phase 9C A1 (B093 half-2): conditional v2 read. When
+        historical_forecasts_v2 is populated, query it with `AND
+        temperature_metric = ?`; else fall back to legacy `forecasts`
+        (preserves zero-data Golden Window behavior — v2 is empty until
+        user lifts the window + runs backfill).
+
+        The v2 schema carries per-row `temperature_metric`; legacy schema
+        has both forecast_high + forecast_low columns in one row (dual-
+        metric per-row). The v2 → legacy fallback preserves backward
+        compat while enabling metric-aware reads when v2 has data.
         """
+        # Try v2 FIRST if the table exists and has any rows for this city+date.
+        # v2 schema is per-row metric-partitioned: (city, target_date, source,
+        # temperature_metric, forecast_value, temp_unit, lead_days, available_at).
+        # Translate to the legacy dual-column shape (forecast_high +
+        # forecast_low, one populated per metric) so downstream
+        # _forecast_reference_for's column-selection logic works unchanged.
+        try:
+            v2_rows = self.conn.execute(
+                f"""
+                SELECT source, available_at AS forecast_basis_date,
+                       available_at AS forecast_issue_time,
+                       lead_days, forecast_value, temp_unit
+                FROM {self._sp}historical_forecasts_v2
+                WHERE city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                ORDER BY lead_days ASC, source ASC, available_at ASC
+                """,
+                (city_name, target_date, temperature_metric),
+            ).fetchall()
+        except Exception:
+            v2_rows = []
+        if v2_rows:
+            # Translate per-row metric-partitioned → legacy dual-column shape.
+            # Downstream (_forecast_reference_for) reads `forecast_low` when
+            # temperature_metric='low', else `forecast_high` — so we populate
+            # only the metric-matching column per row.
+            translated = []
+            for row in v2_rows:
+                d = dict(row)
+                if temperature_metric == "low":
+                    d["forecast_low"] = d.pop("forecast_value")
+                    d["forecast_high"] = None
+                else:
+                    d["forecast_high"] = d.pop("forecast_value")
+                    d["forecast_low"] = None
+                translated.append(d)
+            return translated
+
+        # Legacy fallback — unchanged query; per-row has both metrics via
+        # forecast_high + forecast_low columns. Downstream column-selection
+        # in _forecast_reference_for picks the correct metric's column.
         try:
             rows = self.conn.execute(
                 f"""
@@ -264,7 +316,10 @@ class ReplayContext:
         return [dict(row) for row in rows]
 
     def _forecast_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
-        rows = self._forecast_rows_for(city_name, target_date)
+        # Phase 9C A1: thread metric to _forecast_rows_for so the v2 branch
+        # filters by metric column; legacy branch (fallback) remains
+        # column-selection based via `forecast_col`.
+        rows = self._forecast_rows_for(city_name, target_date, temperature_metric=temperature_metric)
         if not rows:
             return None
         positive_leads = [float(row["lead_days"]) for row in rows if float(row["lead_days"] or 0) > 0]
@@ -1193,8 +1248,10 @@ def _replay_one_settlement(
 
     bins = [Bin(low=_parse_temp_range(label)[0], high=_parse_temp_range(label)[1], label=label, unit=city.settlement_unit) for label in bin_labels]
 
-    # Get calibrator
-    cal, cal_level = get_calibrator(ctx.conn, city, target_date)
+    # Get calibrator — L3 Phase 9C: thread metric from replay public entry
+    cal, cal_level = get_calibrator(
+        ctx.conn, city, target_date, temperature_metric=temperature_metric,
+    )
 
     # Compute alpha (with overrides if any)
     override_alpha = ctx.overrides.get("alpha", {}).get(city.name, {}).get(season)

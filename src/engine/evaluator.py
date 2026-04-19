@@ -60,6 +60,7 @@ from src.strategy.selection_family import (
 )
 from src.types.metric_identity import MetricIdentity
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
+from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.strategy.market_analysis import MarketAnalysis
@@ -128,6 +129,50 @@ class EdgeDecision:
     epistemic_context_json: Optional[str] = None
     edge_context_json: Optional[str] = None
 
+
+
+def _read_v2_snapshot_metadata(
+    conn, city_name: str, target_date: str, temperature_metric: str,
+) -> dict:
+    """Phase 9C A4 (DT#7 wire): read boundary_ambiguous + related metadata
+    for one (city, target_date, metric) row from ensemble_snapshots_v2.
+
+    Pre-Golden-Window-lift: v2 is empty → query returns no rows → returns
+    empty dict → boundary_ambiguous_refuses_signal() returns False → no
+    refusal (dormant gate). Post-data-lift: v2 populated by
+    extract_tigge_mn2t6_localday_min.py per §DT#7 boundary-leakage law →
+    gate fires on boundary_ambiguous=1 rows.
+
+    Returns:
+        dict with `boundary_ambiguous` key when row exists; empty dict
+        when row is absent OR v2 table is not applied (backward compat
+        for legacy-only databases).
+    """
+    # Resolve schema prefix (world.ensemble_snapshots_v2 when world DB
+    # attached; bare ensemble_snapshots_v2 in monolithic test DBs).
+    import sqlite3
+    for sp in ("world.", ""):
+        try:
+            row = conn.execute(
+                f"""
+                SELECT boundary_ambiguous
+                FROM {sp}ensemble_snapshots_v2
+                WHERE city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                ORDER BY fetch_time DESC
+                LIMIT 1
+                """,
+                (city_name, target_date, temperature_metric),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        except Exception:
+            return {}
+        if row is None:
+            return {}
+        return {"boundary_ambiguous": bool(row["boundary_ambiguous"])}
+    return {}
 
 
 def _decision_id() -> str:
@@ -680,6 +725,31 @@ def evaluate_candidate(
             applied_validations=["day0_observation"],
         )]
 
+    # DT#7 Phase 9C A4 (clause 3): refuse boundary-ambiguous candidates.
+    # When ensemble_snapshots_v2 carries boundary_ambiguous=1 for this
+    # (city, target_date, metric) row — as written at ingest time by
+    # scripts/extract_tigge_mn2t6_localday_min.py per the boundary-leakage
+    # law — the candidate must not be treated as confirmatory signal.
+    # Pre-Golden-Window: v2 is empty; helper returns {} → gate returns
+    # False → no refusal. Post-data-lift: v2 populated + low-track ingest
+    # sets boundary_ambiguous per §DT#7 law → gate fires when appropriate.
+    # Law: docs/authority/zeus_current_architecture.md §22 +
+    #      docs/authority/zeus_dual_track_architecture.md §DT#7.
+    v2_snapshot_meta = _read_v2_snapshot_metadata(
+        conn, city.name, target_date,
+        temperature_metric.temperature_metric,
+    )
+    if boundary_ambiguous_refuses_signal(v2_snapshot_meta):
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="MARKET_FILTER",
+            rejection_reasons=["DT7_boundary_day_ambiguous"],
+            availability_status="DATA_AVAILABLE",
+            selected_method=selected_method,
+            applied_validations=["dt7_boundary_day_gate"],
+        )]
+
     # Build bins — skip unparseable (both boundaries None)
     bins = []
     token_map = {}
@@ -888,7 +958,13 @@ def evaluate_candidate(
                 p_raw=p_raw,
             )]
         _authority_verified = True  # K1/#68: gate ran and no UNVERIFIED rows found
-    cal, cal_level = get_calibrator(conn, city, target_date)
+    # L3 Phase 9C: metric-aware calibrator lookup. `temperature_metric` is
+    # MetricIdentity (normalized at L662 via _normalize_temperature_metric);
+    # pull the string attribute for the kwarg.
+    cal, cal_level = get_calibrator(
+        conn, city, target_date,
+        temperature_metric=temperature_metric.temperature_metric,
+    )
     if cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,

@@ -129,6 +129,31 @@ Every canonical snapshot row must carry at least:
 - `boundary_ambiguous` (bool)
 - `ambiguous_member_count`
 - `manifest_hash`
+
+### Phase 9C policy clarification (2026-04-19): settlements_v2 writer origin
+
+`settlements_v2` is a **read-side query symmetry surface** — live settlement
+truth arrives externally (Polymarket oracle + Weather Underground observations)
+and is written by existing legacy paths (`src/execution/harvester.py` for
+terminalization, PM oracle sync for market truth). Zeus's Python code does
+**not** contain an internal `write_settlement_v2(...)` writer; the v2 table
+exists so that a future backfill tool (historical replay symmetry) or an
+external publisher (PM oracle v2 integration, if introduced) can populate
+rows that dual-track readers query with metric discrimination.
+
+Current state (Phase 9C / Golden Window active): `settlements_v2` has zero
+rows. `get_calibrator` and other v2-aware readers gracefully fall back to
+legacy for HIGH (backward compat) and fail closed for LOW (no data → no
+calibrator → Level 4 uncalibrated → evaluator refuses with
+`rejection_reason='no_calibrator'`). This is fail-closed by design.
+
+If and when a live LOW settlement publisher lands, its writer must:
+1. Write to `settlements_v2` with explicit `temperature_metric`;
+2. Carry provenance fields (`source`, `authority`) per DT#1 / DT#6 §B;
+3. NOT mutate legacy `settlements` for LOW rows (NC-11 negative constraint).
+
+Until then, read-side `settlements_v2` queries return empty result sets for
+LOW + non-backfilled HIGH; downstream consumers handle gracefully.
 - `provenance_json`
 
 Fallback forecast rows are never canonical training evidence. Missing
