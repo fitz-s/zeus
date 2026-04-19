@@ -299,6 +299,129 @@ def test_red_triggers_active_position_sweep(monkeypatch):
     )
 
 
+# DT#2 — Phase 9B ITERATE resolution (R-BY relationship antibody)
+def test_red_force_exit_marker_drives_evaluate_exit_to_exit():
+    """DT#2 / INV-19 relationship antibody (R-BY, critic-carol cycle-3 fix):
+
+    R-BV (sweep mechanism) only verified that `_execute_force_exit_sweep`
+    writes `exit_reason="red_force_exit"` on positions. Critic-carol cycle 3
+    surfaced CRITICAL-1: the marker was INERT — no runtime consumer read it.
+    P9B ITERATE-fix wires the marker into `evaluate_exit`: when a position
+    carries exit_reason="red_force_exit" AND exit_context is NOT
+    day0_active, evaluate_exit short-circuits normal edge evaluation and
+    returns ExitDecision(should_exit=True, trigger="RED_FORCE_EXIT").
+
+    This is a RELATIONSHIP antibody per Fitz methodology: tests the
+    cross-module invariant that cycle_runner's sweep output flows correctly
+    into portfolio.evaluate_exit's decision surface. Function-level tests
+    alone could not detect the inert-marker pathology (critic-carol cycle-3
+    L9 runtime-probe learning).
+    """
+    from src.state.portfolio import Position, ExitContext
+
+    # GIVEN a sweep-marked position (as left by _execute_force_exit_sweep)
+    marked_pos = Position(
+        trade_id="t1", market_id="m1", city="NYC", cluster="US-Northeast",
+        target_date="2026-04-15", bin_label="50-51°F", direction="buy_yes",
+        unit="F", state="holding",
+        exit_reason="red_force_exit",
+        size_usd=10.0, entry_price=0.40, p_posterior=0.60, shares=25.0,
+        cost_basis_usd=10.0,
+    )
+
+    # AND a HEALTHY ExitContext (not day0-active; all authority fields
+    # present) — pre-fix, the marker was silently ignored
+    healthy_context = ExitContext(
+        fresh_prob=0.60,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.40,
+        current_market_price_is_fresh=True,
+        best_bid=0.39,
+        best_ask=0.41,
+        market_vig=0.02,
+        hours_to_settlement=12.0,
+        position_state="holding",
+        day0_active=False,
+        whale_toxicity=False,
+        chain_is_fresh=True,
+    )
+
+    # WHEN evaluate_exit runs
+    decision = marked_pos.evaluate_exit(healthy_context)
+
+    # THEN should_exit=True with RED_FORCE_EXIT trigger
+    assert decision.should_exit is True, (
+        f"R-BY: sweep-marked position + healthy ExitContext must yield "
+        f"should_exit=True. Got should_exit={decision.should_exit}, "
+        f"reason={decision.reason!r}, trigger={decision.trigger!r}. "
+        f"Pre-fix: marker was inert (decision.should_exit=False because "
+        f"normal edge evaluation ran and found no exit trigger). Post-fix: "
+        f"evaluate_exit short-circuits on exit_reason='red_force_exit'."
+    )
+    assert decision.trigger == "RED_FORCE_EXIT", (
+        f"R-BY: trigger must be RED_FORCE_EXIT; got {decision.trigger!r}"
+    )
+    assert decision.urgency == "immediate", (
+        f"R-BY: urgency must be 'immediate' on RED force exit; "
+        f"got {decision.urgency!r}"
+    )
+    assert "dt2_red_force_exit_sweep_actuated" in decision.applied_validations, (
+        f"R-BY: applied_validations must trace the DT#2 actuator; got "
+        f"{decision.applied_validations!r}"
+    )
+
+
+# DT#2 — Day0 exclusion antibody (R-BY.2 pair-negative)
+def test_red_force_exit_marker_does_not_override_day0_evaluation():
+    """DT#2 boundary clause (R-BY.2): Day0 positions have their own risk-
+    containment path (nowcast + causality) and must NOT be short-circuited
+    by the RED force-exit branch. Critic-carol cycle-3 fix preserves Day0
+    evaluator semantics by gating the short-circuit on `not day0_active`.
+
+    Pair-negative antibody to R-BY (critic-carol cycle-1 L7 / cycle-2
+    paired-antibody pattern): both false-negative (marker fails to fire
+    when it should) AND false-positive (marker fires when it shouldn't)
+    must be locked.
+    """
+    from src.state.portfolio import Position, ExitContext
+
+    marked_pos = Position(
+        trade_id="t2", market_id="m2", city="LA", cluster="US-West",
+        target_date="2026-04-16", bin_label="70-71°F", direction="buy_yes",
+        unit="F", state="holding",
+        exit_reason="red_force_exit",
+        size_usd=10.0, entry_price=0.40, p_posterior=0.60, shares=25.0,
+        cost_basis_usd=10.0,
+    )
+
+    day0_context = ExitContext(
+        fresh_prob=0.60,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.40,
+        current_market_price_is_fresh=True,
+        best_bid=0.39,
+        best_ask=0.41,
+        market_vig=0.02,
+        hours_to_settlement=2.0,
+        position_state="holding",
+        day0_active=True,  # <-- Day0 path; must NOT be short-circuited
+        whale_toxicity=False,
+        chain_is_fresh=True,
+    )
+
+    decision = marked_pos.evaluate_exit(day0_context)
+
+    # Day0 position SHOULD NOT short-circuit on the RED marker — its own
+    # nowcast/causality logic must run. The decision may or may not exit
+    # depending on Day0 logic, but the trigger must NOT be RED_FORCE_EXIT.
+    assert decision.trigger != "RED_FORCE_EXIT", (
+        f"R-BY.2: Day0 position must NOT be short-circuited by RED marker; "
+        f"got trigger={decision.trigger!r}. The day0_active gate on the "
+        f"DT#2 branch has regressed."
+    )
+    assert "dt2_red_force_exit_sweep_actuated" not in decision.applied_validations
+
+
 # DT#7 — NEW Phase 9B (R-BX)
 def test_boundary_ambiguous_refuses_signal_contract():
     """DT#7 clause 3: boundary_ambiguous_refuses_signal() must return True

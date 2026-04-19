@@ -294,8 +294,40 @@ class Position:
 
         All probabilities remain in held/native space. Missing authority fields
         fail closed with an explicit incomplete verdict.
+
+        Phase 9B ITERATE resolution (DT#2 R-BY): when `self.exit_reason` is
+        set to "red_force_exit" (by cycle_runner's `_execute_force_exit_sweep`
+        during a RED daily-loss cycle), short-circuit normal edge evaluation
+        and return `ExitDecision(should_exit=True, trigger="RED_FORCE_EXIT")`.
+        This wires the Phase 9B sweep marker to the existing exit actuator
+        path (monitor_refresh → evaluate_exit → execute_exit), closing the
+        critic-carol cycle-3 CRITICAL-1 "inert marker" gap. Day0 positions
+        skip this path — they have their own risk-containment via
+        nowcast/causality; DT#2 RED is orthogonal to Day0 evaluator logic.
         """
         applied = list(self.applied_validations)
+
+        # DT#2 RED force-exit sweep short-circuit (Phase 9B ITERATE, R-BY).
+        # Must run BEFORE the missing-authority fail-closed check: when the
+        # risk layer declares RED, we exit regardless of whether we have full
+        # ExitContext authority. The sell order posts at whatever the
+        # orderbook offers; RED containment takes precedence over normal
+        # price-quality gating.
+        if (
+            self.exit_reason == "red_force_exit"
+            and not exit_context.day0_active
+        ):
+            applied.append("dt2_red_force_exit_sweep_actuated")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                "RED_FORCE_EXIT",
+                urgency="immediate",
+                trigger="RED_FORCE_EXIT",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
         missing = exit_context.missing_authority_fields()
         if missing:
             applied.append("exit_context_incomplete")
