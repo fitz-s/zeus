@@ -44,6 +44,7 @@ RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
 REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml"
 CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
+CODE_REVIEW_GRAPH_DB_PATH = ROOT / ".code-review-graph" / "graph.db"
 SKIP_PATTERN = re.compile(r"pytest\.mark\.skip|pytest\.skip\(")
 DANGEROUS_REVERSE_ANTIBODY_PATTERNS = (
     re.compile(r"assert\s+.*round_single\([^)]*(?:52|72|74)\.5[^)]*\)\s*==\s*(?:52|72|74)\.0"),
@@ -598,6 +599,19 @@ def run_freshness_metadata(changed_files: list[str] | None = None) -> StrictResu
 
 def run_naming_conventions() -> StrictResult:
     return _freshness_checks().run_naming_conventions(sys.modules[__name__])
+
+
+def _code_review_graph_checks():
+    try:
+        from scripts import topology_doctor_code_review_graph
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_code_review_graph
+
+    return topology_doctor_code_review_graph
+
+
+def run_code_review_graph_status(changed_files: list[str] | None = None) -> StrictResult:
+    return _code_review_graph_checks().run_code_review_graph_status(sys.modules[__name__], changed_files)
 
 
 def _packet_prefill_checks():

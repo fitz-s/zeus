@@ -34,6 +34,7 @@ plan.
 | `docs/to-do-list/` | Active checklist workbooks, not authority | `docs/to-do-list/AGENTS.md` |
 | `docs/artifacts/` | Active evidence artifacts, not authority | `docs/artifacts/AGENTS.md` |
 | `docs/archives/` | Historical evidence only | local ignored archive route; not reviewer-visible and never default-read |
+| `.agents/skills/` | Repo-local workflow skills and handoff guidance | read the target skill `SKILL.md`; AI handoff route starts at `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md` |
 | `architecture/` | Machine-checkable authority and topology | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and external reality contracts | `config/AGENTS.md` |
 | `.github/workflows/` | CI/advisory gates | `.github/workflows/AGENTS.md` |
@@ -105,12 +106,14 @@ Prefer these over hand-maintained prose when they exist:
 | Test topology | `python scripts/topology_doctor.py --tests --json` |
 | Script safety | `python scripts/topology_doctor.py --scripts --json` |
 | Naming/freshness map | `python scripts/topology_doctor.py --naming-conventions --json` |
+| Code graph cache health | `python scripts/topology_doctor.py --code-review-graph-status --json` |
 
 ## Do Not Default-Read
 
 - `docs/archives/**` — historical evidence only.
 - `docs/reports/` — generated report sink from declared writers only; not a default route.
 - `.omx/context/**` — micro-logs/evidence breadcrumbs, not governing law.
+- `.code-review-graph/**` — local derived code-impact cache; not authority or default-read context.
 - `docs/known_gaps.md` — load only when investigating active blockers.
 - Long math references such as `docs/reference/statistical_methodology.md` and `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
 

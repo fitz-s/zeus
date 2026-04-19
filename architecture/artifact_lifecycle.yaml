@@ -97,6 +97,7 @@ artifact_classes:
       - state/
       - .omx/
       - .omc/
+      - .code-review-graph/
     archive_paths:
       - not_archived
     record_required: false

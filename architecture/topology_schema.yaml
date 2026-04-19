@@ -128,6 +128,16 @@ strict_issue_codes:
   - naming_conventions_manifest_missing
   - naming_conventions_required_field_missing
   - naming_conventions_rule_invalid
+  - code_review_graph_missing
+  - code_review_graph_unreadable
+  - code_review_graph_stale_head
+  - code_review_graph_stale_branch
+  - code_review_graph_tracked_db
+  - code_review_graph_ignore_missing
+  - code_review_graph_partial_coverage
+  - code_review_graph_dirty_file_stale
+  - code_review_graph_postprocess_empty
+  - code_review_graph_git_status_failed
   - freshness_header_missing
   - freshness_header_field_missing
   - freshness_header_date_invalid

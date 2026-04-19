@@ -1,0 +1,73 @@
+{
+  "task": "code review graph topology bridge",
+  "packet": "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md"
+  ],
+  "allowed_files": [
+    ".gitignore",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/naming_conventions.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "architecture/topology_schema.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/**",
+    "scripts/code_review_graph_mcp_readonly.py",
+    "scripts/topology_doctor.py",
+    "scripts/topology_doctor_cli.py",
+    "scripts/topology_doctor_closeout.py",
+    "scripts/topology_doctor_code_review_graph.py",
+    "tests/test_topology_doctor.py"
+  ],
+  "forbidden_files": [
+    ".code-review-graph/**",
+    "docs/authority/**",
+    "state/*.db",
+    "state/*.json",
+    "src/**"
+  ],
+  "changed_files": [
+    ".gitignore",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/naming_conventions.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "architecture/topology_schema.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md",
+    "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/receipt.json",
+    "docs/operations/task_2026-04-19_code_review_graph_topology_bridge/work_log.md",
+    "scripts/code_review_graph_mcp_readonly.py",
+    "scripts/topology_doctor.py",
+    "scripts/topology_doctor_cli.py",
+    "scripts/topology_doctor_closeout.py",
+    "scripts/topology_doctor_code_review_graph.py",
+    "tests/test_topology_doctor.py",
+    "workspace_map.md"
+  ],
+  "tests_evidence": [
+    "python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_cli.py scripts/topology_doctor_closeout.py scripts/topology_doctor_code_review_graph.py scripts/code_review_graph_mcp_readonly.py",
+    "python -m pytest -q tests/test_topology_doctor.py -k 'code_review_graph_status or closeout_compiles_selected_lanes or cli_json_parity_for_closeout_command'",
+    "python scripts/topology_doctor.py --code-review-graph-status --summary-only",
+    "python scripts/topology_doctor.py closeout --changed-files ... --plan-evidence docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md --work-record-path docs/operations/task_2026-04-19_code_review_graph_topology_bridge/work_log.md --receipt-path docs/operations/task_2026-04-19_code_review_graph_topology_bridge/receipt.json --summary-only"
+  ]
+}

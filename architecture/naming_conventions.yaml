@@ -54,6 +54,7 @@ file_naming:
         deprecate_legacy_state_files.py: established repair command name
         _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
         bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
+        code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor
         equity_curve.py: established diagnostic report command
         force_lifecycle.py: established repair command name; dangerous and packet-gated
         healthcheck.py: established operator entrypoint
@@ -74,6 +75,7 @@ file_naming:
         topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
         topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
         topology_doctor_closeout.py: compiled closeout checker-family module imported by topology_doctor.py
+        topology_doctor_code_review_graph.py: Code Review Graph cache-status checker-family module imported by topology_doctor.py
         topology_doctor_context_pack.py: context-pack/impact builder-family module imported by topology_doctor.py
         topology_doctor_core_map.py: core-map/compiled-topology builder-family module imported by topology_doctor.py
         topology_doctor_data_rebuild_checks.py: data-rebuild checker-family module imported by topology_doctor.py

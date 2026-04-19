@@ -373,6 +373,7 @@ scripts:
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}
   topology_doctor_closeout.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for compiled closeout lane}
+  topology_doctor_code_review_graph.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for local Code Review Graph cache health checks}
   topology_doctor_context_pack.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for context-pack/impact builder family}
   topology_doctor_core_map.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for core-map/compiled-topology builder family}
   topology_doctor_data_rebuild_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for data-rebuild checker family}
@@ -396,3 +397,4 @@ scripts:
   verify_truth_surfaces.py: {class: diagnostic}
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
   bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
+  code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}
