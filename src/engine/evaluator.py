@@ -184,9 +184,12 @@ def _size_at_execution_price_boundary(
     ep_fee_adjusted = ep.with_taker_fee(fee_rate)
     ep_fee_adjusted.assert_kelly_safe()
 
+    # DT#5 P9B (INV-21): pass the full ExecutionPrice object, not `.value`.
+    # kelly_size now accepts ExecutionPrice and calls assert_kelly_safe()
+    # internally — structural enforcement at the Kelly boundary.
     fee_adjusted_size = kelly_size(
         p_posterior,
-        ep_fee_adjusted.value,
+        ep_fee_adjusted,
         sizing_bankroll,
         kelly_multiplier,
         safety_cap_usd=safety_cap_usd,

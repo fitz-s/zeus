@@ -1268,9 +1268,21 @@ def test_force_exit_review_scope_is_entry_block_only(monkeypatch, tmp_path):
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
+    # Phase 9B DT#2 / R-BV: scope widened from "entry_block_only" to
+    # "sweep_active_positions". Pre-P9B this test asserted entry-block-only
+    # scope; P9B lands the sweep so the assertion flips to
+    # "sweep_active_positions" AND the sweep mark is visible on the position.
+    # This is a critic-beth-style "stale antibody flip at guard-removal"
+    # update — the test is intentionally re-purposed for the new law.
     assert monitored == ["t1"]
     assert summary["force_exit_review"] is True
-    assert summary["force_exit_review_scope"] == "entry_block_only"
+    assert summary["force_exit_review_scope"] == "sweep_active_positions"
+    assert summary["force_exit_sweep"]["attempted"] == 1, (
+        f"Phase 9B R-BV: sweep should have marked 1 active position; "
+        f"got summary={summary.get('force_exit_sweep')!r}"
+    )
+    # Position must carry the sweep exit_reason (exit_lifecycle picks it up next cycle)
+    assert portfolio.positions[0].exit_reason == "red_force_exit"
     assert summary["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
     assert summary["monitors"] == 1
     assert summary["candidates"] == 0

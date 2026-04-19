@@ -270,10 +270,19 @@ class TestNoBareFloatInExitTriggerThresholds:
             "P9 requires thresholds traced to ExpiringAssumption or ProvenanceRecord."
         )
 
-    def test_kelly_size_entry_price_currently_bare_float_annotation(self):
-        """Document current state: entry_price annotated as float (INV-12 violation).
+    def test_kelly_size_entry_price_accepts_execution_price(self):
+        """Phase 9B DT#5 / R-BW (stale-antibody flip 2026-04-18):
+        kelly_size.entry_price annotation is now `float | ExecutionPrice` —
+        polymorphic with structural enforcement when typed. Pre-P9B this test
+        was named `..._currently_bare_float_annotation` and documented the
+        INV-12 violation as the known current state; P9B activates the contract
+        (kelly_size calls assert_kelly_safe() internally on ExecutionPrice)
+        without breaking backward-compat for unit-test callers.
 
-        This PASSES now. Update when evaluator.py wires ExecutionPrice at the seam.
+        Antibody shape (structural AST): parse kelly.py and assert
+        `entry_price` has a union annotation mentioning both `float` and
+        `ExecutionPrice`. If a future phase tightens to strict
+        ExecutionPrice-only, update this test + docstring together.
         """
         source = KELLY_PY.read_text()
         tree = ast.parse(source)
@@ -282,16 +291,21 @@ class TestNoBareFloatInExitTriggerThresholds:
                 for arg in node.args.args:
                     if arg.arg == "entry_price":
                         ann = arg.annotation
-                        # Current state: float annotation (the violation)
-                        if ann is not None and isinstance(ann, ast.Name) and ann.id == "float":
-                            return  # Expected current state — test passes
-                        elif ann is None:
-                            return  # No annotation — also pre-seam
-                        else:
-                            # Annotation exists and is not bare float
+                        if ann is None:
                             pytest.fail(
-                                "entry_price annotation has changed. "
-                                "Update this test to verify it's ExecutionPrice."
+                                "Phase 9B R-BW: kelly_size.entry_price has no "
+                                "annotation. Must be `float | ExecutionPrice`."
                             )
-                return  # entry_price param found but no annotation
+                        ann_text = ast.unparse(ann)
+                        has_float = "float" in ann_text
+                        has_execution_price = "ExecutionPrice" in ann_text
+                        assert has_float and has_execution_price, (
+                            f"Phase 9B R-BW: kelly_size.entry_price annotation "
+                            f"must include both `float` (backward-compat) and "
+                            f"`ExecutionPrice` (DT#5 enforcement); got: {ann_text!r}"
+                        )
+                        return
+                pytest.fail(
+                    "Phase 9B R-BW: kelly_size signature has no entry_price param."
+                )
         pytest.skip("kelly_size not found in kelly.py")

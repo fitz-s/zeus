@@ -48,6 +48,61 @@ logger = logging.getLogger(__name__)
 
 KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
 
+# DT#2 P9B (INV-19): terminal position states are excluded from the RED
+# force-exit sweep. Mirrors `_TERMINAL_POSITION_STATES` in src/state/portfolio.py
+# (module-private there; duplicated here to avoid cross-layer coupling).
+_TERMINAL_POSITION_STATES_FOR_SWEEP = frozenset({
+    "settled",
+    "voided",
+    "admin_closed",
+    "quarantined",
+})
+
+
+def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
+    """DT#2 / INV-19 RED force-exit sweep (Phase 9B).
+
+    Marks all active (non-terminal) positions with `exit_reason="red_force_exit"`
+    so the existing exit_lifecycle machinery picks them up on the next
+    monitor_refresh cycle and posts sell orders through the normal exit lane.
+
+    Does NOT post sell orders in-cycle — keeps the sweep low-risk + testable.
+    Already-exiting positions (non-empty `exit_reason` from a prior exit flow)
+    are NOT overridden — we mark only positions that have no exit flow yet.
+
+    Law reference: docs/authority/zeus_current_architecture.md §17 +
+    docs/authority/zeus_dual_track_architecture.md §6 DT#2. Pre-P9B behavior
+    was entry-block-only (Phase 1 scope); this closes the Phase 2 sweep gap.
+
+    Returns:
+        dict with counts: {attempted, already_exiting, skipped_terminal}
+    """
+    attempted = 0
+    already_exiting = 0
+    skipped_terminal = 0
+
+    for pos in portfolio.positions:
+        # pos.state may be a LifecycleState enum (str-subclass) or a bare string;
+        # under Python 3.14 str(enum) returns fully-qualified "ClassName.MEMBER",
+        # so extract .value when available.
+        raw_state = getattr(pos, "state", "") or ""
+        state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
+        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP:
+            skipped_terminal += 1
+            continue
+        existing_reason = str(getattr(pos, "exit_reason", "") or "").strip()
+        if existing_reason:
+            already_exiting += 1
+            continue
+        pos.exit_reason = "red_force_exit"
+        attempted += 1
+
+    return {
+        "attempted": attempted,
+        "already_exiting": already_exiting,
+        "skipped_terminal": skipped_terminal,
+    }
+
 
 def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
     return risk_level == RiskLevel.GREEN
@@ -241,13 +296,28 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     portfolio_dirty = portfolio_dirty or p_dirty
     tracker_dirty = tracker_dirty or t_dirty
 
-    # B5: When daily_loss RED, block new entries (Phase 1 scope: entry-blocking only;
-    # forced exit sweep for active positions is a Phase 2 item)
+    # B5 + DT#2 P9B: When daily_loss RED, block new entries AND sweep active
+    # positions toward exit (previously Phase 1 was entry-block-only; Phase 9B
+    # closes the sweep gap per zeus_dual_track_architecture.md §6 DT#2 law:
+    # "RED must cancel all pending orders AND initiate an exit sweep on
+    # active positions"). Sweep marks `exit_reason="red_force_exit"` on each
+    # non-terminal, not-already-exiting position; exit_lifecycle machinery
+    # picks up on next monitor_refresh cycle.
     force_exit = get_force_exit_review()
     if force_exit:
         summary["force_exit_review"] = True
-        summary["force_exit_review_scope"] = "entry_block_only"
-        logger.warning("B5: force_exit_review active — daily loss RED. Scope: entry-block only.")
+        summary["force_exit_review_scope"] = "sweep_active_positions"
+        sweep_result = _execute_force_exit_sweep(portfolio)
+        summary["force_exit_sweep"] = sweep_result
+        if sweep_result["attempted"] > 0:
+            portfolio_dirty = True  # positions' exit_reason changed; persist
+        logger.warning(
+            "B5/DT#2: force_exit_review active — daily loss RED. "
+            "Sweep: attempted=%d already_exiting=%d skipped_terminal=%d.",
+            sweep_result["attempted"],
+            sweep_result["already_exiting"],
+            sweep_result["skipped_terminal"],
+        )
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
