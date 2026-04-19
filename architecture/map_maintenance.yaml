@@ -131,3 +131,19 @@ rules:
       - tests/contracts/AGENTS.md
       - architecture/test_topology.yaml
     rationale: contract manifests need a local registry and test-topology awareness.
+  - id: repo_local_skill_registry
+    path_globs: [".agents/skills/*/SKILL.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - .agents/skills/AGENTS.md
+      - workspace_map.md
+      - architecture/topology.yaml
+    rationale: repo-local skills are workflow surfaces and must remain routed without overriding root guidance.
+  - id: raw_oracle_snapshot_registry
+    path_globs: ["raw/oracle_shadow_snapshots/*/*.json"]
+    on_change: [added, deleted]
+    required_companions:
+      - raw/AGENTS.md
+      - architecture/artifact_lifecycle.yaml
+      - architecture/topology.yaml
+    rationale: raw oracle snapshots are evidence inputs and need explicit lifecycle/topology classification.

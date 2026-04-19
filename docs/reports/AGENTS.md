@@ -7,9 +7,9 @@ manifests, tests, contracts, or authority docs before they become binding.
 
 ## File registry
 
-This directory intentionally starts empty. Generated reports are allowed here
-only when a declared writer in `architecture/script_manifest.yaml` targets
-`docs/reports/`.
+| File | Purpose |
+|------|---------|
+| `task_2026-04-18_external_reality_review.md` | External-reality review of Zeus execution/state/settlement risks; evidence only |
 
 ## Rules
 

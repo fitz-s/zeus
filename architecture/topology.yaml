@@ -97,12 +97,24 @@ coverage_roots:
     zone: ci
     authority_role: runtime_support
     forbidden_misread: Advisory CI lanes are not blocking proof.
+  - path: ".agents/skills"
+    status: active
+    scope: scoped
+    zone: repo_local_skills
+    authority_role: runtime_support
+    forbidden_misread: Repo-local skills are workflow aids and never override root AGENTS or machine manifests.
   - path: "architecture"
     status: active
     scope: global
     zone: architecture
     authority_role: schema_law
     forbidden_misread: Topology graph must not redefine canonical manifests.
+  - path: "raw"
+    status: active
+    scope: runtime
+    zone: raw_evidence
+    authority_role: derived_diagnostic
+    forbidden_misread: Raw captures are external evidence inputs, not canonical truth until promoted through declared bridge/config paths.
   - path: "state"
     status: conditional
     scope: runtime
@@ -422,6 +434,8 @@ registry_directories:
   - path: "config"
   - path: "config/reality_contracts"
   - path: ".github/workflows"
+  - path: ".agents/skills"
+  - path: "raw"
 
 docs_mode_excluded_roots: []
 

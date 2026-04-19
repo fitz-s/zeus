@@ -87,6 +87,7 @@ artifact_classes:
       - docs/artifacts/
       - docs/to-do-list/
       - docs/operations/task_YYYY-MM-DD_slug/evidence/
+      - raw/oracle_shadow_snapshots/
       - .omx/context/
     archive_paths:
       - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/evidence/
@@ -123,6 +124,12 @@ classification_rules:
     artifact_class: generated_evidence
     lifecycle: active
     destination_rule: Keep active generated reports explicit and non-authoritative; archive historical reports under docs/archives/reports/.
+  - id: raw_oracle_shadow_snapshots
+    path_globs:
+      - raw/oracle_shadow_snapshots/*/*.json
+    artifact_class: generated_evidence
+    lifecycle: active
+    destination_rule: Keep raw oracle snapshots as evidence inputs; promote only through declared oracle calibration/config paths.
   - id: active_work_log
     path_globs:
       - docs/operations/task_????-??-??_*/work_log.md

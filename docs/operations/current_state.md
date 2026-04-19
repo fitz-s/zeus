@@ -32,6 +32,7 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/runtime_artifact_inventory.md` — `.omx/.omc` planning artifact inventory and disposition guide
   - `docs/operations/task_2026-04-16_function_naming_freshness/plan.md` — small completed governance package for function naming and changed-file script/test freshness metadata
   - `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md` — active package for Code Review Graph topology-first integration and Codex MCP safety
+  - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md` — active package syncing non-Phase-10A workspace artifacts and topology map updates
 - Next packet: Continue the Dual-Track Metric Spine Refactor unless a higher-priority governance break supersedes it.
 
 ## Runtime

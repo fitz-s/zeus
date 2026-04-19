@@ -19,22 +19,28 @@ Assumption: **DT has progressed to Phase 5** (Phases 1–4 are DONE). Phase 5 bu
 
 "Schema v2" everywhere in the audit refers to Phase 2 deliverables and is therefore **landed** under this assumption.
 
-## Summary matrix
+## Section A — FULLY CLOSED as of 2026-04-19 Phase 10A commit
 
-| Bug | File:line | Section | DT prerequisite |
-|---|---|---|---|
-| B063 | [src/state/chain_reconciliation.py](../../src/state/chain_reconciliation.py) + [src/state/db.py](../../src/state/db.py) | **A** | Phase 2 `rescue_events_v2` audit table |
-| B070 | [src/state/db.py#L3592-L3640](../../src/state/db.py#L3592) | **A** | Phase 2 `control_overrides_history_v2` |
-| B071 | [src/state/db.py#L3643-L3722](../../src/state/db.py#L3643) | **A** | Phase 2 `token_suppression_history_v2` |
-| B091 | [src/engine/evaluator.py#L1494-L1515](../../src/engine/evaluator.py#L1494) | **A** | Phase 1 MetricIdentity + `time_field_status` enum (SD-G) |
-| B100 | [src/state/db.py#L1078-L1094](../../src/state/db.py#L1078) | **A** | Phase 2 v2 migration path (replaces `DROP TABLE`) |
-| B069 | [src/state/db.py#L3560-L3583](../../src/state/db.py#L3560) + [src/state/portfolio.py](../../src/state/portfolio.py) | **B** | Phase 5 authoritative truth flag + Phase 1 MetricIdentity view layer |
-| B073 | [src/state/portfolio.py#L974-L993](../../src/state/portfolio.py#L974) | **B** | Phase 5 authoritative truth flag |
-| B077 | [src/state/truth_files.py#L101-L102](../../src/state/truth_files.py#L101) | **B** | Phase 5 SD-A mode authority (land `mode` as first-class routing key) |
-| B078 | [src/state/truth_files.py#L46-L50](../../src/state/truth_files.py#L46), [L123-L125](../../src/state/truth_files.py#L123), [L174-L179](../../src/state/truth_files.py#L174) | **B** | Phase 5 low historical lane truth-meta registry |
-| B093 | [src/engine/replay.py#L246-L280](../../src/engine/replay.py#L246) | **B** | Phase 5 low-lane MetricIdentity enforcement |
-| B055 | [src/riskguard/riskguard.py#L173-L178](../../src/riskguard/riskguard.py#L173) | **C** | Phase 6 DT#6 graceful-degradation law |
-| B099 | [src/engine/cycle_runtime.py#L1078-L1103](../../src/engine/cycle_runtime.py#L1078), [L1191-L1193](../../src/engine/cycle_runtime.py#L1191) | **C** | DT#1 architect packet (atomic `_execute_candidate` transaction) |
+All 5 Section A bugs (B063/B070/B071/B091/B100) are now RESOLVED. Historical queue below preserved for audit trail; current status table follows.
+
+## Current status matrix (post-Phase 10A)
+
+| Bug | File:line | Section | Status | Commit |
+|---|---|---|---|---|
+| B063 | [src/state/chain_reconciliation.py](../../src/state/chain_reconciliation.py) + [src/state/db.py](../../src/state/db.py) | A | ✅ RESOLVED | `94cc1f9` |
+| B070 | [src/state/db.py#L3592-L3640](../../src/state/db.py#L3592) | A | ✅ RESOLVED | `ebb4f41` |
+| B071 | [src/state/db.py#L3308-L3388](../../src/state/db.py#L3308) | A | ✅ RESOLVED | Phase 10A (this commit) |
+| B091 | [src/engine/evaluator.py#L1271-L1286](../../src/engine/evaluator.py#L1271) | A | ✅ RESOLVED | `177ae8b` (upper) + Phase 10A (lower, extends P9C `decision_time_status` vocab) |
+| B100 | [src/state/db.py#L889-L1008](../../src/state/db.py#L889) | A | ✅ RESOLVED | Pre-Phase 10A (SAVEPOINT migration pattern) |
+| B069 | [src/state/db.py](../../src/state/db.py) + [src/state/portfolio.py](../../src/state/portfolio.py) | B | ✅ RESOLVED | Phase 5A `977d9ae` |
+| B073 | [src/state/portfolio.py](../../src/state/portfolio.py) | B | ✅ RESOLVED | Phase 5A `977d9ae` |
+| B077 | [src/state/truth_files.py](../../src/state/truth_files.py) | B | ✅ RESOLVED | Phase 5A `977d9ae` |
+| B078 | [src/state/truth_files.py](../../src/state/truth_files.py) | B | ✅ RESOLVED | Phase 5B `c327872` |
+| B093 | [src/engine/replay.py](../../src/engine/replay.py) | B | ✅ RESOLVED | Phase 5C `821959e` + `59e271c` |
+| B055 | [src/riskguard/riskguard.py#L173-L178](../../src/riskguard/riskguard.py#L173) | **C** | ⏳ OPEN_DT_BLOCKED — DT#6 graceful-degradation architect packet |
+| B099 | [src/engine/cycle_runtime.py#L1078-L1103](../../src/engine/cycle_runtime.py#L1078), [L1191-L1193](../../src/engine/cycle_runtime.py#L1191) | **C** | ⏳ OPEN_DT_BLOCKED — DT#1 atomic `_execute_candidate` architect packet |
+
+**Only Section C (B055, B099) remains open. Both require architect packets before independent fixes.**
 
 ---
 
