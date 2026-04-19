@@ -1935,6 +1935,7 @@ def run_replay(
     mode: str = "audit",
     overrides: Optional[dict] = None,
     allow_snapshot_only_reference: bool = False,
+    temperature_metric: str = "high",
 ) -> ReplaySummary:
     """Run the Decision Replay Engine.
 
@@ -1943,6 +1944,11 @@ def run_replay(
         end_date: YYYY-MM-DD
         mode: 'audit', 'counterfactual', 'walk_forward'
         overrides: parameter overrides for counterfactual mode
+        temperature_metric: 'high' (HIGH_LOCALDAY_MAX) or 'low' (LOW_LOCALDAY_MIN).
+            Phase 8 (R-BP): threaded to `_replay_one_settlement`, which already
+            accepts the kwarg (see L1107). Default 'high' preserves backward
+            compat for every pre-P8 caller. Full B093 half-2 migration to
+            `historical_forecasts_v2` is P9 scope (requires v2 data).
 
     Returns:
         ReplaySummary with per-city breakdown and PnL
@@ -1998,7 +2004,13 @@ def run_replay(
             "winning_bin": srow["winning_bin"],
         }
 
-        outcome = _replay_one_settlement(ctx, city, target_date, settlement)
+        outcome = _replay_one_settlement(
+            ctx,
+            city,
+            target_date,
+            settlement,
+            temperature_metric=temperature_metric,
+        )
         if outcome is None:
             continue
 

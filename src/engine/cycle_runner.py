@@ -21,7 +21,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
 from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
-from src.riskguard.riskguard import get_current_level, get_force_exit_review
+from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.db import get_trade_connection_with_world, record_token_suppression
@@ -178,7 +178,21 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     conn = get_connection()
     portfolio = load_portfolio()
     if getattr(portfolio, 'portfolio_loader_degraded', False):
-        raise RuntimeError("Portfolio loader degraded: DB not authoritative. Failsafe subsystem shutdown.")
+        # DT#6 graceful degradation (Phase 8 R-BQ): do NOT raise RuntimeError.
+        # Run the degraded-mode riskguard tick so risk_level reflects DATA_DEGRADED
+        # (riskguard.tick_with_portfolio surfaces the degraded authority into
+        # overall_level). Downstream entry gates honour risk_level != GREEN,
+        # suppressing new-entry paths while monitor / exit / reconciliation
+        # lanes continue read-only. See docs/authority/zeus_dual_track_architecture.md
+        # §6 DT#6 law: "process must not raise RuntimeError; disable new-entry
+        # paths; keep monitor/exit/reconciliation running read-only".
+        logger.warning(
+            "Portfolio loader degraded — running DT#6 graceful-degradation cycle "
+            "(new-entry paths suppressed via risk_level; monitor/exit/reconciliation continue)"
+        )
+        summary["portfolio_degraded"] = True
+        risk_level = tick_with_portfolio(portfolio)
+        summary["risk_level"] = risk_level.value
     clob = PolymarketClient()
     tracker = get_tracker()
     limits = RiskLimits()
