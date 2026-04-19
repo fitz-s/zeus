@@ -411,6 +411,10 @@ class TestRCKDecisionTimeStatusEvaluator:
             discovery_mode="opening_hunt",
             event_id=eid,
             slug="",
+            # P10B R9: make_*_family_id requires temperature_metric on candidate;
+            # these R-CK tests exercise the HIGH path (decision_time_status vocab
+            # extension from P9C replay), so default to "high".
+            temperature_metric="high",
         )
 
     def test_rcck1_fabrication_path_persists_fabricated_status(self):
