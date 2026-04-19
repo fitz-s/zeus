@@ -352,7 +352,7 @@ def _refresh_day0_observation(
         p_cal_yes = float(p_raw_vector[held_idx])
         applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise"]
 
-    ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
+    ensemble_spread = TemperatureDelta(float(np.std(extrema.maxes)), city.settlement_unit)
 
     hours_since_open = 48.0
     if position.entered_at:
@@ -402,7 +402,7 @@ def _refresh_day0_observation(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_maxes": remaining_member_maxes,
+        "member_maxes": extrema.maxes,
         "calibrator": cal,
         "lead_days": 0.0,
         "unit": city.settlement_unit,

@@ -230,6 +230,63 @@ WHERE history_id = (
     WHERE h2.override_id = h1.override_id
 );
 
+-- B071: token_suppression is an event-sourced projection (mirrors B070).
+-- token_suppression_history is the canonical append-only log; the
+-- token_suppression_current VIEW projects the latest row (by history_id,
+-- AUTOINCREMENT) per token_id.
+--
+-- DO NOT add writes that bypass token_suppression_history.
+-- DO NOT remove token_suppression_history: the VIEW depends on it.
+-- See B070 (control_overrides_history) for the pattern rationale.
+CREATE TABLE IF NOT EXISTS token_suppression_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id TEXT NOT NULL,
+    condition_id TEXT,
+    suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+        'operator_quarantine_clear',
+        'chain_only_quarantined',
+        'settled_position'
+    )),
+    source_module TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+    recorded_at TEXT NOT NULL
+);
+
+-- Index covers MAX(history_id) WHERE token_id = ? lookup used by the VIEW.
+CREATE INDEX IF NOT EXISTS idx_token_suppression_history_id_time
+    ON token_suppression_history(token_id, history_id DESC);
+
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_update
+BEFORE UPDATE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_delete
+BEFORE DELETE ON token_suppression_history
+BEGIN
+    SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+END;
+
+-- VIEW orders by history_id (AUTOINCREMENT, strictly monotone per writer)
+-- rather than created_at (wall-clock, vulnerable to ties and clock skew).
+CREATE VIEW IF NOT EXISTS token_suppression_current AS
+SELECT token_id, condition_id, suppression_reason, source_module,
+       created_at, updated_at, evidence_json
+FROM token_suppression_history h1
+WHERE history_id = (
+    SELECT MAX(history_id)
+    FROM token_suppression_history h2
+    WHERE h2.token_id = h1.token_id
+);
+
+-- Legacy token_suppression table kept for backward-compat until migration runs.
+-- After migration (scripts/migrate_b071_token_suppression_to_history.py --apply
+-- with ZEUS_DESTRUCTIVE_CONFIRMED=1), this table is DROPped and the name
+-- token_suppression becomes an alias VIEW for token_suppression_current.
 CREATE TABLE IF NOT EXISTS token_suppression (
     token_id TEXT PRIMARY KEY,
     condition_id TEXT,
