@@ -1953,6 +1953,15 @@ def run_replay(
     Returns:
         ReplaySummary with per-city breakdown and PnL
     """
+    # Phase 9A MINOR-M2: warn if caller passes a non-default temperature_metric
+    # into a mode that silently drops it (WU sweep / trade-history audit lanes
+    # don't thread the kwarg — their outputs remain single-metric as of P9A).
+    if mode in (WU_SWEEP_LANE, TRADE_HISTORY_LANE) and temperature_metric != "high":
+        logger.warning(
+            "run_replay: temperature_metric=%r silently dropped by mode=%r lane "
+            "(lane is not metric-aware as of Phase 9A; P9+ scope)",
+            temperature_metric, mode,
+        )
     if mode == WU_SWEEP_LANE:
         return run_wu_settlement_sweep(
             start_date,

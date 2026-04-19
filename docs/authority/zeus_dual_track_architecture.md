@@ -244,6 +244,51 @@ The legal behavior is:
 Fail-closed is mandatory for new risk; it is not permission to blind the
 monitor/exit lane.
 
+#### Interpretation B (adopted 2026-04-18, Phase 9A)
+
+"Read-only" means **no NEW canonical-state entries** (position creation, new
+risk policy changes, new strategy enablement); it does NOT mean "no JSON cache
+refresh at all". In particular:
+
+- `save_portfolio()` / `save_tracker()` MAY proceed in degraded mode provided
+  the updates originate from external-authority sources (CLOB API reconciliation,
+  chain sync with on-chain truth, order fill/cancel events). Persisting these
+  external-truth updates is valuable operational data even when local DB
+  projection is non-authoritative.
+- `PortfolioState.authority` is a runtime signal derived at load time from DB
+  availability — it is NOT serialized into positions-cache.json. A degraded
+  save followed by a recovered-DB load yields `authority="canonical_db"`
+  naturally (the signal is re-derived from fresh DB state).
+- The JSON file's `_truth_authority` annotation (via `annotate_truth_payload`
+  + `_TRUTH_AUTHORITY_MAP` at `src/state/portfolio.py:47-51`) records the
+  runtime authority at write time; readers inspect this tag for provenance
+  audit. As of 2026-04-18, `_TRUTH_AUTHORITY_MAP["degraded"] = "VERIFIED"` —
+  review periodically whether that mapping still reflects intent.
+- `riskguard.tick_with_portfolio()` (built Phase 6, wired into cycle_runner
+  Phase 8) is **advisory** — it computes `RiskLevel.DATA_DEGRADED` but does
+  NOT persist to `risk_state.db`. The returned level is authoritative for the
+  current cycle's `summary["risk_level"]`, but downstream readers of
+  `risk_state.db` (e.g. `status_summary.py::_get_risk_level`) continue to see
+  whatever the last full riskguard tick wrote. This inter-cycle drift is
+  accepted as design: the next full riskguard tick resolves it. Future `tick_*`
+  variants should either persist or document ephemeral explicitly.
+- Operator visibility is guaranteed via three-signal redundancy on every
+  degraded cycle:
+  1. `summary["portfolio_degraded"] = True`
+  2. `summary["entries_blocked_reason"] = "risk_level=DATA_DEGRADED"`
+     (Phase 9A R-BT; pre-P9A this field was silently `None`)
+  3. `summary["risk_level"] = "DATA_DEGRADED"`
+
+Antibodies protecting this law (tests/test_phase8_shadow_code.py):
+
+- R-BQ.1 (structural, P9A-hardened): ANY RuntimeError escaping the DT#6 branch
+  is a violation — structural immunity, not text-match
+- R-BQ.2: `riskguard.tick_with_portfolio` called exactly once with the
+  degraded PortfolioState
+- R-BS: `save_portfolio(authority="degraded")` preserves positions+bankroll
+  faithfully and the truth-payload annotation seam is exercised
+- R-BT: `summary["entries_blocked_reason"]` populated with degraded reason code
+
 ### DT#7 — Boundary-day settlement policy (market-reality)
 
 Near the integer settlement boundary (where station drift, DST boundary,
