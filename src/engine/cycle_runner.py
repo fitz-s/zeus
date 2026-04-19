@@ -192,6 +192,10 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         summary["portfolio_degraded"] = True
         risk_level = tick_with_portfolio(portfolio)
+        # Phase 9A MINOR-M4: intentional overwrite of summary["risk_level"] set
+        # at L176 from get_current_level() — the degraded tick's level supersedes
+        # the pre-lookup per DT#6 semantics. Canonical value for this cycle is
+        # whatever tick_with_portfolio returned (typically RiskLevel.DATA_DEGRADED).
         summary["risk_level"] = risk_level.value
     clob = PolymarketClient()
     tracker = get_tracker()
@@ -278,7 +282,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
-    elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED):
+    elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED, RiskLevel.DATA_DEGRADED):
+        # Phase 9A R-BT: DATA_DEGRADED from DT#6 (portfolio_loader_degraded) must
+        # populate entries_blocked_reason so operators see a reason code in
+        # summary / status_summary / Discord reports. Pre-P9A: DATA_DEGRADED
+        # fell through to None while entries were silently blocked.
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
