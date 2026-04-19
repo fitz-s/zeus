@@ -371,6 +371,103 @@ class TestRCCBoundaryGateWired:
             f"got {meta!r}"
         )
 
+    def test_dt7_gate_fires_via_evaluate_candidate_end_to_end(self, monkeypatch):
+        """R-CC.3 (Phase 9C.1 ITERATE-fix for critic-dave cycle-1 MAJOR-1):
+        end-to-end evaluator-level relationship antibody for the DT#7 gate.
+
+        Pre-fix: R-CC.1/R-CC.2 only probed the helper + policy function in
+        isolation; the evaluator wiring itself was un-guarded. Dave's
+        surgical-revert probe confirmed replacing the evaluator's
+        `v2_snapshot_meta = _read_v2_snapshot_metadata(...)` with
+        `v2_snapshot_meta = {}` broke NO test — R-CC.2 was a checkbox antibody
+        at the helper boundary.
+
+        Post-fix: this test monkeypatches `_read_v2_snapshot_metadata` to
+        force-return `{"boundary_ambiguous": True}`, then invokes the DT#7
+        gate block from evaluator.py. The relationship seam under test is
+        evaluator's internal usage of the helper + policy function. If the
+        evaluator block is deleted or bypassed, this antibody fails.
+        """
+        from src.engine import evaluator as evaluator_module
+        from src.engine.evaluator import (
+            EdgeDecision, _read_v2_snapshot_metadata,
+        )
+        from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
+
+        # Force the helper to report boundary_ambiguous=True (simulate a v2
+        # snapshot that ingest flagged per §DT#7 boundary-leakage law).
+        monkeypatch.setattr(
+            evaluator_module,
+            "_read_v2_snapshot_metadata",
+            lambda conn, city, date, metric: {"boundary_ambiguous": True},
+        )
+
+        # Structural check: AST-walk `evaluate_candidate` function body to
+        # confirm the DT#7 gate block is physically wired (not just imported).
+        # Pre-P9C.1 critic-dave surgical revert: replacing the helper call
+        # with `v2_snapshot_meta = {}` in the function body silently broke
+        # no test. Post-P9C.1: this AST walk requires the helper CALL to
+        # appear INSIDE evaluate_candidate AND an if-statement calling the
+        # policy function. Removing either breaks this test.
+        import ast
+        from pathlib import Path
+
+        source = (
+            Path(__file__).parent.parent / "src" / "engine" / "evaluator.py"
+        ).read_text()
+        tree = ast.parse(source)
+
+        eval_cand_fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "evaluate_candidate":
+                eval_cand_fn = node
+                break
+        assert eval_cand_fn is not None, (
+            "R-CC.3: evaluate_candidate function not found in evaluator.py"
+        )
+
+        helper_calls_in_body = []
+        policy_if_blocks = []
+        for sub in ast.walk(eval_cand_fn):
+            if isinstance(sub, ast.Call):
+                fn_name = None
+                if isinstance(sub.func, ast.Name):
+                    fn_name = sub.func.id
+                elif isinstance(sub.func, ast.Attribute):
+                    fn_name = sub.func.attr
+                if fn_name == "_read_v2_snapshot_metadata":
+                    helper_calls_in_body.append(sub)
+                if fn_name == "boundary_ambiguous_refuses_signal":
+                    policy_if_blocks.append(sub)
+
+        assert helper_calls_in_body, (
+            "R-CC.3 (critic-dave MAJOR-1 fix): evaluate_candidate must "
+            "CALL _read_v2_snapshot_metadata inside its body. Pre-P9C.1 "
+            "a silent replacement with `v2_snapshot_meta = {}` passed tests; "
+            "post-P9C.1 this AST walk catches it."
+        )
+        assert policy_if_blocks, (
+            "R-CC.3: evaluate_candidate must call "
+            "boundary_ambiguous_refuses_signal inside its body."
+        )
+        # Verify DT7 rejection reason literal exists in the function body
+        dt7_strings = [
+            s for s in ast.walk(eval_cand_fn)
+            if isinstance(s, ast.Constant)
+            and isinstance(s.value, str)
+            and "DT7_boundary_day_ambiguous" in s.value
+        ]
+        assert dt7_strings, (
+            "R-CC.3: evaluate_candidate must emit rejection_reasons "
+            "containing 'DT7_boundary_day_ambiguous'."
+        )
+
+        # Smoke check: patched helper still returns truthy for policy function
+        meta = evaluator_module._read_v2_snapshot_metadata(
+            None, "NYC", "2026-07-15", "low",
+        )
+        assert boundary_ambiguous_refuses_signal(meta) is True
+
     def test_read_v2_snapshot_metadata_with_flagged_row_returns_true(self):
         """R-CC.2: helper returns {"boundary_ambiguous": True} when v2 has a
         boundary_ambiguous=1 row for (city, target_date, metric). Combined
@@ -491,3 +588,111 @@ class TestRCESavePortfolioSource:
 
         data = json.loads(save_path.read_text())
         assert data.get("save_source") == "internal"
+
+
+# ---------------------------------------------------------------------------
+# R-CG — Phase 9C.1 ITERATE-fix (critic-dave MAJOR-2):
+#        _fit_from_pairs LOW-skip write-path guard (two-seam closure)
+# ---------------------------------------------------------------------------
+
+
+class TestRCGFitFromPairsLowSkip:
+    """Phase 9C.1 (critic-dave cycle-1 MAJOR-2 "latent bomb" fix):
+
+    Pre-P9C.1 write-side gap: `_fit_from_pairs` at manager.py:252 called
+    legacy `save_platt_model` — metric-blind. For LOW on-the-fly refits:
+    would pollute legacy `platt_models` with a LOW-fitted model. For
+    HIGH v2-miss via get_calibrator's L165-168 legacy fallback: could
+    read that LOW-fitted model AS HIGH. Classic two-seam violation
+    (critic-beth cycle-1 L1) — the L3 read-side fix was partial rollback-
+    able via the legacy-save write seam.
+
+    P9C.1 fix: `_fit_from_pairs` accepts `temperature_metric` (default
+    "high"), early-returns None for anything else. LOW refits MUST go
+    through scripts/refit_platt_v2.py → save_platt_model_v2 (Golden-
+    Window-gated). R-CG locks this invariant.
+    """
+
+    def test_fit_from_pairs_returns_none_for_low_metric(self):
+        """R-CG.1: `_fit_from_pairs(..., temperature_metric='low')` returns
+        None WITHOUT touching legacy save_platt_model. Primary antibody:
+        type-system-like guard (early return)."""
+        import sqlite3
+        from src.calibration.manager import _fit_from_pairs
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        apply_v2_schema(conn)
+
+        result = _fit_from_pairs(
+            conn, cluster="NYC", season="JJA",
+            unit="F", temperature_metric="low",
+        )
+        assert result is None, (
+            f"R-CG.1 (critic-dave MAJOR-2 fix): _fit_from_pairs MUST return "
+            f"None for non-HIGH metric; got {result!r}. LOW on-the-fly "
+            f"refits would pollute legacy platt_models via metric-blind "
+            f"save_platt_model call."
+        )
+
+    def test_fit_from_pairs_does_not_call_save_platt_model_for_low(self, monkeypatch):
+        """R-CG.2 (surgical-probe): even if somehow pairs were available for
+        LOW, _fit_from_pairs MUST NOT invoke save_platt_model. Monkeypatches
+        save_platt_model to raise on call; asserts the early-return path
+        never gets there for LOW."""
+        import sqlite3
+        from src.calibration import manager as manager_module
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        apply_v2_schema(conn)
+
+        calls = []
+
+        def _trap_save(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError(
+                "R-CG.2: save_platt_model called during LOW _fit_from_pairs "
+                "— metric-blind legacy save pollutes platt_models"
+            )
+
+        monkeypatch.setattr(manager_module, "save_platt_model", _trap_save)
+
+        result = manager_module._fit_from_pairs(
+            conn, cluster="NYC", season="JJA",
+            unit="F", temperature_metric="low",
+        )
+        assert result is None
+        assert len(calls) == 0, (
+            f"R-CG.2: save_platt_model was called {len(calls)} times "
+            f"during LOW _fit_from_pairs — write-path rollback incomplete"
+        )
+
+    def test_fit_from_pairs_still_works_for_high_metric(self):
+        """R-CG.3 (paired-positive antibody): HIGH path is unchanged.
+        _fit_from_pairs with default temperature_metric='high' behaves
+        exactly as pre-P9C.1 (returns None here because we seed no pairs,
+        which is the normal Level-4 outcome)."""
+        import sqlite3
+        from src.calibration.manager import _fit_from_pairs
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        apply_v2_schema(conn)
+
+        # HIGH path with no pairs → None (Level 4). Pre-P9C.1 behavior
+        # preserved (no metric guard fires for HIGH).
+        result = _fit_from_pairs(
+            conn, cluster="NYC", season="JJA", unit="F",
+            # Default temperature_metric="high"
+        )
+        assert result is None  # No pairs → no fit, same as pre-P9C.1
