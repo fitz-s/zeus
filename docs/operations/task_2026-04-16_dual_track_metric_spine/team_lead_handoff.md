@@ -54,8 +54,8 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 2. ~~**Phase 7A**~~ **COMPLETE** at `c496c36` + `a872e50`. Metric-aware rebuild cutover + delete_slice metric scoping + CRITICAL-1 read-side fix + MAJOR-1 schema DEFAULT restoration + MAJOR-2 backfill contract gate. See "Phase 7A closure" below.
 3. ~~**Phase 7B**~~ **COMPLETE (5/6)** at `6fc41ec`. Naming hygiene: metric_specs extracted + alias removed + manifest registered + schema dropped + R-AZ-2 rewritten. See "Phase 7B closure" below. Item 2 (_tigge_common extract) deferred to P7B-followup — planner's "15 safe helpers" claim was inaccurate (module-level constants differ).
 4. ~~**Phase 7B-followup**~~ **COMPLETE** at `2adcbc9`. Item 2 (_tigge_common extract — 13 helpers + CityManifestDriftError + compute_required_max_step/compute_manifest_hash) + naming_conventions hygiene (extract_ prefix + refit_platt_v2 exception + _tigge_common manifest entry). Net +318/-364 LOC. 89/89 targeted tests GREEN. Scout 2026-04-18 confirmed: `run_replay` actually lives at `src/engine/replay.py:1932` (not `src/main.py` as earlier handoff said); evaluator is already metric-aware (no P8 work there); `monitor_refresh.py` has zero `temperature_metric` references (non-Day0 LOW wiring still owed); settlement writer does not exist in code (settlements arrive externally).
-4. **Phase 8** — low shadow mode (`run_replay` metric threading, low-track evaluator produces shadow probability). **ADDED SCOPE** (critic's P6 forward-log): `cycle_runner.py:180-181` DT#6 rewiring — currently `raise RuntimeError` on `portfolio_loader_degraded=True`; must route through `riskguard.tick_with_portfolio` instead. Mechanism exists; routing missing. **ADDED SCOPE** (P7A deferral): B093 half-2 replay migration to `historical_forecasts_v2` — requires Zero-Data Golden Window lift + v2 table population.
-5. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7. **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low).
+5. ~~**Phase 8 route A**~~ **COMPLETE** at `6ffefa4` (critic-carol first-try PASS, 2026-04-18). Scope: S1 `run_replay` public-entry `temperature_metric` threading + S2 `cycle_runner.py:180-181` DT#6 rewire to `riskguard.tick_with_portfolio`. 4/4 R-BP/R-BQ antibodies GREEN. Full regression 144/1846 (zero new failures vs 144/1842 baseline; +4 from antibodies). Contract: `phase8_contract.md`. Route A honored: code-only, no TIGGE data import, v2 tables zero-row, Golden Window preserved. See "Phase 8 closure" below. Gate E code-prerequisites complete; Gate E data-evidence blocks on future Golden Window lift (P9/later).
+6. **Phase 9** — low limited activation (Gate F) + risk-critical DT#2/DT#5/DT#7 + **P8 observability forward-log absorption** (4 MAJOR items from critic-carol). **ADDED SCOPE** (critic's P6 forward-log): `Day0LowNowcastSignal.p_vector` proper implementation before Gate F (current impl has lazy-construction delegating to HIGH — acceptable until activation, not acceptable for live low). **ADDED SCOPE** (P7A deferral): B093 half-2 replay migration to `historical_forecasts_v2`. **ADDED SCOPE** (critic-carol P8 MAJORs): see §"Phase 8 closure" forward-log.
 
 ## Phase 7A closure
 
@@ -93,6 +93,56 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-1: contract_version / boundary_min_value schema columns undocumented
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
+
+## Phase 8 closure
+
+**Commit**: `6ffefa4` feat(phase8): code-ready LOW shadow — run_replay metric threading + DT#6 rewire. critic-carol **first-try PASS** (cycle 1, fresh spawn replacing critic-beth after her 3-cycle run).
+
+**Delivered** (Route A, code-only):
+- S1 — `src/engine/replay.py:1932` `run_replay(temperature_metric: str = "high")` public kwarg; threaded to `_replay_one_settlement` at L2001 call site (which already accepted the kwarg since P5C but was never called with it)
+- S2 — `src/engine/cycle_runner.py:180-181` removes `raise RuntimeError(...)` on `portfolio_loader_degraded=True`; replaces with `logger.warning` + `summary["portfolio_degraded"]=True` + `risk_level = tick_with_portfolio(portfolio)` + summary refresh. DT#6 law (`zeus_dual_track_architecture.md §6`): process MUST NOT raise; downstream entry gates honor `risk_level != GREEN`
+- `tests/test_phase8_shadow_code.py` NEW — R-BP.1/2 (run_replay metric threading both directions) + R-BQ.1/2 (DT#6 no-raise + tick invocation). 4/4 GREEN first-pass
+
+**Acceptance delivered**:
+- Hard constraints: all 7 honored (no v2 writes, no DDL, no TIGGE, no evaluator/monitor_refresh/settlement-writer changes, kwarg-only signature change, no `raise RuntimeError` reintroduction, Golden Window preserved)
+- Regression: targeted 20 failed / 231 passed (pre-P8 baseline 20/227, delta = +4 from R-BP/R-BQ); full 144/1846/95/7 (pre-P8 baseline 144/1842, zero new failures)
+- critic-carol pre-commitment predictions: 5/5 hit
+
+**Structural antibodies installed**:
+- R-BP.1 `test_run_replay_threads_temperature_metric_low_to_replay_one_settlement` — semantic capture of metric threading via monkeypatched target
+- R-BP.2 `test_run_replay_default_temperature_metric_is_high_backward_compat` — every pre-P8 caller preserved
+- R-BQ.1 `test_run_cycle_degraded_portfolio_does_not_raise_runtime_error` — DT#6 law: no raise on degraded portfolio
+- R-BQ.2 `test_run_cycle_degraded_portfolio_calls_tick_with_portfolio` — positive-side confirmation: replacement mechanism fires exactly once with the degraded PortfolioState
+
+**critic-carol PASS rationale**:
+- 0 CRITICAL / 4 MAJOR / 4 MINOR / 6 test-gap
+- All 4 MAJORs are observability/antibody-hygiene concerns (deferrable to P9, not P8 blockers)
+- Fitz Four-Constraints scoring: structural decisions PASS (2 decisions clean delivery); translation loss ~65-75% antibody immunity; immune system partial (observability gap); data provenance N/A direct
+- Methodology trend: **P7B + P8 = 2 consecutive first-try PASSes** under Gen-Verifier; pattern converging on contract-first + pre-commitment + pair-based antibody design
+
+**P8 forward-log → P9 (from critic-carol's review)**:
+1. MAJOR-1: Code `entries_blocked_reason = "risk_level=DATA_DEGRADED"` or `"portfolio_loader_degraded"` branch in `cycle_runner.py:281` (currently DATA_DEGRADED falls through to `None`)
+2. MAJOR-2: Decide persistence contract for `riskguard.tick_with_portfolio` — either persist to `risk_state.db` to align `status_summary.json` readers, OR document as ephemeral advisory
+3. MAJOR-3: Harden R-BQ.1 to drop silent-return path at test_phase8_shadow_code.py:236 (after a downstream RuntimeError, the assertion at L239 is skipped)
+4. MAJOR-4: Replace R-BQ.1 text-match antibody (literal pre-P8 string `"Portfolio loader degraded: DB not authoritative"`) with structural "no RuntimeError escapes branch" assertion
+5. MINOR: `scripts/run_replay.py` CLI expose `--temperature-metric` flag
+6. MINOR: Warn when `temperature_metric != "high"` combined with `wu_settlement_sweep` / `trade_history_audit` modes (silently dropped today)
+7. MINOR: Fix duplicate `4.` numbering in this handoff (done in this close commit)
+8. MINOR: Add comment at `cycle_runner.py:195` that `summary["risk_level"]` overwrite is intentional
+9. TEST-GAP: End-to-end test that `_forecast_reference_for(metric="low")` actually selects `forecast_low` column (second-seam test, blocks on data presence)
+10. TEST-GAP: `status_summary.json` reflects DATA_DEGRADED during degraded cycle
+11. TEST-GAP: `entries_blocked_reason` output for degraded path
+12. TEST-GAP: No rollback path if `tick_with_portfolio` itself raises; no try/except around DT#6 branch
+13. TEST-GAP: `portfolio_dirty`/`tracker_dirty` stays False in degraded mode (interpretation A/B ambiguity — contract §L26-27 unclear whether "read-only" forbids `save_portfolio` JSON-refresh)
+14. TEST-GAP: `risk_state.db` unchanged after DT#6 branch
+
+**Ambiguity for user ruling**:
+- Contract interpretation question: "monitor/exit/reconciliation continue read-only" — does this forbid `save_portfolio(degraded_portfolio)` JSON refresh (Interpretation A) or permit it (Interpretation B)? Under A, current code at cycle_runner L333 violates contract; under B, current code is correct.
+
+**critic rotation note** (new methodology crystallized during P8):
+- critic-beth retired after 3 cycles to prevent over-familiarity
+- critic-carol (cycle 1) inherited disk-durable learnings; fresh pre-commitment predictions hit 5/5 but identified an ORTHOGONAL finding class (observability drift) — rotation was valuable
+- Suggest next rotation at end of P9 (critic-carol → critic-dave). Three-cycles-per-critic keeps compounding learnings while preventing blind spots.
 
 ## Phase 7B closure
 
