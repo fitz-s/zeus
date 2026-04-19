@@ -208,6 +208,7 @@ def test_fdr_family_key_is_canonical():
         cycle_mode="opening_hunt",
         city="NYC",
         target_date="2026-04-01",
+        temperature_metric="high",
         discovery_mode="opening_hunt",
         decision_snapshot_id="snap-1",
     )
@@ -220,6 +221,12 @@ def test_fdr_family_key_is_canonical():
     # Determinism within each scope
     assert h_id == make_hypothesis_family_id(**cand), "hypothesis family ID must be deterministic"
     assert e_id == make_edge_family_id(**cand, strategy_key="center_buy"), "edge family ID must be deterministic"
+
+    # R-CO.1 S4 R9 P10B: metric-discriminating assertion — same other args, different metric → different ID
+    cand_low = dict(cand, temperature_metric="low")
+    h_id_high = make_hypothesis_family_id(**cand)
+    h_id_low = make_hypothesis_family_id(**cand_low)
+    assert h_id_high != h_id_low, "family_id must discriminate by metric: HIGH != LOW"
 
 
 # INV-19 / DT#2 — ACTIVATED Phase 9B (R-BV)

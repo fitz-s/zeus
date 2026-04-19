@@ -19,7 +19,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -241,7 +241,7 @@ class ReplayContext:
 
     def _forecast_rows_for(
         self, city_name: str, target_date: str,
-        temperature_metric: str = "high",
+        temperature_metric: Literal["high", "low"] = "high",
     ) -> list[dict]:
         """Load diagnostic historical forecast rows for a replay fallback.
 
@@ -298,6 +298,10 @@ class ReplayContext:
         # Legacy fallback — unchanged query; per-row has both metrics via
         # forecast_high + forecast_low columns. Downstream column-selection
         # in _forecast_reference_for picks the correct metric's column.
+        # S1 R3 P10B: metric-aware WHERE clause.
+        # LOW replay filters on forecast_low; HIGH (default) on forecast_high.
+        # The v2→legacy translator at L286-295 already populates both columns.
+        _forecast_col = "forecast_low" if temperature_metric == "low" else "forecast_high"
         try:
             rows = self.conn.execute(
                 f"""
@@ -306,7 +310,7 @@ class ReplayContext:
                 FROM {self._sp}forecasts
                 WHERE city = ?
                   AND target_date = ?
-                  AND forecast_high IS NOT NULL
+                  AND {_forecast_col} IS NOT NULL
                 ORDER BY lead_days ASC, source ASC, forecast_basis_date ASC
                 """,
                 (city_name, target_date),
@@ -315,7 +319,7 @@ class ReplayContext:
             return []
         return [dict(row) for row in rows]
 
-    def _forecast_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
+    def _forecast_reference_for(self, city_name: str, target_date: str, temperature_metric: Literal["high", "low"] = "high") -> Optional[dict]:
         # Phase 9C A1: thread metric to _forecast_rows_for so the v2 branch
         # filters by metric column; legacy branch (fallback) remains
         # column-selection based via `forecast_col`.
@@ -353,7 +357,7 @@ class ReplayContext:
             "lead_days": selected_lead,
         }
 
-    def _forecast_snapshot_for(self, city_name: str, target_date: str, snapshot_id: str, temperature_metric: str = "high") -> Optional[dict]:
+    def _forecast_snapshot_for(self, city_name: str, target_date: str, snapshot_id: str, temperature_metric: Literal["high", "low"] = "high") -> Optional[dict]:
         ref = self._forecast_reference_for(city_name, target_date, temperature_metric=temperature_metric)
         if ref is None or ref["snapshot_id"] != snapshot_id:
             return None
@@ -382,7 +386,7 @@ class ReplayContext:
             "n_members": len(member_values),
         }
 
-    def get_decision_reference_for(self, city_name: str, target_date: str, temperature_metric: str = "high") -> Optional[dict]:
+    def get_decision_reference_for(self, city_name: str, target_date: str, temperature_metric: Literal["high", "low"] = "high") -> Optional[dict]:
         """Get an actual decision-time reference for replay.
 
         Replay must not invent a decision timestamp. If no actual decision exists
@@ -1164,7 +1168,7 @@ def _replay_one_settlement(
     city: City,
     target_date: str,
     settlement: dict,
-    temperature_metric: str = "high",
+    temperature_metric: Literal["high", "low"] = "high",
 ) -> Optional[ReplayOutcome]:
     """Replay the evaluator pipeline for one city × target_date.
 
@@ -1992,7 +1996,7 @@ def run_replay(
     mode: str = "audit",
     overrides: Optional[dict] = None,
     allow_snapshot_only_reference: bool = False,
-    temperature_metric: str = "high",
+    temperature_metric: Literal["high", "low"] = "high",
 ) -> ReplaySummary:
     """Run the Decision Replay Engine.
 
@@ -2010,6 +2014,10 @@ def run_replay(
     Returns:
         ReplaySummary with per-city breakdown and PnL
     """
+    # S3 R5 P10B: runtime enforcement at run_replay entry point
+    assert temperature_metric in ("high", "low"), (
+        f"Invalid temperature_metric: {temperature_metric!r}"
+    )
     # Phase 9A MINOR-M2: warn if caller passes a non-default temperature_metric
     # into a mode that silently drops it (WU sweep / trade-history audit lanes
     # don't thread the kwarg — their outputs remain single-metric as of P9A).

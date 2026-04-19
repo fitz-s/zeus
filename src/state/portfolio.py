@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from src.config import STATE_DIR, get_mode, settings, state_path
 from src.contracts import (
@@ -149,7 +149,7 @@ class Position:
     direction: DirectionAlias  # Forces use of Direction(Enum)
 
     unit: str = "F"  # Blueprint v2: carried, never inferred
-    temperature_metric: str = "high"  # "high" or "low" — carried from market at entry
+    temperature_metric: Literal["high", "low"] = "high"  # carried from market at entry
 
     # Provenance: which environment created this position (set once, never changed)
     env: str = "live"  # live-only (Phase 1 axiom)
@@ -251,6 +251,10 @@ class Position:
 
     def __post_init__(self):
         """CRITICAL: Enforce Enum strictness via coercion."""
+        # S3 R5 P10B: runtime enforcement of Literal["high", "low"] at entry point
+        assert self.temperature_metric in ("high", "low"), (
+            f"Invalid temperature_metric: {self.temperature_metric!r}"
+        )
         if not isinstance(self.direction, Direction):
             self.direction = Direction(self.direction)
         if not isinstance(self.state, LifecycleState):

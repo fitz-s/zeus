@@ -8,7 +8,7 @@ Spec §3.2-3.4:
 """
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -125,7 +125,7 @@ def get_calibrator(
     conn,
     city: City,
     target_date: str,
-    temperature_metric: str = "high",
+    temperature_metric: Literal["high", "low"] = "high",
 ) -> tuple[Optional[ExtendedPlattCalibrator], int]:
     """Get the best available calibrator for a city+date+metric.
 
@@ -152,6 +152,10 @@ def get_calibrator(
 
     Returns: (calibrator_or_None, maturity_level)
     """
+    # S3 R5 P10B: runtime enforcement at get_calibrator entry point
+    assert temperature_metric in ("high", "low"), (
+        f"Invalid temperature_metric: {temperature_metric!r}"
+    )
     season = season_from_date(target_date, lat=city.lat)
     cluster = city.cluster
 
@@ -243,7 +247,7 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
 
 def _fit_from_pairs(
     conn, cluster: str, season: str, *, unit: str | None = None,
-    temperature_metric: str = "high",
+    temperature_metric: Literal["high", "low"] = "high",
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs.
 

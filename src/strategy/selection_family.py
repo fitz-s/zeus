@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ def make_hypothesis_family_id(
     cycle_mode: str,
     city: str,
     target_date: str,
+    temperature_metric: Literal["high", "low"],
     discovery_mode: str,
     decision_snapshot_id: str = "",
 ) -> str:
@@ -41,8 +43,11 @@ def make_hypothesis_family_id(
 
     Encodes scope explicitly via "hyp|" prefix so IDs are always distinguishable
     from edge-scope IDs even when all other fields match.
+
+    S4 R9 P10B: temperature_metric is a required kwarg inserted after target_date
+    so HIGH and LOW candidates never share a family budget.
     """
-    parts = ["hyp", cycle_mode, city, target_date, discovery_mode]
+    parts = ["hyp", cycle_mode, city, target_date, temperature_metric, discovery_mode]
     if decision_snapshot_id:
         parts.append(decision_snapshot_id)
     return "|".join(parts)
@@ -53,6 +58,7 @@ def make_edge_family_id(
     cycle_mode: str,
     city: str,
     target_date: str,
+    temperature_metric: Literal["high", "low"],
     strategy_key: str,
     discovery_mode: str,
     decision_snapshot_id: str = "",
@@ -65,6 +71,9 @@ def make_edge_family_id(
     Encodes scope explicitly via "edge|" prefix so IDs are always distinguishable
     from hypothesis-scope IDs even when all other fields match.
 
+    S4 R9 P10B: temperature_metric is a required kwarg inserted after target_date
+    so HIGH and LOW edges never share a family budget.
+
     Raises:
         ValueError: if strategy_key is falsy (empty string or None). An edge
             family requires a real strategy to prevent silent scope collapse.
@@ -74,7 +83,7 @@ def make_edge_family_id(
             f"make_edge_family_id requires a non-empty strategy_key; "
             f"got {strategy_key!r}. Use make_hypothesis_family_id for per-candidate scope."
         )
-    parts = ["edge", cycle_mode, city, target_date, strategy_key, discovery_mode]
+    parts = ["edge", cycle_mode, city, target_date, temperature_metric, strategy_key, discovery_mode]
     if decision_snapshot_id:
         parts.append(decision_snapshot_id)
     return "|".join(parts)
@@ -88,6 +97,7 @@ def make_family_id(
     strategy_key: str,
     discovery_mode: str,
     decision_snapshot_id: str = "",
+    temperature_metric: Literal["high", "low"] = "high",
 ) -> str:
     """DEPRECATED: use make_hypothesis_family_id or make_edge_family_id.
 
@@ -96,6 +106,9 @@ def make_family_id(
     - Real strategy_key       → edge scope (make_edge_family_id)
 
     Emits DeprecationWarning on every call.
+
+    S4 R9 P10B: temperature_metric param added with default "high" for
+    backward-compat (deprecated callers pre-P10B need not update).
     """
     warnings.warn(
         "make_family_id() is deprecated. Use make_hypothesis_family_id() for "
@@ -108,6 +121,7 @@ def make_family_id(
             cycle_mode=cycle_mode,
             city=city,
             target_date=target_date,
+            temperature_metric=temperature_metric,
             discovery_mode=discovery_mode,
             decision_snapshot_id=decision_snapshot_id,
         )
@@ -115,6 +129,7 @@ def make_family_id(
         cycle_mode=cycle_mode,
         city=city,
         target_date=target_date,
+        temperature_metric=temperature_metric,
         strategy_key=strategy_key,
         discovery_mode=discovery_mode,
         decision_snapshot_id=decision_snapshot_id,

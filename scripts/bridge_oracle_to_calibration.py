@@ -199,29 +199,51 @@ def bridge(dry_run: bool = False) -> dict:
                 city_name, matches, total, error_rate * 100,
             )
 
-    # Merge snapshot results into existing oracle error rates
+    # Merge snapshot results into existing oracle error rates.
+    # S2 R4 P10B: write nested {city: {high: {...}, low: {...}}} shape.
+    # This bridge only measures HIGH track (daily_high snapshots), so only
+    # the "high" subkey is updated here. LOW starts empty and is populated
+    # when LOW oracle snapshot infrastructure is added (future phase).
     for city_name, snap_stats in city_stats.items():
         if city_name not in existing:
             existing[city_name] = {}
-        existing[city_name]["snapshot_data"] = snap_stats
+
+        # Migrate legacy flat structure to nested on first write
+        city_entry = existing[city_name]
+        if "oracle_error_rate" in city_entry and "high" not in city_entry:
+            # Legacy flat: promote to nested "high" subkey
+            legacy_rate = city_entry.pop("oracle_error_rate", 0.0)
+            legacy_status = city_entry.pop("status", "OK")
+            legacy_snap_data = city_entry.pop("snapshot_data", {})
+            city_entry["high"] = {
+                "oracle_error_rate": legacy_rate,
+                "status": legacy_status,
+                "snapshot_data": legacy_snap_data,
+            }
+
+        # Ensure "high" subkey exists
+        if "high" not in city_entry:
+            city_entry["high"] = {}
+
+        city_entry["high"]["snapshot_data"] = snap_stats
 
         # Combine snapshot error rate with historical same-source error rate
-        hist_rate = existing[city_name].get("oracle_error_rate", 0.0)
+        hist_rate = city_entry["high"].get("oracle_error_rate", 0.0)
         snap_rate = snap_stats["snapshot_error_rate"]
 
         # Use the higher of the two as the effective oracle_error_rate
         combined_rate = max(hist_rate, snap_rate)
-        existing[city_name]["oracle_error_rate"] = combined_rate
+        city_entry["high"]["oracle_error_rate"] = combined_rate
 
         # Update status
         if combined_rate > 0.10:
-            existing[city_name]["status"] = "BLACKLIST"
+            city_entry["high"]["status"] = "BLACKLIST"
         elif combined_rate > 0.03:
-            existing[city_name]["status"] = "CAUTION"
+            city_entry["high"]["status"] = "CAUTION"
         elif combined_rate > 0.0:
-            existing[city_name]["status"] = "INCIDENTAL"
+            city_entry["high"]["status"] = "INCIDENTAL"
         else:
-            existing[city_name]["status"] = "OK"
+            city_entry["high"]["status"] = "OK"
 
     if not dry_run:
         ORACLE_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -69,6 +69,32 @@ def _get_risk_details() -> dict:
         return {}
 
 
+_V2_TABLES = (
+    "platt_models_v2",
+    "calibration_pairs_v2",
+    "ensemble_snapshots_v2",
+    "historical_forecasts_v2",
+    "settlements_v2",
+)
+
+
+def _get_v2_row_counts(conn) -> dict[str, int]:
+    """Query row counts for the 5 v2 tables.
+
+    S5 R11 P10B: meta-immune-system sensor. Returns 0 for tables that don't
+    exist yet (Golden Window: v2 tables are empty until data lift). Missing
+    table → 0, not an error, so this never blocks status writes.
+    """
+    counts: dict[str, int] = {}
+    for table in _V2_TABLES:
+        try:
+            row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            counts[table] = int(row[0]) if row else 0
+        except Exception:
+            counts[table] = 0
+    return counts
+
+
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -153,6 +179,14 @@ def write_status(cycle_summary: dict = None) -> None:
             "by_strategy": {},
             "stale_strategy_keys": [],
         }
+
+    # S5 R11 P10B: v2 row-count sensor
+    v2_row_counts: dict[str, int] = {}
+    try:
+        if conn is not None:
+            v2_row_counts = _get_v2_row_counts(conn)
+    except Exception:
+        pass
 
     strategy_summary: dict[str, dict] = {}
     strategy_open_counts = position_view.get("strategy_open_counts", {})
@@ -244,6 +278,11 @@ def write_status(cycle_summary: dict = None) -> None:
         "learning": {},
         "no_trade": {},
         "cycle": cycle_summary or {},
+        # S5 R11 P10B: v2 row-count observability sensor
+        "v2_row_counts": v2_row_counts,
+        # S5 R11 P10B: dual-track scaffold claim (True since P9C closed the main line)
+        "dual_track_scaffold_claimed": True,
+        "discrepancy_flags": [],
     }
     status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
     status["control"]["review_required_commands"] = review_required_commands_from_status(status)
@@ -309,6 +348,12 @@ def write_status(cycle_summary: dict = None) -> None:
     finally:
         if conn is not None:
             conn.close()
+
+    # S5 R11 P10B: discrepancy flag — claim=True AND any v2 table has 0 rows
+    if status.get("dual_track_scaffold_claimed") and v2_row_counts:
+        empty_v2 = [t for t, c in v2_row_counts.items() if c == 0]
+        if empty_v2:
+            status["discrepancy_flags"].append("v2_empty_despite_closure_claim")
 
     consistency_issues: list[str] = []
     cycle_risk_level = str((cycle_summary or {}).get("risk_level") or "")

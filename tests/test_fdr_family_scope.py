@@ -54,6 +54,7 @@ class TestFDRFamilyScopeSeparation:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
@@ -73,6 +74,7 @@ class TestFDRFamilyScopeSeparation:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
@@ -86,6 +88,7 @@ class TestFDRFamilyScopeSeparation:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
@@ -105,6 +108,7 @@ class TestFDRFamilyScopeSeparation:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
@@ -139,6 +143,7 @@ class TestEdgeFamilyIdValidation:
                 cycle_mode="opening_hunt",
                 city="NYC",
                 target_date="2026-04-01",
+                temperature_metric="high",
                 strategy_key="",
                 discovery_mode="opening_hunt",
             )
@@ -155,6 +160,7 @@ class TestEdgeFamilyIdValidation:
                 cycle_mode="opening_hunt",
                 city="NYC",
                 target_date="2026-04-01",
+                temperature_metric="high",
                 strategy_key=None,
                 discovery_mode="opening_hunt",
             )
@@ -218,6 +224,7 @@ class TestMakeFamilyIdDeprecatedWrapper:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
@@ -249,6 +256,7 @@ class TestMakeFamilyIdDeprecatedWrapper:
             cycle_mode="opening_hunt",
             city="NYC",
             target_date="2026-04-01",
+            temperature_metric="high",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
         )
