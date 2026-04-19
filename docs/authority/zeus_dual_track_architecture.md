@@ -250,11 +250,14 @@ monitor/exit lane.
 risk policy changes, new strategy enablement); it does NOT mean "no JSON cache
 refresh at all". In particular:
 
-- `save_portfolio()` / `save_tracker()` MAY proceed in degraded mode provided
-  the updates originate from external-authority sources (CLOB API reconciliation,
-  chain sync with on-chain truth, order fill/cancel events). Persisting these
-  external-truth updates is valuable operational data even when local DB
-  projection is non-authoritative.
+- `save_portfolio()` / `save_tracker()` MAY proceed in degraded mode. Callers
+  **SHOULD** restrict saves to external-authority-derived updates (CLOB API
+  reconciliation, chain sync with on-chain truth, order fill/cancel events)
+  so that persistence reflects truth that survives the local DB degradation.
+  **There is no runtime enforcement** of this constraint as of Phase 9A — the
+  convention is caller-side discipline. A future phase (P9B/P9C or later)
+  may add a `source: Literal[...]` parameter to `save_portfolio()` to lock
+  this at the seam; logged as design debt per critic-carol P9A MINOR-2.
 - `PortfolioState.authority` is a runtime signal derived at load time from DB
   availability — it is NOT serialized into positions-cache.json. A degraded
   save followed by a recovered-DB load yields `authority="canonical_db"`

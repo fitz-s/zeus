@@ -382,16 +382,26 @@ class TestRBSSavePortfolioDegradedRoundtrip:
 
         data = json.loads(save_path.read_text())
 
-        # The truth annotation must be present (may be nested under a wrapper key
-        # depending on annotate_truth_payload structure — search exhaustively)
+        # The truth annotation must be present — may be nested under a wrapper
+        # key depending on annotate_truth_payload structure. Search top-level
+        # keys for any "authority" or "truth" token.
         truth_found = False
         for key in data:
             if "authority" in key.lower() or "truth" in key.lower():
                 truth_found = True
                 break
-        # Fall back: annotate_truth_payload may nest; accept either top-level or
-        # a _truth / provenance wrapper. Final fallback: accept any JSON write.
-        assert save_path.exists(), "R-BS.2: truth annotation seam not exercised"
+
+        # P9A-close fix (critic-carol cycle-2 MINOR-1): prior shape asserted
+        # `save_path.exists()` which was trivially true after any successful
+        # save — R-BS.2 was a checkbox antibody. Now assert the keyword search
+        # result unconditionally so any future refactor that drops
+        # annotate_truth_payload from save_portfolio fails loudly.
+        assert truth_found, (
+            f"R-BS.2: no truth/authority annotation key found in saved JSON. "
+            f"Top-level keys: {list(data.keys())!r}. "
+            f"If annotate_truth_payload was intentionally removed from save_portfolio, "
+            f"update this test and _TRUTH_AUTHORITY_MAP review note at DT#6 §B."
+        )
 
 
 # ---------------------------------------------------------------------------
