@@ -439,6 +439,7 @@ def _record_selection_family_facts(
     decision_snapshot_id: str,
     selected_method: str,
     recorded_at: str,
+    decision_time_status: str | None = None,
 ) -> dict:
     """Persist tested selection hypotheses without changing active selection."""
     if conn is None:
@@ -570,6 +571,7 @@ def _record_selection_family_facts(
             discovery_mode=discovery_mode,
             created_at=recorded_at,
             meta=meta,
+            decision_time_status=decision_time_status,
         )
         if result.get("status") == "written":
             family_writes += 1
@@ -1272,8 +1274,11 @@ def evaluate_candidate(
         # degraded callers), DO NOT silently fabricate a fresh `now()` for
         # `recorded_at` and pretend it is the cycle's decision moment.
         # Fabrication is permitted as a last resort but MUST be observable.
+        # decision_time_status extends the P9C vocab (replay.py "OK" / "SYNTHETIC_MIDDAY")
+        # into the evaluator path. See B091 lower half.
         if decision_time is not None:
             _recorded_at = decision_time.isoformat()
+            _decision_time_status = "OK"
         else:
             _fabricated_now = datetime.now(timezone.utc)
             logger.warning(
@@ -1284,6 +1289,7 @@ def evaluate_candidate(
                 _fabricated_now,
             )
             _recorded_at = _fabricated_now.isoformat()
+            _decision_time_status = "FABRICATED_SELECTION_FAMILY"
         _record_selection_family_facts(
             conn,
             candidate=candidate,
@@ -1293,6 +1299,7 @@ def evaluate_candidate(
             decision_snapshot_id=snapshot_id,
             selected_method=selected_method,
             recorded_at=_recorded_at,
+            decision_time_status=_decision_time_status,
         )
     except Exception as exc:
         logger.warning("Failed to record selection family facts: %s", exc)

@@ -451,7 +451,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             strategy_key TEXT,
             discovery_mode TEXT,
             created_at TEXT NOT NULL,
-            meta_json TEXT NOT NULL
+            meta_json TEXT NOT NULL,
+            decision_time_status TEXT
         );
 
         CREATE TABLE IF NOT EXISTS selection_hypothesis_fact (
@@ -853,6 +854,15 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass  # Column already exists — idempotent re-run
 
+    # B091 lower half: add decision_time_status column to selection_family_fact.
+    # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
+    try:
+        conn.execute(
+            "ALTER TABLE selection_family_fact ADD COLUMN decision_time_status TEXT;"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn)
@@ -1101,6 +1111,23 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _view_exists(conn: sqlite3.Connection, view: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ?",
+        (view,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_or_view_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Return True if `name` exists as either a TABLE or a VIEW."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (name,),
     ).fetchone()
     return row is not None
 
@@ -1617,6 +1644,7 @@ def log_selection_family_fact(
     target_date: str | None = None,
     strategy_key: str | None = None,
     discovery_mode: str | None = None,
+    decision_time_status: str | None = None,
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
@@ -1628,9 +1656,9 @@ def log_selection_family_fact(
         """
         INSERT INTO selection_family_fact (
             family_id, cycle_mode, decision_snapshot_id, city, target_date,
-            strategy_key, discovery_mode, created_at, meta_json
+            strategy_key, discovery_mode, created_at, meta_json, decision_time_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(family_id) DO UPDATE SET
             cycle_mode=excluded.cycle_mode,
             decision_snapshot_id=excluded.decision_snapshot_id,
@@ -1639,7 +1667,8 @@ def log_selection_family_fact(
             strategy_key=excluded.strategy_key,
             discovery_mode=excluded.discovery_mode,
             created_at=excluded.created_at,
-            meta_json=excluded.meta_json
+            meta_json=excluded.meta_json,
+            decision_time_status=excluded.decision_time_status
         """,
         (
             family_id,
@@ -1651,6 +1680,7 @@ def log_selection_family_fact(
             discovery_mode,
             created_at,
             json.dumps(meta, ensure_ascii=False, sort_keys=True),
+            decision_time_status,
         ),
     )
     return {"status": "written", "table": "selection_family_fact"}
@@ -3315,10 +3345,20 @@ def record_token_suppression(
     created_at: str | None = None,
     evidence: dict | None = None,
 ) -> dict:
-    """Persist a token-level reconciliation suppression fact in canonical DB truth."""
+    """Append a token suppression event to the append-only history log.
+
+    B071: writes into `token_suppression_history` (append-only log) AND
+    into the legacy `token_suppression` table (upsert, for backward compat
+    with callers that query the legacy table directly). The `token_suppression_current`
+    VIEW projects the latest row per `token_id` from the history table.
+
+    After running migrate_b071_token_suppression_to_history.py --apply --drop-legacy,
+    the legacy table is DROPped and replaced by a VIEW alias, and the dual-write
+    can be removed in a future cleanup phase.
+    """
     if conn is None:
         return {"status": "skipped_no_connection", "table": "token_suppression"}
-    if not _table_exists(conn, "token_suppression"):
+    if not _table_exists(conn, "token_suppression_history"):
         return {"status": "skipped_missing_table", "table": "token_suppression"}
     normalized_token = str(token_id or "").strip()
     if not normalized_token:
@@ -3330,16 +3370,34 @@ def record_token_suppression(
     if not normalized_source:
         raise ValueError("token suppression requires source_module")
     now = created_at or datetime.now(timezone.utc).isoformat()
+    recorded_at = datetime.now(timezone.utc).isoformat()
     evidence_payload = dict(evidence or {})
     if normalized_reason == "chain_only_quarantined":
+        # Use MAX(history_id) — strictly monotone, no clock/tie dependency (B071).
+        # Fall back to legacy token_suppression table if no history row exists yet
+        # (pre-migration DBs that have rows only in the legacy table).
         existing = conn.execute(
             """
             SELECT suppression_reason, created_at, evidence_json
-            FROM token_suppression
+            FROM token_suppression_history
             WHERE token_id = ?
+              AND history_id = (
+                  SELECT MAX(h2.history_id)
+                  FROM token_suppression_history h2
+                  WHERE h2.token_id = ?
+              )
             """,
-            (normalized_token,),
+            (normalized_token, normalized_token),
         ).fetchone()
+        if existing is None and _table_exists(conn, "token_suppression"):
+            existing = conn.execute(
+                """
+                SELECT suppression_reason, created_at, evidence_json
+                FROM token_suppression
+                WHERE token_id = ?
+                """,
+                (normalized_token,),
+            ).fetchone()
         if existing is not None and str(existing["suppression_reason"] or "") == "chain_only_quarantined":
             try:
                 existing_evidence = json.loads(str(existing["evidence_json"] or "{}"))
@@ -3353,33 +3411,63 @@ def record_token_suppression(
             if first_seen_at:
                 evidence_payload["first_seen_at"] = first_seen_at
     evidence_json = json.dumps(evidence_payload, sort_keys=True)
-    conn.execute(
-        """
-        INSERT INTO token_suppression (
-            token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(token_id) DO UPDATE SET
-            condition_id = CASE
-                WHEN excluded.condition_id IS NULL OR excluded.condition_id = ''
-                THEN token_suppression.condition_id
-                ELSE excluded.condition_id
-            END,
-            suppression_reason = excluded.suppression_reason,
-            source_module = excluded.source_module,
-            updated_at = excluded.updated_at,
-            evidence_json = excluded.evidence_json
-        """,
-        (
-            normalized_token,
-            str(condition_id or ""),
-            normalized_reason,
-            normalized_source,
-            now,
-            now,
-            evidence_json,
-        ),
-    )
+    # B071 cycle-2 critic MINOR #1: wrap dual-write in a single transaction.
+    # Without this, a failure between the history INSERT and the legacy UPSERT
+    # leaves the two tables inconsistent — history says "suppressed" while
+    # legacy still shows the prior state (or nothing). `with conn:` uses the
+    # connection as a context manager that commits on success, rolls back on
+    # exception. Dual-write becomes atomic at the write-side seam.
+    with conn:
+        # Append to history (B071 — append-only, audit trail).
+        conn.execute(
+            """
+            INSERT INTO token_suppression_history (
+                token_id, condition_id, suppression_reason, source_module,
+                created_at, updated_at, evidence_json, operation, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'record', ?)
+            """,
+            (
+                normalized_token,
+                str(condition_id or ""),
+                normalized_reason,
+                normalized_source,
+                now,
+                now,
+                evidence_json,
+                recorded_at,
+            ),
+        )
+        # Dual-write: keep legacy token_suppression table in sync for backward
+        # compat with callers that query it directly (pre-migration). Removed
+        # after migrate_b071 --drop-legacy creates the VIEW alias.
+        if _table_exists(conn, "token_suppression"):
+            conn.execute(
+                """
+                INSERT INTO token_suppression (
+                    token_id, condition_id, suppression_reason, source_module,
+                    created_at, updated_at, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(token_id) DO UPDATE SET
+                    condition_id = CASE
+                        WHEN excluded.condition_id IS NULL OR excluded.condition_id = ''
+                        THEN token_suppression.condition_id
+                        ELSE excluded.condition_id
+                    END,
+                    suppression_reason = excluded.suppression_reason,
+                    source_module = excluded.source_module,
+                    updated_at = excluded.updated_at,
+                    evidence_json = excluded.evidence_json
+                """,
+                (
+                    normalized_token,
+                    str(condition_id or ""),
+                    normalized_reason,
+                    normalized_source,
+                    now,
+                    now,
+                    evidence_json,
+                ),
+            )
     return {
         "status": "written",
         "table": "token_suppression",
@@ -3388,8 +3476,14 @@ def record_token_suppression(
 
 
 def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]:
-    """Return tokens that reconciliation must not resurrect from chain-only state."""
-    if conn is None or not _table_exists(conn, "token_suppression"):
+    """Return tokens that reconciliation must not resurrect from chain-only state.
+
+    Reads from `token_suppression` which is either the legacy mutable table
+    (pre-migration) or the VIEW alias created by
+    migrate_b071_token_suppression_to_history.py --apply --drop-legacy (B071).
+    The VIEW projects the latest row per token_id from the append-only history.
+    """
+    if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
     rows = conn.execute(
         f"""
@@ -3404,8 +3498,13 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
 
 
 def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
-    """Return unresolved chain-only quarantine facts for runtime cache hydration."""
-    if conn is None or not _table_exists(conn, "token_suppression"):
+    """Return unresolved chain-only quarantine facts for runtime cache hydration.
+
+    Reads from `token_suppression` which is either the legacy mutable table
+    (pre-migration) or the VIEW alias created by B071 migration. The VIEW
+    projects the latest row per token_id from the append-only history.
+    """
+    if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
     rows = conn.execute(
         """
