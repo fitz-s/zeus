@@ -56,7 +56,7 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 4. ~~**Phase 7B-followup**~~ **COMPLETE** at `2adcbc9`. Item 2 (_tigge_common extract — 13 helpers + CityManifestDriftError + compute_required_max_step/compute_manifest_hash) + naming_conventions hygiene (extract_ prefix + refit_platt_v2 exception + _tigge_common manifest entry). Net +318/-364 LOC. 89/89 targeted tests GREEN. Scout 2026-04-18 confirmed: `run_replay` actually lives at `src/engine/replay.py:1932` (not `src/main.py` as earlier handoff said); evaluator is already metric-aware (no P8 work there); `monitor_refresh.py` has zero `temperature_metric` references (non-Day0 LOW wiring still owed); settlement writer does not exist in code (settlements arrive externally).
 5. ~~**Phase 8 route A**~~ **COMPLETE** at `6ffefa4` (critic-carol first-try PASS, 2026-04-18). Scope: S1 `run_replay` public-entry `temperature_metric` threading + S2 `cycle_runner.py:180-181` DT#6 rewire to `riskguard.tick_with_portfolio`. 4/4 R-BP/R-BQ antibodies GREEN. Full regression 144/1846 (zero new failures vs 144/1842 baseline; +4 from antibodies). Contract: `phase8_contract.md`. Route A honored: code-only, no TIGGE data import, v2 tables zero-row, Golden Window preserved. See "Phase 8 closure" below. Gate E code-prerequisites complete; Gate E data-evidence blocks on future Golden Window lift (P9/later).
 6. ~~**Phase 9A**~~ **COMPLETE** at `7081634` (critic-carol cycle 2 first-try PASS, 2026-04-18). Absorbs all 4 P8 MAJOR observability forward-log items + adopts DT#6 Interpretation B in authority doc. Scope: S1 `entries_blocked_reason` DATA_DEGRADED + S2 L195 overwrite comment + S3 run_replay mode+metric warning + S4 R-BQ.1 structural hardening (drops silent-return + text-match) + S5 DT#6 §B law clarification + S6 R-BS.1/2 save_portfolio roundtrip + S7 R-BT entries_blocked_reason antibody + S8 R-BU.1/2 mode+metric warning pair. 9/9 antibodies GREEN. Full regression 144/1851 (+5 exact match, zero new failures). 2 MINOR (R-BS.2 vacuous assert + DT#6 §B aspirational doc) patched in phase9a-close commit. See "Phase 9A closure" below.
-7. **Phase 9B** — DT#2 RED force-exit + DT#5 Kelly executable-price + DT#7 boundary-day antibodies. critic-carol cycle 3 (final before dave rotation). Her cycle-2 learnings recommend **explicit adversarial-mode 15-min hunt** to counter 3-pass streak complacency.
+7. ~~**Phase 9B**~~ **COMPLETE** at `0974a62` (impl) + `b73927c` (ITERATE fix). critic-carol cycle 3 — **streak broke as predicted** (P7B+P8+P9A=3 PASS, P9B=ITERATE). Adversarial opening surfaced CRITICAL-1: DT#2 marker was inert (no runtime consumer read `exit_reason="red_force_exit"`). ITERATE fix wired marker into `evaluate_exit` short-circuit + added R-BY/R-BY.2 relationship antibody pair. Re-verify PASS. 5/5 antibodies GREEN (R-BV/R-BW/R-BX/R-BY/R-BY.2). Regression 144/1856/93 (+5 from P9B antibodies, zero new failures). critic-carol **retires** after 3 cycles (P8/P9A/P9B); P9C opens with critic-dave. See "Phase 9B closure" below.
 8. **Phase 9C** — Gate F activation prep: `Day0LowNowcastSignal.p_vector` proper implementation (currently lazy HIGH delegate — unacceptable for live LOW), `monitor_refresh.py` LOW wiring (non-Day0), B093 half-2 (`_forecast_rows_for` → `historical_forecasts_v2`; blocks on Golden Window lift), `--temperature-metric` CLI flag, second-seam data-closure tests. critic-dave cycle 1 (fresh spawn) with critic-carol learnings inherited.
 
 ## Phase 7A closure
@@ -95,6 +95,56 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-1: contract_version / boundary_min_value schema columns undocumented
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
+
+## Phase 9B closure
+
+**Commits**: `0974a62` feat(phase9b): risk-critical DT closure (DT#2 + DT#5 + DT#7) → `b73927c` fix(phase9b): ITERATE resolution — DT#2 actuator wiring (CRITICAL-1 resolved). critic-carol cycle 3 PASS on re-verify.
+
+**Delivered**:
+- **DT#2 R-BV + R-BY/R-BY.2**: `_execute_force_exit_sweep` in cycle_runner marks non-terminal positions with `exit_reason="red_force_exit"` + `Position.evaluate_exit` short-circuits to `ExitDecision(True, "RED_FORCE_EXIT", urgency="immediate")` when marker present + Day0 excluded. Closes zeus_current_architecture.md §17 "sweep active positions toward exit" law. Pre-P9B was entry-block-only (Phase 1 scope).
+- **DT#5 R-BW**: `kelly_size` polymorphic `float | ExecutionPrice` with internal `assert_kelly_safe()` when typed. evaluator.py L187 upgraded to pass full ExecutionPrice object. Closes §20 law (INV-21). Bare-float backward compat preserved for unit tests + legacy replay.py:1300.
+- **DT#7 R-BX**: `src/contracts/boundary_policy.py::boundary_ambiguous_refuses_signal(snapshot_dict)` — named contract function for clause 3 "refuse boundary-ambiguous as confirmatory signal". Evaluator wiring P9C (blocks on monitor_refresh LOW plumbing; function is orphan by design, forward-logged).
+- **Stale-antibody flips** (per critic-beth cycle-3 P3.1 methodology): 2 pre-P9B antibodies flipped (`..._currently_bare_float_annotation` → `..._accepts_execution_price`; `..._force_exit_review_scope_is_entry_block_only` → assertion changed to `sweep_active_positions`).
+
+**Antibodies installed (5/5 GREEN)**:
+- R-BV sweep mechanism (function-level)
+- R-BY sweep → evaluate_exit relationship (cross-module)
+- R-BY.2 Day0 exclusion pair-negative
+- R-BW kelly triple-case (float BC / non-compliant raise / compliant size)
+- R-BX boundary_ambiguous_refuses_signal contract
+
+**critic-carol 3-cycle PASS → ITERATE → PASS history**:
+- **Cycle 1** (P8): first-try PASS, 4 MAJOR forward-log, 7 durable learnings
+- **Cycle 2** (P9A): first-try PASS, 0 MAJOR, 2 MINOR fixed in close, 8 durable learnings (4 new)
+- **Cycle 3** (P9B): **ITERATE** on CRITICAL-1 inert-marker (adversarial opening surfaced static-review blind spot), team-lead fixed option (a) at b73927c, re-verify PASS. 16 total durable learnings (L1-L16), retirement reflection.
+
+**Methodology outcomes validated**:
+- **3-streak complacency warning (cycle-2 L6)** → PROVEN: streak broke exactly at cycle 3, adversarial opening caught what thorough would miss
+- **Runtime-probe methodology (cycle-3 L9)** → the decisive audit for marker-based refactors — grep + code-path analysis alone missed CRITICAL-1; running a position through evaluate_exit with a healthy context exposed inert marker pathology
+- **Paired-antibody pattern (cycle-1 L7)** → R-BY + R-BY.2 demonstrated value again (positive + Day0 exclusion negative)
+- **Relationship vs function antibody distinction (cycle-3 L9)** → R-BV alone was insufficient (function-level: marker written). R-BY completes the cross-module picture (sweep → evaluate → decision).
+
+**P9B forward-log → P9C (critic-dave cycle 1 opens; onboarding brief at `phase9_evidence/critic_dave_onboarding_brief.md`)**:
+- DT#7 full enforcement (evaluator wiring + leverage reduction + oracle penalty isolation)
+- monitor_refresh.py LOW wiring
+- Day0LowNowcastSignal.p_vector proper impl pre-Gate F
+- B093 half-2 replay → historical_forecasts_v2 (blocks on Golden Window lift)
+- --temperature-metric CLI flag on scripts/run_replay.py
+- Second-seam data-closure tests for R-BP (forecast_low column selection)
+- `_TRUTH_AUTHORITY_MAP["degraded"]="VERIFIED"` re-audit
+- `save_portfolio` `source` param for DT#6 B enforcement
+- `tick_with_portfolio` persistence contract decision
+- **(new from P9B cycle-3 re-verify L15 + P7)**: Broader inert-marker scan across `exit_reason` / `chain_state` / other marker fields — audit each for symmetric producer↔consumer pairs
+- **(new from P9B cycle-3 re-verify L15)**: R-BY.2 antibody-strength note — current fixture has asymmetric discrimination (catches Day0→RED misrouting but not inverse Day0-fails-own-logic case). Not a fix defect; antibody-strengthening task for dave in P9C.
+- Strict-ExecutionPrice-only kelly_size migration (remove bare-float BC path; upgrade replay.py:1300 + math tests)
+
+**Critic rotation**: critic-carol retires after 3 cycles per rotation convention (P8/P9A/P9B). critic-dave opens P9C cycle 1. His onboarding brief inherits critic-beth 3-cycle learnings + critic-carol 3-cycle learnings + the "3-streak PASS prior not evidence" calibration note.
+
+**Evidence dir**:
+- `phase9_evidence/critic_carol_phase9b_wide_review.md` — initial adversarial-opening review with CRITICAL-1
+- `phase9_evidence/critic_carol_phase9b_reverify.md` — re-verify PASS on b73927c
+- `phase9_evidence/critic_carol_phase9b_learnings.md` — 16 L-numbered learnings + retirement reflection (L14 surgical-revert antibody, L15 antibody asymmetry observation, L16 runtime-probe-is-the-whole-value)
+- `phase9_evidence/critic_dave_onboarding_brief.md` — 20-min reading order for dave + "prior not evidence" streak calibration
 
 ## Phase 9A closure
 
