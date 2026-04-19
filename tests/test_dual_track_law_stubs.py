@@ -121,10 +121,74 @@ def test_json_export_after_db_commit():
     assert count == 0, "DB must have no partial row after db_op failure"
 
 
-# NC-14 / INV-21
+# NC-14 / INV-21 / DT#5 — ACTIVATED Phase 9B (R-BW)
 def test_kelly_input_carries_distributional_info():
-    """NC-14 / INV-21: kelly_size() must receive a distributional price object, not a bare entry_price scalar."""
-    pytest.skip("pending: enforced pre-Phase 9 activation")
+    """NC-14 / INV-21 / DT#5: kelly_size() must enforce distributional price
+    semantics when a typed ExecutionPrice is passed.
+
+    Phase 9B (ACTIVATED 2026-04-18):
+      - kelly_size() accepts `float | ExecutionPrice` (polymorphic for BC);
+      - when an ExecutionPrice is passed, `assert_kelly_safe()` runs inside
+        kelly_size, raising ExecutionPriceContractError on violation;
+      - bare float still accepted for backward compat with math unit tests
+        + legacy callers (replay.py:1300); migration to strict
+        ExecutionPrice-only is a later-phase chore.
+
+    This antibody pair tests the three cases:
+      (a) Bare float still works (backward compat preserved);
+      (b) Non-compliant ExecutionPrice raises ExecutionPriceContractError;
+      (c) Compliant ExecutionPrice returns a positive Kelly size.
+    """
+    from src.strategy.kelly import kelly_size
+    from src.contracts.execution_price import (
+        ExecutionPrice,
+        ExecutionPriceContractError,
+    )
+
+    # (a) Backward-compat: bare float with positive edge returns positive size
+    bc_size = kelly_size(
+        p_posterior=0.60,
+        entry_price=0.40,
+        bankroll=1000.0,
+        kelly_mult=0.25,
+    )
+    assert bc_size > 0.0, (
+        f"R-BW (a): bare-float kelly_size with positive edge must still "
+        f"return positive size for backward compat; got {bc_size}"
+    )
+
+    # (b) Non-compliant ExecutionPrice: implied_probability (DT#5 law violation)
+    unsafe = ExecutionPrice(
+        value=0.50,
+        price_type="implied_probability",
+        fee_deducted=False,
+        currency="probability_units",
+    )
+    with pytest.raises(ExecutionPriceContractError):
+        kelly_size(
+            p_posterior=0.60,
+            entry_price=unsafe,
+            bankroll=1000.0,
+            kelly_mult=0.25,
+        )
+
+    # (c) Compliant ExecutionPrice: fee_adjusted + fee_deducted + probability_units
+    safe = ExecutionPrice(
+        value=0.40,
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
+    safe_size = kelly_size(
+        p_posterior=0.60,
+        entry_price=safe,
+        bankroll=1000.0,
+        kelly_mult=0.25,
+    )
+    assert safe_size > 0.0, (
+        f"R-BW (c): compliant ExecutionPrice must produce positive Kelly size; "
+        f"got {safe_size}"
+    )
 
 
 # NC-15 / INV-22
@@ -158,10 +222,122 @@ def test_fdr_family_key_is_canonical():
     assert e_id == make_edge_family_id(**cand, strategy_key="center_buy"), "edge family ID must be deterministic"
 
 
-# INV-19
-def test_red_triggers_active_position_sweep():
-    """INV-19: RED risk level must cancel all pending orders and sweep active positions toward exit; entry-block-only RED is forbidden."""
-    pytest.skip("pending: enforced in risk phase before Phase 9")
+# INV-19 / DT#2 — ACTIVATED Phase 9B (R-BV)
+def test_red_triggers_active_position_sweep(monkeypatch):
+    """INV-19 / DT#2: RED risk level must sweep active positions toward exit;
+    entry-block-only RED scope is forbidden.
+
+    Phase 9B (ACTIVATED 2026-04-18):
+      - cycle_runner._execute_force_exit_sweep(portfolio) marks all active,
+        non-terminal, not-already-exiting positions with
+        exit_reason="red_force_exit";
+      - exit_lifecycle machinery picks up on next monitor_refresh cycle and
+        posts sell orders (not in-cycle — low-risk + testable sweep).
+
+    This antibody pair tests:
+      (positive) 3 active positions → 3 marked with "red_force_exit"
+      (negative) terminal positions skipped; already-exiting preserved
+    """
+    from src.engine.cycle_runner import _execute_force_exit_sweep
+    from src.state.portfolio import PortfolioState, Position
+
+    # Build a portfolio with mixed states
+    active_pos_1 = Position(
+        trade_id="t1", market_id="m1", city="NYC", cluster="US-Northeast",
+        target_date="2026-04-10", bin_label="50-51°F", direction="buy_yes",
+        unit="F", state="holding", exit_reason="",
+    )
+    active_pos_2 = Position(
+        trade_id="t2", market_id="m2", city="LA", cluster="US-West",
+        target_date="2026-04-11", bin_label="70-71°F", direction="buy_yes",
+        unit="F", state="holding", exit_reason="",
+    )
+    already_exiting = Position(
+        trade_id="t3", market_id="m3", city="CHI", cluster="US-Midwest",
+        target_date="2026-04-12", bin_label="40-41°F", direction="buy_yes",
+        unit="F", state="holding",
+        exit_reason="SLO_TRIGGER",  # different flow; must NOT override
+    )
+    settled_pos = Position(
+        trade_id="t4", market_id="m4", city="SF", cluster="US-West",
+        target_date="2026-04-09", bin_label="60-61°F", direction="buy_yes",
+        unit="F", state="settled", exit_reason="SETTLEMENT",
+    )
+
+    portfolio = PortfolioState(
+        positions=[active_pos_1, active_pos_2, already_exiting, settled_pos],
+    )
+
+    # (positive + negative combined) Sweep runs once, reports accurate counts
+    result = _execute_force_exit_sweep(portfolio)
+
+    assert result["attempted"] == 2, (
+        f"R-BV: two active positions without existing exit flow should be "
+        f"swept; got {result!r}"
+    )
+    assert result["already_exiting"] == 1, (
+        f"R-BV: one position with pre-existing exit_reason should be "
+        f"preserved (not overwritten); got {result!r}"
+    )
+    assert result["skipped_terminal"] == 1, (
+        f"R-BV: settled position should be skipped; got {result!r}"
+    )
+
+    # Verify actual state mutations (not just the summary)
+    assert active_pos_1.exit_reason == "red_force_exit", (
+        f"R-BV: active_pos_1 must carry sweep exit_reason; got "
+        f"{active_pos_1.exit_reason!r}"
+    )
+    assert active_pos_2.exit_reason == "red_force_exit"
+    assert already_exiting.exit_reason == "SLO_TRIGGER", (
+        f"R-BV: already_exiting.exit_reason must NOT be overwritten by sweep; "
+        f"got {already_exiting.exit_reason!r}"
+    )
+    assert settled_pos.exit_reason == "SETTLEMENT", (
+        f"R-BV: settled_pos.exit_reason must NOT be overwritten; got "
+        f"{settled_pos.exit_reason!r}"
+    )
+
+
+# DT#7 — NEW Phase 9B (R-BX)
+def test_boundary_ambiguous_refuses_signal_contract():
+    """DT#7 clause 3: boundary_ambiguous_refuses_signal() must return True
+    when the snapshot is flagged boundary-ambiguous; callers use the return
+    to refuse the candidate as confirmatory signal.
+
+    Phase 9B scope delivers the contract function at
+    src/contracts/boundary_policy.py; evaluator wiring is P9C (blocks on
+    monitor_refresh LOW data flow per critic-carol cycle-2 forward-log).
+
+    Law: docs/authority/zeus_current_architecture.md §22 +
+    docs/authority/zeus_dual_track_architecture.md §DT#7.
+    """
+    from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
+
+    # (positive) flagged snapshot → refuse
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": True}) is True, (
+        "R-BX: boundary_ambiguous=True snapshot must refuse signal"
+    )
+
+    # (negative) unflagged snapshot → permit
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": False}) is False, (
+        "R-BX: boundary_ambiguous=False snapshot must permit signal"
+    )
+
+    # (absence-is-permissive) missing key → permit (safe fallback during
+    # transition when boundary_ambiguous plumbing may be partial)
+    assert boundary_ambiguous_refuses_signal({}) is False, (
+        "R-BX: absent boundary_ambiguous key must permit (safe default)"
+    )
+
+    # (bool coercion) truthy non-bool values refuse
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": 1}) is True
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": "truthy"}) is True
+
+    # (bool coercion) falsy non-bool values permit
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": 0}) is False
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": ""}) is False
+    assert boundary_ambiguous_refuses_signal({"boundary_ambiguous": None}) is False
 
 
 # INV-18
