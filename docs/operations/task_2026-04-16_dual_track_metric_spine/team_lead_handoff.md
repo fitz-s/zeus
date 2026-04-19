@@ -1,9 +1,21 @@
-# Team-Lead Handoff (post-P7A, 2026-04-18)
+# Team-Lead Handoff (post-P9C + e2e audit, 2026-04-19)
 
-**Written**: 2026-04-18 post Phase 5 + 6 + 7A complete (Gen-Verifier mode). Team infrastructure RETIRED — `TeamDelete` applied. New composition: team-lead (Opus, main context) + critic-beth (Opus, persistent via disk-durable learnings + fresh spawn per phase) + ephemeral subagents (Sonnet/Haiku per task shape). Supersedes all earlier handoffs.
+**Written**: 2026-04-18 post Phase 5 + 6 + 7A. **Updated 2026-04-19 post P9C closure + post-close e2e independent audit.** Gen-Verifier mode. Team-lead (Opus, main context) + rotating persistent critic (beth retired after P5fix/P7A/P7B; carol retired after P8/P9A/P9B; **dave active** cycle 1 after P9C) + ephemeral subagents.
+
+## ⚠️ CRITICAL POST-COMPACT FIRST READ
+
+**The dual-track refactor is STRUCTURALLY COMPLETE but has a CRITICAL pre-existing production bug (monitor_refresh NameError, HIGH+LOW Day0 both affected) + Gate C was never actually closed (v2 tables empty; HIGH still reads legacy).**
+
+**Before any other work, read**:
+`docs/operations/task_2026-04-16_dual_track_metric_spine/e2e_audit/synthesis_and_remediation_plan.md`
+
+That file contains the full compact remediation plan (R1-R13) with file:line citations + prioritized packet recommendations (P10A/B/C). Supporting audits at same directory:
+- `architect_end_state_audit.md` — structural audit (PARTIAL verdict, "ship seaworthy, cargo never loaded")
+- `runtime_trace.md` — runtime trace (3 silent-failure risks + discriminating probe for ingest metric stamp)
 
 ## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
+0. **NEW** — Read `e2e_audit/synthesis_and_remediation_plan.md` — durable compact summary of the two-agent independent audit post-P9C. Single read that resurrects full dual-track end-state.
 1. Read `~/.claude/agent-team-methodology.md` — operating manual. §"Critic role" (L0.0 peer-not-suspect, 6-tier hypothesis ordering).
 2. Read `~/.claude/CLAUDE.md` — global Fitz methodology, Four Constraints, Code Provenance.
 3. Read THIS file IN FULL.
