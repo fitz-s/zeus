@@ -22,6 +22,7 @@ from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection
 
 if TYPE_CHECKING:
+    from src.config import City
     from src.types.metric_identity import MetricIdentity
 
 # INV-15: sources whose rows are canonical training data.
@@ -77,6 +78,7 @@ def add_calibration_pair(
     *,
     bin_source: str = "legacy",
     authority: str = "UNVERIFIED",
+    city_obj: "City | None" = None,
 ) -> None:
     """Insert a calibration pair (one per bin per settled market).
 
@@ -88,9 +90,17 @@ def add_calibration_pair(
     are unchanged. The new canonical-grid rebuild script passes
     ``bin_source="canonical_v1"`` to mark rows it owns, which the destructive
     DELETE path in that script targets by equality match.
+
+    city_obj: optional City for SettlementSemantics dispatch (HKO oracle_truncate).
+    If None, falls back to bare WMO half-up (backward compat for tests/scripts).
     """
     if settlement_value is not None:
-        settlement_value = round_wmo_half_up_value(float(settlement_value))
+        if city_obj is not None:
+            from src.contracts.settlement_semantics import SettlementSemantics
+            round_fn = SettlementSemantics.for_city(city_obj).round_values
+            settlement_value = round_fn([float(settlement_value)])[0]
+        else:
+            settlement_value = round_wmo_half_up_value(float(settlement_value))
     if decision_group_id is None or not str(decision_group_id).strip():
         raise ValueError(
             "decision_group_id is required; use "
@@ -149,15 +159,24 @@ def add_calibration_pair_v2(
     authority: str = "VERIFIED",
     causality_status: str = "OK",
     snapshot_id: Optional[int] = None,
+    city_obj: "City | None" = None,
 ) -> None:
     """Insert a calibration pair into calibration_pairs_v2.
 
     Requires metric_identity (4A.3 — no legacy default). INV-15: training_allowed
     is silently forced to False if source is not in the canonical whitelist
     (tigge, ecmwf_ens). Pass source= explicitly from the ingest path.
+
+    city_obj: optional City for SettlementSemantics dispatch (HKO oracle_truncate).
+    If None, falls back to bare WMO half-up (backward compat for tests/scripts).
     """
     if settlement_value is not None:
-        settlement_value = round_wmo_half_up_value(float(settlement_value))
+        if city_obj is not None:
+            from src.contracts.settlement_semantics import SettlementSemantics
+            round_fn = SettlementSemantics.for_city(city_obj).round_values
+            settlement_value = round_fn([float(settlement_value)])[0]
+        else:
+            settlement_value = round_wmo_half_up_value(float(settlement_value))
     if decision_group_id is None or not str(decision_group_id).strip():
         raise ValueError(
             "decision_group_id is required; use "

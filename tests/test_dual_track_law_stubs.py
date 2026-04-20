@@ -581,6 +581,51 @@ def test_chain_reconciliation_three_state_machine():
 
 
 # INV-20
-def test_load_portfolio_degrades_gracefully_on_authority_loss():
+def test_load_portfolio_degrades_gracefully_on_authority_loss(monkeypatch):
     """INV-20: Authority-loss must preserve monitor/exit/reconciliation paths in read-only mode; RuntimeError that kills the full cycle on authority-loss is forbidden."""
-    pytest.skip("pending: enforced with Phase 6 runtime split")
+    import sqlite3
+    import src.state.db as db_module
+    from src.state import portfolio as portfolio_module
+    from src.state.portfolio_loader_policy import LoaderPolicyDecision
+
+    def _degraded_policy(snapshot_status, **kwargs):
+        # Simulate auth-loss: return a non-canonical truth source policy
+        return LoaderPolicyDecision(
+            source="json_fallback",
+            reason="test: authority-loss simulation (INV-20)",
+            escalate=True,
+        )
+
+    monkeypatch.setattr(portfolio_module, "choose_portfolio_truth_source", _degraded_policy)
+
+    # Provide an in-memory DB so DB connection succeeds, but query returns degraded snapshot
+    _mem_conn = sqlite3.connect(":memory:")
+    _mem_conn.row_factory = sqlite3.Row
+
+    def _fake_get_connection(*args, **kwargs):
+        return _mem_conn
+
+    def _fake_get_trade_connection_with_world(*args, **kwargs):
+        return _mem_conn
+
+    def _fake_query_portfolio_loader_view(conn, **kwargs):
+        return {"status": "degraded_test", "positions": [], "table": "position_current"}
+
+    def _fake_query_token_suppression_tokens(conn):
+        return []
+
+    def _fake_query_chain_only_quarantine_rows(conn, **kwargs):
+        return []
+
+    monkeypatch.setattr(db_module, "get_connection", _fake_get_connection)
+    monkeypatch.setattr(db_module, "get_trade_connection_with_world", _fake_get_trade_connection_with_world)
+    monkeypatch.setattr(db_module, "query_portfolio_loader_view", _fake_query_portfolio_loader_view)
+    monkeypatch.setattr(db_module, "query_token_suppression_tokens", _fake_query_token_suppression_tokens)
+    monkeypatch.setattr(db_module, "query_chain_only_quarantine_rows", _fake_query_chain_only_quarantine_rows)
+    monkeypatch.setattr(portfolio_module, "_guard_deprecated_portfolio_json", lambda p: None)
+
+    state = portfolio_module.load_portfolio()
+    assert state.authority in ("degraded", "unverified"), (
+        f"INV-20: load_portfolio must degrade not raise on auth-loss. "
+        f"Got authority={state.authority!r}"
+    )

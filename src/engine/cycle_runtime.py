@@ -1114,14 +1114,26 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         deps.add_position(portfolio, pos)
                         from src.state.db import log_execution_report, log_trade_entry
 
-                        log_trade_entry(conn, pos)
+                        sp_name = f"sp_candidate_{str(d.decision_id).replace('-', '_')}"
+                        conn.execute(f"SAVEPOINT {sp_name}")
+                        try:
+                            log_trade_entry(conn, pos)
+                            log_execution_report(conn, pos, result, decision_id=d.decision_id)
+                            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        except Exception:
+                            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                            raise
+                        # Dual-write runs outside the SAVEPOINT guard because it uses
+                        # `with conn:` internally (commits its own sub-transaction).
+                        # Placing it inside would release the SAVEPOINT on commit,
+                        # breaking the ROLLBACK path on subsequent errors.
                         _dual_write_canonical_entry_if_available(
                             conn,
                             pos,
                             decision_id=d.decision_id,
                             deps=deps,
                         )
-                        log_execution_report(conn, pos, result, decision_id=d.decision_id)
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)

@@ -202,7 +202,8 @@ def _refresh_ens_member_counting(
     # Persistence anomaly check: if ENS predicts a historically rare
     # day-to-day temperature change, discount model trust
     anomaly_discount = _check_persistence_anomaly(
-        conn, city.name, target_d, float(np.mean(ens.member_maxes))
+        conn, city.name, target_d, float(np.mean(ens.member_maxes)),
+        temperature_metric=position.temperature_metric,
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
@@ -227,7 +228,7 @@ def _refresh_ens_member_counting(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_maxes": ens.member_maxes,
+        "member_extrema": ens.member_maxes,
         "calibrator": cal,
         "lead_days": float(lead_days),
         "unit": city.settlement_unit,
@@ -402,7 +403,7 @@ def _refresh_day0_observation(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_maxes": extrema.maxes,
+        "member_extrema": extrema.maxes if extrema.maxes is not None else extrema.mins,
         "calibrator": cal,
         "lead_days": 0.0,
         "unit": city.settlement_unit,
@@ -434,7 +435,8 @@ def _delta_bucket(delta: float) -> str:
 
 
 def _check_persistence_anomaly(
-    conn, city_name: str, target_date, predicted_high: float
+    conn, city_name: str, target_date, predicted_high: float,
+    *, temperature_metric=None,
 ) -> float:
     """Check if ENS-predicted temp change from recent days is historically rare.
 
@@ -443,7 +445,19 @@ def _check_persistence_anomaly(
     - n < 30: not enough data → no discount
     - n=30: 10% discount
     - n=100+: 30% max discount
+
+    LOW metric gate: legacy settlements has no metric column; LOW lookups would
+    cross-compare against HIGH historical values. Defer to metric-aware query
+    when settlements_v2 populated (P10D).
     """
+    if temperature_metric is not None:
+        is_low = (
+            getattr(temperature_metric, "is_low", lambda: False)()
+            or temperature_metric == "low"
+        )
+        if is_low:
+            return 1.0  # no persistence discount for LOW
+
     from datetime import timedelta
 
     try:
@@ -645,8 +659,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             from src.strategy.market_analysis import MarketAnalysis
             held_idx = bootstrap_ctx["held_idx"]
             bins = bootstrap_ctx["bins"]
-            if len(bootstrap_ctx["member_maxes"]) == 0:
-                raise ValueError("Bootstrap context has no member_maxes")
+            if len(bootstrap_ctx["member_extrema"]) == 0:
+                raise ValueError("Bootstrap context has no member_extrema")
             p_market_arr = np.zeros(len(bins))
             # A1: MarketAnalysis expects YES-side market prices (entry convention).
             # For buy_no, current_p_market is native NO-side — convert back to YES.
@@ -659,7 +673,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 p_market=p_market_arr,
                 alpha=bootstrap_ctx["alpha"],
                 bins=bins,
-                member_maxes=bootstrap_ctx["member_maxes"],
+                member_maxes=bootstrap_ctx["member_extrema"],
                 calibrator=bootstrap_ctx["calibrator"],
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],

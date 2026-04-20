@@ -19,7 +19,8 @@ import httpx
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
-from src.calibration.store import add_calibration_pair
+from src.calibration.store import add_calibration_pair, add_calibration_pair_v2
+from src.types.metric_identity import LOW_LOCALDAY_MIN
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
@@ -343,6 +344,8 @@ def run_harvester() -> dict:
                 ]
             event_pairs = 0
             for context in learning_contexts:
+                _dv = context.get("source_model_version", "") or ""
+                _temperature_metric = "low" if "mn2t6" in _dv or "min" in _dv else "high"
                 event_pairs += harvest_settlement(
                     shared_conn,
                     city,
@@ -354,6 +357,7 @@ def run_harvester() -> dict:
                     forecast_issue_time=context["issue_time"],
                     forecast_available_at=context["available_at"],
                     source_model_version=context["source_model_version"],
+                    temperature_metric=_temperature_metric,
                 )
             total_pairs += event_pairs
             if event_pairs > 0:
@@ -811,6 +815,7 @@ def harvest_settlement(
     source_model_version: Optional[str] = None,
     settlement_value: Optional[float] = None,
     bias_corrected: Optional[bool] = None,
+    temperature_metric: str = "high",
 ) -> int:
     """Generate calibration pairs from a settled market.
 
@@ -839,21 +844,38 @@ def harvest_settlement(
         if p_raw is None:
             continue
 
-        add_calibration_pair(
-            conn, city=city.name, target_date=target_date,
-            range_label=label, p_raw=p_raw, outcome=outcome,
-            lead_days=lead_days, season=season, cluster=city.cluster,
-            forecast_available_at=now,
-            settlement_value=(round_wmo_half_up_value(float(settlement_value))
-                              if settlement_value is not None else None),
-            decision_group_id=compute_id(
-                city.name,
-                target_date,
-                issue_time,
-                source_model_version or "",
-            ),
-            bias_corrected=bool(bias_corrected),
+        dgid = compute_id(
+            city.name,
+            target_date,
+            issue_time,
+            source_model_version or "",
         )
+        if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low":
+            add_calibration_pair_v2(
+                conn, city=city.name, target_date=target_date,
+                range_label=label, p_raw=p_raw, outcome=outcome,
+                lead_days=lead_days, season=season, cluster=city.cluster,
+                forecast_available_at=now,
+                settlement_value=settlement_value,
+                decision_group_id=dgid,
+                bias_corrected=bool(bias_corrected),
+                city_obj=city,
+                metric_identity=LOW_LOCALDAY_MIN,
+                data_version=LOW_LOCALDAY_MIN.data_version,
+                training_allowed=True,
+            )
+        else:
+            add_calibration_pair(
+                conn, city=city.name, target_date=target_date,
+                range_label=label, p_raw=p_raw, outcome=outcome,
+                lead_days=lead_days, season=season, cluster=city.cluster,
+                forecast_available_at=now,
+                settlement_value=(round_wmo_half_up_value(float(settlement_value))
+                                  if settlement_value is not None else None),
+                decision_group_id=dgid,
+                bias_corrected=bool(bias_corrected),
+                city_obj=city,
+            )
         count += 1
 
     logger.info("Harvested %d pairs for %s %s (winner: %s)",
