@@ -121,23 +121,17 @@ def test_json_export_after_db_commit():
     assert count == 0, "DB must have no partial row after db_op failure"
 
 
-# NC-14 / INV-21 / DT#5 — ACTIVATED Phase 9B (R-BW)
+# NC-14 / INV-21 / DT#5 — STRICT Phase 10E (R-BW flipped)
 def test_kelly_input_carries_distributional_info():
-    """NC-14 / INV-21 / DT#5: kelly_size() must enforce distributional price
-    semantics when a typed ExecutionPrice is passed.
+    """NC-14 / INV-21 / DT#5: kelly_size() STRICTLY requires ExecutionPrice.
 
-    Phase 9B (ACTIVATED 2026-04-18):
-      - kelly_size() accepts `float | ExecutionPrice` (polymorphic for BC);
-      - when an ExecutionPrice is passed, `assert_kelly_safe()` runs inside
-        kelly_size, raising ExecutionPriceContractError on violation;
-      - bare float still accepted for backward compat with math unit tests
-        + legacy callers (replay.py:1300); migration to strict
-        ExecutionPrice-only is a later-phase chore.
+    Phase 10E (STRICT 2026-04-20):
+      - kelly_size() entry_price MUST be a typed ExecutionPrice;
+      - bare float is rejected (TypeError — no bare-float path exists);
+      - non-compliant ExecutionPrice raises ExecutionPriceContractError;
+      - compliant ExecutionPrice returns a positive Kelly size.
 
-    This antibody pair tests the three cases:
-      (a) Bare float still works (backward compat preserved);
-      (b) Non-compliant ExecutionPrice raises ExecutionPriceContractError;
-      (c) Compliant ExecutionPrice returns a positive Kelly size.
+    Antibody shape: BC path now raises TypeError (strict-reject antibody).
     """
     from src.strategy.kelly import kelly_size
     from src.contracts.execution_price import (
@@ -145,17 +139,14 @@ def test_kelly_input_carries_distributional_info():
         ExecutionPriceContractError,
     )
 
-    # (a) Backward-compat: bare float with positive edge returns positive size
-    bc_size = kelly_size(
-        p_posterior=0.60,
-        entry_price=0.40,
-        bankroll=1000.0,
-        kelly_mult=0.25,
-    )
-    assert bc_size > 0.0, (
-        f"R-BW (a): bare-float kelly_size with positive edge must still "
-        f"return positive size for backward compat; got {bc_size}"
-    )
+    # (a) Strict: bare float is REJECTED — no bare-float path survives P10E
+    with pytest.raises((TypeError, AttributeError), match="assert_kelly_safe|NoneType|float"):
+        kelly_size(
+            p_posterior=0.60,
+            entry_price=0.40,
+            bankroll=1000.0,
+            kelly_mult=0.25,
+        )
 
     # (b) Non-compliant ExecutionPrice: implied_probability (DT#5 law violation)
     unsafe = ExecutionPrice(

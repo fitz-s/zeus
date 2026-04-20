@@ -347,6 +347,7 @@ def _process_snapshot(
             # calibration_pairs by authority='VERIFIED' to ensure only
             # provenance-verified pairs train the Platt model.
             authority="VERIFIED",
+            city_obj=city,
         )
         pairs_this_snapshot += 1
 

@@ -260,9 +260,12 @@ def _size_at_execution_price_boundary(
     sizing_bankroll: float,
     kelly_multiplier: float,
     safety_cap_usd: float | None,
-    feature_flags: dict | None,
 ) -> float:
-    """Size a trade at the evaluator→Kelly boundary using typed entry cost."""
+    """Size a trade at the evaluator→Kelly boundary using typed entry cost.
+
+    P10E: shadow-off rollback path removed — fee-adjusted typed price is the
+    only path. No feature flag; assert_kelly_safe() runs unconditionally.
+    """
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(
         value=raw_entry_price,
@@ -284,28 +287,8 @@ def _size_at_execution_price_boundary(
         safety_cap_usd=safety_cap_usd,
     )
 
-    use_fee_adjusted = (feature_flags or {}).get("EXECUTION_PRICE_SHADOW", True)
-    if use_fee_adjusted:
-        return fee_adjusted_size
-
-    raw_size = kelly_size(
-        p_posterior,
-        raw_entry_price,
-        sizing_bankroll,
-        kelly_multiplier,
-        safety_cap_usd=safety_cap_usd,
-    )
-    if raw_size > 0:
-        _ep_logger = logging.getLogger("zeus.execution_price_shadow")
-        _ep_logger.info(
-            "shadow_delta old=%.4f new=%.4f delta=%.4f entry=%.4f fee_adjusted=%.4f",
-            raw_size,
-            fee_adjusted_size,
-            raw_size - fee_adjusted_size,
-            raw_entry_price,
-            ep_fee_adjusted.value,
-        )
-    return raw_size
+    # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
+    return fee_adjusted_size
 
 
 def _default_weather_fee_rate() -> float:
@@ -1290,7 +1273,7 @@ def evaluate_candidate(
         p_market=p_market,
         alpha=alpha,
         bins=bins,
-        member_maxes=ens.member_maxes,
+        member_maxes=ens.member_extrema,
         calibrator=cal,
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,
@@ -1637,7 +1620,6 @@ def evaluate_candidate(
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
                 safety_cap_usd=settings["live_safety_cap_usd"],
-                feature_flags=settings.feature_flags,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -1829,7 +1811,11 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                     ens_result.get("fetch_time"),
                 ),
             ),
-            json.dumps(ens.member_maxes.tolist()),
+            # S3e: member_extrema stores HIGH maxes for HIGH rows and LOW mins for LOW rows.
+            # Downstream (rebuild_calibration_pairs*) filters by temperature_metric column
+            # to route to the correct settlement semantics. Do NOT use members_json without
+            # checking temperature_metric first.
+            json.dumps(ens.member_extrema.tolist()),
             ens.spread_float(),
             int(ens.is_bimodal()),
             ens_result["model"],

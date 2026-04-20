@@ -11,13 +11,11 @@ Dynamic multiplier reduces sizing when:
 - Portfolio is concentrated
 - In drawdown
 
-DT#5 / INV-21 (Phase 9B enforcement):
-  `entry_price` may be passed as either a bare `float` (backward compat for
-  unit tests + legacy callers) OR as a typed `ExecutionPrice` (opt-in
-  structural enforcement). When an `ExecutionPrice` is passed, `kelly_size`
-  calls `assert_kelly_safe()` internally — caller gets compile-time-like
-  safety at the Kelly boundary. See
-  `docs/authority/zeus_current_architecture.md §20` for the law.
+DT#5 / INV-21 (Phase 10E strict enforcement):
+  `entry_price` MUST be a typed `ExecutionPrice`. Bare float callers are
+  forbidden at this boundary — `kelly_size` calls `assert_kelly_safe()`
+  unconditionally. See `docs/authority/zeus_current_architecture.md §20`
+  for the law.
 """
 
 import logging
@@ -32,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def kelly_size(
     p_posterior: float,
-    entry_price: float | ExecutionPrice,
+    entry_price: ExecutionPrice,
     bankroll: float,
     kelly_mult: float = 0.25,
     safety_cap_usd: float | None = None,
@@ -40,23 +38,16 @@ def kelly_size(
     """Compute position size using fractional Kelly criterion. Spec §5.1.
 
     Returns: size in USD. Returns 0.0 if no positive edge.
-    entry_price: cost per share in [0.01, 0.99]. Accepts:
-        - bare `float` (backward-compat; unit tests + legacy callers)
-        - `ExecutionPrice` (DT#5 / INV-21 enforcement — assert_kelly_safe()
-          is called internally, raising ExecutionPriceContractError if the
-          price is not suitable for Kelly sizing)
+    entry_price: MUST be a typed ExecutionPrice (DT#5 / INV-21 strict —
+        assert_kelly_safe() is called unconditionally, raising
+        ExecutionPriceContractError if the price is not suitable for Kelly
+        sizing). Bare floats are forbidden at this boundary (P10E).
     safety_cap_usd: optional hard ceiling in USD. When provided, clips output
         and emits a structured log record with the original pre-clip size.
     """
-    # DT#5 P9B: typed path enforces law; bare-float path preserves legacy
-    # test/caller compatibility. Migration of remaining bare-float callers
-    # (replay.py:1300, scripts/...) is a later-phase chore; the gate is now
-    # structurally available to any caller that opts in.
-    if isinstance(entry_price, ExecutionPrice):
-        entry_price.assert_kelly_safe()
-        price_value = entry_price.value
-    else:
-        price_value = float(entry_price)
+    # DT#5 P10E: strict — assert_kelly_safe() runs unconditionally.
+    entry_price.assert_kelly_safe()
+    price_value = entry_price.value
 
     if price_value <= 0.0 or price_value >= 1.0:
         return 0.0

@@ -170,9 +170,14 @@ class TestKellyFullCascadeWithSize:
             drawdown_pct=0.15,
             max_drawdown=0.20,
         )
+        from src.contracts.execution_price import ExecutionPrice
+        ep = ExecutionPrice(
+            value=0.40, price_type="fee_adjusted", fee_deducted=True,
+            currency="probability_units",
+        )
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,
+            entry_price=ep,
             bankroll=bankroll,
             kelly_mult=mult,
         )

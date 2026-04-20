@@ -168,6 +168,7 @@ class TestStoreRoundTrip:
                     f"2026-01-{i+1:02d}",
                     "2026-01-01T00:00:00Z",
                 ),
+                city_obj=NYC,
             )
         conn.commit()
         _ensure_auth_verified(conn)
@@ -296,6 +297,7 @@ class TestDecisionGroupAccounting:
                         target_date,
                         forecast_available_at,
                     ),
+                    city_obj=NYC,
                 )
         conn.commit()
         _ensure_auth_verified(conn)
@@ -355,6 +357,7 @@ class TestDecisionGroupAccounting:
                 "2026-01-01",
                 "2025-12-30T00:00:00Z",
             ),
+            city_obj=NYC,
         )
         _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
@@ -399,6 +402,7 @@ class TestDecisionGroupAccounting:
                 "2026-01-01",
                 "2025-12-30T00:00:00Z",
             ),
+            city_obj=NYC,
         )
         _ensure_auth_verified(conn)
 
@@ -442,6 +446,7 @@ class TestDecisionGroupAccounting:
                         "2025-12-30T00:00:00Z",
                         f"test_calibration_manager_v1_lead_{lead_days:g}",
                     ),
+                    city_obj=NYC,
                 )
 
         _ensure_auth_verified(conn)
@@ -499,6 +504,7 @@ class TestDecisionGroupAccounting:
                         f"2026-01-{group_idx + 1:02d}",
                         f"2025-12-{group_idx + 20:02d}T00:00:00Z",
                     ),
+                    city_obj=NYC,
                 )
         _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
@@ -544,6 +550,7 @@ class TestDecisionGroupAccounting:
                 forecast_available_at="2025-12-30T00:00:00Z",
                 settlement_value=40.0,
                 decision_group_id=group_id,
+                city_obj=NYC,
             )
         _ensure_auth_verified(conn)
         with pytest.raises(ValueError, match="collision"):
@@ -576,6 +583,7 @@ class TestDecisionGroupAccounting:
                 ),
                 bin_source="canonical_v1",
                 authority="VERIFIED",
+                city_obj=NYC,
             )
 
         assert _fit_from_pairs(conn, "US-Northeast", "DJF") is None
@@ -768,6 +776,7 @@ class TestBlockedOOSCalibration:
                     target_date,
                     forecast_available_at,
                 ),
+                city_obj=NYC,
             )
 
     def test_blocked_oos_returns_report_with_metrics(self, tmp_path):

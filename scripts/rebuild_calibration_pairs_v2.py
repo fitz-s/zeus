@@ -304,6 +304,7 @@ def _process_snapshot_v2(
             authority="VERIFIED",
             causality_status="OK",
             snapshot_id=snapshot["snapshot_id"],
+            city_obj=city,
         )
         pairs_this_snapshot += 1
 

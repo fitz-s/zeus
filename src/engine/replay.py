@@ -1179,7 +1179,8 @@ def _replay_one_settlement(
         _ = None.selected_method
     from src.calibration.manager import get_calibrator
     from src.strategy.fdr_filter import fdr_filter
-    from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+    from src.strategy.kelly import dynamic_kelly_mult
+    from src.engine.evaluator import _size_at_execution_price_boundary, _default_weather_fee_rate
     from src.strategy.market_analysis import MarketAnalysis
     from src.strategy.market_fusion import compute_alpha
     from src.calibration.manager import season_from_month
@@ -1358,11 +1359,17 @@ def _replay_one_settlement(
                 portfolio_heat=0.0,
                 drawdown_pct=0.0,
             )
-            size_usd = kelly_size(
-                edge.p_posterior,
-                edge.entry_price,
-                bankroll=settings.capital_base_usd,
-                kelly_mult=k_mult,
+            # P10E: route through the evaluator seam so replay uses typed
+            # ExecutionPrice (fee-adjusted) rather than a bare float.
+            # _default_weather_fee_rate() mirrors the live-evaluation path.
+            _replay_fee_rate = _default_weather_fee_rate()
+            size_usd = _size_at_execution_price_boundary(
+                p_posterior=edge.p_posterior,
+                entry_price=edge.entry_price,
+                fee_rate=_replay_fee_rate,
+                sizing_bankroll=settings.capital_base_usd,
+                kelly_multiplier=k_mult,
+                safety_cap_usd=None,
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:

@@ -288,7 +288,7 @@ def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | No
         )
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:
-        deps.logger.debug("Canonical entry dual-write skipped for %s: %s", pos.trade_id, exc)
+        deps.logger.warning("CANONICAL_DUAL_WRITE_SKIPPED trade_id=%s reason=%s", pos.trade_id, exc)
         return False
 
     return True

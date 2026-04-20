@@ -449,6 +449,12 @@ def test_r3_store_add_pair_raises_without_decision_group_id():
                 bias_corrected INTEGER
             )
         """)
+        from src.config import City
+        nyc = City(
+            name="NYC", lat=40.7772, lon=-73.8726,
+            timezone="America/New_York", cluster="NYC",
+            settlement_unit="F", wu_station="KLGA",
+        )
         with pytest.raises((TypeError, ValueError, sqlite3.IntegrityError)):
             store_module.add_calibration_pair(
                 conn,
@@ -462,6 +468,7 @@ def test_r3_store_add_pair_raises_without_decision_group_id():
                 cluster="NE",
                 forecast_available_at="2024-01-12T12:00:00Z",
                 decision_group_id=None,  # MUST be rejected
+                city_obj=nyc,
             )
 
 

@@ -222,15 +222,22 @@ class TestNoBareFloatAtKellyBoundary:
             "This documents the D3 systematic Kelly oversizing."
         )
 
-    def test_kelly_size_remains_numeric_kernel(self):
-        """Kelly stays numeric; evaluator owns the ExecutionPrice boundary."""
+    def test_kelly_size_with_typed_entry_price(self):
+        """Kelly accepts typed ExecutionPrice; evaluator owns the wrapping boundary."""
+        from src.contracts.execution_price import ExecutionPrice
+        ep = ExecutionPrice(
+            value=0.40,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        )
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,
+            entry_price=ep,
             bankroll=1000.0,
             kelly_mult=0.25,
         )
-        assert size > 0.0, "kelly_size remains a numeric kernel behind the evaluator seam"
+        assert size > 0.0, "kelly_size with valid ExecutionPrice returns positive size"
 
 
 # ---------------------------------------------------------------------------
@@ -270,19 +277,14 @@ class TestNoBareFloatInExitTriggerThresholds:
             "P9 requires thresholds traced to ExpiringAssumption or ProvenanceRecord."
         )
 
-    def test_kelly_size_entry_price_accepts_execution_price(self):
-        """Phase 9B DT#5 / R-BW (stale-antibody flip 2026-04-18):
-        kelly_size.entry_price annotation is now `float | ExecutionPrice` —
-        polymorphic with structural enforcement when typed. Pre-P9B this test
-        was named `..._currently_bare_float_annotation` and documented the
-        INV-12 violation as the known current state; P9B activates the contract
-        (kelly_size calls assert_kelly_safe() internally on ExecutionPrice)
-        without breaking backward-compat for unit-test callers.
+    def test_kelly_size_entry_price_requires_execution_price(self):
+        """Phase 10E DT#5 / R-BW (strict-antibody flip 2026-04-20):
+        kelly_size.entry_price annotation is now strictly `ExecutionPrice` —
+        bare float backward-compat is REMOVED. Pre-P10E this was a union
+        `float | ExecutionPrice`; P10E tightens to ExecutionPrice-only per R10.
 
         Antibody shape (structural AST): parse kelly.py and assert
-        `entry_price` has a union annotation mentioning both `float` and
-        `ExecutionPrice`. If a future phase tightens to strict
-        ExecutionPrice-only, update this test + docstring together.
+        `entry_price` annotation is EXACTLY `ExecutionPrice` (no `float |`).
         """
         source = KELLY_PY.read_text()
         tree = ast.parse(source)
@@ -293,19 +295,23 @@ class TestNoBareFloatInExitTriggerThresholds:
                         ann = arg.annotation
                         if ann is None:
                             pytest.fail(
-                                "Phase 9B R-BW: kelly_size.entry_price has no "
-                                "annotation. Must be `float | ExecutionPrice`."
+                                "Phase 10E R-BW: kelly_size.entry_price has no "
+                                "annotation. Must be `ExecutionPrice` (strict)."
                             )
                         ann_text = ast.unparse(ann)
-                        has_float = "float" in ann_text
+                        has_bare_float_union = "float" in ann_text and "|" in ann_text
                         has_execution_price = "ExecutionPrice" in ann_text
-                        assert has_float and has_execution_price, (
-                            f"Phase 9B R-BW: kelly_size.entry_price annotation "
-                            f"must include both `float` (backward-compat) and "
-                            f"`ExecutionPrice` (DT#5 enforcement); got: {ann_text!r}"
+                        assert has_execution_price, (
+                            f"Phase 10E R-BW: kelly_size.entry_price annotation "
+                            f"must be `ExecutionPrice` (strict); got: {ann_text!r}"
+                        )
+                        assert not has_bare_float_union, (
+                            f"Phase 10E R-BW: kelly_size.entry_price must NOT be "
+                            f"a float union — bare-float path removed in P10E; "
+                            f"got: {ann_text!r}"
                         )
                         return
                 pytest.fail(
-                    "Phase 9B R-BW: kelly_size signature has no entry_price param."
+                    "Phase 10E R-BW: kelly_size signature has no entry_price param."
                 )
         pytest.skip("kelly_size not found in kelly.py")

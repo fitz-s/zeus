@@ -53,6 +53,7 @@ class TestCalibrationPairRequiresMetricIdentity:
         but TypeError specifically means the signature contract is violated.
         """
         from src.calibration.store import add_calibration_pair_v2
+        from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = sqlite3.connect(":memory:")
@@ -61,6 +62,12 @@ class TestCalibrationPairRequiresMetricIdentity:
         from src.state.schema.v2_schema import apply_v2_schema
         init_schema(conn)
         apply_v2_schema(conn)
+
+        nyc = City(
+            name="NYC", lat=40.7772, lon=-73.8726,
+            timezone="America/New_York", cluster="NYC",
+            settlement_unit="F", wu_station="KLGA",
+        )
 
         # Must not raise TypeError (may raise IntegrityError or similar for data reasons)
         try:
@@ -79,6 +86,7 @@ class TestCalibrationPairRequiresMetricIdentity:
                 training_allowed=True,
                 data_version="tigge_mx2t6_local_calendar_day_max_v1",
                 metric_identity=HIGH_LOCALDAY_MAX,
+                city_obj=nyc,
             )
         except TypeError:
             pytest.fail(

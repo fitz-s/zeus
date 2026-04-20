@@ -98,6 +98,10 @@ PARIS_C = _FakeCity(
     "Paris", "C", wu_station="LFPB", cluster="Paris", lat=48.85, lon=2.35,
     timezone="Europe/Paris",
 )
+CHICAGO_F = _FakeCity(
+    "Chicago", "F", wu_station="KORD", cluster="Chicago", lat=41.98, lon=-87.9,
+    timezone="America/Chicago",
+)
 
 
 def _sem_f():
@@ -337,6 +341,7 @@ def test_R7_delete_canonical_slice_cleans_linked_groups_preserves_legacy(mem_db)
         forecast_available_at="2025-06-14T00:00:00Z",
         decision_group_id="NYC|2025-06-15|canon",
         bin_source="canonical_v1",
+        city_obj=NYC_F,
     )
     add_calibration_pair(
         mem_db,
@@ -351,6 +356,7 @@ def test_R7_delete_canonical_slice_cleans_linked_groups_preserves_legacy(mem_db)
         forecast_available_at="2025-06-14T00:00:00Z",
         decision_group_id="Chicago|2025-06-15|legacy",
         bin_source="legacy",
+        city_obj=CHICAGO_F,
     )
     mem_db.executemany(
         """
@@ -444,6 +450,7 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
             "legacy_test",
         ),
         bin_source="legacy",
+        city_obj=PARIS_C,
     )
     add_calibration_pair(
         mem_db,
@@ -463,6 +470,7 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
             "canonical_test",
         ),
         bin_source="canonical_v1",
+        city_obj=PARIS_C,
     )
     mem_db.commit()
 

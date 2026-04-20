@@ -31,6 +31,12 @@ class Day0ObservationContext:
 
     low_so_far is required and may never be None — providers that cannot
     produce it must raise ObservationUnavailableError instead.
+
+    causality_status: INV-16 enforcement. "OK" means the low-track slot is
+    causal (the day has not yet started at the decision time). Any other value
+    (e.g., "N/A_CAUSAL_DAY_ALREADY_STARTED") causes the evaluator to route
+    through a separate rejection gate instead of forecast Platt lookup.
+    Added P10E S3a.
     """
 
     current_temp: float
@@ -39,6 +45,7 @@ class Day0ObservationContext:
     source: str
     observation_time: object  # raw timestamp — str | int | float | None
     unit: str
+    causality_status: str = "OK"
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:

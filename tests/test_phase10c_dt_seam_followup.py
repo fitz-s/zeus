@@ -411,7 +411,10 @@ class TestRCTSettlementSemanticsDispatch:
         )
 
     def test_r_ct_3_ast_city_obj_in_both_signatures(self):
-        """R-CT.3: AST: both add_calibration_pair* functions have city_obj: City | None = None."""
+        """R-CT.3: AST: both add_calibration_pair* functions have city_obj as required kwonly arg.
+
+        P10E: city_obj is no longer optional (City, no default). Still in kwonlyargs.
+        """
         source = _read_store_source()
         tree = ast.parse(source)
 
