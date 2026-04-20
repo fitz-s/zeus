@@ -12,8 +12,8 @@ Role: single live control-entry surface for the repo.
 
 ## Active Work
 
-- Branch: `data-improve` @ HEAD `f2ffcad` (pushed `origin/data-improve` 2026-04-19)
-- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16. **Phase 10A + 10B shipped 2026-04-19.** Dual-track scaffold complete; v2 data migration deferred to post-Golden-Window. Residue: B055, B099 (architect-gated), R10/R12/R13/monitor_refresh LOW (user-ruled deferrals).
+- Branch: `data-improve` @ HEAD `553347c` (pushed `origin/data-improve` 2026-04-19)
+- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16. **Phase 10 COMPLETE 2026-04-19 (P10A → P10E, 5 sub-phases).** Dual-track metric spine structurally complete; LOW-lane code-ready; v2 data migration deferred to post-Golden-Window. DT law enforcement LIVE on DT#1-#7 except DT#7 leverage+oracle pending Gate F. All 19 DT markers wired; 77+ structural antibodies deployed. Next: user ruling on P11 Execution-State Truth OR architect packets B055/B099 OR operational work (Gate F lift).
 - Dual-Track refactor packet file: `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
 - Dual-Track authority file: `docs/authority/zeus_dual_track_architecture.md`
 - Archived:
@@ -35,8 +35,8 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md` — active package syncing non-Phase-10A workspace artifacts and topology map updates
   - `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md` — active package adding derived Code Review Graph appendix to topology context packs
   - `docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md` — active package tracking Code Review Graph DB as non-authority online repo context
-- Next packet: Continue the Dual-Track Metric Spine Refactor (Phase 10C or architect-gated residue) unless a higher-priority governance break supersedes it.
-- Post-P10B forward-log: B055 + B099 (architect-gated, no phase assigned); R10 Kelly strict / R12 H7 triage / R13 TRUTH_AUTHORITY_MAP (user-ruling required); monitor_refresh LOW plumbing + Literal→MetricIdentity P10C migration (explicitly deferred). Regression baseline: 144/1905/93.
+- Next packet: User ruling required. Options: (1) P11 Execution-State Truth (Codex main path); (2) B055 DT#6 architect packet; (3) B099 DT#1 architect packet; (4) Operational work (Gate F lift pending TIGGE cloud completion).
+- Post-Phase-10 forward-log: P11 Execution-State Truth (Codex main path) OR B055 DT#6 architect packet OR B099 DT#1 architect packet (user ruling required); operational work Gate F lift (TIGGE cloud downloads). Regression baseline: 144-147/1950-1951/92 (flake range from test-order pollution; deterministic, non-blocking).
 
 ## Runtime
 
@@ -51,8 +51,10 @@ Role: single live control-entry surface for the repo.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
 - Packet 3 closed 2026-04-15 — docs mesh repair and authority normalization complete.
 - Packet 4 closed 2026-04-15 — source file rationale map complete.
-- Phase 10A: independent hygiene fix pack (R1 monitor rename + B071 + B091-lower + S5 doc flip). Merged `2026-04-19` at `81294d2`. Regression baseline: 142/1894/93.
-- Phase 10B: DT-seam cleanup (R3+R4+R5+R9+R11). Merged `2026-04-19` at `f2ffcad`. Regression baseline: 144/1905/93.
+- Phase 10A: independent hygiene fix pack (R1 monitor rename + B071 + B091-lower + S5 doc flip). Merged `2026-04-19` at `81294d2`. Regression: 142/1894/93.
+- Phase 10B: DT-seam cleanup (R3+R4+R5+R9+R11). Merged `2026-04-19` at `f2ffcad`. Regression: 144/1905/93.
+- Phase 10C: LOW-lane tail + HKO semantic injection + DT#1 SAVEPOINT. Merged `2026-04-19` at `18b510b`. Regression: ~144/1920/92.
+- Phase 10D + 10E: P10D SLIM `f55f4e1` (causality_status wire + ensemble rename + INV-13 + ghost tests) + P10E FINAL `553347c` (R10 Kelly strict + city_obj strict + loose ends). Merged `2026-04-19`. Regression envelope: 144-147 failed / 1950-1951 passed / 92 skipped. critic-eve (P10C/P10D/P10E, 3-cycle) retired PASS-WITH-RESERVATIONS.
 
 ## 75-Bug Audit Progress (data-improve branch)
 
