@@ -132,7 +132,7 @@ strict_issue_codes:
   - code_review_graph_unreadable
   - code_review_graph_stale_head
   - code_review_graph_stale_branch
-  - code_review_graph_tracked_db
+  - code_review_graph_untracked_db
   - code_review_graph_ignore_missing
   - code_review_graph_partial_coverage
   - code_review_graph_dirty_file_stale

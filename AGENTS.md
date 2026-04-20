@@ -225,7 +225,7 @@ execution or evidence use. Machine checks:
 
 ## Code Review Graph
 
-`code-review-graph` is a local derived code-impact cache, not authority. Use it only after topology routing for source/test/script impact; low graph risk never waives planning-lock, manifests, receipts, topology, authority order, or truth rules. Check: `python scripts/topology_doctor.py --code-review-graph-status --changed-files <files>`.
+`code-review-graph` is a tracked derived online-context artifact, not authority. The tracked `.code-review-graph/graph.db` lets online Pro/review agents inspect repo structure without local disk access. Use it only after topology routing for source/test/script impact; low graph risk never waives planning-lock, manifests, receipts, topology, authority order, or truth rules. Check: `python scripts/topology_doctor.py --code-review-graph-status --changed-files <files>`.
 
 ## Mesh Maintenance
 

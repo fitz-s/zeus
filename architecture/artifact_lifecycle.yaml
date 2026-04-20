@@ -98,10 +98,17 @@ artifact_classes:
       - state/
       - .omx/
       - .omc/
-      - .code-review-graph/
+      - .code-review-graph/*
     archive_paths:
       - not_archived
     record_required: false
+  - id: tracked_online_context_artifact
+    purpose: Derived artifact tracked so online review/pro models can inspect repo structure without local disk access.
+    active_paths:
+      - .code-review-graph/graph.db
+    archive_paths:
+      - not_archived
+    record_required: true
 
 classification_rules:
   - id: active_operations_packet
