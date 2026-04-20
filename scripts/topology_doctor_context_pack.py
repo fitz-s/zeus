@@ -1,4 +1,7 @@
 """Context-pack and impact builder family for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-20; last_reused=2026-04-20
+# Purpose: Build task-shaped context packets and derived review/debug appendices.
+# Reuse: Keep generated context provisional; do not promote graph or lore evidence to authority here.
 
 from __future__ import annotations
 
@@ -480,6 +483,7 @@ def build_debug_context_pack(api: Any, task: str, files: list[str]) -> dict[str,
         "red_green_checks": debug_red_green_checks(files=target_files, impact=impact, claims=claims),
         "coverage_gaps": gaps,
         "downstream_risks": risks,
+        "code_impact_graph": api.build_code_impact_graph(target_files, task=task),
         "tests_required": impact.get("aggregate", {}).get("tests_required", []),
         "static_checks": impact.get("aggregate", {}).get("static_checks", []),
         "debug_questions": context_pack_questions(profile, impact, claims, gaps),
@@ -537,6 +541,7 @@ def build_package_review_context_pack(api: Any, task: str, files: list[str]) -> 
         "cross_slice_questions": context_pack_questions(profile, impact, claims, gaps),
         "coverage_gaps": gaps,
         "downstream_risks": risks,
+        "code_impact_graph": api.build_code_impact_graph(changed_files, task=task),
         "tests_required": impact.get("aggregate", {}).get("tests_required", []),
         "static_checks": impact.get("aggregate", {}).get("static_checks", []),
         "lore": layered_history_lore(api, task, changed_files),

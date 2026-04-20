@@ -33,6 +33,7 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/task_2026-04-16_function_naming_freshness/plan.md` — small completed governance package for function naming and changed-file script/test freshness metadata
   - `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md` — active package for Code Review Graph topology-first integration and Codex MCP safety
   - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md` — active package syncing non-Phase-10A workspace artifacts and topology map updates
+  - `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md` — active package adding derived Code Review Graph appendix to topology context packs
 - Next packet: Continue the Dual-Track Metric Spine Refactor (Phase 10C or architect-gated residue) unless a higher-priority governance break supersedes it.
 - Post-P10B forward-log: B055 + B099 (architect-gated, no phase assigned); R10 Kelly strict / R12 H7 triage / R13 TRUTH_AUTHORITY_MAP (user-ruling required); monitor_refresh LOW plumbing + Literal→MetricIdentity P10C migration (explicitly deferred). Regression baseline: 144/1905/93.
 

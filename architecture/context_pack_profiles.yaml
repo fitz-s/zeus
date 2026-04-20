@@ -39,6 +39,7 @@ profiles:
       - cross_slice_questions
       - coverage_gaps
       - downstream_risks
+      - code_impact_graph
       - tests_required
       - static_checks
       - route_health
@@ -80,6 +81,7 @@ profiles:
       - red_green_checks
       - coverage_gaps
       - downstream_risks
+      - code_impact_graph
       - route_health
       - repo_health
       - context_assumption

@@ -614,6 +614,10 @@ def run_code_review_graph_status(changed_files: list[str] | None = None) -> Stri
     return _code_review_graph_checks().run_code_review_graph_status(sys.modules[__name__], changed_files)
 
 
+def build_code_impact_graph(files: list[str], task: str = "") -> dict[str, Any]:
+    return _code_review_graph_checks().build_code_impact_graph(sys.modules[__name__], files, task=task)
+
+
 def _packet_prefill_checks():
     try:
         from scripts import topology_doctor_packet_prefill

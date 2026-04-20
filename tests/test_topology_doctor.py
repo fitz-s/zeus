@@ -239,6 +239,74 @@ def _write_code_review_graph_db(path, *, branch="data-improve", head="HEADSHA", 
         conn.close()
 
 
+def _write_code_review_graph_impact_db(path, *, branch="data-improve", head="HEADSHA", file_hash, file_path):
+    import sqlite3
+
+    caller_path = str(path.parent.parent / "src" / "caller.py")
+    test_path = str(path.parent.parent / "tests" / "test_example.py")
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT NOT NULL UNIQUE,
+                file_path TEXT NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                is_test INTEGER DEFAULT 0,
+                file_hash TEXT
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                source_qualified TEXT NOT NULL,
+                target_qualified TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                line INTEGER DEFAULT 0
+            );
+            CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE communities (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE risk_index (node_id INTEGER PRIMARY KEY);
+            """
+        )
+        conn.executemany(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            [
+                ("git_branch", branch),
+                ("git_head_sha", head),
+                ("last_updated", "2026-04-20T00:00:00"),
+                ("schema_version", "9"),
+            ],
+        )
+        nodes = [
+            ("File", file_path, file_path, file_path, 1, 10, 0, file_hash),
+            ("Function", "target_func", f"{file_path}::target_func", file_path, 2, 5, 0, file_hash),
+            ("Function", "caller_func", f"{caller_path}::caller_func", caller_path, 3, 8, 0, "caller-hash"),
+            ("Test", "test_target_func", f"{test_path}::test_target_func", test_path, 4, 9, 1, "test-hash"),
+        ]
+        conn.executemany(
+            "INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, line_end, is_test, file_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            nodes,
+        )
+        conn.executemany(
+            "INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("CALLS", f"{caller_path}::caller_func", f"{file_path}::target_func", caller_path, 4),
+                ("TESTED_BY", f"{test_path}::test_target_func", f"{file_path}::target_func", test_path, 5),
+            ],
+        )
+        conn.execute("INSERT INTO flows DEFAULT VALUES")
+        conn.execute("INSERT INTO communities DEFAULT VALUES")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_cli_json_parity_for_code_review_graph_status(monkeypatch, tmp_path):
     root = tmp_path
     (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
@@ -298,6 +366,43 @@ def test_code_review_graph_status_blocks_tracked_graph_db(monkeypatch, tmp_path)
 
     assert not result.ok
     assert any(issue.code == "code_review_graph_tracked_db" for issue in result.issues)
+
+
+def test_code_impact_graph_is_not_applicable_for_docs_only():
+    payload = topology_doctor.build_code_impact_graph(["docs/README.md"], task="review docs")
+
+    assert payload["authority_status"] == "derived_code_impact_not_authority"
+    assert payload["applicable"] is False
+    assert payload["usable"] is False
+    assert payload["reason"] == "no source/test/script code files in this context pack"
+
+
+def test_build_code_impact_graph_extracts_callers_and_tests(monkeypatch, tmp_path):
+    root = tmp_path
+    source = root / "src" / "example.py"
+    source.parent.mkdir()
+    source.write_text("def target_func():\n    return 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    _write_code_review_graph_impact_db(
+        root / ".code-review-graph" / "graph.db",
+        file_hash=topology_doctor._code_review_graph_checks().sha256_file(source),
+        file_path=source.resolve().as_posix(),
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["src/example.py"])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {"src/example.py": "modified"})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+
+    payload = topology_doctor.build_code_impact_graph(["src/example.py"], task="review code")
+
+    assert payload["applicable"] is True
+    assert payload["usable"] is True
+    assert payload["changed_nodes"][0]["name"] == "target_func"
+    assert payload["callers"][0]["callers"][0]["name"] == "caller_func"
+    assert payload["tests_for"][0]["tests"][0]["name"] == "test_target_func"
+    assert payload["test_gaps"] == []
 
 
 def test_cli_json_parity_for_closeout_command(monkeypatch):

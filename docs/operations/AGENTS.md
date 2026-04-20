@@ -14,6 +14,7 @@ Live control surface — current state pointer, active work packets. This is whe
 | `task_2026-04-16_function_naming_freshness/` | Small governance package for function naming and script/test freshness metadata |
 | `task_2026-04-19_code_review_graph_topology_bridge/` | Active package coordinating local Code Review Graph cache with Zeus topology-first rules |
 | `task_2026-04-19_workspace_artifact_sync/` | Active package for syncing non-Phase-10A workspace artifacts and topology map updates |
+| `task_2026-04-20_code_impact_graph_context_pack/` | Active package adding derived Code Review Graph appendix to topology context packs |
 | `data_rebuild_plan.md` | Active upstream data-rebuild plan; do not execute from topology packets |
 | `runtime_artifact_inventory.md` | Repo-facing inventory for `.omx/.omc` planning artifacts that must not live only in ignored runtime state |
 

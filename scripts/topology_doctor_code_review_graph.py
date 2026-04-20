@@ -15,7 +15,16 @@ from typing import Any
 
 GRAPH_DIR = ".code-review-graph"
 GRAPH_DB = ".code-review-graph/graph.db"
-CODE_PATTERNS = ("src/**/*.py", "scripts/*.py", "scripts/*.sh", "tests/test_*.py")
+CODE_PATTERNS = ("src/*.py", "src/**/*.py", "scripts/*.py", "scripts/*.sh", "tests/test_*.py")
+GRAPH_UNUSABLE_WARNING_CODES = {
+    "code_review_graph_missing",
+    "code_review_graph_unreadable",
+    "code_review_graph_stale_head",
+    "code_review_graph_stale_branch",
+    "code_review_graph_partial_coverage",
+    "code_review_graph_dirty_file_stale",
+    "code_review_graph_git_status_failed",
+}
 
 
 def path_matches_any(path: str, patterns: tuple[str, ...]) -> bool:
@@ -231,3 +240,202 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
 
     blocking = [issue for issue in issues if issue.severity == "error"]
     return api.StrictResult(ok=not blocking, issues=issues)
+
+
+def relativize(api: Any, path: str) -> str:
+    try:
+        return Path(path).resolve().relative_to(api.ROOT).as_posix()
+    except ValueError:
+        return path
+
+
+def node_payload(api: Any, row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "kind": row["kind"],
+        "path": relativize(api, row["file_path"]),
+        "line_start": row["line_start"],
+        "line_end": row["line_end"],
+        "qualified_name": row["qualified_name"],
+    }
+
+
+def graph_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        "files": scalar(conn, "SELECT COUNT(*) FROM nodes WHERE kind = 'File'"),
+        "nodes": scalar(conn, "SELECT COUNT(*) FROM nodes"),
+        "edges": scalar(conn, "SELECT COUNT(*) FROM edges"),
+        "flows": scalar(conn, "SELECT COUNT(*) FROM flows"),
+        "communities": scalar(conn, "SELECT COUNT(*) FROM communities"),
+    }
+
+
+def rows_for_file(conn: sqlite3.Connection, file_path: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT name, kind, qualified_name, file_path, line_start, line_end, is_test
+        FROM nodes
+        WHERE file_path = ? AND kind != 'File'
+        ORDER BY COALESCE(line_start, 0), name
+        """,
+        (file_path,),
+    ).fetchall()
+
+
+def related_nodes(
+    conn: sqlite3.Connection,
+    *,
+    edge_kind: str,
+    target_qualified: str,
+    target_name: str,
+    limit: int = 8,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT DISTINCT n.name, n.kind, n.qualified_name, n.file_path, n.line_start, n.line_end, n.is_test
+        FROM edges e
+        JOIN nodes n ON n.qualified_name = e.source_qualified
+        WHERE e.kind = ? AND e.target_qualified IN (?, ?)
+        ORDER BY n.file_path, COALESCE(n.line_start, 0), n.name
+        LIMIT ?
+        """,
+        (edge_kind, target_qualified, target_name, limit),
+    ).fetchall()
+
+
+def impacted_files_for_nodes(api: Any, conn: sqlite3.Connection, qualified_names: list[str], limit: int = 30) -> list[str]:
+    if not qualified_names:
+        return []
+    placeholders = ",".join("?" for _ in qualified_names)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT COALESCE(n.file_path, e.file_path) AS file_path
+        FROM edges e
+        LEFT JOIN nodes n
+          ON n.qualified_name = CASE
+            WHEN e.source_qualified IN ({placeholders}) THEN e.target_qualified
+            ELSE e.source_qualified
+          END
+        WHERE e.source_qualified IN ({placeholders})
+           OR e.target_qualified IN ({placeholders})
+        LIMIT ?
+        """,
+        [*qualified_names, *qualified_names, *qualified_names, limit],
+    ).fetchall()
+    return sorted(
+        {
+            relativize(api, row["file_path"])
+            for row in rows
+            if row["file_path"]
+        }
+    )
+
+
+def build_code_impact_graph(api: Any, files: list[str], task: str = "") -> dict[str, Any]:
+    target_files = sorted(dict.fromkeys(files))
+    code_files = [path for path in target_files if path_matches_any(path, CODE_PATTERNS)]
+    payload: dict[str, Any] = {
+        "authority_status": "derived_code_impact_not_authority",
+        "task": task,
+        "target_files": target_files,
+        "code_files": code_files,
+        "applicable": bool(code_files),
+        "usable": False,
+        "graph_health": {},
+        "changed_nodes": [],
+        "callers": [],
+        "tests_for": [],
+        "test_gaps": [],
+        "impacted_files": [],
+        "limitations": [
+            "Graph output is derived review evidence only.",
+            "A low graph risk result never waives topology gates, planning-lock, manifests, receipts, or canonical truth checks.",
+        ],
+    }
+    if not code_files:
+        payload["reason"] = "no source/test/script code files in this context pack"
+        return payload
+
+    status = api.run_code_review_graph_status(code_files)
+    health_issues = [api.asdict(issue) for issue in status.issues]
+    payload["graph_health"] = {
+        "ok": status.ok,
+        "issue_count": len(status.issues),
+        "blocking_count": len([issue for issue in status.issues if issue.severity == "error"]),
+        "warning_count": len([issue for issue in status.issues if issue.severity == "warning"]),
+        "issues": health_issues,
+    }
+    if (
+        not status.ok
+        or any(issue.code in GRAPH_UNUSABLE_WARNING_CODES for issue in status.issues)
+    ):
+        payload["reason"] = "graph cache is unavailable, stale, or missing target code coverage"
+        return payload
+
+    try:
+        conn = open_graph_db(api)
+    except sqlite3.Error as exc:
+        payload["reason"] = f"graph DB unreadable: {exc}"
+        return payload
+
+    try:
+        meta = metadata(conn)
+        payload["graph_metadata"] = {
+            "git_branch": meta.get("git_branch", ""),
+            "git_head_sha": meta.get("git_head_sha", ""),
+            "last_updated": meta.get("last_updated", ""),
+            "schema_version": meta.get("schema_version", ""),
+            "counts": graph_counts(conn),
+        }
+        changed_rows: list[sqlite3.Row] = []
+        for rel_path in code_files:
+            abs_path = (api.ROOT / rel_path).resolve().as_posix()
+            changed_rows.extend(rows_for_file(conn, abs_path))
+        payload["changed_nodes"] = [node_payload(api, row) for row in changed_rows[:40]]
+
+        callers: list[dict[str, Any]] = []
+        tests_for: list[dict[str, Any]] = []
+        test_gaps: list[dict[str, Any]] = []
+        qualified_names: list[str] = []
+        for row in changed_rows:
+            qualified = row["qualified_name"]
+            name = row["name"]
+            qualified_names.append(qualified)
+            if row["kind"] not in {"Function", "Class"} or row["is_test"]:
+                continue
+            caller_rows = related_nodes(
+                conn,
+                edge_kind="CALLS",
+                target_qualified=qualified,
+                target_name=name,
+            )
+            test_rows = related_nodes(
+                conn,
+                edge_kind="TESTED_BY",
+                target_qualified=qualified,
+                target_name=name,
+            )
+            if caller_rows:
+                callers.append(
+                    {
+                        "target": node_payload(api, row),
+                        "callers": [node_payload(api, caller) for caller in caller_rows],
+                    }
+                )
+            if test_rows:
+                tests_for.append(
+                    {
+                        "target": node_payload(api, row),
+                        "tests": [node_payload(api, test) for test in test_rows],
+                    }
+                )
+            else:
+                test_gaps.append(node_payload(api, row))
+        payload["callers"] = callers[:20]
+        payload["tests_for"] = tests_for[:20]
+        payload["test_gaps"] = test_gaps[:20]
+        payload["impacted_files"] = impacted_files_for_nodes(api, conn, qualified_names)
+        payload["usable"] = True
+        return payload
+    finally:
+        conn.close()
