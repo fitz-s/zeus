@@ -134,11 +134,11 @@ coverage_roots:
     authority_role: scratch_artifact
     forbidden_misread: OMC state is session/runtime context, not repo authority.
   - path: ".code-review-graph"
-    status: scratch
-    scope: runtime
-    zone: local_code_graph_cache
+    status: generated
+    scope: derived_context
+    zone: online_code_graph_context
     authority_role: derived_diagnostic
-    forbidden_misread: Code Review Graph is a local code-impact cache; it never authorizes topology, manifests, planning-lock, or canonical truth.
+    forbidden_misread: Code Review Graph is tracked online context for review/model orientation; it never authorizes topology, manifests, planning-lock, or canonical truth.
   - path: ".claude/worktrees"
     status: shadow
     scope: shadow

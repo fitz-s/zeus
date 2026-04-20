@@ -13,7 +13,9 @@ logs/*.log
 logs/*.err
 .omx/
 .omc/
-.code-review-graph/
+.code-review-graph/*
+!.code-review-graph/.gitignore
+!.code-review-graph/graph.db
 equity_curve.png
 .DS_Store
 __pycache__/

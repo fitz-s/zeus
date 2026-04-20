@@ -1,7 +1,7 @@
 """Code Review Graph status checker family for topology_doctor."""
 # Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
-# Purpose: Validate local code-review-graph cache freshness without making it authority.
-# Reuse: Keep this lane warning-only; graph evidence must not bypass Zeus topology gates.
+# Purpose: Validate tracked code-review-graph online context without making it authority.
+# Reuse: Keep freshness/coverage warning-first; graph evidence must not bypass Zeus topology gates.
 
 from __future__ import annotations
 
@@ -56,14 +56,13 @@ def graph_db_tracked(api: Any) -> bool:
 def graph_ignore_guard_present(api: Any) -> bool:
     root_gitignore = api.ROOT / ".gitignore"
     if root_gitignore.exists():
-        for raw in root_gitignore.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw.strip()
-            if line in {".code-review-graph", ".code-review-graph/"}:
-                return True
+        lines = {raw.strip() for raw in root_gitignore.read_text(encoding="utf-8", errors="ignore").splitlines()}
+        if ".code-review-graph/*" in lines and "!.code-review-graph/graph.db" in lines:
+            return True
     local_gitignore = api.ROOT / GRAPH_DIR / ".gitignore"
     if local_gitignore.exists():
-        text = local_gitignore.read_text(encoding="utf-8", errors="ignore")
-        if "*" in {line.strip() for line in text.splitlines()}:
+        lines = {line.strip() for line in local_gitignore.read_text(encoding="utf-8", errors="ignore").splitlines()}
+        if "*" in lines and "!graph.db" in lines:
             return True
     return False
 
@@ -126,12 +125,12 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
             ],
         )
 
-    if graph_db_tracked(api):
+    if not graph_db_tracked(api):
         issues.append(
             api._issue(
-                "code_review_graph_tracked_db",
+                "code_review_graph_untracked_db",
                 GRAPH_DB,
-                "graph.db contains absolute paths and must remain untracked",
+                "graph.db is the tracked derived online-context artifact; stage it or rebuild before relying on online graph context",
             )
         )
     if not graph_ignore_guard_present(api):

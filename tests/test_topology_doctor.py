@@ -309,10 +309,10 @@ def _write_code_review_graph_impact_db(path, *, branch="data-improve", head="HEA
 
 def test_cli_json_parity_for_code_review_graph_status(monkeypatch, tmp_path):
     root = tmp_path
-    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
     _write_code_review_graph_db(root / ".code-review-graph" / "graph.db")
     monkeypatch.setattr(topology_doctor, "ROOT", root)
-    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
     monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
     from scripts import topology_doctor_code_review_graph
 
@@ -332,14 +332,14 @@ def test_code_review_graph_status_warns_on_dirty_file_hash_mismatch(monkeypatch,
     script = root / "scripts" / "example.py"
     script.parent.mkdir()
     script.write_text("print('new')\n", encoding="utf-8")
-    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
     _write_code_review_graph_db(
         root / ".code-review-graph" / "graph.db",
         file_path=script.resolve().as_posix(),
         file_hash="old-hash",
     )
     monkeypatch.setattr(topology_doctor, "ROOT", root)
-    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
     monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {"scripts/example.py": "modified"})
     from scripts import topology_doctor_code_review_graph
 
@@ -351,12 +351,12 @@ def test_code_review_graph_status_warns_on_dirty_file_hash_mismatch(monkeypatch,
     assert any(issue.code == "code_review_graph_dirty_file_stale" for issue in result.issues)
 
 
-def test_code_review_graph_status_blocks_tracked_graph_db(monkeypatch, tmp_path):
+def test_code_review_graph_status_blocks_untracked_graph_db(monkeypatch, tmp_path):
     root = tmp_path
-    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
     _write_code_review_graph_db(root / ".code-review-graph" / "graph.db")
     monkeypatch.setattr(topology_doctor, "ROOT", root)
-    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
     monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
     from scripts import topology_doctor_code_review_graph
 
@@ -365,7 +365,7 @@ def test_code_review_graph_status_blocks_tracked_graph_db(monkeypatch, tmp_path)
     result = topology_doctor.run_code_review_graph_status()
 
     assert not result.ok
-    assert any(issue.code == "code_review_graph_tracked_db" for issue in result.issues)
+    assert any(issue.code == "code_review_graph_untracked_db" for issue in result.issues)
 
 
 def test_code_impact_graph_is_not_applicable_for_docs_only():
@@ -382,7 +382,7 @@ def test_build_code_impact_graph_extracts_callers_and_tests(monkeypatch, tmp_pat
     source = root / "src" / "example.py"
     source.parent.mkdir()
     source.write_text("def target_func():\n    return 1\n", encoding="utf-8")
-    (root / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
     _write_code_review_graph_impact_db(
         root / ".code-review-graph" / "graph.db",
         file_hash=topology_doctor._code_review_graph_checks().sha256_file(source),

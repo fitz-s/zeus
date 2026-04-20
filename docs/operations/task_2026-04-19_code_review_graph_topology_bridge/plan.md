@@ -11,9 +11,16 @@ manifests, route receipts, or canonical truth rules.
 
 ## Decision
 
+Supersession note (2026-04-20): the original P0 decision classified
+`.code-review-graph/` as a local scratch cache. That is superseded for
+`.code-review-graph/graph.db` by
+`docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md`,
+which tracks the DB as a derived online-context artifact for Pro/review agents.
+The non-authority rule remains unchanged.
+
 Implement P0/P1 only in this packet:
 
-- Classify `.code-review-graph/` as local scratch/derived diagnostic cache.
+- Classify `.code-review-graph/` byproducts as local scratch/derived diagnostic cache.
 - Add a warning-first `topology_doctor --code-review-graph-status` lane.
 - Make repository hygiene blocking when `graph.db` is tracked or no ignore guard exists.
 - Expose Codex through a Zeus-owned MCP facade that omits source-writing `apply_refactor_tool`.

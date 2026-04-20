@@ -115,7 +115,7 @@ Prefer these over hand-maintained prose when they exist:
 - `docs/archives/**` — historical evidence only.
 - `docs/reports/` — generated report sink from declared writers only; not a default route.
 - `.omx/context/**` — micro-logs/evidence breadcrumbs, not governing law.
-- `.code-review-graph/**` — local derived code-impact cache; not authority or default-read context.
+- `.code-review-graph/graph.db` — tracked derived online code-impact context; not authority or default-read law. Other `.code-review-graph/**` byproducts stay local scratch.
 - `docs/known_gaps.md` — load only when investigating active blockers.
 - Long math references such as `docs/reference/statistical_methodology.md` and `docs/reference/zeus_math_spec.md` — load when digest/lore routes you there.
 
