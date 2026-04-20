@@ -62,6 +62,8 @@ categories:
     - tests/test_truth_surface_health.py
     - tests/test_tigge_snapshot_p_raw_backfill.py
     - tests/test_wallet_source.py
+    - tests/test_phase10a_hygiene.py
+    - tests/test_phase10b_dt_seam_cleanup.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py

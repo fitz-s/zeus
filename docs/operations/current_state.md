@@ -12,8 +12,8 @@ Role: single live control-entry surface for the repo.
 
 ## Active Work
 
-- Branch: `data-improve`
-- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16, governance + architecture refactor owning metric identity, World DB v2, death-trap remediation law, and low-track activation.
+- Branch: `data-improve` @ HEAD `f2ffcad` (pushed `origin/data-improve` 2026-04-19)
+- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16. **Phase 10A + 10B shipped 2026-04-19.** Dual-track scaffold complete; v2 data migration deferred to post-Golden-Window. Residue: B055, B099 (architect-gated), R10/R12/R13/monitor_refresh LOW (user-ruled deferrals).
 - Dual-Track refactor packet file: `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
 - Dual-Track authority file: `docs/authority/zeus_dual_track_architecture.md`
 - Archived:
@@ -33,7 +33,8 @@ Role: single live control-entry surface for the repo.
   - `docs/operations/task_2026-04-16_function_naming_freshness/plan.md` — small completed governance package for function naming and changed-file script/test freshness metadata
   - `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md` — active package for Code Review Graph topology-first integration and Codex MCP safety
   - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md` — active package syncing non-Phase-10A workspace artifacts and topology map updates
-- Next packet: Continue the Dual-Track Metric Spine Refactor unless a higher-priority governance break supersedes it.
+- Next packet: Continue the Dual-Track Metric Spine Refactor (Phase 10C or architect-gated residue) unless a higher-priority governance break supersedes it.
+- Post-P10B forward-log: B055 + B099 (architect-gated, no phase assigned); R10 Kelly strict / R12 H7 triage / R13 TRUTH_AUTHORITY_MAP (user-ruling required); monitor_refresh LOW plumbing + Literal→MetricIdentity P10C migration (explicitly deferred). Regression baseline: 144/1905/93.
 
 ## Runtime
 
@@ -48,6 +49,8 @@ Role: single live control-entry surface for the repo.
 - Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
 - Packet 3 closed 2026-04-15 — docs mesh repair and authority normalization complete.
 - Packet 4 closed 2026-04-15 — source file rationale map complete.
+- Phase 10A: independent hygiene fix pack (R1 monitor rename + B071 + B091-lower + S5 doc flip). Merged `2026-04-19` at `81294d2`. Regression baseline: 142/1894/93.
+- Phase 10B: DT-seam cleanup (R3+R4+R5+R9+R11). Merged `2026-04-19` at `f2ffcad`. Regression baseline: 144/1905/93.
 
 ## 75-Bug Audit Progress (data-improve branch)
 

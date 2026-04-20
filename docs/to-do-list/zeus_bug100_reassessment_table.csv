@@ -53,7 +53,7 @@ B051,riskguard,src/riskguard/policy.py,K2 失败路径 fail-close,P1,坏 policy 
 B052,riskguard,src/riskguard/riskguard.py,K3 单一真相/authority,P0,loader row 会把缺字段补成 unknown/F/live/0.0，生成“看起来合法”的 Position,L64-L98,PRE_EXISTING_FIX,,NO,strict required field validation at HEAD:L64-69 (P0 pre-fixed)
 B053,riskguard,src/riskguard/riskguard.py,K3 单一真相/authority,P1,RiskGuard 组合了 canonical 仓位与 working-state bankroll 元数据,L101-L120,STILL_OPEN,,NO,mixes canonical positions with working-state capital metadata
 B054,riskguard,src/riskguard/riskguard.py,K8 控制面 fail-safe,P0,trailing loss 参考缺失/不一致时直接返回 RED 且 loss=0.0,L220-L241,PRE_EXISTING_FIX,f6a49e4,NO,trailing loss RED/loss=0 refactored (P0)
-B055,riskguard,src/riskguard/riskguard.py,K4 时间/模式/参考,P1,reference 窗口只看 lookback 附近 2 小时，调度漂移就会退化,L173-L178,STILL_OPEN,PENDING_DT6,NO,2h tolerance unchanged; consolidated into Phase 6 DT#6 graceful degradation
+B055,riskguard,src/riskguard/riskguard.py,K4 时间/模式/参考,P1,reference 窗口只看 lookback 附近 2 小时，调度漂移就会退化,L173-L178,OPEN_DT_BLOCKED,PENDING_DT6,NO,Blocked on DT#6 architect packet. 2h tolerance unchanged; consolidated into Phase 6 DT#6 graceful degradation. Do NOT attempt independent fix.
 B056,signal,src/signal/day0_signal.py,K6 数学/概率语义,P0,ens_remaining 为空时 p_vector 会发生除零/无效概率,L121-L167,PRE_EXISTING_FIX,,NO,VERIFIER DISPUTE: ens_remaining ValueError already at 943e74d
 B057,signal,src/signal/day0_signal.py,K6 数学/概率语义,P1,expected_high 没有复用 day0_blended_highs/backbone 逻辑,L170-L173,PRE_EXISTING_FIX,,NO,legacy_upper_envelope_mean rename pre-dates Phase 0
 B058,signal,src/signal/day0_signal.py,K6 数学/概率语义,P2,obs_dominates 用 <，observation_weight 用 <=，阈值边界语义不一致,L188-L214,PRE_EXISTING_FIX,,NO,obs_dominates consistent comparison pre-dates Phase 0

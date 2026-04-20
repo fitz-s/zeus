@@ -28,23 +28,24 @@ That file contains the full compact remediation plan (R1-R13) with file:line cit
 
 ## Branch + commit state
 
-Branch: `data-improve`. Top of `origin/data-improve` = `e3a4700`. All pushed.
+Branch: `data-improve`. Top of `origin/data-improve` = `f2ffcad`. All pushed.
 
 ```
+f2ffcad docs(phase10b-close): critic-dave retirement verdict PASS-WITH-RESERVATIONS
+f632a9f fix(phase10b): P10A R-CK regression via missing temperature_metric in _candidate + v2 contract doc
+8d46f44 feat(phase10b): DT-Seam Cleanup — 5 structural seams + 13 antibody tests
+81294d2 feat(phase10a): independent hygiene fix pack — R1 monitor rename + B071 + B091-lower + S5 doc flip
+3b306c0 Sync workspace artifacts without touching Phase 10A code
+630a1e6 docs(e2e-audit): post-P9C independent verification + compact remediation plan
+0a760bb docs(phase9c-close): DUAL-TRACK MAIN LINE CLOSED + critic-dave artifacts
+d516e6b fix(phase9c): ITERATE resolution — two-seam closure for L3 + DT#7 wire antibody
+114a0f5 feat(phase9c): dual-track main-line closure — L3 CRITICAL + 8 structural items
+69978af docs(phase9b-close): Phase 9B CLOSED at b73927c + critic-carol retirement + dave onboarding
 e3a4700 docs(phase6): microplan — Strategy A internal M1-M4 milestones
         ^ ACTUAL CONTENT: full Phase 6 implementation (Day0 split + DT#6 + B055
           absorption). Commit-message mislabeling via team-lead git coordination
           error; content reviewed + PASS by critic-beth.
           User-deferred commit-msg amend (force-push decision).
-df1cc71 docs(phase6): contract — Day0 split + two-file co-landing
-c001dda docs(operating-contract): P5 structural learnings → Phase 6 protocol
-5e5fbf6 docs(phase5-close): handoff text consistency
-ecf50bd docs(phase5-close): rebuild_v2 spec kwarg + R-AZ un-xfail + learnings
-59e271c fix(phase5C): remove SQL metric filter from legacy forecasts query
-821959e Phase 5C: replay MetricIdentity + Gate D core antibody + B093 half-1
-3f42842 fix(phase5B-pack): 7 cross-team findings + R-AP..R-AU antibodies
-c327872 Phase 5B: low historical lane + ingest contract gate + B078 absorbed
-977d9ae Phase 5A: truth-authority spine + MetricIdentity view layer
 ```
 
 **Phase 5 COMPLETE.** Gate D PASSED via R-AZ-3 structural antibody.
@@ -69,7 +70,106 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 5. ~~**Phase 8 route A**~~ **COMPLETE** at `6ffefa4` (critic-carol first-try PASS, 2026-04-18). Scope: S1 `run_replay` public-entry `temperature_metric` threading + S2 `cycle_runner.py:180-181` DT#6 rewire to `riskguard.tick_with_portfolio`. 4/4 R-BP/R-BQ antibodies GREEN. Full regression 144/1846 (zero new failures vs 144/1842 baseline; +4 from antibodies). Contract: `phase8_contract.md`. Route A honored: code-only, no TIGGE data import, v2 tables zero-row, Golden Window preserved. See "Phase 8 closure" below. Gate E code-prerequisites complete; Gate E data-evidence blocks on future Golden Window lift (P9/later).
 6. ~~**Phase 9A**~~ **COMPLETE** at `7081634` (critic-carol cycle 2 first-try PASS, 2026-04-18). Absorbs all 4 P8 MAJOR observability forward-log items + adopts DT#6 Interpretation B in authority doc. Scope: S1 `entries_blocked_reason` DATA_DEGRADED + S2 L195 overwrite comment + S3 run_replay mode+metric warning + S4 R-BQ.1 structural hardening (drops silent-return + text-match) + S5 DT#6 §B law clarification + S6 R-BS.1/2 save_portfolio roundtrip + S7 R-BT entries_blocked_reason antibody + S8 R-BU.1/2 mode+metric warning pair. 9/9 antibodies GREEN. Full regression 144/1851 (+5 exact match, zero new failures). 2 MINOR (R-BS.2 vacuous assert + DT#6 §B aspirational doc) patched in phase9a-close commit. See "Phase 9A closure" below.
 7. ~~**Phase 9B**~~ **COMPLETE** at `0974a62` (impl) + `b73927c` (ITERATE fix). critic-carol cycle 3 — **streak broke as predicted** (P7B+P8+P9A=3 PASS, P9B=ITERATE). Adversarial opening surfaced CRITICAL-1: DT#2 marker was inert (no runtime consumer read `exit_reason="red_force_exit"`). ITERATE fix wired marker into `evaluate_exit` short-circuit + added R-BY/R-BY.2 relationship antibody pair. Re-verify PASS. 5/5 antibodies GREEN (R-BV/R-BW/R-BX/R-BY/R-BY.2). Regression 144/1856/93 (+5 from P9B antibodies, zero new failures). critic-carol **retires** after 3 cycles (P8/P9A/P9B); P9C opens with critic-dave. See "Phase 9B closure" below.
-8. ~~**Phase 9C**~~ **COMPLETE** at `114a0f5` (feat) + `d516e6b` (ITERATE fix). **DUAL-TRACK MAIN LINE CLOSED** (per critic-dave cycle-1 re-verify). Scope delivered: S1 L3 CRITICAL `get_calibrator` metric-aware + new `load_platt_model_v2` reader + 4 callers (**the blocker that made LOW deployment impossible pre-P9C** — calibration read side was metric-blind) + S2 A3 `Day0LowNowcastSignal.p_vector` + S3 A1 `_forecast_rows_for` conditional v2 read + S4 A4 DT#7 gate wired to evaluator + S5 B1 `--temperature-metric` CLI flag + S6 B3 `save_portfolio` source audit tag + S7 C2 R-BY.2 strengthen + S8 L2 dedicated `tests/test_phase9c_gate_f_prep.py` + S9 L1 settlements_v2 external-only policy doc. critic-dave cycle 1 returned ITERATE with 2 MAJOR findings (R-CC.2 checkbox antibody at helper boundary + `_fit_from_pairs` legacy-save latent bomb — write-side twin of L3); ITERATE fix at `d516e6b` added `_fit_from_pairs` metric-aware guard (LOW → None early-return, write-side two-seam closed) + R-CC.3 AST-walk structural antibody (evaluator gate wire) + R-CG.1/2/3 paired antibodies (LOW-skip positive/surgical/HIGH-unchanged). Re-verify PASS. 17 P9C antibodies GREEN. Full regression 144/1873/93 (+17 from pre-P9B; zero new failures). See "Phase 9C closure" below.
+8. ~~**Phase 9C**~~ **COMPLETE** at `114a0f5` (feat) + `d516e6b` (ITERATE fix). **DUAL-TRACK MAIN LINE SCAFFOLD COMPLETE** (per critic-dave cycle-1 re-verify; data migration deferred to post-Golden-Window). Scope delivered: S1 L3 CRITICAL `get_calibrator` metric-aware + new `load_platt_model_v2` reader + 4 callers (**the blocker that made LOW deployment impossible pre-P9C** — calibration read side was metric-blind) + S2 A3 `Day0LowNowcastSignal.p_vector` + S3 A1 `_forecast_rows_for` conditional v2 read + S4 A4 DT#7 gate wired to evaluator + S5 B1 `--temperature-metric` CLI flag + S6 B3 `save_portfolio` source audit tag + S7 C2 R-BY.2 strengthen + S8 L2 dedicated `tests/test_phase9c_gate_f_prep.py` + S9 L1 settlements_v2 external-only policy doc. critic-dave cycle 1 returned ITERATE with 2 MAJOR findings (R-CC.2 checkbox antibody at helper boundary + `_fit_from_pairs` legacy-save latent bomb — write-side twin of L3); ITERATE fix at `d516e6b` added `_fit_from_pairs` metric-aware guard (LOW → None early-return, write-side two-seam closed) + R-CC.3 AST-walk structural antibody (evaluator gate wire) + R-CG.1/2/3 paired antibodies (LOW-skip positive/surgical/HIGH-unchanged). Re-verify PASS. 17 P9C antibodies GREEN. Full regression 144/1873/93 (+17 from pre-P9B; zero new failures). See "Phase 9C closure" below.
+9. ~~**Phase 10A**~~ **COMPLETE** at `81294d2`. Independent hygiene fix pack: R1 monitor_refresh NameError rename + B071 token_suppression history+view + B091-lower decision_time_status evaluator extension + S5 doc flip (14 bug rows). 21 antibodies GREEN (R-CH/R-CI/R-CJ/R-CK families including 2 ITERATE-fix wiring antibodies). Full regression 142/1894/93 (−2 failed, +21 passed vs P9C baseline). See "Phase 10A closure" below.
+10. ~~**Phase 10B**~~ **COMPLETE** at `8d46f44` (feat) + `f632a9f` (ITERATE fix). DT-Seam Cleanup — 5 structural seams (R3 replay WHERE + R4 oracle_penalty keying + R5 Literal annotations + R9 FDR metric-aware + R11 v2 row-count sensor). 13 antibodies GREEN (R-CL/R-CM/R-CN/R-CO/R-CP families). Full regression 144/1905/93 (+13 passed vs P10A baseline; zero new failures). critic-dave cycle 3 PASS-WITH-RESERVATIONS → **dave retires**. critic-eve slot open. See "Phase 10B closure" below.
+
+## Phase 10B closure
+
+**Commits**: `8d46f44` feat(phase10b): DT-Seam Cleanup — 5 structural seams + 13 antibody tests → `f632a9f` fix(phase10b): P10A R-CK regression via missing temperature_metric in _candidate + v2 contract doc. critic-dave cycle 3 (retirement cycle) PASS-WITH-RESERVATIONS.
+
+**Delivered (5 S-items, all per contract v2)**:
+- **S1 R3** — `src/engine/replay.py:309` metric-aware legacy fallback WHERE clause. `col = "forecast_low" if temperature_metric == "low" else "forecast_high"`. LOW replay with v2-empty Golden Window now falls through to the correct column instead of HIGH-only filter.
+- **S2 R4** — `src/strategy/oracle_penalty.py` cache re-keyed from `dict[str, OracleInfo]` → `dict[tuple[str, str], OracleInfo]` keyed by `(city, temperature_metric)`. `data/oracle_error_rates.json` schema extended to `{city: {high: {...}, low: {...}}}` nested metric dimension. Legacy flat-shape JSON migrated as `(city, "high")` entries on load. `get_oracle_info(city, temperature_metric)` kwarg added. 3 evaluator.py call sites pass `position.temperature_metric`. Delivers 2/3 of DT#7.
+- **S3 R5** — `temperature_metric: Literal["high", "low"] = "high"` at all 9 explicit runtime seams (allowlist per contract v2). 3/9 seams have runtime assert enforcement; 6/9 Literal annotation only. Forward-logged to P10C for full MetricIdentity migration. Trade-off accepted and documented per dave L26.
+- **S4 R9** — `make_hypothesis_family_id` / `make_edge_family_id` extended with `temperature_metric: Literal["high", "low"]` required kwarg. Tuple now includes metric dimension. Evaluator.py call sites pass candidate metric. Test `test_fdr_family_key_is_canonical` EXTENDED (not activated) with metric-discriminating assertion.
+- **S5 R11** — `src/observability/status_summary.py` gains `_get_v2_row_counts(conn)` helper querying 5 v2 tables; emits `v2_row_counts` into status payload. Discrepancy flag fires when `platt_models_v2=0 AND dual_track_closure: true`. Closes meta-immune-system gap P9C fired without.
+
+**ITERATE fix** (`f632a9f`): executor autocommitted `8d46f44` before critic review; team-lead wide-review pre-push caught R-CK helper regression from P10A — `_candidate` helper in evaluator was missing `temperature_metric` thread for new FDR/oracle_penalty callers. Fix applied before push. critic-dave L22 candidate memory (executor-without-critic coordination fault pattern).
+
+**Antibodies installed (13 total for P10B)**:
+- R-CL.1/2: replay legacy WHERE (LOW column selection + HIGH pair-negative)
+- R-CM.1/2/3: oracle_penalty (city, metric) isolation + cache invalidation + legacy JSON migration
+- R-CN.1/2: MetricIdentity 9-seam allowlist Literal annotations + AST allowlist-scoped gate
+- R-CO.1/2: FDR family_id metric-aware EXTEND + evaluator caller AST
+- R-CP.1/2: v2 row-count sensor + discrepancy flag consumer (3 additional from S4 FDR side-effect unblocks)
+
+**Regression evidence (2026-04-19)**:
+- Full: 144 failed / 1905 passed / 93 skipped / 7 subtests
+- Baseline at P10A (`81294d2`): 144/1892 verified by critic-dave (team-lead cited 142/1894 — off by 2; delta math holds)
+- Delta: failed +0 / passed +13 / skipped 0 — exactly matches 13 P10B antibodies
+
+**Hard constraints preserved**:
+- No TIGGE import / no v2 table writes / no SQL DDL on v2
+- No `_TRUTH_AUTHORITY_MAP` change / no Kelly strict migration / no Day0 LOW activation
+- No B067/B074 touch (dropped from scope; stale bug claim / architect YELLOW)
+- Golden Window intact
+
+**critic-dave cycle-3 PASS-WITH-RESERVATIONS rationale**:
+- Zero CRITICAL, zero MAJOR; 3 MINOR (contract citation stale, regression count off by 2, 6/9 seams lack runtime enforcement)
+- Regression reproduction confirmed independently: 144/1905/93 on 3 runs
+- No-regression delta +13 exact match to antibody count
+- R-CP checkbox risk pre-framed as operator-read escape hatch (L24 carve-out: documented escape hatch is valid)
+
+**critic rotation**: critic-dave retires after 3 cycles per rotation convention (P9C/P10A/P10B). critic-eve slot open for P10C or any future phase. L17-L26 inherited by critic-eve.
+
+**Post-P10B forward-log** (explicit deferrals — all architect-gated or user-ruled):
+- B055 (DT#6 architect packet)
+- B099 (DT#1 architect packet)
+- R10 Kelly strict ExecutionPrice migration (breaking; needs user ruling)
+- R12 H7 144-failure triage (user ruling)
+- R13 `_TRUTH_AUTHORITY_MAP["degraded"]="VERIFIED"` semantic re-decision
+- monitor_refresh LOW plumbing (surfaces under R5 if Type regression appears; xfail-with-ticket strategy)
+- Pre-existing `temperature_metric: str` outside the 9-seam allowlist (P10C blanket migration)
+- Full `MetricIdentity` wrapper at runtime seams (P10C — Literal is P10B stopgap per L26)
+- Gate F (Day0 LOW limited activation) — requires Golden Window lift + live data stream
+- R6 Gate C resolution (user ruling — doc-only vs data-migration)
+
+**Evidence dir**: `docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/`
+- `critic_dave_phase10b_wide_review.md` — cycle-3 retirement verdict + L22-L26
+
+## Phase 10A closure
+
+**Commit**: `81294d2` feat(phase10a): independent hygiene fix pack — R1 monitor rename + B071 + B091-lower + S5 doc flip. critic-dave cycle 2 ITERATE → re-verify PASS.
+
+**Delivered (4 code items + 1 doc flip)**:
+- **S1 R1 CRITICAL** — `src/engine/monitor_refresh.py:355,405` `remaining_member_maxes` → `extrema.maxes`. Two-line rename that eliminates the NameError silently swallowed at L614. HIGH+LOW Day0 refresh equally affected pre-fix. Sibling check: zero `\bremaining_member_maxes\b` hits in `src/`, `scripts/` post-fix.
+- **S2 R2 antibody-only** — No code change. Scout confirmed probe PASS: `extract_tigge_mn2t6_localday_min.py` already stamps `temperature_metric='low'` at L20/L101/L356 with validation at L411. Antibody R-CI.1-3 locks the contract.
+- **S3 B071** — `src/state/db.py:3308-3388` (`record_token_suppression`): mutable upsert replaced with append-only `token_suppression_history` table + derived `token_suppression_current` view (mirror of B070 pattern). `with conn:` wrapper on dual-write per critic-dave MINOR-1 ITERATE fix. `scripts/migrate_b071_token_suppression_to_history.py` idempotent migration script. 3-state `(auto→manual→auto)` sequence now reconstructible from history alone.
+- **S4 B091-lower** — `src/engine/evaluator.py:1271-1286` fabrication site extended with `decision_time_status: Literal["OK", "FABRICATED_SELECTION_FAMILY", "UNAVAILABLE_UPSTREAM"]`. Reuses P9C `decision_time_status` vocab from `src/engine/replay.py:345,418` — no parallel vocabulary. Schema column `decision_time_status TEXT` on `selection_family_fact` with idempotent ALTER guard. ITERATE fix added R-CK.5/6 AST-walk wiring antibodies after dave found R-CK.1-4 were ORM-edge-only (called `_record_selection_family_facts` directly, not `evaluate_candidate` — L17 antibody-theater pattern).
+- **S5 doc flip** — 14 bug rows flipped in `docs/to-do-list/zeus_bug100_reassessment_table.csv`. Spot-verified by critic-dave: B050→`057979c` (PASS), B078→`c327872` (PASS), B063→`94cc1f9` (PASS), B100 SAVEPOINT at `db.py:965-1018` (PASS within line-drift tolerance).
+
+**Antibodies installed (21 total for P10A)**:
+- R-CH.1/2/3: monitor_refresh extrema.maxes rename (positive + count + surgical-revert pair)
+- R-CI.1/2/3: ingest metric stamp lock (INSERT captures `temperature_metric='low'` × 3 paths)
+- R-CJ.1/2/3/4/5: token_suppression 3-state sequence + view + history + migration idempotency + caller coverage
+- R-CK.1/2/3/4: evaluator decision_time_status ORM-edge tests (FABRICATED + OK + status-range + DB column)
+- R-CK.5/6 (ITERATE-fix): AST-walk structural wiring antibodies (both-assignment-nodes + kwarg-thread to record call)
+
+**Regression evidence (2026-04-19)**:
+- Full: 142 failed / 1894 passed / 93 skipped / 7 subtests (at commit `81294d2`)
+- Pre-P10A baseline 144/1873/93 → delta −2 failed / +21 passed
+- +21 decomposes: 16 antibodies (R-CH.1-3 + R-CI.1-3 + R-CJ.1-5 + R-CK.1-4) + 2 R-CK.5/6 wiring + 3 S1 rename side-effect unblocks
+- −2 failed: two flaky-race tests resolved by `with conn:` transaction wrap
+
+**Hard constraints preserved**:
+- No TIGGE import / no v2 table writes / no SQL DDL on v2
+- No evaluator DT#7 gate change / no monitor_refresh LOW plumbing change
+- No `_TRUTH_AUTHORITY_MAP` change / no `kelly_size` signature change
+- No `except Exception` narrowing / Golden Window intact
+
+**critic-dave cycle-2 ITERATE rationale**:
+- MAJOR #1: R-CK antibodies were ORM-edge (called `_record_selection_family_facts` directly; surgical-revert of evaluator assignment PASSED). Fixed by R-CK.5/6 AST-walk + kwarg-thread antibodies. L17 documented.
+- MINOR #1: `record_token_suppression` dual-write lacked `with conn:` wrapper. Fixed.
+- MINOR #2: R-CH.2 `>=3` count check is adequate (count drops if semantic flip occurs). Acknowledged; no action.
+
+**Durable learnings from cycle 2**:
+- L17: ORM-edge tests lock the ORM edge, not the caller wiring. Antibody MUST call top layer OR AST-assert the full wiring chain.
+- L18: UNCOMMITTED_AGENT_EDIT_LOSS — re-read from disk after any edit to staged files before regression run.
+- L19: Dual-write without explicit `with conn:` is an unchecked caller-assumption (two-seam violation per Fitz Constraint #2).
+
+**Evidence dir**: `docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/`
+- `critic_dave_phase10a_wide_review.md` — cycle-2 review + ITERATE findings + re-verify PASS addendum
 
 ## Phase 7A closure
 
@@ -108,9 +208,9 @@ critic-beth authoritative verdict at `phase5_evidence/critic_beth_phase6_wide_re
 - MINOR-2: CalibrationMetricSpec + METRIC_SPECS should extract to `src/calibration/metric_specs.py`
 - P6 carryover: remaining_member_maxes_for_day0 alias removal; _tigge_common.py extraction; script_manifest.yaml 5 scripts
 
-## Phase 9C closure — DUAL-TRACK MAIN LINE CLOSED
+## Phase 9C closure — Dual-Track Main-Line Scaffold Complete, Data Migration Pending
 
-**Commits**: `114a0f5` feat(phase9c) → `d516e6b` fix(phase9c): ITERATE resolution. critic-dave cycle 1 (fresh spawn, general-purpose agent type per carol cycle-3 methodology fix, adversarial-opening per rotation convention) delivered ITERATE → team-lead fixed → re-verify PASS.
+**Commits**: `114a0f5` feat(phase9c) → `d516e6b` fix(phase9c): ITERATE resolution. critic-dave cycle 1 (fresh spawn, general-purpose agent type per carol cycle-3 methodology fix, adversarial-opening per rotation convention) delivered ITERATE → team-lead fixed → re-verify PASS. (structural readiness; v2 data migration deferred to post-Golden-Window)
 
 **Delivered (9 structural items + 4 ITERATE-fix items)**:
 
