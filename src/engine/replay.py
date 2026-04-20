@@ -24,7 +24,7 @@ from typing import Literal, Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
-from src.contracts.settlement_semantics import round_wmo_half_up_value
+from src.contracts.settlement_semantics import round_wmo_half_up_value, SettlementSemantics
 from src.state.db import (
     get_backtest_connection,
     get_trade_connection_with_world,
@@ -1407,10 +1407,12 @@ def _replay_one_settlement(
             if should_trade and edge.entry_price > 0:
                 would_trade = True
                 shares = size_usd / edge.entry_price if edge.entry_price > 0 else 0.0
+                round_fn = SettlementSemantics.for_city(city).round_values if city else None
                 won = derive_outcome_from_settlement_value(
                     settlement_value,
                     edge.bin,
                     city.settlement_unit,
+                    round_fn=round_fn,
                 )
                 if edge.direction == "buy_yes":
                     exit_price = 1.0 if won else 0.0
@@ -1679,10 +1681,12 @@ def run_wu_settlement_sweep(
             per_city_skill_samples.setdefault(city.name, [])
             per_city_top_candidates.setdefault(city.name, {})
             for bin in bins:
+                round_fn = SettlementSemantics.for_city(city).round_values if city else None
                 outcome = derive_outcome_from_settlement_value(
                     row["settlement_value"],
                     bin,
                     city.settlement_unit,
+                    round_fn=round_fn,
                 )
                 _insert_backtest_outcome(
                     backtest_conn,
@@ -1731,10 +1735,12 @@ def run_wu_settlement_sweep(
                     missing_reasons=["bin_unparseable"],
                 )
                 continue
+            round_fn = SettlementSemantics.for_city(city).round_values if city else None
             outcome = derive_outcome_from_settlement_value(
                 row["settlement_value"],
                 bin,
                 city.settlement_unit,
+                round_fn=round_fn,
             )
             p_raw = _clamp_probability(forecast_row["p_raw"])
             brier = _binary_brier(p_raw, outcome)
@@ -1944,10 +1950,12 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
             missing.append("bin_unparseable")
             divergence = "bin_unparseable"
         else:
+            round_fn = SettlementSemantics.for_city(city).round_values if city else None
             wu_outcome = derive_outcome_from_settlement_value(
                 settlement["settlement_value"],
                 bin,
                 unit,
+                round_fn=round_fn,
             )
             divergence = classify_outcome_divergence(
                 wu_outcome,

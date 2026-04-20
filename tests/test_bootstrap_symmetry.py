@@ -134,7 +134,7 @@ class TestBootstrapContextStashing:
         assert "alpha" in ctx
         assert "bins" in ctx
         assert "held_idx" in ctx
-        assert "member_maxes" in ctx
+        assert "member_extrema" in ctx
         assert "calibrator" in ctx
         assert "lead_days" in ctx
         assert "unit" in ctx
@@ -196,7 +196,7 @@ class TestBootstrapCIInRefreshPosition:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 3.0,
             "unit": "F",
@@ -252,7 +252,7 @@ class TestBootstrapCIInRefreshPosition:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 3.0,
             "unit": "F",
@@ -295,7 +295,7 @@ class TestBootstrapCIInRefreshPosition:
                 Bin(low=50.0, high=51.0, label="50-51°F", unit="F"),
             ],
             "held_idx": 1,
-            "member_maxes": np.array([]),  # Empty — will cause bootstrap to fail
+            "member_extrema": np.array([]),  # Empty — will cause bootstrap to fail
             "calibrator": None,  # No calibrator — may cause issues
             "lead_days": 3.0,
             "unit": "F",
@@ -346,7 +346,7 @@ class TestDay0WindowBootstrapPropagation:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 0.0,
             "unit": "F",

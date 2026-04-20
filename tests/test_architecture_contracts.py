@@ -3425,7 +3425,13 @@ def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
     text = (ROOT / "src/engine/cycle_runtime.py").read_text()
     marker = "log_trade_entry(conn, pos)"
     start = text.index(marker)
-    snippet = text[start : start + 300]
+    # Canonical helper must appear after legacy write (ordering invariant).
+    # Window is 1000 chars to accommodate the SAVEPOINT guard block introduced
+    # in P10C (S6), which places _dual_write_canonical_entry_if_available
+    # immediately after the SAVEPOINT try/except for correctness reasons
+    # (with-conn inside that helper commits its own sub-transaction, which
+    # would release the SAVEPOINT if placed inside the try block).
+    snippet = text[start : start + 1000]
     assert marker in snippet
     assert "_dual_write_canonical_entry_if_available(" in snippet
 
