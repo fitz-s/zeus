@@ -38,7 +38,13 @@ class TestINV15SourceWhitelistGate:
     def _write_pair(self, conn, *, decision_group_id: str, data_version: str,
                     training_allowed: bool, target_date: str = "2026-04-16") -> None:
         from src.calibration.store import add_calibration_pair_v2
+        from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        nyc = City(
+            name="NYC", lat=40.7772, lon=-73.8726,
+            timezone="America/New_York", cluster="NYC",
+            settlement_unit="F", wu_station="KLGA",
+        )
         add_calibration_pair_v2(
             conn=conn,
             city="NYC",
@@ -54,6 +60,7 @@ class TestINV15SourceWhitelistGate:
             metric_identity=HIGH_LOCALDAY_MAX,
             data_version=data_version,
             training_allowed=training_allowed,
+            city_obj=nyc,
         )
         conn.commit()
 
@@ -189,8 +196,14 @@ class TestCalibrationPairsV2IdentityFields:
     def _insert_calibration_pair_v2(self, conn: sqlite3.Connection, **overrides) -> str:
         """Helper: write a v2 calibration pair and return the decision_group_id."""
         from src.calibration.store import add_calibration_pair_v2
+        from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
+        nyc = City(
+            name="NYC", lat=40.7772, lon=-73.8726,
+            timezone="America/New_York", cluster="NYC",
+            settlement_unit="F", wu_station="KLGA",
+        )
         dg_id = overrides.pop("decision_group_id", "dg-rm-test-001")
         add_calibration_pair_v2(
             conn=conn,
@@ -208,6 +221,7 @@ class TestCalibrationPairsV2IdentityFields:
             data_version=HIGH_LOCALDAY_MAX.data_version,
             source="tigge",
             training_allowed=True,
+            city_obj=nyc,
             **overrides,
         )
         conn.commit()

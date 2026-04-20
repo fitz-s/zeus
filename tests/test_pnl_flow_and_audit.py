@@ -3121,6 +3121,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
                 "2026-03-30T01:00:00Z",
                 "test_pnl_flow_and_audit_v1",
             ),
+            city_obj=NYC,
         )
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
     settled_pos = _position(

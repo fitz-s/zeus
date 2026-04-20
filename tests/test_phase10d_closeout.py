@@ -424,18 +424,28 @@ class TestRDCInv16Transition:
             "(distinct rejection axis)"
         )
 
-    def test_r_dc_2_inv16_test3_xfailed_with_ticket(self):
-        """R-DC.2: test_day0_observation_context_carries_causality_status is explicitly
-        marked xfail with P10E ticket in test_phase6_causality_status.py."""
+    def test_r_dc_2_inv16_test3_passes_natively_post_p10e(self):
+        """R-DC.2 (P10E updated): test_day0_observation_context_carries_causality_status
+        was xfailed in P10D pending P10E Day0ObservationContext.causality_status field.
+        P10E S3a added the field; xfail marker was removed; test now passes natively.
+
+        This antibody enforces the inverse: NO stale xfail marker on the test (would
+        mask the P10E S3a fix).
+        """
         source_path = PROJECT_ROOT / "tests" / "test_phase6_causality_status.py"
         source = source_path.read_text(encoding="utf-8")
 
-        assert "xfail" in source, (
-            "R-DC.2: test_phase6_causality_status.py must contain xfail marker for test 3"
-        )
-        assert "P10E" in source, (
-            "R-DC.2: xfail marker must reference P10E ticket"
-        )
-        assert "test_day0_observation_context_carries_causality_status" in source, (
-            "R-DC.2: test_day0_observation_context_carries_causality_status must still exist"
+        # Find the test function's 5 lines preceding (where a decorator would sit)
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if "def test_day0_observation_context_carries_causality_status" in line:
+                preceding = "\n".join(lines[max(0, i - 3):i])
+                assert "xfail" not in preceding.lower(), (
+                    f"R-DC.2: stale xfail marker detected on INV-16 test 3 "
+                    f"(P10E S3a added Day0ObservationContext.causality_status; "
+                    f"test passes natively now). Preceding lines:\n{preceding}"
+                )
+                return
+        raise AssertionError(
+            "R-DC.2: test_day0_observation_context_carries_causality_status not found"
         )

@@ -53,8 +53,7 @@ invariants:
       spec_sections: [3, P4, 22]
       negative_constraints: [NC-05]
       tests:
-        # TODO: P10E/P11 — test not yet written, tracked by ticket
-        # tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
+        - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
   - id: INV-07
     zones: [K0_frozen_kernel]
     statement: Lifecycle grammar is finite and authoritative.

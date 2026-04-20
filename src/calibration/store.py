@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.state.db import get_world_connection
 
 if TYPE_CHECKING:
@@ -78,12 +77,12 @@ def add_calibration_pair(
     *,
     bin_source: str = "legacy",
     authority: str = "UNVERIFIED",
-    city_obj: "City | None" = None,
+    city_obj: "City",
 ) -> None:
     """Insert a calibration pair (one per bin per settled market).
 
-    Spec \u00a78.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
-    settlement_value is stored for audit only \u2014 defensive round to integer per contract.
+    Spec §8.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
+    settlement_value is stored for audit only — defensive round to integer per contract.
 
     2026-04-14 refactor: ``bin_source`` defaults to ``"legacy"`` so existing
     callers (market-bin-derived harvester path, generate_calibration_pairs.py)
@@ -91,16 +90,13 @@ def add_calibration_pair(
     ``bin_source="canonical_v1"`` to mark rows it owns, which the destructive
     DELETE path in that script targets by equality match.
 
-    city_obj: optional City for SettlementSemantics dispatch (HKO oracle_truncate).
-    If None, falls back to bare WMO half-up (backward compat for tests/scripts).
+    city_obj: City for SettlementSemantics dispatch (HKO oracle_truncate).
+    Required (P10E strict). Use SettlementSemantics.for_city(city_obj).
     """
     if settlement_value is not None:
-        if city_obj is not None:
-            from src.contracts.settlement_semantics import SettlementSemantics
-            round_fn = SettlementSemantics.for_city(city_obj).round_values
-            settlement_value = round_fn([float(settlement_value)])[0]
-        else:
-            settlement_value = round_wmo_half_up_value(float(settlement_value))
+        from src.contracts.settlement_semantics import SettlementSemantics
+        round_fn = SettlementSemantics.for_city(city_obj).round_values
+        settlement_value = round_fn([float(settlement_value)])[0]
     if decision_group_id is None or not str(decision_group_id).strip():
         raise ValueError(
             "decision_group_id is required; use "
@@ -159,7 +155,7 @@ def add_calibration_pair_v2(
     authority: str = "VERIFIED",
     causality_status: str = "OK",
     snapshot_id: Optional[int] = None,
-    city_obj: "City | None" = None,
+    city_obj: "City",
 ) -> None:
     """Insert a calibration pair into calibration_pairs_v2.
 
@@ -167,16 +163,13 @@ def add_calibration_pair_v2(
     is silently forced to False if source is not in the canonical whitelist
     (tigge, ecmwf_ens). Pass source= explicitly from the ingest path.
 
-    city_obj: optional City for SettlementSemantics dispatch (HKO oracle_truncate).
-    If None, falls back to bare WMO half-up (backward compat for tests/scripts).
+    city_obj: City for SettlementSemantics dispatch (HKO oracle_truncate).
+    Required (P10E strict). Use SettlementSemantics.for_city(city_obj).
     """
     if settlement_value is not None:
-        if city_obj is not None:
-            from src.contracts.settlement_semantics import SettlementSemantics
-            round_fn = SettlementSemantics.for_city(city_obj).round_values
-            settlement_value = round_fn([float(settlement_value)])[0]
-        else:
-            settlement_value = round_wmo_half_up_value(float(settlement_value))
+        from src.contracts.settlement_semantics import SettlementSemantics
+        round_fn = SettlementSemantics.for_city(city_obj).round_values
+        settlement_value = round_fn([float(settlement_value)])[0]
     if decision_group_id is None or not str(decision_group_id).strip():
         raise ValueError(
             "decision_group_id is required; use "

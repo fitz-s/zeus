@@ -99,7 +99,6 @@ class TestCausalityStatusRejectAxis(unittest.TestCase):
             "(INV-16). The label 'CAUSAL_SLOT_NOT_OK' or equivalent must be present.",
         )
 
-    @pytest.mark.xfail(reason="P10E: Day0ObservationContext.causality_status field addition required; tracked by ticket")
     def test_day0_observation_context_carries_causality_status(self):
         """INV-16: Day0ObservationContext must carry causality_status so the
         evaluator can gate on it without re-querying the snapshot table.

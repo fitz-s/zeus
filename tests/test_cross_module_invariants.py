@@ -153,12 +153,99 @@ def bad_function(obj):
     repo_errors = run_linter(Path('src'))
     assert repo_errors == 0, "Linter gate flagged existing code in src/."
 
+def test_inv03_harvester_prefers_decision_snapshot_over_latest():
+    """INV-06 / NC-05: harvest_settlement must use decision_snapshot_id filter,
+    NOT ORDER BY fetch_time DESC LIMIT 1 (hindsight fallback).
+
+    AST walks the harvest_settlement function body ONLY — excludes _get_stored_p_raw
+    which legitimately uses ORDER BY fetch_time DESC LIMIT 1 as a separate fallback.
+    """
+    import ast
+    harvester_py = PROJECT_ROOT / "src" / "execution" / "harvester.py"
+    if not harvester_py.exists():
+        pytest.skip("harvester.py not found")
+
+    source = harvester_py.read_text()
+    tree = ast.parse(source)
+
+    harvest_fn_body_linenos: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "harvest_settlement":
+            for child in ast.walk(node):
+                if hasattr(child, "lineno"):
+                    harvest_fn_body_linenos.add(child.lineno)
+            break
+
+    if not harvest_fn_body_linenos:
+        pytest.skip("harvest_settlement not found in harvester.py")
+
+    lines = source.splitlines()
+    violations = []
+    for lineno in sorted(harvest_fn_body_linenos):
+        if lineno - 1 < len(lines):
+            line = lines[lineno - 1]
+            if "ORDER BY fetch_time DESC LIMIT 1" in line:
+                violations.append(f"L{lineno}: {line.strip()}")
+
+    assert not violations, (
+        "INV-06 / NC-05: harvest_settlement must not use ORDER BY fetch_time DESC LIMIT 1 "
+        "(hindsight fallback). Use decision_snapshot_id filter:\n"
+        + "\n".join(f"  {v}" for v in violations)
+    )
+
+
+def test_inv04_no_bare_temperature_threshold_comparisons_in_src():
+    """NC-08: No bare float threshold comparisons against temperature identifier names
+    in src/. Strict set: {temp, temperature, kelvin, celsius, fahrenheit}. No 'threshold'.
+
+    Pre-verified false-positive rate = 0 (P10E contract M3 correction).
+    """
+    import ast
+
+    TEMP_NAMES = {"temp", "temperature", "kelvin", "celsius", "fahrenheit"}
+    violations = []
+
+    for py_file in (PROJECT_ROOT / "src").rglob("*.py"):
+        try:
+            source = py_file.read_text()
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            left = node.left
+            comparators = node.comparators
+            all_sides = [left] + list(comparators)
+            has_bare_float = any(
+                isinstance(s, ast.Constant) and isinstance(s.value, float)
+                for s in all_sides
+            )
+            has_temp_name = any(
+                isinstance(s, ast.Name) and s.id in TEMP_NAMES
+                for s in all_sides
+            )
+            if has_bare_float and has_temp_name:
+                violations.append(
+                    f"{py_file.relative_to(PROJECT_ROOT)}:{node.lineno}: "
+                    f"bare float comparison against temperature identifier"
+                )
+
+    assert not violations, (
+        "NC-08: bare float threshold comparisons against temperature identifiers in src/:\n"
+        + "\n".join(f"  {v}" for v in violations)
+    )
+
+
 if __name__ == "__main__":
     tests = [
     test_calibration_pairs_use_same_bias_correction_as_live,
         test_model_bias_table_not_empty_if_bias_enabled,
         test_platt_models_consistent_with_bias_flag,
         test_structural_linter_gate,
+        test_inv03_harvester_prefers_decision_snapshot_over_latest,
+        test_inv04_no_bare_temperature_threshold_comparisons_in_src,
     ]
 
     results = {}

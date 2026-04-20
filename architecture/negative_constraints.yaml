@@ -34,8 +34,7 @@ constraints:
       docs:
         - architecture/ast_rules/forbidden_patterns.md
       tests:
-        # TODO: P10E/P11 — test not yet written, tracked by ticket
-        # tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
+        - tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest
   - id: NC-06
     statement: No memory-only durable governance.
     enforced_by:
@@ -50,8 +49,7 @@ constraints:
     statement: No bare implicit unit assumptions in semantic code paths.
     enforced_by:
       tests:
-        # TODO: P10E/P11 — test not yet written, tracked by ticket
-        # tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src
+        - tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src
       semgrep_rule_ids:
         - zeus-no-default-unit-fallback
   - id: NC-09

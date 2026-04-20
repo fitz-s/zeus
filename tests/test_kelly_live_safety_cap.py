@@ -21,7 +21,17 @@ from pathlib import Path
 
 import pytest
 
+from src.contracts.execution_price import ExecutionPrice
 from src.strategy.kelly import kelly_size
+
+
+def _ep(value: float) -> ExecutionPrice:
+    return ExecutionPrice(
+        value=value,
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
 
 
 # live_safety_cap_usd from config/settings.json (closeout criterion §4.1)
@@ -31,7 +41,7 @@ CAP = 5.0
 # f* = (0.9 - 0.1) / (1 - 0.1) = 0.889; size = 0.889 * 0.25 * 5000 ≈ 1111.11
 _LARGE_KWARGS = dict(
     p_posterior=0.9,
-    entry_price=0.1,
+    entry_price=_ep(0.1),
     bankroll=5_000.0,
     kelly_mult=0.25,
 )
@@ -41,7 +51,7 @@ _LARGE_RAW_SIZE = (0.9 - 0.1) / (1.0 - 0.1) * 0.25 * 5_000.0  # ≈ 1111.11
 # f* = (0.52 - 0.5) / (1 - 0.5) = 0.04; size = 0.04 * 0.25 * 100 = 1.0
 _SMALL_KWARGS = dict(
     p_posterior=0.52,
-    entry_price=0.5,
+    entry_price=_ep(0.5),
     bankroll=100.0,
     kelly_mult=0.25,
 )
