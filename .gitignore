@@ -47,3 +47,6 @@ state/city_settlement_audit.json
 /patch_schema.py
 
 .git-commit-msg.tmp
+
+raw/oracle_shadow_snapshots/
+docs/**/*.xlsx

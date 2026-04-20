@@ -133,8 +133,10 @@ class EdgeDecision:
 
 def _read_v2_snapshot_metadata(
     conn, city_name: str, target_date: str, temperature_metric: str,
+    snapshot_id: str | None = None,
 ) -> dict:
-    """Phase 9C A4 (DT#7 wire): read boundary_ambiguous + related metadata
+    """Phase 9C A4 (DT#7 wire) + P10D S1 (M3 causality wire):
+    read boundary_ambiguous, causality_status, and snapshot_id metadata
     for one (city, target_date, metric) row from ensemble_snapshots_v2.
 
     Pre-Golden-Window-lift: v2 is empty → query returns no rows → returns
@@ -143,35 +145,77 @@ def _read_v2_snapshot_metadata(
     extract_tigge_mn2t6_localday_min.py per §DT#7 boundary-leakage law →
     gate fires on boundary_ambiguous=1 rows.
 
+    M3 ordering: if snapshot_id is provided (candidate edge origin), lookup
+    by snapshot_id first for exact match; fallback to fetch_time DESC LIMIT 1
+    (most-recent row) when snapshot_id is absent or unmatched. The fallback
+    may read a later-filed correction row; this is acceptable pre-data-lift
+    but noted as a caveat for post-lift audits.
+
     Returns:
-        dict with `boundary_ambiguous` key when row exists; empty dict
-        when row is absent OR v2 table is not applied (backward compat
-        for legacy-only databases).
+        dict with `boundary_ambiguous`, `causality_status`, and `snapshot_id`
+        keys when row exists; empty dict when row is absent OR v2 table is
+        not present (backward compat for legacy-only databases).
     """
     # Resolve schema prefix (world.ensemble_snapshots_v2 when world DB
     # attached; bare ensemble_snapshots_v2 in monolithic test DBs).
     import sqlite3
     for sp in ("world.", ""):
         try:
-            row = conn.execute(
-                f"""
-                SELECT boundary_ambiguous
-                FROM {sp}ensemble_snapshots_v2
-                WHERE city = ?
-                  AND target_date = ?
-                  AND temperature_metric = ?
-                ORDER BY fetch_time DESC
-                LIMIT 1
-                """,
-                (city_name, target_date, temperature_metric),
-            ).fetchone()
+            if snapshot_id:
+                # M3: prefer exact snapshot_id match to avoid reading
+                # later-filed correction rows for a different fetch cycle.
+                row = conn.execute(
+                    f"""
+                    SELECT boundary_ambiguous, causality_status, snapshot_id
+                    FROM {sp}ensemble_snapshots_v2
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND temperature_metric = ?
+                      AND snapshot_id = ?
+                    LIMIT 1
+                    """,
+                    (city_name, target_date, temperature_metric, snapshot_id),
+                ).fetchone()
+                if row is None:
+                    # snapshot_id present but unmatched — fall through to
+                    # fetch_time-ordered fallback below.
+                    row = conn.execute(
+                        f"""
+                        SELECT boundary_ambiguous, causality_status, snapshot_id
+                        FROM {sp}ensemble_snapshots_v2
+                        WHERE city = ?
+                          AND target_date = ?
+                          AND temperature_metric = ?
+                        ORDER BY fetch_time DESC
+                        LIMIT 1
+                        """,
+                        (city_name, target_date, temperature_metric),
+                    ).fetchone()
+            else:
+                # M3 fallback: no snapshot_id — use most-recent fetch.
+                row = conn.execute(
+                    f"""
+                    SELECT boundary_ambiguous, causality_status, snapshot_id
+                    FROM {sp}ensemble_snapshots_v2
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND temperature_metric = ?
+                    ORDER BY fetch_time DESC
+                    LIMIT 1
+                    """,
+                    (city_name, target_date, temperature_metric),
+                ).fetchone()
         except sqlite3.OperationalError:
             continue
         except Exception:
             return {}
         if row is None:
             return {}
-        return {"boundary_ambiguous": bool(row["boundary_ambiguous"])}
+        return {
+            "boundary_ambiguous": bool(row["boundary_ambiguous"]),
+            "causality_status": str(row["causality_status"]),
+            "snapshot_id": row["snapshot_id"],
+        }
     return {}
 
 
@@ -892,6 +936,35 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
+        # P10D S1 / INV-16: thread causality_status from v2 snapshot metadata
+        # into Day0SignalInputs so the Day0Router causality gate is live.
+        # Pre-Golden-Window: v2_snapshot_meta is empty → fallback to "OK" (dormant gate).
+        # Post-data-lift: v2 carries causality_status per ETL ingest law.
+        # N/A_CAUSAL_DAY_ALREADY_STARTED signals the day has partially elapsed;
+        # Day0Router routes LOW slots accordingly per _LOW_ALLOWED_CAUSALITY.
+        causality_status = v2_snapshot_meta.get("causality_status", "OK")
+
+        # INV-16 enforcement: reject LOW slots with causality_status outside the
+        # allowed set before reaching any Platt lookup.  This is a SEPARATE
+        # rejection axis from OBSERVATION_UNAVAILABLE_LOW — it fires when the
+        # slot is partially historical for a reason other than missing observation.
+        # The Day0Router already enforces _LOW_ALLOWED_CAUSALITY; this gate adds
+        # an explicit evaluator-level rejection_stage for audit and operator clarity.
+        _LOW_ALLOWED_CAUSALITY = frozenset({"OK", "N/A_CAUSAL_DAY_ALREADY_STARTED"})
+        if temperature_metric.is_low() and causality_status not in _LOW_ALLOWED_CAUSALITY:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="CAUSAL_SLOT_NOT_OK",
+                rejection_reasons=[
+                    f"Day0 low slot rejected: causality_status={causality_status!r} "
+                    f"not in allowed set {sorted(_LOW_ALLOWED_CAUSALITY)} (INV-16)"
+                ],
+                availability_status="DATA_AVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "ens_fetch", "causality_gate"],
+            )]
+
         day0 = Day0Router.route(Day0SignalInputs(
             temperature_metric=temperature_metric,
             observed_high_so_far=float(candidate.observation.high_so_far) if candidate.observation.high_so_far is not None else None,
@@ -905,6 +978,7 @@ def evaluate_candidate(
             observation_time=candidate.observation.observation_time,
             temporal_context=temporal_context,
             round_fn=settlement_semantics.round_values,
+            causality_status=causality_status,
         ))
         p_raw = day0.p_vector(bins)
         day0_forecast_context = day0.forecast_context()
@@ -1728,11 +1802,18 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         if fetch_time_value is None:
             raise ValueError("ENS snapshot missing fetch_time")
 
+        # P10D S3: stamp temperature_metric on each snapshot row so LOW rows
+        # are distinguishable from HIGH rows in the legacy table.
+        # ens.temperature_metric is a MetricIdentity — extract the string value.
+        snap_metric = getattr(getattr(ens, "temperature_metric", None), "temperature_metric", "high") or "high"
+        logger.debug("snapshot_metric=%s city=%s date=%s", snap_metric, city.name, target_date)
+
         conn.execute(f"""
             INSERT OR IGNORE INTO {snapshots_table}
             (city, target_date, issue_time, valid_time, available_at, fetch_time,
-             lead_hours, members_json, spread, is_bimodal, model_version, data_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             lead_hours, members_json, spread, is_bimodal, model_version, data_version,
+             temperature_metric)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             city.name,
             target_date,
@@ -1753,6 +1834,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             int(ens.is_bimodal()),
             ens_result["model"],
             "live_v1",
+            snap_metric,
         ))
         row = conn.execute(f"""
             SELECT snapshot_id FROM {snapshots_table}

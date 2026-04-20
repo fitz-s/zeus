@@ -266,6 +266,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL DEFAULT 'v1',
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
+            temperature_metric TEXT NOT NULL DEFAULT 'high',
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -859,6 +860,18 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     try:
         conn.execute(
             "ALTER TABLE selection_family_fact ADD COLUMN decision_time_status TEXT;"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
+    # P10D S3 (eve C2 inversion): add temperature_metric to legacy ensemble_snapshots.
+    # ensemble_snapshots_v2 has zero runtime writers; skipping legacy writes for LOW
+    # would destroy snapshot persistence (harvester joins on snapshot_id from legacy
+    # table). Add temperature_metric column here so LOW rows are distinguishable.
+    # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
+    try:
+        conn.execute(
+            "ALTER TABLE ensemble_snapshots ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high';"
         )
     except sqlite3.OperationalError:
         pass  # Column already exists — idempotent re-run

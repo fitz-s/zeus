@@ -276,7 +276,7 @@ class EnsembleSignal:
         # Daily extrema per member, respecting city timezone for day boundary.
         # For low-temperature markets, computes daily mins instead of maxes.
         self.temperature_metric = temperature_metric
-        self.member_maxes = member_maxes_for_target_date(
+        self.member_extrema = member_maxes_for_target_date(
             members_hourly,
             times,
             city.timezone,
@@ -300,9 +300,9 @@ class EnsembleSignal:
             bias_enabled = False  # config surface genuinely unavailable
         if bias_enabled:
             corrected, applied = self._apply_bias_correction(
-                self.member_maxes, city, target_date
+                self.member_extrema, city, target_date
             )
-            self.member_maxes = corrected
+            self.member_extrema = corrected
             self.bias_corrected = applied
         
         self.city = city
@@ -310,7 +310,7 @@ class EnsembleSignal:
         self.settlement_semantics = settlement_semantics
         
         # Simulated settlement values (may have floating decimals if precision < 1)
-        self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_maxes)
+        self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_extrema)
 
     def _simulate_settlement(self, values: np.ndarray) -> np.ndarray:
         return self.settlement_semantics.round_values(values)
@@ -408,7 +408,7 @@ class EnsembleSignal:
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
         return p_raw_vector_from_maxes(
-            self.member_maxes,
+            self.member_extrema,
             self.city,
             self.settlement_semantics,
             bins,
@@ -418,11 +418,11 @@ class EnsembleSignal:
 
     def spread(self) -> TemperatureDelta:
         """Ensemble spread (σ of member daily maxes) as typed TemperatureDelta."""
-        return TemperatureDelta(float(np.std(self.member_maxes)), self.city.settlement_unit)
+        return TemperatureDelta(float(np.std(self.member_extrema)), self.city.settlement_unit)
 
     def spread_float(self) -> float:
         """Spread as bare float (legacy compatibility, used by DB storage)."""
-        return float(np.std(self.member_maxes))
+        return float(np.std(self.member_extrema))
 
     def is_bimodal(self) -> bool:
         """Detect regime split (e.g., cold front timing uncertainty).
@@ -430,7 +430,7 @@ class EnsembleSignal:
         Spec §2.1: Uses KDE peak counting with argrelextrema.
         Fallback: gap heuristic if KDE fails (e.g., all members identical).
         """
-        maxes = self.member_maxes
+        maxes = self.member_extrema
         rng = float(maxes.max() - maxes.min())
 
         # Per-city: if spread < 1 instrument noise, members are in consensus
@@ -463,5 +463,10 @@ class EnsembleSignal:
         """
         window = sigma_instrument_for_city(self.city).value
         return float(
-            np.sum(np.abs(self.member_maxes - boundary) < window)
-        ) / len(self.member_maxes)
+            np.sum(np.abs(self.member_extrema - boundary) < window)
+        ) / len(self.member_extrema)
+
+    @property
+    def member_maxes(self) -> np.ndarray:
+        """Deprecated alias — use member_extrema. For LOW this is mins (semantic disambiguation deferred to P10E+)."""
+        return self.member_extrema

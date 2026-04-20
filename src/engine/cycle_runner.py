@@ -223,7 +223,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # C1/INV-13: one-time provenance registry validation — no-op mode
     try:
         from src.contracts.provenance_registry import require_provenance
-        require_provenance("kelly_mult", requires_provenance=False)
+        require_provenance("kelly_mult")
     except Exception as e:
         logger.warning("Provenance registry precheck failed: %s", e)
 
