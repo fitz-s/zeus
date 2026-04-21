@@ -4,56 +4,50 @@ All docs use `lower_snake_case.md` naming unless a date prefix is required.
 
 ## Design principle
 
-**Flat mesh architecture.** Active subdirectories plus archives. Each directory
-contains only files that are actively referenced by the mesh network (rooted at
-`AGENTS.md`). Everything else lives in `docs/archives/`. This keeps agent
-context loading fast — agents follow links, not directories.
+The docs surface is a tracked active mesh, not "active subdirectories plus
+archives."
 
-## Folders
+- active tracked docs live in declared subroots
+- visible history is routed through `archive_registry.md`
+- raw archive bodies are historical cold storage outside the default read path
 
-| Directory | Purpose | Files |
+## Tracked docs subroots
+
+| Directory | Purpose | Notes |
 |-----------|---------|-------|
-| `authority/` | Current architecture + current delivery law + packet/autonomy/boundary governance | 7 |
-| `reference/` | Domain model, technical orientation, quantitative research, data inventory, strategy, math specification notes | 8 |
-| `operations/` | Live control-entry pointer + current work packets | 5 |
-| `runbooks/` | Operator runbooks | 5 |
-| `reports/` | Generated diagnostic reports from declared writers only; evidence only and not a default route | 2 |
-| `to-do-list/` | Active checklist workbooks and audit queues, never authority | 5 |
-| `artifacts/` | Active evidence artifacts and inventories, never authority | 1 |
-| `archives/` | **Everything historical** — audits, findings, old specs, old governance, overlay packages, handoffs, etc. | many |
+| `authority/` | Current architecture and delivery law | Present-tense authority docs |
+| `reference/` | Domain, math, and repo reference material | Facts and orientation, not authority by themselves |
+| `operations/` | Live control pointer, active packets, package inputs | Current work routing |
+| `runbooks/` | Operator runbooks | Runtime support |
+| `reports/` | Generated diagnostic reports | Evidence only |
+| `to-do-list/` | Active checklist workbooks and audit queues | Never authority |
+| `artifacts/` | Active evidence artifacts and inventories | Never authority |
 
 ## Active top-level docs
 
-- `../AGENTS.md` — root operating brief (read first, always)
-- `reference/zeus_domain_model.md` — "Zeus in 5 minutes" domain model with WHY explanations
-- `authority/zeus_current_architecture.md` — active architecture law (truth surfaces, lifecycle, risk, zones)
-- `authority/zeus_current_delivery.md` — active delivery law (authority order, planning lock, packet routing)
-- `known_gaps.md` — active operational gap register
-- `zeus-architecture-deep-map.md` — generated deep refactor/reference map; evidence only
-- `settlement-source-provenance.md` — settlement source transition provenance evidence
-- `settlement-validation-workflow.md` — settlement validation workflow notes
-- `zeus-pathology-registry.md` — refactor pathology registry
-- `zeus-refactor-plan.md` — incremental refactor plan
-- `zeus-system-constitution.md` — refactor constitution artifact subordinate to active authority
-- `operations/current_state.md` — single live control-entry pointer; current branch / packet truth
-- `runbooks/live-operation.md` — day-to-day live daemon operation runbook
-- `../workspace_map.md` — directory guide and file placement rules (repo root)
+- `../AGENTS.md` - root operating brief
+- `archive_registry.md` - visible historical interface and promotion guardrails
+- `authority/zeus_current_architecture.md` - current architecture law
+- `authority/zeus_current_delivery.md` - current delivery law
+- `reference/zeus_domain_model.md` - short domain model
+- `operations/current_state.md` - live control pointer
+- `runbooks/live_operation.md` - day-to-day live daemon runbook
+- `known_gaps.md` - active operational gap register
+- `../workspace_map.md` - repo visibility and routing guide
 
-## Archives
+## Historical interface
 
-`archives/**` — historical only; never principal authority. Subdirectories include:
-`architecture/`, `artifacts/`, `audits/`, `control/`, `designs/`, `findings/`,
-`governance/`, `handoffs/`, `investigations/`, `math`, `memory/`,
-`migration/`, `overlay_packages/`, `plans/`, `reality_crisis/`, `reference/`,
-`reports/`, `research/`, `results/`, `rollout/`, `sessions/`, `specs/`,
-`traces/`, `work_packets/`.
+Raw historical bodies are not part of the default tracked boot surface.
 
-## Naming Rules (Mandatory)
+Use `archive_registry.md` first. Only open archive bodies or bundles when the
+task explicitly needs historical evidence, and label archive-derived claims as
+`[Archive evidence]`.
 
-- All `.md` files: `lower_snake_case.md` (exceptions: `AGENTS.md`, `README.md`)
-- **New files**: Use `task_YYYY-MM-DD_name.md` format — task prefix identifies the program/packet, date is creation date
-- No single-word prefixes: ❌ `data_plan.md` → ✅ `datafix_2026-04-10_improvement_plan.md`
-- No generic names outside active task folders: ❌ `plan.md`, `progress.md` → ✅ `<task>_<date>_<topic>.md`
-- No spaces in filenames or directory names
-- Existing files keep current names (no retroactive renames)
-- Date prefixes only for time-bound reports
+## Naming rules
+
+- All `.md` files use `lower_snake_case.md`
+- Exceptions: `AGENTS.md`, `README.md`
+- New time-bound packet files use `task_YYYY-MM-DD_name.md` or
+  `task_YYYY-MM-DD_name/`
+- Avoid generic top-level names such as `plan.md` or `progress.md` outside an
+  active task folder

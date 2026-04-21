@@ -1,79 +1,55 @@
 # Current State
 
-Role: single live control-entry surface for the repo.
+Role: single live control pointer for the repo.
 
-## Read Order
+## Active program
 
-1. `AGENTS.md`
-2. `workspace_map.md`
-3. `docs/operations/current_state.md`
-4. Active work packet listed below
-5. `docs/known_gaps.md` when runtime blockers matter
+- Branch: `data-improve`
+- Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
+- Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
+- Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
+- Status: P0 online boot-surface realignment is the active lane
+- Supersession: user ruling in this thread makes the reconstruction package the
+  current mainline control surface; older wait-for-ruling notes about
+  P11/B055/B099 are stale for this packet
 
-## Active Work
+## Required evidence
 
-- Branch: `data-improve` @ HEAD `553347c` (pushed `origin/data-improve` 2026-04-19)
-- Active program: Zeus Dual-Track Metric Spine Refactor — Phase 0 opened 2026-04-16. **Phase 10 COMPLETE 2026-04-19 (P10A → P10E, 5 sub-phases).** Dual-track metric spine structurally complete; LOW-lane code-ready; v2 data migration deferred to post-Golden-Window. DT law enforcement LIVE on DT#1-#7 except DT#7 leverage+oracle pending Gate F. All 19 DT markers wired; 77+ structural antibodies deployed. Next: user ruling on P11 Execution-State Truth OR architect packets B055/B099 OR operational work (Gate F lift).
-- Dual-Track refactor packet file: `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
-- Dual-Track authority file: `docs/authority/zeus_dual_track_architecture.md`
-- Archived:
-  - `docs/archives/work_packets/branches/data-improve/topology/2026-04-14_topology_context_efficiency/` — Phase 7 modularization COMPLETE, closeout steps verified, archived 2026-04-15
-  - `docs/archives/work_packets/branches/data-improve/topology/2026-04-15_topology_enforcement_hardening/` — topology enforcement hardening COMPLETE, merged to `data-improve`, branch-diff closeout verified, archived 2026-04-16
-  - `docs/archives/work_packets/branches/data-improve/live_reorientation/2026-04-11_phase1live/` — stale Phase 1 live-only plan moved out of active operations on 2026-04-16
-  - `docs/archives/work_packets/branches/data-improve/math_semantics/2026-04-16_k6_k7_k8_math_semantics/` — completed K6/K7/K8 remediation work log moved out of active operations on 2026-04-16
-- Active backlog:
-  - `docs/operations/task_2026-04-13_remaining_repair_backlog.md` — all items DEFERRED until DB rebuild completes
-  - `docs/operations/task_2026-04-14_session_backlog.md` — sequential backfill PID 49371 running; post-backfill ETL cascade blocked on completion
-  - `docs/operations/data_rebuild_plan.md` — upstream data rebuild plan (v2.2, scope: collect+store code prep while TIGGE completes)
-- Stale/deferred:
-  - Phase 1 live-only plan is archived; do not use it as an active control surface.
-- Active checklist/evidence:
-  - `docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx` — 75-bug audit COMPLETE (Excel needs manual status update for Phase 4 bugs)
-  - `docs/operations/runtime_artifact_inventory.md` — `.omx/.omc` planning artifact inventory and disposition guide
-  - `docs/operations/task_2026-04-16_function_naming_freshness/plan.md` — small completed governance package for function naming and changed-file script/test freshness metadata
-  - `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md` — active package for Code Review Graph topology-first integration and Codex MCP safety
-  - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md` — active package syncing non-Phase-10A workspace artifacts and topology map updates
-  - `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md` — active package adding derived Code Review Graph appendix to topology context packs
-  - `docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md` — active package tracking Code Review Graph DB as non-authority online repo context
-- Next packet: User ruling required. Options: (1) P11 Execution-State Truth (Codex main path); (2) B055 DT#6 architect packet; (3) B099 DT#1 architect packet; (4) Operational work (Gate F lift pending TIGGE cloud completion).
-- Post-Phase-10 forward-log: P11 Execution-State Truth (Codex main path) OR B055 DT#6 architect packet OR B099 DT#1 architect packet (user ruling required); operational work Gate F lift (TIGGE cloud downloads). Regression baseline: 144-147/1950-1951/92 (flake range from test-order pollution; deterministic, non-blocking).
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md`
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/01_mental_model.md`
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/02_authority_order_rewrite.md`
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/07_execution_packets.md`
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/16_apply_order.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json`
 
-## Runtime
+## Freeze point
 
-- Sequential backfill PID 49371 running (`backfill_wu_daily_all.py --all --missing-only --days 834`)
-- Waiter process PID 50114 (`post_sequential_fillback.sh`) polls every 60s, kicks off HKO + hole scanner on completion
-- Post-backfill unlocks: Task #63 (ETL cascade, 11 steps), Task #61 (TIGGE transfer, 41K rows), historical forecasts recovery (171K rows)
+- P0 allowlist only: boot surfaces, `docs/archive_registry.md`,
+  `docs/operations/current_state.md`, `docs/operations/AGENTS.md`,
+  `architecture/topology.yaml`, and the active task folder
+- No source, test, script, runtime DB, graph-db, or archive-body edits in this
+  lane
+- Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
+  and `state/**`, not here
 
-## Recent Packet State
+## Other registered operations surfaces
 
-- Packet 0 closed as a read-only topology inventory baseline.
-- Packet 1 closed the WMO half-up executable rounding law and recurrence gates.
-- Packet 2 added the topology compiler MVP and `scripts/topology_doctor.py`.
-- Packet 3 closed 2026-04-15 — docs mesh repair and authority normalization complete.
-- Packet 4 closed 2026-04-15 — source file rationale map complete.
-- Phase 10A: independent hygiene fix pack (R1 monitor rename + B071 + B091-lower + S5 doc flip). Merged `2026-04-19` at `81294d2`. Regression: 142/1894/93.
-- Phase 10B: DT-seam cleanup (R3+R4+R5+R9+R11). Merged `2026-04-19` at `f2ffcad`. Regression: 144/1905/93.
-- Phase 10C: LOW-lane tail + HKO semantic injection + DT#1 SAVEPOINT. Merged `2026-04-19` at `18b510b`. Regression: ~144/1920/92.
-- Phase 10D + 10E: P10D SLIM `f55f4e1` (causality_status wire + ensemble rename + INV-13 + ghost tests) + P10E FINAL `553347c` (R10 Kelly strict + city_obj strict + loose ends). Merged `2026-04-19`. Regression envelope: 144-147 failed / 1950-1951 passed / 92 skipped. critic-eve (P10C/P10D/P10E, 3-cycle) retired PASS-WITH-RESERVATIONS.
+- `docs/operations/task_2026-04-13_topology_compiler_program.md`
+- `docs/operations/task_2026-04-13_remaining_repair_backlog.md`
+- `docs/operations/task_2026-04-14_session_backlog.md`
+- `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
+- `docs/operations/task_2026-04-16_function_naming_freshness/plan.md`
+- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`
+- `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md`
+- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md`
+- `docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md`
+- `docs/operations/data_rebuild_plan.md`
 
-## 75-Bug Audit Progress (data-improve branch)
+## Next action
 
-| Phase | Macros | Bugs | Status | Commit |
-|-------|--------|------|--------|--------|
-| Phase 1 | K1+K2 | 39 | ✅ Complete | `96b70a8`, `f6f612e` |
-| Phase 2 | K4+K5 | 13 | ✅ Complete | `4abbeb7` |
-| Phase 3 | K6+K7 | 10 | ✅ Complete | `f6092ca` |
-| Phase 4 | K3+K8 | 13 | ✅ Complete | `3e35808`, `f6eaa72` |
-
-75 of 75 bugs addressed (implemented, confirmed pre-fixed, or confirmed false positive). Audit complete.
-
-## Boundaries
-
-- Do not mutate DB files from this packet.
-- Do not run data rebuild from this packet.
-- Do not perform broad stale-test/script cleanup from this packet.
-- Runtime closeout notes under OMX context are evidence logs, not repo authority.
-
-## Next Expected Packet
-
-Continue the Dual-Track Metric Spine Refactor unless a new architecture/governance blocker supersedes it.
+- Finish P0 boot-surface edits inside the package allowlist
+- Run planning-lock, work-record, receipt, docs, context-budget, and
+  map-maintenance verification
+- Keep unrelated dirty work and local archive inputs untouched

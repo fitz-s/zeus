@@ -437,11 +437,10 @@ registry_directories:
   - path: ".agents/skills"
   - path: "raw"
 
-docs_mode_excluded_roots: []
-
 docs_root_allowed_files:
   - docs/AGENTS.md
   - docs/README.md
+  - docs/archive_registry.md
   - docs/known_gaps.md
   - docs/zeus-architecture-deep-map.md
   - docs/settlement-source-provenance.md
@@ -453,13 +452,14 @@ docs_root_allowed_files:
 active_operations_registry:
   current_state: docs/operations/current_state.md
   required_labels:
-    - Dual-Track refactor packet file
-    - Active backlog
-    - Active checklist/evidence
-    - Next packet
+    - Active package source
+    - Active execution packet
+    - Required evidence
+    - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx
+    - docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md
+    - docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md
 
 runtime_artifact_inventory:
   path: docs/operations/runtime_artifact_inventory.md
@@ -470,6 +470,9 @@ runtime_artifact_inventory:
     Runtime-local planning artifacts are ignored and not authority. When they
     contain planning/progress knowledge, this inventory must list the path and
     disposition so agents do not need to rediscover hidden context.
+
+docs_mode_excluded_roots:
+  - path: "docs/archives.zip"
 
 docs_subroots:
   - path: "docs/authority"
