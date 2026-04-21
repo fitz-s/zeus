@@ -4,6 +4,11 @@ All discovery modes go through the same CycleRunner with different DiscoveryMode
 The lifecycle is identical for all modes — only scanner parameters differ.
 """
 
+# Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
+# Last reused/audited: 2026-04-21
+# Authority basis: Phase 10 DT-close B047 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B047_scheduler_observability.md
+
+import functools
 import logging
 import os
 import sys
@@ -16,12 +21,43 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from src.config import cities_by_name, get_mode, settings
 from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
+from src.observability.scheduler_health import _write_scheduler_health
 from src.state.db import init_schema, get_world_connection, get_trade_connection
 
 logger = logging.getLogger("zeus")
 
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
+
+
+def _scheduler_job(job_name: str):
+    """Decorator: every scheduler.add_job(fn, ...) target in this module must
+    wear this (B047 — see SCAFFOLD_B047_scheduler_observability.md).
+
+    Wraps fn so that:
+      - success → ``scheduler_jobs_health.json[job_name].status = OK`` + timestamp
+      - exception → logged with traceback + ``status = FAILED`` + failure_reason
+
+    Never re-raises (fail-open per K2 design in 27bedbd: daemon must keep
+    running; OpenClaw supervisor relies on heartbeat). ``_write_heartbeat``
+    is the sole scheduler target exempt from this decorator (it IS the
+    coarse observability channel).
+    """
+
+    def _decorator(fn):
+        @functools.wraps(fn)
+        def _wrapper(*args, **kwargs):
+            try:
+                result = fn(*args, **kwargs)
+                _write_scheduler_health(job_name, failed=False)
+                return result
+            except Exception as exc:
+                logger.error("%s failed: %s", job_name, exc, exc_info=True)
+                _write_scheduler_health(job_name, failed=True, reason=str(exc))
+
+        return _wrapper
+
+    return _decorator
 
 
 def _etl_subprocess_python() -> str:
@@ -31,8 +67,15 @@ def _etl_subprocess_python() -> str:
     return sys.executable
 
 
+@_scheduler_job("run_mode")
 def _run_mode(mode: DiscoveryMode):
-    """Wrapper with error handling and cycle lock for scheduler."""
+    """Wrapper with error handling and cycle lock for scheduler.
+
+    Dual-signal observability: this wrapper writes to ``status_summary.json``
+    via status_summary.write_status (the legacy mode-specific channel) AND
+    the ``@_scheduler_job`` decorator independently writes to
+    ``scheduler_jobs_health.json`` (B047 uniform channel). Non-conflicting.
+    """
     acquired = _cycle_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("%s skipped: another cycle is still running", mode.value)
@@ -58,15 +101,14 @@ def _run_mode(mode: DiscoveryMode):
         _cycle_lock.release()
 
 
+@_scheduler_job("harvester")
 def _harvester_cycle():
-    try:
-        from src.execution.harvester import run_harvester
-        result = run_harvester()
-        logger.info("Harvester: %s", result)
-    except Exception as e:
-        logger.error("Harvester failed: %s", e, exc_info=True)
+    from src.execution.harvester import run_harvester
+    result = run_harvester()
+    logger.info("Harvester: %s", result)
 
 
+@_scheduler_job("k2_daily_obs")
 def _k2_daily_obs_tick():
     """K2 daily-observations tick — replaces legacy wu_daily_collector.
 
@@ -77,19 +119,17 @@ def _k2_daily_obs_tick():
     - All writes flow through ObservationAtom + IngestionGuard (no Layer 3)
     - data_coverage is updated in the same transaction as the physical row
     """
+    from src.data.daily_obs_append import daily_tick
+    from src.state.db import get_world_connection
+    conn = get_world_connection()
     try:
-        from src.data.daily_obs_append import daily_tick
-        from src.state.db import get_world_connection
-        conn = get_world_connection()
-        try:
-            result = daily_tick(conn)
-        finally:
-            conn.close()
-        logger.info("K2 daily_obs_tick: %s", result)
-    except Exception as e:
-        logger.error("K2 daily_obs_tick failed: %s", e, exc_info=True)
+        result = daily_tick(conn)
+    finally:
+        conn.close()
+    logger.info("K2 daily_obs_tick: %s", result)
 
 
+@_scheduler_job("k2_hourly_instants")
 def _k2_hourly_instants_tick():
     """K2 hourly Open-Meteo archive tick for observation_instants.
 
@@ -97,38 +137,34 @@ def _k2_hourly_instants_tick():
     most recently completed local day). 3-day rolling window allows
     Open-Meteo archive ~2-3 day delay + catches promotions.
     """
+    from src.data.hourly_instants_append import hourly_tick
+    from src.state.db import get_world_connection
+    conn = get_world_connection()
     try:
-        from src.data.hourly_instants_append import hourly_tick
-        from src.state.db import get_world_connection
-        conn = get_world_connection()
-        try:
-            result = hourly_tick(conn)
-        finally:
-            conn.close()
-        logger.info("K2 hourly_instants_tick: %s", result)
-    except Exception as e:
-        logger.error("K2 hourly_instants_tick failed: %s", e, exc_info=True)
+        result = hourly_tick(conn)
+    finally:
+        conn.close()
+    logger.info("K2 hourly_instants_tick: %s", result)
 
 
+@_scheduler_job("k2_solar_daily")
 def _k2_solar_daily_tick():
     """K2 daily sunrise/sunset refresh — once per day (UTC 00:30).
 
     Fetches [today, today+14] per city. Deterministic astronomical data
     so no backoff / retry semantics are needed beyond network errors.
     """
+    from src.data.solar_append import daily_tick
+    from src.state.db import get_world_connection
+    conn = get_world_connection()
     try:
-        from src.data.solar_append import daily_tick
-        from src.state.db import get_world_connection
-        conn = get_world_connection()
-        try:
-            result = daily_tick(conn)
-        finally:
-            conn.close()
-        logger.info("K2 solar_daily_tick: %s", result)
-    except Exception as e:
-        logger.error("K2 solar_daily_tick failed: %s", e, exc_info=True)
+        result = daily_tick(conn)
+    finally:
+        conn.close()
+    logger.info("K2 solar_daily_tick: %s", result)
 
 
+@_scheduler_job("k2_forecasts_daily")
 def _k2_forecasts_daily_tick():
     """K2 daily NWP forecasts refresh — once per day (UTC 07:30).
 
@@ -136,19 +172,17 @@ def _k2_forecasts_daily_tick():
     Previous Runs API (empirically ~UTC 07:00). Fetches [today-3,
     today+7] × 5 models × 7 leads per city.
     """
+    from src.data.forecasts_append import daily_tick
+    from src.state.db import get_world_connection
+    conn = get_world_connection()
     try:
-        from src.data.forecasts_append import daily_tick
-        from src.state.db import get_world_connection
-        conn = get_world_connection()
-        try:
-            result = daily_tick(conn)
-        finally:
-            conn.close()
-        logger.info("K2 forecasts_daily_tick: %s", result)
-    except Exception as e:
-        logger.error("K2 forecasts_daily_tick failed: %s", e, exc_info=True)
+        result = daily_tick(conn)
+    finally:
+        conn.close()
+    logger.info("K2 forecasts_daily_tick: %s", result)
 
 
+@_scheduler_job("k2_hole_scanner")
 def _k2_hole_scanner_tick():
     """K2 hole scanner daily patrol — runs hole_scanner.scan_all().
 
@@ -157,22 +191,20 @@ def _k2_hole_scanner_tick():
     The appenders pick up the new MISSING rows on their next tick via
     find_pending_fills. Logs a compact summary per data_table.
     """
+    from src.data.hole_scanner import HoleScanner
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
     try:
-        from src.data.hole_scanner import HoleScanner
-        from src.state.db import get_world_connection
-
-        conn = get_world_connection()
-        try:
-            scanner = HoleScanner(conn)
-            results = scanner.scan_all()
-            for r in results:
-                logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error("K2 hole_scanner_tick failed: %s", e, exc_info=True)
+        scanner = HoleScanner(conn)
+        results = scanner.scan_all()
+        for r in results:
+            logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
+    finally:
+        conn.close()
 
 
+@_scheduler_job("k2_startup_catch_up")
 def _k2_startup_catch_up():
     """K2 boot-time hole filler — runs once at daemon start.
 
@@ -181,39 +213,35 @@ def _k2_startup_catch_up():
     the last 30 days and fills them. This handles daemon downtime gaps
     without human intervention.
     """
+    from src.data.daily_obs_append import catch_up_missing as catch_up_obs
+    from src.data.hourly_instants_append import catch_up_missing as catch_up_hourly
+    from src.data.solar_append import catch_up_missing as catch_up_solar
+    from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
     try:
-        from src.data.daily_obs_append import catch_up_missing as catch_up_obs
-        from src.data.hourly_instants_append import catch_up_missing as catch_up_hourly
-        from src.data.solar_append import catch_up_missing as catch_up_solar
-        from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
-        from src.state.db import get_world_connection
-
-        conn = get_world_connection()
-        try:
-            logger.info("K2 startup catch-up: observations")
-            logger.info("  %s", catch_up_obs(conn, days_back=30))
-            logger.info("K2 startup catch-up: observation_instants")
-            logger.info("  %s", catch_up_hourly(conn, days_back=30))
-            logger.info("K2 startup catch-up: solar_daily")
-            logger.info("  %s", catch_up_solar(conn, days_back=30))
-            logger.info("K2 startup catch-up: forecasts")
-            logger.info("  %s", catch_up_forecasts(conn, days_back=30))
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.error("K2 startup catch-up failed: %s", e, exc_info=True)
+        logger.info("K2 startup catch-up: observations")
+        logger.info("  %s", catch_up_obs(conn, days_back=30))
+        logger.info("K2 startup catch-up: observation_instants")
+        logger.info("  %s", catch_up_hourly(conn, days_back=30))
+        logger.info("K2 startup catch-up: solar_daily")
+        logger.info("  %s", catch_up_solar(conn, days_back=30))
+        logger.info("K2 startup catch-up: forecasts")
+        logger.info("  %s", catch_up_forecasts(conn, days_back=30))
+    finally:
+        conn.close()
 
 
+@_scheduler_job("ecmwf_open_data")
 def _ecmwf_open_data_cycle():
-    try:
-        from src.data.ecmwf_open_data import collect_open_ens_cycle
+    from src.data.ecmwf_open_data import collect_open_ens_cycle
 
-        result = collect_open_ens_cycle()
-        logger.info("ECMWF Open Data: %s", result)
-    except Exception as e:
-        logger.error("ECMWF Open Data collection failed: %s", e, exc_info=True)
+    result = collect_open_ens_cycle()
+    logger.info("ECMWF Open Data: %s", result)
 
 
+@_scheduler_job("etl_recalibrate")
 def _etl_recalibrate():
     """Weekly recalibration: refresh ETL tables + refit Platt + replay audit.
 
@@ -274,28 +302,26 @@ def _etl_recalibrate():
     logger.info("ETL recalibration: %s", results)
 
 
+@_scheduler_job("automation_analysis")
 def _automation_analysis_cycle():
     """Daily diagnostic: check calibration layer tables and bias correction readiness.
 
     Designed to run every 6 hours so Zeus operator always knows the state
     of the automation layer without manual DB queries.
     """
-    try:
-        import sys
-        import subprocess
-        venv_python = sys.executable
-        script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
-        r = subprocess.run(
-            [venv_python, str(script)],
-            capture_output=True, text=True, timeout=60,
-        )
-        output = r.stdout.strip()
-        if output:
-            logger.info("[automation_analysis]\n%s", output)
-        if r.returncode != 0 and r.stderr:
-            logger.warning("[automation_analysis] errors: %s", r.stderr[-300:])
-    except Exception as e:
-        logger.error("automation_analysis failed: %s", e, exc_info=True)
+    import sys
+    import subprocess
+    venv_python = sys.executable
+    script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
+    r = subprocess.run(
+        [venv_python, str(script)],
+        capture_output=True, text=True, timeout=60,
+    )
+    output = r.stdout.strip()
+    if output:
+        logger.info("[automation_analysis]\n%s", output)
+    if r.returncode != 0 and r.stderr:
+        logger.warning("[automation_analysis] errors: %s", r.stderr[-300:])
 
 
 def run_single_cycle():
