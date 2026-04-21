@@ -738,7 +738,7 @@ Layer 4: Runtime readiness (needs Layer 3)
 `backfill_wu_daily_all.py`, `backfill_hko_daily.py`, `backfill_ogimet_metar.py`, `backfill_hourly_openmeteo.py`, `backfill_solar_openmeteo.py`, `backfill_openmeteo_previous_runs.py`, `backfill_ens.py`, `backfill_tigge_snapshot_p_raw.py`, `backfill_observations_from_settlements.py`, `backfill_cluster_taxonomy.py`, `backfill_current_market_price_snapshots.py`, `backfill_exit_telemetry.py`, `backfill_outcome_fact.py`, `backfill_probability_traces_from_opportunities.py`, `backfill_recent_exits_attribution.py`, `backfill_semantic_snapshots.py`, `backfill_trade_decision_attribution.py`, `backfill_truth_metadata.py`, `onboard_cities.py`
 
 ### ETL (derived table builders)
-`etl_asos_wu_offset.py`, `etl_diurnal_curves.py`, `etl_forecast_error_profiles.py`, `etl_forecast_skill_from_forecasts.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_ladder_backfill.py`, `etl_market_price_history.py`, `etl_observation_instants.py`, `etl_solar_times.py`, `etl_temp_persistence.py`, `etl_tigge_calibration.py`, `etl_tigge_direct_calibration.py`, `etl_tigge_ens.py`, `ingest_grib_to_snapshots.py`
+`etl_asos_wu_offset.py`, `etl_diurnal_curves.py`, `etl_forecast_error_profiles.py`, `etl_forecast_skill_from_forecasts.py`, `etl_historical_forecasts.py`, `etl_hourly_observations.py`, `etl_solar_times.py`, `etl_temp_persistence.py`, `etl_tigge_calibration.py`, `etl_tigge_direct_calibration.py`, `etl_tigge_ens.py`, `ingest_grib_to_snapshots.py`
 
 ### Calibration
 `generate_calibration_pairs.py`, `rebuild_calibration_pairs_canonical.py`, `rebuild_calibration.py`, `refit_platt.py`, `validate_dynamic_alpha.py`, `baseline_experiment.py`, `investigate_ecmwf_bias.py`, `build_correlation_matrix.py`
@@ -753,7 +753,7 @@ Layer 4: Runtime readiness (needs Layer 3)
 `run_replay.py`, `replay_parity.py`, `capture_replay_artifact.py`, `profit_validation_replay.py`
 
 ### Migration
-`migrate_add_authority_column.py`, `migrate_cluster_to_city.py`, `migrate_rainstorm_full.py`, `migrate_to_isolated_dbs.py`, `nuke_rebuild_projections.py`, `deprecate_legacy_state_files.py`
+`migrate_add_authority_column.py`, `migrate_cluster_to_city.py`, `migrate_to_isolated_dbs.py`, `nuke_rebuild_projections.py`, `deprecate_legacy_state_files.py`
 
 ### Operations
 `live_smoke_test.py`, `healthcheck.py`, `deep_heartbeat.py`, `heartbeat_dispatcher.py`, `force_lifecycle.py`, `cleanup_ghost_positions.py`, `apply_recommended_controls.py`, `analyze_paper_trading.py`, `venus_autonomy_gate.py`, `venus_sensing_report.py`, `equity_curve.py`, `generate_monthly_bounds.py`, `parse_change_log.py`, `rebuild_strategy_tracker_current_regime.py`, `rebuild_settlements.py`, `refresh_paper_runtime_artifacts.py`

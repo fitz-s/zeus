@@ -83,7 +83,6 @@ def run_validation() -> dict:
 
     main_source = MAIN_PATH.read_text(encoding="utf-8")
     for required_script in [
-        "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_hourly_observations.py",
     ]:

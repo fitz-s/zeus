@@ -4,7 +4,7 @@ Zone: K0_frozen_kernel — cross-cutting unit safety
 
 ## What this code does (and WHY)
 
-Temperature unit confusion was the #1 class of bugs in the predecessor system (Rainstorm). Zeus prevents this with typed containers: `Temperature` (absolute: 72°F) and `TemperatureDelta` (differences: σ=0.3°F). Cross-unit operations raise `UnitMismatchError` at runtime. Values stay in their native unit (Dallas=°F, London=°C) — there is NO single-unit refactor. Conversions are explicit via `.to(target_unit)`.
+Temperature unit confusion was the #1 class of bugs in the legacy predecessor system. Zeus prevents this with typed containers: `Temperature` (absolute: 72°F) and `TemperatureDelta` (differences: σ=0.3°F). Cross-unit operations raise `UnitMismatchError` at runtime. Values stay in their native unit (Dallas=°F, London=°C) — there is NO single-unit refactor. Conversions are explicit via `.to(target_unit)`.
 
 ## Key files
 

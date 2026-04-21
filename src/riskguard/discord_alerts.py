@@ -1,6 +1,6 @@
 """Zeus RiskGuard Discord alerting — sends halt/resume/warning notifications.
 
-P12 finding #7: Zeus has no alerting mechanism. Adapted from Rainstorm's pattern
+P12 finding #7: Zeus has no alerting mechanism. Adapted from the legacy predecessor's pattern
 but using Zeus-native conventions (keychain resolver, risk_state.db path).
 
 Webhook URL resolved from macOS Keychain: `zeus_discord_webhook`.

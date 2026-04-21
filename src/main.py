@@ -264,7 +264,6 @@ def _etl_recalibrate():
 
     # 1. Refresh ETL tables (diurnal curves, persistence, observations)
     for script in [
-        "etl_observation_instants.py",
         "etl_diurnal_curves.py",
         "etl_temp_persistence.py",
         "etl_hourly_observations.py",

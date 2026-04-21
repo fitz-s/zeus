@@ -976,7 +976,7 @@ def _settle_positions(
             continue
 
         # Determine P&L — correct formula: shares × exit_price - cost_basis
-        # Rainstorm comparison found the old formula underestimated winning P&L
+        # Legacy-predecessor comparison found the old formula underestimated winning P&L
         won = pos.bin_label == winning_label
         shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0
         exited_at_before_settlement = getattr(pos, "last_exit_at", "")

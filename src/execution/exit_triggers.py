@@ -1,6 +1,6 @@
 """Exit trigger evaluation with 8-layer churn defense. Spec §6.3.
 
-Rainstorm lesson: false EDGE_REVERSAL from direction-formula double-inversion caused
+Legacy-predecessor lesson: false EDGE_REVERSAL from direction-formula double-inversion caused
 7/8 buy_no positions to force-exit within 30-90min. 8 layers prevent this.
 
 INVARIANT: All probabilities passed to exit triggers are in the NATIVE space of the

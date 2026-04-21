@@ -186,7 +186,7 @@ constants:
       improvement (r=+0.214, tight Brier 0.114 vs wide 0.269). 2°F is the tight
       threshold from a sweep of percentile cutoffs on the 2026-03 dataset.
       Per CLAUDE.md: wrapped as TemperatureDelta to prevent °C/°F confusion
-      (the Rainstorm DST bug category).
+      (the legacy-predecessor DST bug category).
     validated_at: "2026-03-31"
     replacement_criteria: "1000+ ENS snapshots per city; re-fit using per-city ensemble spread percentiles"
     cascade_bound: null

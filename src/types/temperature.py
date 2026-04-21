@@ -1,7 +1,7 @@
 """
 Temperature and TemperatureDelta typed containers.
 
-Prevents the #1 class of Rainstorm bugs: comparing/combining values in
+Prevents the #1 class of legacy-predecessor bugs: comparing/combining values in
 different units (°F vs °C) without conversion.
 
 Design decisions (per Fitz):

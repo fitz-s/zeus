@@ -4,7 +4,7 @@
 
 This script is the new write path for ``calibration_pairs``. It replaces the
 legacy ``scripts/generate_calibration_pairs.py``, which required
-``market_events`` (Rainstorm migration data, lost) to define bin structure.
+``market_events`` (legacy-predecessor migration data, lost) to define bin structure.
 The new path constructs a canonical per-unit bin grid
 (``src/contracts/calibration_bins.py``) that mirrors live Polymarket widths
 (2°F pair-integer interior bins for F cities, 1°C point-integer interior

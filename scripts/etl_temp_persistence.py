@@ -1,6 +1,6 @@
 """ETL: Temperature persistence from daily observations.
 
-Source: zeus.db:observations (daily, already imported via migrate_rainstorm_data)
+Source: zeus.db:observations (daily, already imported via legacy-predecessor migration)
 Target: zeus.db:temp_persistence
 
 Computes day-over-day temperature change distribution per city×season.

@@ -1,6 +1,6 @@
 """ETL: Historical forecasts from zeus-world.db → historical_forecasts + model_skill.
 
-Source: zeus-world.db:forecasts (migrated from rainstorm, 171K+ rows, 5 NWP models)
+Source: zeus-world.db:forecasts (migrated from legacy predecessor, 171K+ rows, 5 NWP models)
   - ecmwf_previous_runs: 35,518 (lead 0-7)
   - gfs_previous_runs: 35,518 (lead 0-7)
   - openmeteo_previous_runs: 34,939 (lead 0-7)

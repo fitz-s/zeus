@@ -137,7 +137,7 @@ def check_settlement_harvester(cur) -> dict:
     """Check 4: latest settlement activity vs now. FAIL if >48h since last settlement.
 
     Checks decision_log (settlement artifacts) and calibration_pairs (harvester output)
-    rather than the legacy settlements table which is a static Rainstorm import.
+    rather than the legacy settlements table which is a static legacy-predecessor import.
     """
     # Primary: decision_log settlement artifacts have the actual settled_at timestamp
     max_settled = _scalar(

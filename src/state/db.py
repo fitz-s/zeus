@@ -154,7 +154,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         conn = get_connection()
 
     conn.executescript("""
-        -- Inherited from Rainstorm: settlement outcomes
+        -- Inherited from legacy predecessor: settlement outcomes
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
@@ -232,7 +232,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
 
         -- Inherited: historical prices for baseline backtesting
-        -- city/target_date/range_label carried over from Rainstorm for bin mapping
+        -- city/target_date/range_label carried over from legacy predecessor for bin mapping
         CREATE TABLE IF NOT EXISTS token_price_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token_id TEXT NOT NULL,
@@ -535,7 +535,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
 
-        -- ETL tables: Rainstorm data validated and imported
+        -- ETL tables: legacy-predecessor data validated and imported
 
         -- Ladder backfill: 5 models × 7 leads per settlement
         CREATE TABLE IF NOT EXISTS forecast_skill (

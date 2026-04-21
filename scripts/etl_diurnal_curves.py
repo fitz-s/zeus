@@ -42,7 +42,7 @@ def run_etl() -> dict:
 
     instant_count = zeus.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0]
     if instant_count == 0:
-        print("ERROR: observation_instants is empty. Run etl_observation_instants.py first.")
+        print("ERROR: observation_instants is empty. Populate via backfill_hourly_openmeteo.py first.")
         zeus.close()
         return {"stored": 0, "error": "no observation_instants"}
 

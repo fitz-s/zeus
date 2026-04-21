@@ -4,7 +4,7 @@ D4 gap: Entry uses bootstrap p-value + BH-FDR (α=0.10, n=200+, CI_lower > 0).
 Exit uses 2 consecutive negative cycles — a single forward_edge comparison with no
 multiple-testing correction and a sample width of 2. The system admits edges
 cautiously but exits aggressively, killing true edges before maturation.
-Rainstorm's 7/8 buy_no false-EDGE_REVERSAL deaths match this pattern exactly.
+The legacy predecessor's 7/8 buy_no false-EDGE_REVERSAL deaths match this pattern exactly.
 
 Resolution: Entry and exit decisions share the same DecisionEvidence contract.
 Exit evidence must meet symmetric statistical burden.

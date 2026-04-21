@@ -5,7 +5,7 @@ First-principles observation (2026-04-14 refactor)
 Platt calibration learns `f(forecast, reality)`, not `f(forecast, market)`. The
 historical pipeline joined `ensemble_snapshots`, `settlements`, and
 `market_events` to construct training pairs, which meant that losing the market
-bin structure (Rainstorm data loss) silently broke calibration. But the bin
+bin structure (legacy predecessor data loss) silently broke calibration. But the bin
 structure a calibration model sees at *training time* has nothing in common with
 market operation — it is merely "the partition of the real line over which we
 accumulate (P_raw, outcome) statistics". Any partition will do, provided it is:

@@ -24,7 +24,7 @@ class AuthorityViolation(ValueError):
     """
 
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
-# This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
+# This prevents the legacy-predecessor bug where 2.0 was used for both °F and °C cities.
 # HARDCODED(setting_key="edge.spread_tight_f", note_key="edge._spread_tight_f_note",
 #           tier=2, replace_after="1000+ ENS snapshots per city",
 #           data_needed="per-city spread distribution percentiles")

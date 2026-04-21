@@ -716,17 +716,15 @@ All jobs are scheduled via `APScheduler.BlockingScheduler` in `src/main.py`.
 
 ### 8.2 ETL Recalibration Pipeline
 
-`_etl_recalibrate()` runs 6 sequential subprocess scripts via venv Python:
+`_etl_recalibrate()` runs sequential subprocess scripts via venv Python:
 
 | Step | Script | Purpose | Timeout |
 |------|--------|---------|---------|
-| 1 | `migrate_rainstorm_full.py` | Refresh Rainstorm-derived source tables | 300s |
-| 2 | `etl_observation_instants.py` | Observation timestamp indexes | 300s |
-| 3 | `etl_diurnal_curves.py` | City-specific diurnal temperature curves | 300s |
-| 4 | `etl_temp_persistence.py` | Temperature persistence statistics | 300s |
-| 5 | `etl_hourly_observations.py` | Hourly observation rollups | 300s |
-| 6 | `etl_tigge_direct_calibration.py` | TIGGE ENS→settlement calibration pairs | 300s |
-| 7 | `refit_platt.py` | Platt model refit (D5: Brier 0.31→0.02, −92%) | 300s |
+| 1 | `etl_diurnal_curves.py` | City-specific diurnal temperature curves | 300s |
+| 2 | `etl_temp_persistence.py` | Temperature persistence statistics | 300s |
+| 3 | `etl_hourly_observations.py` | Hourly observation rollups | 300s |
+| 4 | `etl_tigge_direct_calibration.py` | TIGGE ENS→settlement calibration pairs | 300s |
+| 5 | `refit_platt.py` | Platt model refit (D5: Brier 0.31→0.02, −92%) | 300s |
 | 8 | `run_replay.py --mode audit` | Replay audit snapshot for performance trend | 600s |
 
 Each step logs `"OK"` or `"FAIL: {stderr}"` independently. Partial success is tolerated — a failed ETL step does not abort subsequent steps.
