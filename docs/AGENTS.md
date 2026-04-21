@@ -46,7 +46,7 @@ body or bundle.
 - New active docs belong in declared tracked subroots, not directly under
   `docs/`, except for approved root files such as `README.md`,
   `archive_registry.md`, and `known_gaps.md`.
-- Historical needs route through `archive_registry.md`, not `archives/AGENTS.md`
-  or raw archive bodies.
+- Historical needs route through `archive_registry.md`, not archive-subtree
+  routers or raw archive bodies.
 - Generated reports are evidence only and must not become authority by
   placement.

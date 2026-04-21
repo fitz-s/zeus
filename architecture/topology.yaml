@@ -509,9 +509,23 @@ docs_subroots:
     allowed_extensions: [".xlsx", ".csv", ".json"]
   - path: "docs/archives"
     role: historical_archive
-    requires_agents: true
+    visibility: historical_cold_storage
+    default_read: false
+    visible_interface: docs/archive_registry.md
+    requires_agents: false
     allow_non_markdown: true
     allowed_extensions: [".md", ".sql", ".csv", ".json", ".yaml", ".yml", ".py", ".sh", ".txt", ".xlsx", ".patch"]
+
+archive_interface:
+  path: docs/archive_registry.md
+  default_read: false
+  cold_storage_patterns:
+    - docs/archives/**
+    - docs/archives.zip
+  required_label: "[Archive evidence]"
+  forbidden_live_peer_phrases:
+    - "Active subdirectories plus archives"
+    - "archives/AGENTS.md"
 
 reference_fact_specs:
   - path: "docs/reference/zeus_math_spec.md"
