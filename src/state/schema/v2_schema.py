@@ -283,8 +283,9 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 source_file TEXT,
                 imported_at TEXT NOT NULL,
                 authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED', 'ICAO_STATION_NATIVE')),
                 data_version TEXT NOT NULL DEFAULT 'v1',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(city, source, utc_timestamp)
             )
         """)
@@ -292,17 +293,72 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_observation_instants_v2_city_ts
                 ON observation_instants_v2(city, target_date, utc_timestamp)
         """)
-        # Gate F Step 2: authority + data_version columns for existing DBs (idempotent).
+        # Gate F Step 2 / Phase 0: authority + data_version + provenance_json
+        # columns for existing DBs (idempotent).
+        #
+        # ICAO_STATION_NATIVE authority value is for HK hko_hourly_accumulator
+        # rows per plan v3 L95 and reader filter in antibody A4. The CHECK
+        # constraint is only applied to NEW DBs (SQLite ALTER cannot add CHECK);
+        # live tables rely on writer-level A6 enforcement.
         # Pairs with Gap A closure in step1_schema_audit.md.
         for alter_sql in [
             "ALTER TABLE observation_instants_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
             "ALTER TABLE observation_instants_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
         ]:
             try:
                 conn.execute(alter_sql)
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+
+        # ----------------------------------------------------------------
+        # zeus_meta — runtime-switch registry for atomic data-version cutover
+        # ----------------------------------------------------------------
+        # Phase 0 creates the table + observation_data_version='v0' so the
+        # observation_instants_current VIEW returns 0 rows until Phase 2
+        # fleet-atomic flip sets value='v1.wu-native'.
+        #
+        # Rationale: downstream readers (diurnal_curves, temp_persistence,
+        # monitor_refresh, etl_hourly_observations) modify to SELECT FROM
+        # observation_instants_current in Phase 1. Pre-Phase-2 the view is
+        # empty, so readers fall back to legacy observation_instants. Phase 2
+        # is a single UPDATE zeus_meta SET value='v1.wu-native' — atomic
+        # cutover without per-reader coordination.
+        # ----------------------------------------------------------------
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS zeus_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            INSERT OR IGNORE INTO zeus_meta (key, value)
+            VALUES ('observation_data_version', 'v0')
+        """)
+
+        # ----------------------------------------------------------------
+        # observation_instants_current VIEW — atomic cutover indirection
+        # ----------------------------------------------------------------
+        # Returns only rows whose data_version matches zeus_meta. Pre-Phase-2
+        # zeus_meta.observation_data_version='v0', and no rows carry that
+        # data_version (pilot uses 'v1.wu-native.pilot', fleet uses
+        # 'v1.wu-native'). Phase 2 flips the meta value, instantly activating
+        # whichever corpus is desired.
+        #
+        # Must be created AFTER the ADD COLUMN block so `o.*` includes
+        # provenance_json.
+        # ----------------------------------------------------------------
+        conn.execute("DROP VIEW IF EXISTS observation_instants_current")
+        conn.execute("""
+            CREATE VIEW observation_instants_current AS
+                SELECT o.*
+                FROM observation_instants_v2 o
+                JOIN zeus_meta m
+                  ON m.key = 'observation_data_version'
+                 AND o.data_version = m.value
+        """)
 
         # ----------------------------------------------------------------
         # historical_forecasts_v2
