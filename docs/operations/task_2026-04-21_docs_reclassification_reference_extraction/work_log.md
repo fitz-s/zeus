@@ -79,3 +79,23 @@ Pre-close review:
 Next:
 
 - commit P0, then run post-close status checks before opening P1
+
+## P0 post-close
+
+Date: 2026-04-21
+Commit: `b1a9761`
+
+Post-close review:
+
+- Critic: PASS. P0 installed docs classification scaffolding and anchors
+  without P1 extraction/demotion, source/runtime changes, graph DB changes, or
+  archive-body work.
+- Verifier: PASS. `python scripts/topology_doctor.py --docs --json`,
+  `python scripts/topology_doctor.py --context-budget --json`, and
+  `python scripts/topology_doctor.py --reference-replacement --json` pass after
+  commit.
+
+Next:
+
+- run package P0 follow-up review
+- do not start P1 until review says `proceed_to_p1`

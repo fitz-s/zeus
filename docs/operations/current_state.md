@@ -8,7 +8,8 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: P0 install docs registry and canonical reference anchors active
+- Status: P0 install docs registry and canonical reference anchors complete; P0 review required before P1
+- Docs reclassification P0 commit: `b1a9761`
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
 - P2A commit: `d45ec40`
@@ -29,8 +30,8 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P0 boundaries: no `src/**`, no runtime DB/state edits, no graph DB, no
-  archive-body reads, no semantic authority-law rewrites
+- P0 is closed locally. Do not begin P1 extraction/demotion until the P0 review
+  says `proceed_to_p1`.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -52,7 +53,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Complete P0 docs registry, `known_gaps` move, and reference anchor setup
-- Treat Gate F registration and ralplan inventory updates as P0 preflight
-  LOCAL_ADAPTATION only
+- Run P0 follow-up review using the second package's
+  `18_pro_followup_prompt.md`
+- If review says `proceed_to_p1`, open P1 extraction/demotion planning
 - Keep unrelated dirty work and local archive inputs untouched
