@@ -4,9 +4,13 @@ This module intentionally receives the topology_doctor module as `api` instead
 of importing its internals. That keeps this first checker-family split small and
 preserves the existing public helper surface during migration.
 """
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-21; last_reused=2026-04-21
+# Purpose: Docs-tree, operations-registry, runtime-plan, and docs-registry checks for topology_doctor.
+# Reuse: Keep docs-specific policy checks here; route root/state/source checks through their checker modules.
 
 from __future__ import annotations
 
+import glob
 import re
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,28 @@ CONFIG_AGENTS_VOLATILE_FACT_PATTERNS = (
 )
 
 PROGRESS_HANDOFF_PATTERN = re.compile(r"(progress|handoff|work[_-]?log|closeout)", re.IGNORECASE)
+
+DOCS_REGISTRY_REQUIRED_FIELDS = {
+    "path",
+    "doc_class",
+    "default_read",
+    "direct_reference_allowed",
+    "current_role",
+    "canonical_replaced_by",
+    "next_action",
+    "lifecycle_state",
+    "coverage_scope",
+    "parent_coverage_allowed",
+}
+
+DOCS_REGISTRY_PARENT_PATTERNS = (
+    "docs/operations/task_*/",
+    "docs/operations/*_package_*/",
+    "docs/reports/",
+    "docs/artifacts/",
+    "docs/to-do-list/",
+    "docs/runbooks/",
+)
 
 
 def docs_mode_excluded_roots(api: Any, topology: dict[str, Any]) -> list[Path]:
@@ -67,7 +93,7 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
         for rel in api._git_visible_files()
         if rel.startswith("docs/") and (api.ROOT / rel).is_file()
     ]
-    allowed_root_files = set(topology.get("docs_root_allowed_files") or {"docs/AGENTS.md", "docs/README.md", "docs/known_gaps.md"})
+    allowed_root_files = set(topology.get("docs_root_allowed_files") or {"docs/AGENTS.md", "docs/README.md", "docs/archive_registry.md"})
     for path in sorted(visible_docs_files):
         rel = path.relative_to(api.ROOT).as_posix()
         if any(is_under(path, root) for root in excluded_roots):
@@ -104,6 +130,119 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
             )
         if " " in rel:
             issues.append(api._issue("hidden_active_doc", rel, "active docs path contains spaces"))
+    return issues
+
+
+def docs_registry_path_matches(path: str, entry: dict[str, Any]) -> bool:
+    raw = str(entry.get("path") or "")
+    if entry.get("coverage_scope") == "descendants" and entry.get("parent_coverage_allowed"):
+        pattern = raw + ("**" if raw.endswith("/") else "/**")
+        return re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+    if any(char in raw for char in "*?["):
+        return re.match(glob.translate(raw, recursive=True, include_hidden=True, seps="/"), path) is not None
+    return path == raw
+
+
+def docs_registry_parent_allowed(path: str) -> bool:
+    return any(
+        re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+        for pattern in DOCS_REGISTRY_PARENT_PATTERNS
+    )
+
+
+def docs_registry_covers(path: str, entries: list[dict[str, Any]]) -> bool:
+    return any(docs_registry_path_matches(path, entry) for entry in entries)
+
+
+def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
+    issues: list[Any] = []
+    registry_path = getattr(api, "DOCS_REGISTRY_PATH", api.ROOT / "architecture" / "docs_registry.yaml")
+    if not registry_path.exists():
+        return [
+            api._issue(
+                "docs_registry_missing",
+                "architecture/docs_registry.yaml",
+                "docs registry is missing",
+            )
+        ]
+
+    registry = api.load_docs_registry()
+    entries = list(registry.get("entries") or [])
+    allowed_classes = set(registry.get("allowed_doc_classes") or [])
+    allowed_next = set(registry.get("allowed_next_actions") or [])
+    allowed_lifecycle = set(registry.get("allowed_lifecycle_states") or [])
+    allowed_scopes = set(registry.get("allowed_coverage_scopes") or [])
+    seen: set[str] = set()
+
+    for entry in entries:
+        path = str(entry.get("path") or "")
+        missing = sorted(field for field in DOCS_REGISTRY_REQUIRED_FIELDS if field not in entry)
+        if missing:
+            issues.append(
+                api._issue(
+                    "docs_registry_required_field_missing",
+                    f"architecture/docs_registry.yaml:{path or '<missing-path>'}",
+                    f"docs registry entry missing fields: {', '.join(missing)}",
+                )
+            )
+            continue
+        if path in seen:
+            issues.append(api._issue("docs_registry_duplicate_path", path, "duplicate docs registry path"))
+        seen.add(path)
+        if entry.get("doc_class") not in allowed_classes:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid doc_class {entry.get('doc_class')!r}"))
+        if entry.get("next_action") not in allowed_next:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid next_action {entry.get('next_action')!r}"))
+        if entry.get("lifecycle_state") not in allowed_lifecycle:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid lifecycle_state {entry.get('lifecycle_state')!r}"))
+        if entry.get("coverage_scope") not in allowed_scopes:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid coverage_scope {entry.get('coverage_scope')!r}"))
+        if entry.get("coverage_scope") == "descendants":
+            if not entry.get("parent_coverage_allowed"):
+                issues.append(api._issue("docs_registry_parent_not_allowed", path, "descendant coverage requires parent_coverage_allowed=true"))
+            elif not docs_registry_parent_allowed(path):
+                issues.append(api._issue("docs_registry_parent_not_allowed", path, "parent coverage is not allowed for this docs path"))
+        elif entry.get("parent_coverage_allowed"):
+            issues.append(api._issue("docs_registry_parent_not_allowed", path, "parent_coverage_allowed requires coverage_scope=descendants"))
+        for replacement in entry.get("canonical_replaced_by") or []:
+            replacement = str(replacement)
+            if replacement and not (api.ROOT / replacement).exists():
+                issues.append(api._issue("docs_registry_replacement_missing", path, f"replacement target missing: {replacement}"))
+
+    excluded_roots = docs_mode_excluded_roots(api, topology)
+    visible_docs = [
+        rel
+        for rel in api._git_visible_files()
+        if rel.startswith("docs/")
+        and (api.ROOT / rel).is_file()
+        and not any(is_under(api.ROOT / rel, root) for root in excluded_roots)
+    ]
+    for rel in sorted(visible_docs):
+        if rel.startswith("docs/archives/"):
+            continue
+        if not docs_registry_covers(rel, entries):
+            issues.append(api._issue("docs_registry_unclassified_doc", rel, "tracked docs file is not classified by architecture/docs_registry.yaml"))
+
+    default_surfaces = [
+        api.ROOT / "docs" / "README.md",
+        api.ROOT / "docs" / "AGENTS.md",
+        api.ROOT / "docs" / "reference" / "AGENTS.md",
+    ]
+    for entry in entries:
+        if entry.get("direct_reference_allowed") is not False:
+            continue
+        path = str(entry.get("path") or "")
+        if not path or any(char in path for char in "*?["):
+            continue
+        for surface in default_surfaces:
+            if surface.exists() and path in surface.read_text(encoding="utf-8", errors="ignore"):
+                issues.append(
+                    api._issue(
+                        "docs_registry_direct_reference_leak",
+                        surface.relative_to(api.ROOT).as_posix(),
+                        f"default-read router references non-direct doc {path}",
+                    )
+                )
     return issues
 
 

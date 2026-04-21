@@ -826,6 +826,147 @@ def test_docs_mode_rejects_archive_default_read_in_topology(tmp_path, monkeypatc
     assert any(issue.code == "docs_archive_default_read_leak" for issue in issues)
 
 
+def _docs_registry_entry(path: str, **overrides):
+    entry = {
+        "path": path,
+        "doc_class": "reference",
+        "default_read": False,
+        "direct_reference_allowed": True,
+        "current_role": "test entry",
+        "canonical_replaced_by": [],
+        "next_action": "keep",
+        "lifecycle_state": "durable",
+        "coverage_scope": "exact",
+        "parent_coverage_allowed": False,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _install_docs_registry_fixture(monkeypatch, tmp_path, registry, visible_files):
+    (tmp_path / "architecture").mkdir(parents=True, exist_ok=True)
+    registry_path = tmp_path / "architecture" / "docs_registry.yaml"
+    registry_path.write_text("schema_version: 1\n", encoding="utf-8")
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "DOCS_REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(topology_doctor, "load_docs_registry", lambda: registry)
+    monkeypatch.setattr(topology_doctor, "_git_visible_files", lambda: visible_files)
+    for rel in visible_files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# doc\n", encoding="utf-8")
+
+
+def test_docs_registry_rejects_missing_required_field(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["reference"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["durable"],
+        "allowed_coverage_scopes": ["exact"],
+        "entries": [{"path": "docs/reference/a.md"}],
+    }
+    _install_docs_registry_fixture(monkeypatch, tmp_path, registry, ["docs/reference/a.md"])
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_registry_required_field_missing" for issue in issues)
+
+
+def test_docs_registry_parent_entry_covers_operations_packet(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["operations"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["transitional"],
+        "allowed_coverage_scopes": ["descendants"],
+        "entries": [
+            _docs_registry_entry(
+                "docs/operations/task_*/",
+                doc_class="operations",
+                lifecycle_state="transitional",
+                coverage_scope="descendants",
+                parent_coverage_allowed=True,
+            )
+        ],
+    }
+    _install_docs_registry_fixture(
+        monkeypatch,
+        tmp_path,
+        registry,
+        ["docs/operations/task_2099-01-01_packet/plan.md"],
+    )
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert issues == []
+
+
+def test_docs_registry_rejects_forbidden_parent_entry(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["authority"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["durable"],
+        "allowed_coverage_scopes": ["descendants"],
+        "entries": [
+            _docs_registry_entry(
+                "docs/authority/",
+                doc_class="authority",
+                coverage_scope="descendants",
+                parent_coverage_allowed=True,
+            )
+        ],
+    }
+    _install_docs_registry_fixture(monkeypatch, tmp_path, registry, ["docs/authority/a.md"])
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_registry_parent_not_allowed" for issue in issues)
+
+
+def test_docs_registry_rejects_unclassified_visible_doc(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["reference"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["durable"],
+        "allowed_coverage_scopes": ["exact"],
+        "entries": [_docs_registry_entry("docs/reference/a.md")],
+    }
+    _install_docs_registry_fixture(
+        monkeypatch,
+        tmp_path,
+        registry,
+        ["docs/reference/a.md", "docs/reference/unclassified.md"],
+    )
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_registry_unclassified_doc" for issue in issues)
+
+
+def test_docs_registry_rejects_direct_reference_leak(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["extraction_source", "router"],
+        "allowed_next_actions": ["extract_then_move", "keep"],
+        "allowed_lifecycle_states": ["temporary", "durable"],
+        "allowed_coverage_scopes": ["exact"],
+        "entries": [
+            _docs_registry_entry(
+                "docs/legacy.md",
+                doc_class="extraction_source",
+                direct_reference_allowed=False,
+                next_action="extract_then_move",
+                lifecycle_state="temporary",
+            ),
+            _docs_registry_entry("docs/README.md", doc_class="router", default_read=True),
+        ],
+    }
+    _install_docs_registry_fixture(monkeypatch, tmp_path, registry, ["docs/legacy.md", "docs/README.md"])
+    (tmp_path / "docs" / "README.md").write_text("Read docs/legacy.md first.\n", encoding="utf-8")
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_registry_direct_reference_leak" for issue in issues)
+
+
 def test_current_state_operation_paths_accept_markdown_and_bare_paths():
     text = (
         "- Primary packet file: [packet](docs/operations/task_2026-04-13_topology_compiler_program.md)\n"

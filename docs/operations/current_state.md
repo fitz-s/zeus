@@ -5,34 +5,32 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
-- Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
-- Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: Workspace Authority Reconstruction P0-P3 complete; no active reconstruction packet remains open
+- Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
+- Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
+- Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
+- Status: P0 install docs registry and canonical reference anchors active
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
 - P2A commit: `d45ec40`
 - P2 closeout-state commit: `c39ed5a`
 - P3 commit: `0510357`
-- Supersession: user ruling in this thread makes the reconstruction package the
-  current mainline control surface; older wait-for-ruling notes about
-  P11/B055/B099 are stale for this packet
+- Prior workspace authority reconstruction is closed at `152f210`.
 
 ## Required evidence
 
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md`
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/01_mental_model.md`
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/02_authority_order_rewrite.md`
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/07_execution_packets.md`
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/16_apply_order.md`
-- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md`
-- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/00_executive_ruling.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/04_target_docs_topology.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/05_reference_extraction_matrix.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/08_execution_packets.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/17_apply_order.md`
+- `.omx/plans/docs-reclassification-p0-ralplan-revised.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
 
 ## Freeze point
 
-- No active reconstruction lane is open
-- No source, test, script, runtime DB, graph-db, or archive-body edits in this
-  lane
+- P0 boundaries: no `src/**`, no runtime DB/state edits, no graph DB, no
+  archive-body reads, no semantic authority-law rewrites
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -48,11 +46,13 @@ Role: single live control pointer for the repo.
 - `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md`
 - `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md`
 - `docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
 - `docs/operations/data_rebuild_plan.md`
+- `docs/operations/task_2026-04-21_gate_f_data_backfill/`
 
 ## Next action
 
-- Choose the next mainline packet explicitly before new implementation work
-- Keep P2B graph sidecar local/ignored unless a future packet changes graph
-  artifact policy
+- Complete P0 docs registry, `known_gaps` move, and reference anchor setup
+- Treat Gate F registration and ralplan inventory updates as P0 preflight
+  LOCAL_ADAPTATION only
 - Keep unrelated dirty work and local archive inputs untouched

@@ -32,6 +32,7 @@ rules:
       - docs/AGENTS.md
       - docs/README.md
       - architecture/topology.yaml
+      - architecture/docs_registry.yaml
     rationale: top-level docs files and artifacts must be routed by the docs mesh.
   - id: docs_archive_interface_registry
     path_globs: ["docs/archive_registry.md"]
@@ -49,6 +50,7 @@ rules:
       - docs/AGENTS.md
       - docs/README.md
       - architecture/topology.yaml
+      - architecture/docs_registry.yaml
     rationale: new or removed docs subtrees change docs-level routing and topology docs_subroots.
   - id: src_file_registry
     path_globs: ["src/**/*.py"]
@@ -86,6 +88,7 @@ rules:
     required_companions:
       - docs/reference/AGENTS.md
       - architecture/reference_replacement.yaml
+      - architecture/docs_registry.yaml
     rationale: reference docs keep a human registry plus a replacement matrix.
   - id: authority_doc_registry
     path_globs: ["docs/authority/*.md"]

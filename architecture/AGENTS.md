@@ -55,6 +55,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `core_claims.yaml` | Proof-backed semantic claims emitted by generated topology views |
 | `runtime_modes.yaml` | Discovery mode index: opening_hunt, update_reaction, day0_capture |
 | `reference_replacement.yaml` | Replacement matrix for bulky reference docs and deletion eligibility |
+| `docs_registry.yaml` | Machine-readable docs classification registry and default-read contract |
 | `map_maintenance.yaml` | Companion-registry rules for added/deleted files in active surfaces |
 | `lifecycle_grammar.md` | Lifecycle grammar specification |
 | `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |

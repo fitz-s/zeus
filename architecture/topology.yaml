@@ -441,7 +441,6 @@ docs_root_allowed_files:
   - docs/AGENTS.md
   - docs/README.md
   - docs/archive_registry.md
-  - docs/known_gaps.md
   - docs/zeus-architecture-deep-map.md
   - docs/settlement-source-provenance.md
   - docs/settlement-validation-workflow.md
@@ -458,8 +457,14 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md
-    - docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md
+    - docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md
+
+docs_registry:
+  path: architecture/docs_registry.yaml
+  rule: >
+    Machine-readable docs classification and default-read registry. P0 seeds
+    touched/current docs plus explicit parent entries; later packets may expand
+    toward a full census.
 
 runtime_artifact_inventory:
   path: docs/operations/runtime_artifact_inventory.md

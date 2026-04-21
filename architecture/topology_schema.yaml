@@ -61,6 +61,14 @@ strict_issue_codes:
   - hidden_active_doc
   - docs_unregistered_subtree
   - docs_non_markdown_artifact
+  - docs_registry_missing
+  - docs_registry_required_field_missing
+  - docs_registry_duplicate_path
+  - docs_registry_invalid_enum
+  - docs_registry_parent_not_allowed
+  - docs_registry_unclassified_doc
+  - docs_registry_direct_reference_leak
+  - docs_registry_replacement_missing
   - docs_archive_interface_missing
   - docs_archive_interface_unregistered
   - docs_archive_default_read_leak

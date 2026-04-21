@@ -21,7 +21,7 @@ When deciding what may land, use this order:
 2. **Machine-checkable manifests** (`architecture/*.yaml`, kernel manifest, invariants, zones, negative constraints)
 3. **Current authority docs** in `docs/authority/`
 4. **Operations pointer** (`docs/operations/current_state.md`)
-5. **Current blockers** (`docs/known_gaps.md`)
+5. **Current blockers** (`docs/operations/known_gaps.md`)
 6. **Historical archives** for rationale only — never for current truth
 
 Chat memory, hook behavior, outer-host memory, and convenience summaries never outrank repo law.
@@ -197,7 +197,7 @@ A new agent should normally read in this order:
 2. `workspace_map.md`
 3. scoped directory `AGENTS.md`
 4. `docs/operations/current_state.md`
-5. `docs/known_gaps.md` if runtime blockers matter
+5. `docs/operations/known_gaps.md` if runtime blockers matter
 6. `docs/authority/zeus_current_architecture.md` if architecture semantics matter
 7. `docs/authority/zeus_packet_discipline.md` / `zeus_autonomy_gates.md` / boundary law only when their domain applies
 

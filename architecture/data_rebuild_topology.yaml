@@ -114,7 +114,7 @@ criteria:
     blocks_live_math_certification: true
   dst_historical_rebuild:
     status: target_not_certified
-    source: docs/known_gaps.md#CRITICAL-DST-Timezone
+    source: docs/operations/known_gaps.md#CRITICAL-DST-Timezone
     protects: [scripts/etl_hourly_observations.py, scripts/etl_diurnal_curves.py, src/signal/diurnal.py]
     required_tests: []
     certification_gate: "Historical diurnal aggregates rebuilt from zone-aware local timestamps for all DST cities."

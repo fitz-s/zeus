@@ -1,0 +1,544 @@
+schema_version: 1
+metadata:
+  created: "2026-04-21"
+  owner_packet: "docs reclassification P0"
+  purpose: >
+    Machine-readable classification for tracked docs surfaces. This registry
+    tells agents whether a doc is law, canonical reference, live operations,
+    evidence, archive interface, or a temporary extraction source.
+
+required_entry_fields:
+  - path
+  - doc_class
+  - default_read
+  - direct_reference_allowed
+  - current_role
+  - canonical_replaced_by
+  - next_action
+  - lifecycle_state
+  - coverage_scope
+  - parent_coverage_allowed
+
+allowed_doc_classes:
+  - router
+  - authority
+  - reference
+  - operations
+  - runbook
+  - report
+  - artifact
+  - checklist
+  - archive_interface
+  - extraction_source
+  - package_input
+
+allowed_next_actions:
+  - keep
+  - extract_then_move
+  - extract_then_reassess
+  - move_to_operations
+  - demote_after_extraction
+  - archive_after_closeout
+  - retain_as_evidence
+
+allowed_lifecycle_states:
+  - durable
+  - active
+  - temporary
+  - transitional
+  - historical
+  - closed
+
+allowed_coverage_scopes:
+  - exact
+  - descendants
+
+parent_coverage_allowed_patterns:
+  - docs/operations/task_*/
+  - docs/operations/*_package_*/
+  - docs/reports/
+  - docs/artifacts/
+  - docs/to-do-list/
+  - docs/runbooks/
+
+entries:
+  - path: docs/AGENTS.md
+    doc_class: router
+    default_read: true
+    direct_reference_allowed: true
+    current_role: docs root routing and local rules
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/README.md
+    doc_class: router
+    default_read: true
+    direct_reference_allowed: true
+    current_role: docs index and reference routing
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/archive_registry.md
+    doc_class: archive_interface
+    default_read: true
+    direct_reference_allowed: true
+    current_role: visible archive access protocol
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/AGENTS.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: authority docs router
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_current_architecture.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: current architecture law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_current_delivery.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: current delivery law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_dual_track_architecture.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: dual-track architecture law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_change_control_constitution.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: change-control constitution
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_packet_discipline.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: packet discipline law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_autonomy_gates.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: autonomy gate law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_live_backtest_shadow_boundary.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: live/backtest/shadow boundary law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_openclaw_venus_delivery_boundary.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: OpenClaw/Venus delivery boundary law
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_data_rebuild_adr.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: data rebuild ADR
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/zeus_k4_fix_pack_adr.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: K4 fix-pack ADR
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/task_2026-04-15_data_math_boundary_integration_note.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: packet-scoped data/math boundary note
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/task_2026-04-15_data_math_delivery_constitution.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: packet-scoped data/math delivery constitution
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/authority/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md
+    doc_class: authority
+    default_read: false
+    direct_reference_allowed: true
+    current_role: packet-scoped data/math rollback doctrine
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/current_state.md
+    doc_class: operations
+    default_read: true
+    direct_reference_allowed: true
+    current_role: live control pointer
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: active
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/AGENTS.md
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: true
+    current_role: operations directory registry
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/data_rebuild_plan.md
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: true
+    current_role: deferred data rebuild plan
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/known_gaps.md
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: true
+    current_role: active runtime gap register
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: active
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/runtime_artifact_inventory.md
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: true
+    current_role: runtime-local planning artifact inventory
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: active
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/task_*/
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: false
+    current_role: active or closed packet directories; route through current_state
+    canonical_replaced_by: []
+    next_action: archive_after_closeout
+    lifecycle_state: transitional
+    coverage_scope: descendants
+    parent_coverage_allowed: true
+  - path: docs/operations/task_*.md
+    doc_class: operations
+    default_read: false
+    direct_reference_allowed: false
+    current_role: single-file operations packet or backlog
+    canonical_replaced_by: []
+    next_action: archive_after_closeout
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/operations/*_package_*/
+    doc_class: package_input
+    default_read: false
+    direct_reference_allowed: false
+    current_role: attached package inputs
+    canonical_replaced_by: []
+    next_action: archive_after_closeout
+    lifecycle_state: transitional
+    coverage_scope: descendants
+    parent_coverage_allowed: true
+  - path: docs/reference/zeus_domain_model.md
+    doc_class: reference
+    default_read: true
+    direct_reference_allowed: true
+    current_role: primary domain reference
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/AGENTS.md
+    doc_class: router
+    default_read: false
+    direct_reference_allowed: true
+    current_role: reference directory registry
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/zeus_architecture_reference.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: canonical deep architecture reference anchor
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/zeus_market_settlement_reference.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: canonical market and settlement reference anchor
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/zeus_data_and_replay_reference.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: canonical data and replay reference anchor
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/zeus_failure_modes_reference.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: canonical failure modes reference anchor
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/zeus_math_spec.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: canonical math specification reference
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/repo_overview.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary architecture extraction source
+    canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/data_inventory.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary data/replay extraction source
+    canonical_replaced_by: [docs/reference/zeus_data_and_replay_reference.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/data_strategy.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary data/replay extraction source
+    canonical_replaced_by: [docs/reference/zeus_data_and_replay_reference.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/statistical_methodology.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary math extraction source
+    canonical_replaced_by: [docs/reference/zeus_math_spec.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/quantitative_research.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary math/failure extraction source
+    canonical_replaced_by: [docs/reference/zeus_math_spec.md, docs/reference/zeus_failure_modes_reference.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/market_microstructure.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: false
+    current_role: temporary market extraction source
+    canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
+    next_action: extract_then_reassess
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/zeus-architecture-deep-map.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root snapshot; extract architecture reference then demote
+    canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/settlement-source-provenance.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root settlement provenance source
+    canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/settlement-validation-workflow.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root settlement workflow source
+    canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/zeus-pathology-registry.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root failure-mode source
+    canonical_replaced_by: [docs/reference/zeus_failure_modes_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/zeus-refactor-plan.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root refactor planning source
+    canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/zeus-system-constitution.md
+    doc_class: extraction_source
+    default_read: false
+    direct_reference_allowed: false
+    current_role: legacy root system constitution source
+    canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
+    next_action: extract_then_move
+    lifecycle_state: temporary
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reports/
+    doc_class: report
+    default_read: false
+    direct_reference_allowed: false
+    current_role: generated reports and demoted snapshots
+    canonical_replaced_by: []
+    next_action: retain_as_evidence
+    lifecycle_state: transitional
+    coverage_scope: descendants
+    parent_coverage_allowed: true
+  - path: docs/artifacts/
+    doc_class: artifact
+    default_read: false
+    direct_reference_allowed: false
+    current_role: active evidence artifacts
+    canonical_replaced_by: []
+    next_action: retain_as_evidence
+    lifecycle_state: transitional
+    coverage_scope: descendants
+    parent_coverage_allowed: true
+  - path: docs/to-do-list/
+    doc_class: checklist
+    default_read: false
+    direct_reference_allowed: false
+    current_role: checklist evidence and audit queues
+    canonical_replaced_by: []
+    next_action: retain_as_evidence
+    lifecycle_state: transitional
+    coverage_scope: descendants
+    parent_coverage_allowed: true
+  - path: docs/runbooks/
+    doc_class: runbook
+    default_read: false
+    direct_reference_allowed: true
+    current_role: operator runbooks
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: descendants
+    parent_coverage_allowed: true

@@ -80,7 +80,7 @@ Soft flags (contamination_risk, confidence_weight) leave the decision of "how mu
 
 2. **Cross-region data-driven correlation backfill.** The Pearson matrix built in K3 uses TIGGE ensemble means. A more accurate matrix would use actual settlement outcomes. After 500+ VERIFIED settlements accumulate, a second correlation revision packet can replace the ensemble-mean matrix with outcome-based correlations.
 
-3. **DST diurnal curves historical rebuild.** `docs/known_gaps.md` documents stale pre-fix diurnal aggregates for DST cities (London, NYC, Chicago, Paris). This rebuild does not fix that — it establishes the correct schema and collection. The diurnal ETL rebuild is a separate packet.
+3. **DST diurnal curves historical rebuild.** `docs/operations/known_gaps.md` documents stale pre-fix diurnal aggregates for DST cities (London, NYC, Chicago, Paris). This rebuild does not fix that — it establishes the correct schema and collection. The diurnal ETL rebuild is a separate packet.
 
 4. **NOAA CDO / meteostat verification.** `observations` contains rows from `noaa_cdo_ghcnd`, `meteostat_daily_max`, `iem_asos`. These are left at `UNVERIFIED` in K4. Verification of each alternate source is a separate, smaller packet.
 

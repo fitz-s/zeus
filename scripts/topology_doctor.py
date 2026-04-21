@@ -44,6 +44,7 @@ RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
 REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml"
 CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
+DOCS_REGISTRY_PATH = ROOT / "architecture" / "docs_registry.yaml"
 CODE_REVIEW_GRAPH_DB_PATH = ROOT / ".code-review-graph" / "graph.db"
 SKIP_PATTERN = re.compile(r"pytest\.mark\.skip|pytest\.skip\(")
 DANGEROUS_REVERSE_ANTIBODY_PATTERNS = (
@@ -151,6 +152,10 @@ def load_core_claims() -> dict[str, Any]:
 
 def load_map_maintenance() -> dict[str, Any]:
     return _load_yaml(MAP_MAINTENANCE_PATH)
+
+
+def load_docs_registry() -> dict[str, Any]:
+    return _load_yaml(DOCS_REGISTRY_PATH)
 
 
 def _git_ls_files() -> list[str]:
@@ -296,6 +301,10 @@ def _check_broken_internal_paths() -> list[TopologyIssue]:
 
 def _check_config_agents_volatile_facts() -> list[TopologyIssue]:
     return _docs_checks().check_config_agents_volatile_facts(sys.modules[__name__])
+
+
+def _check_docs_registry(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_docs_registry(sys.modules[__name__], topology)
 
 
 def _current_state_operation_paths(text: str, surface_prefix: str) -> set[str]:

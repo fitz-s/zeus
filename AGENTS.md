@@ -51,7 +51,7 @@ The durable workspace kernel is:
 
 - machine manifests under `architecture/**`
 - scoped `AGENTS.md` routers
-- `docs/operations/current_state.md` plus the active packet folder
+- `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, and the active packet folder
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
 
@@ -183,7 +183,8 @@ Check:
   `architecture/kernel_manifest.yaml`, targeted rationale entries
 - Dual-track work: `docs/authority/zeus_dual_track_architecture.md`
 - Delivery/governance work: `docs/authority/zeus_current_delivery.md`,
-  `docs/operations/current_state.md`, active packet docs
+  `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, active
+  packet docs
 - Historical failure context: `architecture/history_lore.yaml` first, archive
   bodies only if explicitly needed
 

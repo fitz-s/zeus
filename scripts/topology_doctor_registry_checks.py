@@ -338,6 +338,7 @@ def run_strict(api: Any) -> Any:
     issues.extend(api._check_active_pointers(topology))
     issues.extend(api._check_registries(topology, tracked))
     issues.extend(api._check_reference_authority(topology))
+    issues.extend(api._check_docs_registry(topology))
     issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_root_and_state_classification(topology))
@@ -360,6 +361,7 @@ def run_docs(api: Any) -> Any:
         or issue.path.startswith("docs")
     ]
     issues.extend(api._check_reference_authority(topology))
+    issues.extend(api._check_docs_registry(topology))
     issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_progress_handoff_paths())

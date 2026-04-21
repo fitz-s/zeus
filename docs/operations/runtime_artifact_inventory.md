@@ -68,6 +68,8 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/p2b-graph-meta-sidecar-ralplan-revised.md` | superseded P2B ralplan draft | P2B planning evidence only; superseded by final P2B plan and not authority. |
 | `.omx/plans/p2b-graph-meta-sidecar-ralplan-final.md` | final P2B ralplan | Records local live graph sidecar decision; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/workspace-authority-reconstruction-p3-2026-04-21-ralplan.md` | current P3 ralplan | Active local planning evidence for P3 historical compression; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/docs-reclassification-p0-ralplan.md` | superseded docs reclassification P0 plan | Planning evidence only; superseded by revised P0 plan and not authority. |
+| `.omx/plans/docs-reclassification-p0-ralplan-revised.md` | current docs reclassification P0 ralplan | Active local planning evidence for docs reclassification P0; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons

@@ -74,6 +74,58 @@ entries:
       Root AGENTS keeps only the first-read mental model. This file remains the
       conditional deep "why" reference for domain/math work.
 
+  - path: docs/reference/zeus_architecture_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - canonical architecture reference destination
+      - extraction outline for future deep architecture content
+    allowed_action: keep_conditional
+    rationale: >
+      P0 anchor for architecture reference extraction. It is intentionally
+      skeletal until P1 moves durable material out of root snapshots.
+
+  - path: docs/reference/zeus_market_settlement_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - canonical market and settlement reference destination
+      - extraction outline for settlement provenance and mismatch triage
+    allowed_action: keep_conditional
+    rationale: >
+      P0 anchor for market/settlement extraction. It is not yet a complete
+      replacement for existing provenance/workflow material.
+
+  - path: docs/reference/zeus_data_and_replay_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - canonical data and replay reference destination
+      - extraction outline for data coverage and replay limitations
+    allowed_action: keep_conditional
+    rationale: >
+      P0 anchor for data/replay extraction. Data facts remain in current
+      inventory, strategy, and operations gap sources until P1 extraction.
+
+  - path: docs/reference/zeus_failure_modes_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - canonical failure modes reference destination
+      - extraction outline for pathology and operational gap crosswalk
+    allowed_action: keep_conditional
+    rationale: >
+      P0 anchor for failure-mode extraction. It is intentionally skeletal until
+      P1 extracts durable failure classes from snapshot/evidence sources.
+
   - path: docs/reference/repo_overview.md
     default_read: false
     replacement_status: mostly_replaced
@@ -84,6 +136,7 @@ entries:
       - architecture/source_rationale.yaml
       - architecture/topology.yaml
       - architecture/runtime_modes.yaml
+      - docs/reference/zeus_architecture_reference.md
     unique_remaining:
       - dependency summary
       - logs summary
@@ -102,6 +155,7 @@ entries:
       - architecture/data_rebuild_topology.yaml
       - architecture/history_lore.yaml
       - docs/operations/current_state.md
+      - docs/reference/zeus_data_and_replay_reference.md
     unique_remaining:
       - current data coverage numbers
       - source inventory status
@@ -120,6 +174,7 @@ entries:
       - architecture/data_rebuild_topology.yaml
       - architecture/history_lore.yaml
       - docs/operations/task_2026-04-13_remaining_repair_backlog.md
+      - docs/reference/zeus_data_and_replay_reference.md
     unique_remaining:
       - prioritized data roadmap prose
       - near/mid/later sequencing
@@ -154,6 +209,8 @@ entries:
     replaced_by:
       - architecture/history_lore.yaml
       - docs/reference/zeus_domain_model.md
+      - docs/reference/zeus_failure_modes_reference.md
+      - docs/reference/zeus_math_spec.md
     unique_remaining:
       - market/data/model research findings
       - failure-mode survey
@@ -170,6 +227,7 @@ entries:
       - architecture/history_lore.yaml
       - src/contracts/execution_price.py
       - src/contracts/vig_treatment.py
+      - docs/reference/zeus_market_settlement_reference.md
     unique_remaining:
       - participant structure
       - liquidity/edge persistence research

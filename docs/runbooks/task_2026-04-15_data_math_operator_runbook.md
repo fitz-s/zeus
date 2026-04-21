@@ -58,7 +58,7 @@ Run the Zeus data-math packet without confusing live authority, backtest evidenc
 3. `src/calibration/store.py`
 4. `src/execution/harvester.py`
 5. `src/engine/replay.py`
-6. `docs/known_gaps.md`
+6. `docs/operations/known_gaps.md`
 
 ## Closeout
 

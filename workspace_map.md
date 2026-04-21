@@ -37,8 +37,8 @@ Default navigation command:
 | `tests/` | Regression and law gates | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
 | `docs/authority/` | Current architecture and delivery law | `docs/authority/AGENTS.md` |
-| `docs/reference/` | Domain, math, and repo reference docs | `docs/reference/AGENTS.md` |
-| `docs/operations/` | Live control pointer, active packets, package inputs | `docs/operations/AGENTS.md` |
+| `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and math references | `docs/reference/AGENTS.md` |
+| `docs/operations/` | Live control pointer, active packets, package inputs, gap register | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/reports/` | Generated diagnostic reports | `docs/reports/AGENTS.md` |
 | `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |
@@ -66,6 +66,7 @@ Prefer these over prose when they exist:
 | `architecture/artifact_lifecycle.yaml` | Artifact classes and evidence rules |
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
 | `architecture/change_receipt_schema.yaml` | Route-receipt contract |
+| `architecture/docs_registry.yaml` | Docs classification and default-read registry |
 
 ## Do not default-read
 

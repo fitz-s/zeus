@@ -21,7 +21,7 @@ Do **not** use historical design packets or target-state specs to answer those q
 
 Current runtime work is routed by:
 - `docs/operations/current_state.md` — current packet / branch truth
-- `docs/known_gaps.md` — present-tense blockers and runtime gaps
+- `docs/operations/known_gaps.md` — present-tense blockers and runtime gaps
 
 ---
 
@@ -271,7 +271,7 @@ Read these when their domain applies:
 - `docs/authority/zeus_openclaw_venus_delivery_boundary.md` — Zeus / Venus / OpenClaw boundary
 - `docs/reference/zeus_domain_model.md` — probability chain and settlement semantics
 - `docs/operations/current_state.md` — current branch / packet truth
-- `docs/known_gaps.md` — present-tense runtime blockers
+- `docs/operations/known_gaps.md` — present-tense runtime blockers
 - `docs/authority/zeus_dual_track_architecture.md` — metric identity, World DB v2, death-trap remediation law, Gate A–F grammar
 
 ---

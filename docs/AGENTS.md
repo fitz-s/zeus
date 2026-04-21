@@ -26,7 +26,7 @@ body or bundle.
 |------|---------|
 | `README.md` | Tracked docs index and visibility guide |
 | `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
-| `known_gaps.md` | Active operational gap register |
+| `operations/known_gaps.md` | Active operational gap register |
 | `zeus-architecture-deep-map.md` | Generated deep refactor/reference map; evidence only |
 | `settlement-source-provenance.md` | Settlement provenance evidence; not authority by itself |
 | `settlement-validation-workflow.md` | Settlement validation notes; procedural evidence |
@@ -34,7 +34,7 @@ body or bundle.
 | `zeus-refactor-plan.md` | Incremental refactor plan; planning evidence |
 | `zeus-system-constitution.md` | Refactor constitution artifact subordinate to active authority |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
-| `reference/` | Domain, math, and repo reference docs -> `reference/AGENTS.md` |
+| `reference/` | Domain, math, architecture, market/settlement, data/replay, and failure-mode references -> `reference/AGENTS.md` |
 | `operations/` | Live control pointer, active packets, and package inputs -> `operations/AGENTS.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
@@ -45,7 +45,7 @@ body or bundle.
 
 - New active docs belong in declared tracked subroots, not directly under
   `docs/`, except for approved root files such as `README.md`,
-  `archive_registry.md`, and `known_gaps.md`.
+  `archive_registry.md`; active gaps belong under `operations/`.
 - Historical needs route through `archive_registry.md`, not archive-subtree
   routers or raw archive bodies.
 - Generated reports are evidence only and must not become authority by

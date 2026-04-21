@@ -276,7 +276,7 @@ cards:
       - AGENTS.md
       - docs/reference/statistical_methodology.md
       - docs/reference/zeus_math_spec.md
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
     failure_mode: >
       Settlement, probability, or calibration code uses banker rounding or
       integer coercion while WU/Polymarket settlement truth uses WMO asymmetric
@@ -454,7 +454,7 @@ cards:
     sources:
       - AGENTS.md
       - docs/archives/work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - git log live-only cleanup commits
     failure_mode: >
       Derived JSON caches, status summaries, or legacy paper files outrank
@@ -669,7 +669,7 @@ cards:
     status: mitigated
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - docs/archives/audits/math_audit_2026_04_06.md
       - git commits around monitor_chain_missing, CI-aware exit, divergence thresholds
     failure_mode: >
@@ -725,7 +725,7 @@ cards:
     status: mitigated
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - git commit "Reject cross-city Gamma market bindings"
     failure_mode: >
       Polymarket/Gamma market discovery binds an event for one configured city
@@ -990,7 +990,7 @@ cards:
     status: open_gap
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - docs/reference/statistical_methodology.md
       - src/data/wu_scheduler.py
       - src/data/ingestion_guard.py
@@ -1048,7 +1048,7 @@ cards:
     status: mitigated
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - docs/archives/reports/zeus_logic_verification_2026-04-09.md
       - git commit "Price live entries with token fees"
     failure_mode: >
@@ -1103,7 +1103,7 @@ cards:
     status: mitigated
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - git commits "Gate alpha by consumer target" and "Expose tail alpha as calibration treatment"
     failure_mode: >
       Calibration-serving alpha or tail scaling is treated as profit-safe EV
@@ -1162,7 +1162,7 @@ cards:
     status: mitigated
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - git commit "Remove vig before posterior fusion"
     failure_mode: >
       Market prices with vig are blended as probability truth, or de-vigged
@@ -1215,7 +1215,7 @@ cards:
     status: open_gap
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - .omx/context/daily-loss-24h-truth-20260409T134500Z.md
       - docs/archives/work_packets/REPAIR-REALIZED-TRUTH-CONVERGENCE.md
     failure_mode: >
@@ -1273,7 +1273,7 @@ cards:
     status: active_law
     severity: high
     sources:
-      - docs/known_gaps.md
+      - docs/operations/known_gaps.md
       - git commits "Use degraded bid proxy for buy-yes exits" and "Declare zero-cost hold value in exit gates"
     failure_mode: >
       Exit logic silently replaces missing liquidity/cost evidence with proxies,

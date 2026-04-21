@@ -62,6 +62,31 @@ file_budgets:
     diet_target: >
       Keep as high-confidence fact spec, not top-level authority. Facts should
       be reflected in executable contracts and lore cards.
+  - path: docs/reference/zeus_architecture_reference.md
+    role: canonical_architecture_reference_anchor
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      P0 anchor only. Keep skeletal until P1 extracts durable content from
+      legacy architecture snapshots.
+  - path: docs/reference/zeus_market_settlement_reference.md
+    role: canonical_market_settlement_reference_anchor
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      P0 anchor only. Settlement source/provenance extraction belongs to P1.
+  - path: docs/reference/zeus_data_and_replay_reference.md
+    role: canonical_data_replay_reference_anchor
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      P0 anchor only. Data inventory and replay extraction belong to P1.
+  - path: docs/reference/zeus_failure_modes_reference.md
+    role: canonical_failure_modes_reference_anchor
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      P0 anchor only. Failure-mode extraction belongs to P1.
   - path: docs/archive_registry.md
     role: visible_history_interface
     max_lines: 180
