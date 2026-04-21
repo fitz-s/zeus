@@ -165,7 +165,6 @@ CITY_STATIONS = {
     # Do not re-add under WU — intentionally excluded per settlement_source_type="noaa".
     # "Istanbul":      ("LTFM", "TR", "C"),
     "Ankara":        ("LTAC", "TR", "C"),
-    "Tel Aviv":      ("LLBG", "IL", "C"),
     # Asia
     "Beijing":       ("ZBAA", "CN", "C"),
     "Shanghai":      ("ZSPD", "CN", "C"),
