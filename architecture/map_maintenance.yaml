@@ -33,6 +33,15 @@ rules:
       - docs/README.md
       - architecture/topology.yaml
     rationale: top-level docs files and artifacts must be routed by the docs mesh.
+  - id: docs_archive_interface_registry
+    path_globs: ["docs/archive_registry.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/AGENTS.md
+      - docs/README.md
+      - architecture/topology.yaml
+      - architecture/artifact_lifecycle.yaml
+    rationale: the visible archive interface must move with docs routing and lifecycle classification.
   - id: docs_subtree_registry
     path_globs: ["docs/*/AGENTS.md"]
     on_change: [added, deleted]

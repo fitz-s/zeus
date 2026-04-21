@@ -8,7 +8,8 @@ Role: single live control pointer for the repo.
 - Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
 - Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
 - Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: P0 online boot-surface realignment is the active lane
+- Status: P1 machine visibility and registry alignment is the active lane
+- P0 commit: `19e0178`
 - Supersession: user ruling in this thread makes the reconstruction package the
   current mainline control surface; older wait-for-ruling notes about
   P11/B055/B099 are stale for this packet
@@ -25,11 +26,11 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P0 allowlist only: boot surfaces, `docs/archive_registry.md`,
-  `docs/operations/current_state.md`, `docs/operations/AGENTS.md`,
-  `architecture/topology.yaml`, and the active task folder
+- P1 allowlist only: visibility/topology manifests, docs-root/current-state
+  routing surfaces, minimum topology_doctor checker/test changes, and the
+  active task folder
 - No source, test, script, runtime DB, graph-db, or archive-body edits in this
-  lane
+  lane except the P1-approved topology_doctor checker/test files
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -49,7 +50,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Finish P0 boot-surface edits inside the package allowlist
-- Run planning-lock, work-record, receipt, docs, context-budget, and
-  map-maintenance verification
+- Finish P1 machine protection for archive-interface and thin-current-state
+  policy
+- Run docs, strict, map-maintenance, targeted pytest, and closeout gates
 - Keep unrelated dirty work and local archive inputs untouched

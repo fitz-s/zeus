@@ -65,6 +65,26 @@ register it explicitly in the live operations surface.
 The active packet will start with P0 only. P1/P2/P3 remain downstream phases
 and are not implicitly authorized by reading the package.
 
+## P1 decision
+
+P0 was committed as `19e0178` after local follow-up review and closeout
+verification. RALPLAN consensus then confirmed the next defensible sequence:
+
+1. finish P0 closeout/review
+2. land P1 machine visibility and registry alignment
+3. split future P2 into P2A portability/status and optional P2B sidecar work
+
+P1 therefore implements only the machine-protection layer for P0:
+
+- archive cold-storage semantics in `architecture/topology.yaml`
+- archive-interface checks in topology_doctor
+- context budgets for `docs/archive_registry.md` and `current_state.md`
+- artifact lifecycle classification for `docs/archive_registry.md`
+- targeted regression tests
+
+P1 does not touch graph wrapper code, graph DB artifacts, runtime state, source
+runtime behavior, archive bodies, or package-defined P2 work.
+
 ## Required reads
 
 - `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md`

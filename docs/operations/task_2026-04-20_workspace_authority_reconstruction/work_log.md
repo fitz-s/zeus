@@ -52,3 +52,61 @@ Next:
 
 - hold at the staged P0 packet until explicit commit/next-packet direction
 - keep unrelated dirty work unstaged
+
+## P1 update
+
+Date: 2026-04-21
+Branch: data-improve
+Task: P1 machine visibility and registry alignment.
+
+Changed files:
+
+- `architecture/topology.yaml`
+- `architecture/topology_schema.yaml`
+- `architecture/map_maintenance.yaml`
+- `architecture/context_budget.yaml`
+- `architecture/artifact_lifecycle.yaml`
+- `docs/AGENTS.md`
+- `docs/operations/current_state.md`
+- `scripts/topology_doctor_registry_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json`
+
+Summary:
+
+- marked `docs/archives` as historical cold storage with a visible interface
+  at `docs/archive_registry.md`
+- added archive-interface checks that reject archive-as-live-peer language and
+  missing/unregistered archive registry surfaces
+- added context budgets for archive registry and current state
+- classified archive registry as a liminal archive interface in artifact
+  lifecycle
+- added targeted tests for archive-interface policy
+- updated current state from P0 to P1
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or registry or current_state or map_maintenance"` -> 35 passed, 139 deselected
+- `git diff --check -- architecture/topology.yaml architecture/topology_schema.yaml architecture/map_maintenance.yaml architecture/context_budget.yaml architecture/artifact_lifecycle.yaml scripts/topology_doctor_registry_checks.py tests/test_topology_doctor.py` -> clean
+- `python -m py_compile scripts/topology_doctor_registry_checks.py` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P1 files> --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json` -> ok
+
+Known verification gap:
+
+- `python scripts/topology_doctor.py --strict --json` remains blocked by
+  pre-existing script/test registry debt and the local root
+  `zeus_data_inventory.xlsx`; these are outside the P1 allowlist.
+- P1 closeout reports Code Review Graph stale/partial coverage warnings for
+  changed checker/test files. These are warning-grade and are the subject of
+  later P2A graph portability/status work.
+
+Next:
+
+- run P1 planning-lock/work-record/receipt/map-maintenance/closeout with the
+  final changed-file list
+- do not start P2 until P1 closeout is verified

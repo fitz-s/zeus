@@ -1,4 +1,7 @@
 """Registry/root/docs-strict checker family for topology_doctor."""
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-21; last_reused=2026-04-21
+# Purpose: Registry, root, docs-strict, and archive-interface checks for topology_doctor.
+# Reuse: Keep durable workspace-law checks here; route narrow docs tree checks through topology_doctor_docs_checks.py.
 
 from __future__ import annotations
 
@@ -191,6 +194,68 @@ def check_reference_authority(api: Any, topology: dict[str, Any]) -> list[Any]:
     return issues
 
 
+def check_archive_interface(api: Any, topology: dict[str, Any]) -> list[Any]:
+    issues: list[Any] = []
+    spec = topology.get("archive_interface") or {}
+    interface_rel = str(spec.get("path") or "docs/archive_registry.md")
+    interface_path = api.ROOT / interface_rel
+    if not interface_path.exists():
+        issues.append(
+            api._issue(
+                "docs_archive_interface_missing",
+                interface_rel,
+                "visible archive interface is missing",
+            )
+        )
+    allowed_root = set(topology.get("docs_root_allowed_files") or [])
+    if interface_rel not in allowed_root:
+        issues.append(
+            api._issue(
+                "docs_archive_interface_unregistered",
+                "architecture/topology.yaml:docs_root_allowed_files",
+                f"{interface_rel} must be an allowed docs-root file",
+            )
+        )
+
+    for item in topology.get("docs_subroots") or []:
+        if item.get("path") != "docs/archives":
+            continue
+        if item.get("default_read") is not False:
+            issues.append(
+                api._issue(
+                    "docs_archive_default_read_leak",
+                    "architecture/topology.yaml:docs_subroots.docs/archives",
+                    "docs/archives must be explicitly non-default-read",
+                )
+            )
+        visible_interface = str(item.get("visible_interface") or "")
+        if visible_interface and visible_interface != interface_rel:
+            issues.append(
+                api._issue(
+                    "docs_archive_visible_interface_mismatch",
+                    "architecture/topology.yaml:docs_subroots.docs/archives",
+                    f"docs/archives visible_interface {visible_interface!r} does not match {interface_rel!r}",
+                )
+            )
+
+    forbidden_phrases = [str(item) for item in spec.get("forbidden_live_peer_phrases") or []]
+    for rel in ("docs/AGENTS.md", "docs/README.md"):
+        path = api.ROOT / rel
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for phrase in forbidden_phrases:
+            if phrase and phrase in text:
+                issues.append(
+                    api._issue(
+                        "docs_archive_default_read_leak",
+                        rel,
+                        f"visible docs surface still uses archive-as-live-peer phrase: {phrase!r}",
+                    )
+                )
+    return issues
+
+
 def check_root_and_state_classification(api: Any, topology: dict[str, Any]) -> list[Any]:
     issues = []
     visible_files = {
@@ -273,6 +338,7 @@ def run_strict(api: Any) -> Any:
     issues.extend(api._check_active_pointers(topology))
     issues.extend(api._check_registries(topology, tracked))
     issues.extend(api._check_reference_authority(topology))
+    issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_root_and_state_classification(topology))
     issues.extend(api._check_shadow_authority_references())
@@ -294,6 +360,7 @@ def run_docs(api: Any) -> Any:
         or issue.path.startswith("docs")
     ]
     issues.extend(api._check_reference_authority(topology))
+    issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_progress_handoff_paths())
     issues.extend(api._check_docs_subtree_agents(topology))

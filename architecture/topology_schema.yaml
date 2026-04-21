@@ -61,6 +61,10 @@ strict_issue_codes:
   - hidden_active_doc
   - docs_unregistered_subtree
   - docs_non_markdown_artifact
+  - docs_archive_interface_missing
+  - docs_archive_interface_unregistered
+  - docs_archive_default_read_leak
+  - docs_archive_visible_interface_mismatch
   - docs_generic_name
   - docs_broken_internal_path
   - operations_current_state_missing_label

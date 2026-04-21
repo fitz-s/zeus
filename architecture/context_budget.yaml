@@ -62,6 +62,21 @@ file_budgets:
     diet_target: >
       Keep as high-confidence fact spec, not top-level authority. Facts should
       be reflected in executable contracts and lore cards.
+  - path: docs/archive_registry.md
+    role: visible_history_interface
+    max_lines: 180
+    enforcement: advisory
+    diet_target: >
+      Keep as a compact archive access protocol and promotion guardrail. Do
+      not turn it into an archive catalog or narrative history.
+  - path: docs/operations/current_state.md
+    role: live_control_pointer
+    max_lines: 90
+    enforcement: advisory
+    diet_target: >
+      Keep as the live current packet pointer and evidence list. Move runtime
+      diaries, packet histories, and historical detail into packets, lore, or
+      archive registry surfaces.
   - path: tests/AGENTS.md
     role: manifest_backed_scoped_registry
     max_lines: 80

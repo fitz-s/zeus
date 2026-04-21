@@ -692,6 +692,90 @@ def test_docs_mode_rejects_progress_handoff_outside_allowed_paths(monkeypatch):
     assert all(issue.path != "docs/operations/task_2099-01-01_good/team_handoff.md" for issue in issues)
 
 
+def test_docs_mode_requires_archive_interface_in_allowed_root_files(tmp_path, monkeypatch):
+    root = tmp_path
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "archive_registry.md").write_text("# Archive Registry\n", encoding="utf-8")
+    (docs / "AGENTS.md").write_text("# docs AGENTS\n", encoding="utf-8")
+    (docs / "README.md").write_text("# Docs Index\n", encoding="utf-8")
+    topology = {
+        "archive_interface": {"path": "docs/archive_registry.md"},
+        "docs_root_allowed_files": ["docs/AGENTS.md", "docs/README.md"],
+        "docs_subroots": [
+            {
+                "path": "docs/archives",
+                "default_read": False,
+                "visible_interface": "docs/archive_registry.md",
+            }
+        ],
+    }
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    from scripts import topology_doctor_registry_checks
+
+    issues = topology_doctor_registry_checks.check_archive_interface(topology_doctor, topology)
+
+    assert any(issue.code == "docs_archive_interface_unregistered" for issue in issues)
+
+
+def test_docs_mode_rejects_archive_as_live_peer_language(tmp_path, monkeypatch):
+    root = tmp_path
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "archive_registry.md").write_text("# Archive Registry\n", encoding="utf-8")
+    (docs / "AGENTS.md").write_text("Documentation root. Active subdirectories plus archives.\n", encoding="utf-8")
+    (docs / "README.md").write_text("Route to archives/AGENTS.md for history.\n", encoding="utf-8")
+    topology = {
+        "archive_interface": {
+            "path": "docs/archive_registry.md",
+            "forbidden_live_peer_phrases": [
+                "Active subdirectories plus archives",
+                "archives/AGENTS.md",
+            ],
+        },
+        "docs_root_allowed_files": ["docs/AGENTS.md", "docs/README.md", "docs/archive_registry.md"],
+        "docs_subroots": [
+            {
+                "path": "docs/archives",
+                "default_read": False,
+                "visible_interface": "docs/archive_registry.md",
+            }
+        ],
+    }
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    from scripts import topology_doctor_registry_checks
+
+    issues = topology_doctor_registry_checks.check_archive_interface(topology_doctor, topology)
+
+    assert any(issue.code == "docs_archive_default_read_leak" for issue in issues)
+
+
+def test_docs_mode_rejects_archive_default_read_in_topology(tmp_path, monkeypatch):
+    root = tmp_path
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "archive_registry.md").write_text("# Archive Registry\n", encoding="utf-8")
+    (docs / "AGENTS.md").write_text("# docs AGENTS\n", encoding="utf-8")
+    (docs / "README.md").write_text("# Docs Index\n", encoding="utf-8")
+    topology = {
+        "archive_interface": {"path": "docs/archive_registry.md"},
+        "docs_root_allowed_files": ["docs/AGENTS.md", "docs/README.md", "docs/archive_registry.md"],
+        "docs_subroots": [
+            {
+                "path": "docs/archives",
+                "default_read": True,
+                "visible_interface": "docs/archive_registry.md",
+            }
+        ],
+    }
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    from scripts import topology_doctor_registry_checks
+
+    issues = topology_doctor_registry_checks.check_archive_interface(topology_doctor, topology)
+
+    assert any(issue.code == "docs_archive_default_read_leak" for issue in issues)
+
+
 def test_current_state_operation_paths_accept_markdown_and_bare_paths():
     text = (
         "- Primary packet file: [packet](docs/operations/task_2026-04-13_topology_compiler_program.md)\n"
@@ -2781,7 +2865,7 @@ def test_compiled_topology_is_derived_read_model():
             "reviewer_visible": False,
         }
     ]
-    assert "docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx" in payload["active_operations_surfaces"]["required_anchors"]
+    assert "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md" in payload["active_operations_surfaces"]["required_anchors"]
     assert any(item["path"] == "docs/reference/zeus_math_spec.md" for item in payload["artifact_roles"])
     assert payload["broken_visible_routes"] == []
     assert payload["unclassified_docs_artifacts"] == []
