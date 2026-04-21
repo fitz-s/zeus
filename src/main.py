@@ -373,7 +373,7 @@ def _startup_wallet_check(clob=None):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
     Accepts an optional clob for testing. In production, creates a live
-    PolymarketClient. Paper mode skips the check (no on-chain wallet).
+    PolymarketClient.
     """
     if clob is None:
         from src.data.polymarket_client import PolymarketClient
@@ -471,12 +471,6 @@ def _startup_data_health_check(conn):
 def main():
     if "ZEUS_MODE" not in os.environ:
         sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=live")
-    if os.environ["ZEUS_MODE"] == "paper":
-        logger.critical(
-            "ZEUS_MODE='paper' is no longer supported. Zeus is designed only for live. "
-            "Paper mode was decommissioned in Phase 1. Set ZEUS_MODE=live."
-        )
-        sys.exit("FATAL: ZEUS_MODE='paper' rejected — Zeus is live-only.")
     if os.environ["ZEUS_MODE"] != "live":
         sys.exit(
             f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not valid. "

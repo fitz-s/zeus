@@ -18,7 +18,7 @@ class ModeMismatchError(ValueError):
     """Raised when a truth file's mode tag does not match the caller's requested mode.
 
     B077 / SD-A: read_mode_truth_json must validate that the file on disk was
-    written for the same mode the caller expects. Live-vs-paper truth-file
+    written for the same mode the caller expects. Cross-mode truth-file
     collisions produce this error rather than silently serving wrong-mode data.
     """
 
@@ -154,7 +154,7 @@ def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dic
     if mode is None:
         raise ModeMismatchError(
             "mode=None is not allowed — pass an explicit mode string (e.g. mode=get_mode()). "
-            "Implicit None bypasses the ModeMismatchError live-vs-paper guard (B077 / SD-A)."
+            "Implicit None bypasses the ModeMismatchError cross-mode guard (B077 / SD-A)."
         )
     path = mode_state_path(filename, mode=mode)
     data, truth = read_truth_json(path)
@@ -164,7 +164,7 @@ def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dic
             raise ModeMismatchError(
                 f"Truth file mode mismatch: caller requested mode={mode!r} but "
                 f"file at {path} is tagged mode={file_mode!r}. "
-                "This indicates a live-vs-paper routing error (B077 / SD-A)."
+                "This indicates a cross-mode routing error (B077 / SD-A)."
             )
     return data, truth
 

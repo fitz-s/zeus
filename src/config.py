@@ -32,11 +32,10 @@ def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
 
     The mode parameter is first-class (threaded through read_mode_truth_json)
     but only "live" (or None) is accepted. Any other value raises ValueError.
-    Paper mode was retired; do not re-add without explicit scope decision.
     """
     resolved = mode or get_mode()
     if resolved not in ACTIVE_MODES:
-        raise ValueError(f"mode_state_path called with invalid mode={resolved!r} — Zeus is live-only; paper retired.")
+        raise ValueError(f"mode_state_path called with invalid mode={resolved!r} — Zeus is live-only.")
     return STATE_DIR / filename
 
 

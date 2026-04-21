@@ -270,7 +270,6 @@ def execute_exit(
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
-    Paper mode: close immediately at market price.
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """

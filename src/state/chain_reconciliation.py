@@ -8,7 +8,6 @@ Rules:
 2. Local but NOT on chain → VOID immediately (don't ask why)
 3. Chain but NOT local → QUARANTINE (low confidence, 48h forced exit eval)
 
-Paper mode: skip (no chain to reconcile).
 Live mode: MANDATORY every cycle before any trading.
 """
 

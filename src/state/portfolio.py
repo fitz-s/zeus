@@ -977,7 +977,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     stem = path.stem
     if stem.startswith("positions-"):
         candidate_mode = stem.split("positions-", 1)[1]
-        if candidate_mode in {"live", "test"}:  # paper removed (Phase 1 axiom)
+        if candidate_mode in {"live", "test"}:  # only live and test are valid modes
             mode_override = candidate_mode
     elif path == POSITIONS_PATH:
         mode_override = current_mode

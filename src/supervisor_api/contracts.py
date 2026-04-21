@@ -30,7 +30,7 @@ class SupervisorContractError(ValueError):
 # carries no env field (fallback path). It is a valid contract value
 # but is UNVERIFIED authority-wise; callers should check via
 # `is_unverified_env()` before making any env-scoped authority decision.
-_VALID_ENVS: tuple[str, ...] = ("live", "paper", "test", "unknown_env")
+_VALID_ENVS: tuple[str, ...] = ("live", "test", "unknown_env")
 
 _UNVERIFIED_ENVS: tuple[str, ...] = ("unknown_env",)
 
@@ -40,7 +40,7 @@ def is_unverified_env(env: str) -> bool:
     treated as UNVERIFIED authority (row did not carry a real env).
 
     Callers that make env-scoped decisions (mode-routing, dashboard
-    segmentation, live-vs-paper P&L attribution) should refuse or
+    segmentation, live-mode P&L attribution) should refuse or
     quarantine rows where this returns True, rather than silently
     bucketing them into the current runtime mode.
     """
@@ -53,7 +53,7 @@ def _check_env(obj: object) -> None:
         raise SupervisorContractError(
             f"{type(obj).__name__}.env must not be empty — "
             "every supervisor object must declare its environment "
-            "(e.g. 'live', 'paper', 'test')"
+            "(e.g. 'live', 'test')"
         )
     if env not in _VALID_ENVS:
         raise SupervisorContractError(
