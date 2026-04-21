@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Topology doctor for Zeus's compiled agent-navigation graph."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-21; last_reused=2026-04-21
 # Purpose: Main facade for compiled topology, navigation, and closeout checks.
 # Reuse: Prefer adding narrow checker-family modules instead of expanding this facade directly.
 
@@ -74,6 +74,7 @@ class TopologyIssue:
 class StrictResult:
     ok: bool
     issues: list[TopologyIssue]
+    details: dict[str, Any] | None = None
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -1066,7 +1067,10 @@ def _print_strict(
     summary_only: bool = False,
 ) -> None:
     if as_json:
-        print(json.dumps({"ok": result.ok, "issues": [asdict(i) for i in result.issues]}, indent=2))
+        payload = {"ok": result.ok, "issues": [asdict(i) for i in result.issues]}
+        if result.details is not None:
+            payload["details"] = result.details
+        print(json.dumps(payload, indent=2))
         return
     if summary_only:
         print(summarize_issues(result.issues))

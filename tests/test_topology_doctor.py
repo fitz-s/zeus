@@ -1,5 +1,5 @@
 """Tests for topology_doctor compiled topology gates."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-21; last_reused=2026-04-21
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
 # Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
 
@@ -324,7 +324,57 @@ def test_cli_json_parity_for_code_review_graph_status(monkeypatch, tmp_path):
     assert payload == {
         "ok": result.ok,
         "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+        "details": result.details,
     }
+
+
+def test_code_review_graph_status_reports_path_mode_and_absent_sidecar(monkeypatch, tmp_path):
+    root = tmp_path
+    source = root / "scripts" / "example.py"
+    source.parent.mkdir()
+    source.write_text("print('graph')\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
+    _write_code_review_graph_db(
+        root / ".code-review-graph" / "graph.db",
+        file_path=source.resolve().as_posix(),
+        file_hash=topology_doctor._code_review_graph_checks().sha256_file(source),
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+
+    result = topology_doctor.run_code_review_graph_status()
+
+    assert result.ok
+    assert result.details["path_mode"] == "absolute"
+    assert result.details["graph_meta"] == {
+        "path": ".code-review-graph/graph_meta.json",
+        "present": False,
+        "tracked": False,
+        "parity_status": "absent",
+    }
+
+
+def test_code_review_graph_mcp_repo_resolution_avoids_workstation_default(monkeypatch, tmp_path):
+    from scripts import code_review_graph_mcp_readonly
+
+    monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+    monkeypatch.setattr(code_review_graph_mcp_readonly, "_default_repo_root", None)
+
+    assert code_review_graph_mcp_readonly._repo(None) is None
+    assert "/Users/leofitz" not in str(code_review_graph_mcp_readonly._repo(None) or "")
+
+    explicit = tmp_path / "repo"
+    explicit.mkdir()
+    assert code_review_graph_mcp_readonly._repo(str(explicit)) == explicit.resolve().as_posix()
+
+    env_repo = tmp_path / "env-repo"
+    env_repo.mkdir()
+    monkeypatch.setenv("CRG_REPO_ROOT", str(env_repo))
+    assert code_review_graph_mcp_readonly._repo(None) == env_repo.resolve().as_posix()
 
 
 def test_code_review_graph_status_warns_on_dirty_file_hash_mismatch(monkeypatch, tmp_path):

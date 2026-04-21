@@ -110,3 +110,50 @@ Next:
 - run P1 planning-lock/work-record/receipt/map-maintenance/closeout with the
   final changed-file list
 - do not start P2 until P1 closeout is verified
+
+## P2A update
+
+Date: 2026-04-21
+Branch: data-improve
+Task: Graph portability/status disclosure, sidecar deferred.
+
+Changed files:
+
+- `scripts/code_review_graph_mcp_readonly.py`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_code_review_graph.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json`
+
+Summary:
+
+- removed hardcoded workstation repo root from the Zeus CRG MCP facade
+- preserved upstream auto-detection and `CRG_REPO_ROOT` override behavior
+- added graph status details for storage `path_mode`, counts, metadata, and
+  sidecar absence/presence
+- threaded the same graph disclosure into code-impact metadata
+- added targeted tests for wrapper repo-root resolution and absent sidecar
+  status
+- deferred `graph_meta.json` creation and sidecar lifecycle classification to
+  P2B
+
+Verification:
+
+- `python scripts/topology_doctor.py --code-review-graph-status --json` -> ok;
+  reports `path_mode=absolute` and `graph_meta.present=false`
+- `python scripts/topology_doctor.py --context-packs --json` -> ok
+- `python -m py_compile scripts/code_review_graph_mcp_readonly.py scripts/topology_doctor.py scripts/topology_doctor_cli.py scripts/topology_doctor_code_review_graph.py scripts/topology_doctor_context_pack.py scripts/topology_doctor_registry_checks.py` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "code_review_graph or context_pack"` -> 13 passed, 163 deselected, 1 warning
+- `git diff --check -- scripts/code_review_graph_mcp_readonly.py scripts/topology_doctor.py scripts/topology_doctor_cli.py scripts/topology_doctor_code_review_graph.py scripts/topology_doctor_context_pack.py tests/test_topology_doctor.py` -> clean
+- `python scripts/topology_doctor.py closeout --changed-files <P2A files> --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json` -> ok
+
+Known verification note:
+
+- `.code-review-graph/graph.db` is dirty in the local worktree and remains
+  unstaged. P2A does not hand-edit, regenerate, or commit graph DB artifacts.
+- P2A closeout reports graph dirty-file-stale warnings for the changed P2A
+  files. These warnings are expected until graph DB refresh policy is handled;
+  they do not block the P2A portability/status change.
