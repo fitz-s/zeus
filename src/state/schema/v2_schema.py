@@ -282,6 +282,9 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 raw_response TEXT,
                 source_file TEXT,
                 imported_at TEXT NOT NULL,
+                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                data_version TEXT NOT NULL DEFAULT 'v1',
                 UNIQUE(city, source, utc_timestamp)
             )
         """)
@@ -289,6 +292,17 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_observation_instants_v2_city_ts
                 ON observation_instants_v2(city, target_date, utc_timestamp)
         """)
+        # Gate F Step 2: authority + data_version columns for existing DBs (idempotent).
+        # Pairs with Gap A closure in step1_schema_audit.md.
+        for alter_sql in [
+            "ALTER TABLE observation_instants_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
         # ----------------------------------------------------------------
         # historical_forecasts_v2
@@ -306,6 +320,10 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 lead_days INTEGER,
                 available_at TEXT,
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                data_version TEXT NOT NULL DEFAULT 'v1',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(city, target_date, source, temperature_metric, lead_days)
             )
         """)
@@ -313,6 +331,18 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_historical_forecasts_v2_lookup
                 ON historical_forecasts_v2(city, target_date, source, temperature_metric, lead_days)
         """)
+        # Gate F Step 2: authority + data_version + provenance_json for existing DBs
+        # (idempotent). Pairs with Gap B closure in step1_schema_audit.md.
+        for alter_sql in [
+            "ALTER TABLE historical_forecasts_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
+            "ALTER TABLE historical_forecasts_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
+            "ALTER TABLE historical_forecasts_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
         # ----------------------------------------------------------------
         # day0_metric_fact
