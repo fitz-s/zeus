@@ -8,27 +8,28 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: P2 runbook and operations routing normalization complete; final critic/verifier review passed
+- Status: P3 plan drafted; await implementation request
 - Docs reclassification P0 commit: `b1a9761`
 - Docs reclassification P1 commit: `84d6d25`
 - P1 follow-up review: `proceed_to_p2`
+- Docs reclassification P2 commit: `1e1b9a7`
+- P2 follow-up review: `proceed_to_p3`
 - Prior workspace authority reconstruction is closed at `152f210`.
 
 ## Required evidence
 
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/06_root_and_subtree_reclassification_audit.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/09_patch_blueprints/p2_patch_blueprint.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/12_codex_prompts/codex_p2_execute.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/09_patch_blueprints/p3_patch_blueprint.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/12_codex_prompts/codex_p3_execute.md`
 - `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/11_validation_matrix.md`
-- `.omx/context/docs-reclassification-p2-20260421T223156Z.md`
-- `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md`
+- `.omx/context/docs-reclassification-p3-20260421T231323Z.md`
+- `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
 
 ## Freeze point
 
-- Do not begin P3 duplicate-fragment deletion or enforcement tightening until
-  P2 follow-up review says `proceed_to_p3`.
+- Do not implement P3 duplicate-fragment freezing/deletion or enforcement
+  tightening until explicitly requested.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here.
 
@@ -51,6 +52,5 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Run P2 follow-up review
-- If review says `proceed_to_p3`, open P3 planning
+- If approved, implement P3 from `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md`
 - Keep unrelated dirty work and local archive inputs untouched

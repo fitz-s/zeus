@@ -287,3 +287,78 @@ Next:
 
 - commit P2 implementation
 - run P2 follow-up review before P3
+
+## P2 follow-up review
+
+Date: 2026-04-21
+Commit: `1e1b9a7`
+Task: Review P2 before P3.
+
+Changed files:
+
+- `docs/operations/runtime_artifact_inventory.md` (routing hygiene for a new
+  unrelated `.omc` plan discovered during review)
+
+Summary:
+
+- P2 demoted the TIGGE local/cloud wiring snapshot to artifacts evidence.
+- The durable TIGGE runbook is generic and free of VM/project/IP/account/local
+  path details.
+- Operations routing is explicit and docs-checkable while `current_state.md`
+  stays compact.
+- A new runtime-local `.omc/plans/observation-instants-migration-iter3.md`
+  appeared after P2 and was indexed as unrelated planning evidence so docs
+  checks remain green.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- durable TIGGE runbook sensitive-string check -> no hits
+- old TIGGE durable-runbook route check -> no live/default-router hits
+
+Verdict:
+
+- `proceed_to_p3`
+
+Next:
+
+- draft P3 plan
+
+## P3 plan
+
+Date: 2026-04-21
+Task: Plan residual fragment cleanup and enforcement tightening.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/runtime_artifact_inventory.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+
+Summary:
+
+- drafted `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md`
+- decision: freeze the six temporary fragment references before any deletion
+  because the replacement matrix still lists unique remaining content
+- no P3 implementation was performed
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <review/plan files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <review/plan files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <review/plan files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `git diff --check -- <review/plan files>` -> ok
+- `git diff -- docs/authority` -> no changes
+
+Next:
+
+- implement P3 only after explicit request
