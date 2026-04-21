@@ -1,5 +1,11 @@
 # Zeus: Technical Orientation
 
+> SUPERSEDED ORIENTATION - NOT DEFAULT READ.
+> Read `docs/reference/zeus_architecture_reference.md`, root `AGENTS.md`, and
+> `workspace_map.md` first. This file is frozen conditional support for
+> remaining dependency/log/external-boundary summaries. It is not authority and
+> should be cited only when canonical references are insufficient.
+
 > For domain model and WHY explanations, see `docs/reference/zeus_domain_model.md`.
 > For operating rules and invariants, see root `AGENTS.md`.
 

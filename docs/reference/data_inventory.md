@@ -1,5 +1,11 @@
 # Data We Have
 
+> CONDITIONAL DATA INVENTORY - NOT DEFAULT READ.
+> Read `docs/reference/zeus_data_and_replay_reference.md` and
+> `architecture/data_rebuild_topology.yaml` first. This file remains frozen
+> support for detailed coverage/source/utilization facts until a generated
+> machine inventory replaces it. It is not authority.
+
 Updated: `2026-04-01`
 
 ## Executive Summary

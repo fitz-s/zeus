@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: P3 plan drafted; await implementation request
+- Status: P3 reference-fragment freezing complete; final critic/verifier review passed
 - Docs reclassification P0 commit: `b1a9761`
 - Docs reclassification P1 commit: `84d6d25`
 - P1 follow-up review: `proceed_to_p2`
@@ -28,8 +28,8 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Do not implement P3 duplicate-fragment freezing/deletion or enforcement
-  tightening until explicitly requested.
+- Do not delete reference fragments in P3 unless
+  `architecture/reference_replacement.yaml` marks them deletion-ready.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here.
 
@@ -52,5 +52,5 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- If approved, implement P3 from `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md`
+- Run docs reclassification package closeout
 - Keep unrelated dirty work and local archive inputs untouched

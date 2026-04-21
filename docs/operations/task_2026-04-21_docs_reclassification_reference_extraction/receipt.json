@@ -1,5 +1,5 @@
 {
-  "task": "docs reclassification p2 review and p3 plan",
+  "task": "docs reclassification p3 freeze residual reference fragments",
   "packet": "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md",
   "route_source": "ralplan",
   "route_evidence": [
@@ -19,16 +19,32 @@
     "docs/reference/AGENTS.md"
   ],
   "allowed_files": [
+    "architecture/docs_registry.yaml",
+    "architecture/reference_replacement.yaml",
     "docs/operations/current_state.md",
-    "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
-    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json",
+    "docs/reference/AGENTS.md",
+    "docs/reference/repo_overview.md",
+    "docs/reference/data_inventory.md",
+    "docs/reference/data_strategy.md",
+    "docs/reference/statistical_methodology.md",
+    "docs/reference/quantitative_research.md",
+    "docs/reference/market_microstructure.md"
   ],
   "changed_files": [
+    "architecture/docs_registry.yaml",
+    "architecture/reference_replacement.yaml",
     "docs/operations/current_state.md",
-    "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
-    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json",
+    "docs/reference/AGENTS.md",
+    "docs/reference/repo_overview.md",
+    "docs/reference/data_inventory.md",
+    "docs/reference/data_strategy.md",
+    "docs/reference/statistical_methodology.md",
+    "docs/reference/quantitative_research.md",
+    "docs/reference/market_microstructure.md"
   ],
   "forbidden_files": [
     "src/**",
@@ -42,14 +58,14 @@
   "tests_evidence": [
     "python scripts/topology_doctor.py --docs --json",
     "python scripts/topology_doctor.py --context-budget --json",
-    "python scripts/topology_doctor.py --artifact-lifecycle --json",
     "python scripts/topology_doctor.py --reference-replacement --json",
-    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <review/plan files> --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <review/plan files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <review/plan files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
-    "git diff --check -- <review/plan files>",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P3 files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
+    "pytest -q tests/test_topology_doctor.py -k \"docs or map_maintenance or context_budget or reference_replacement\"",
+    "git diff --check -- <P3 files>",
     "git diff -- docs/authority"
   ]
 }

@@ -36,6 +36,7 @@ allowed_next_actions:
   - keep
   - extract_then_move
   - extract_then_reassess
+  - keep_until_machine_inventory
   - move_to_operations
   - demote_after_extraction
   - archive_after_closeout
@@ -396,60 +397,60 @@ entries:
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary architecture extraction source
+    current_role: frozen conditional architecture orientation support source
     canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
     next_action: extract_then_reassess
-    lifecycle_state: temporary
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/data_inventory.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary data/replay extraction source
+    current_role: frozen conditional data inventory support source
     canonical_replaced_by: [docs/reference/zeus_data_and_replay_reference.md]
-    next_action: extract_then_reassess
-    lifecycle_state: temporary
+    next_action: keep_until_machine_inventory
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/data_strategy.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary data/replay extraction source
+    current_role: frozen conditional data-roadmap support source
     canonical_replaced_by: [docs/reference/zeus_data_and_replay_reference.md]
     next_action: extract_then_reassess
-    lifecycle_state: temporary
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/statistical_methodology.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary math extraction source
+    current_role: frozen conditional math-methodology support source
     canonical_replaced_by: [docs/reference/zeus_math_spec.md]
-    next_action: extract_then_reassess
-    lifecycle_state: temporary
+    next_action: keep
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/quantitative_research.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary math/failure extraction source
+    current_role: frozen conditional quantitative-research support source
     canonical_replaced_by: [docs/reference/zeus_math_spec.md, docs/reference/zeus_failure_modes_reference.md]
     next_action: extract_then_reassess
-    lifecycle_state: temporary
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/market_microstructure.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: false
-    current_role: temporary market extraction source
+    current_role: frozen conditional market-research support source
     canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
     next_action: extract_then_reassess
-    lifecycle_state: temporary
+    lifecycle_state: transitional
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/artifacts/zeus_architecture_deep_map_2026-04-16.md

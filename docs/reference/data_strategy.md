@@ -1,5 +1,12 @@
 # Zeus Data Strategy
 
+> CONDITIONAL ROADMAP EVIDENCE - NOT DEFAULT READ.
+> Read `docs/reference/zeus_data_and_replay_reference.md`,
+> `architecture/data_rebuild_topology.yaml`, and active operations packets
+> first. This file is frozen support for historical data-roadmap prose. It is
+> not authority and should be cited only when canonical references are
+> insufficient.
+
 ## Current Reality
 
 旧的 `4.1%` 口径已经失效。Zeus 现在不是“几乎没吃数据”，而是：

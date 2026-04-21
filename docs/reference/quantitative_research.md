@@ -1,5 +1,11 @@
 # 数学体系与数据架构研究
 
+> CONDITIONAL RESEARCH EVIDENCE - NOT DEFAULT READ.
+> Read `docs/reference/zeus_domain_model.md`,
+> `docs/reference/zeus_failure_modes_reference.md`, and
+> `docs/reference/zeus_math_spec.md` first. This file is frozen support for
+> market/data/model research background. It is not authority.
+
 *纯定量研究文档。不讨论代码、不讨论 agent 设计。只回答：数字从哪里来，如何被处理，如何变成交易决策。*
 
 ---
