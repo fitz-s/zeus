@@ -484,6 +484,10 @@ def main():
     )
 
     logger.info("Zeus starting in %s mode%s", mode, " (single cycle)" if once else "")
+    # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
+    # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
+    from src.data.proxy_health import bypass_dead_proxy_env_vars
+    bypass_dead_proxy_env_vars()
     logger.info("Capital: $%.2f | Kelly: %.0f%%",
                 settings.capital_base_usd,
                 settings["sizing"]["kelly_multiplier"] * 100)
