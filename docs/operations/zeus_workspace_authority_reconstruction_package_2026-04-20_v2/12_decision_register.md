@@ -1,0 +1,19 @@
+# Decision Register
+
+| Decision | Status | Rationale | Evidence source | Risk | Reversibility | Owner | Next action |
+|---|---|---|---|---|---|---|---|
+| Keep machine manifests as the durable center of workspace law. | required | The repo kernel is stronger than the prose and already encodes most durable classifications. | Current repo | Low if preserved; high if weakened. | Low | Human + local Codex | Rewrite boot surfaces around this fact in P0. |
+| Separate behavior-truth order from workspace-authority order. | required | Zeus currently mixes runtime truth and change permission into one prose plane. | Current repo + external systems model | Medium if misunderstood. | Medium | Human + Pro | Adopt in AGENTS/workspace_map rewrites. |
+| Promote Code Review Graph to first-class derived context engine. | required | CRG is already a serious structural retrieval system externally and already tested internally. | External CRG evidence + current repo tests/scripts | Medium | High | Human + local Codex | Reflect in P0 docs and P2 tooling. |
+| Keep `.code-review-graph/graph.db` tracked. | required | Repo intentionally chose online-visible derived context. | Current repo contract | Low if kept; high if removed without replacement. | Medium | Human + local Codex | Do not untrack absent severe blocker. |
+| Do not make CRG authority. | required | Graph is derived and can be stale/partial/path-sensitive. | Current repo + external model | Critical if violated. | Low | Human + Pro + Codex | Keep explicit in docs, manifests, tests. |
+| Add `docs/archive_registry.md` as visible history interface. | recommended | Online repo needs a truthful way to talk about hidden history without reopening archive bodies. | Current repo visibility mismatch + archive review | Low | High | Local Codex | Implement in P0. |
+| Do not re-track archive bodies in the main repo. | required | Archive bundle is large, mixed-density, and contaminated. | [Archive evidence] | Critical if violated. | Low | Human | Keep history cold; use registry + lore. |
+| Slim `docs/operations/current_state.md` into live control pointer only. | required | It is currently overloaded and unstable. | Current repo | Medium during transition. | High | Local Codex | Implement in P0. |
+| Treat `architecture/history_lore.yaml` as the dense visible historical layer. | recommended | It is already the right compression substrate for historical lessons. | Current repo | Low | High | Human + local Codex | Use in P3 for selective promotions. |
+| P0 must stay docs/topology-only. | required | Mixing authority cleanup with runtime behavior would corrupt reviewability. | Program constraint | Critical if violated. | Low | Local Codex | Keep source/tests/scripts untouched except packet docs/topology in P0. |
+| P1 should machine-protect P0. | recommended | Otherwise P0 becomes prose-only and drifts. | Current repo structure | Low | High | Local Codex | Schema/checker/test updates in P1. |
+| P2 should remove hardcoded repo-root assumptions from the CRG wrapper. | required | A tracked online context engine cannot remain laptop-bound. | Current repo + external CRG portability features | High if deferred forever. | Medium | Local Codex | Implement in P2. |
+| P2 should add a small graph metadata sidecar if locally verifiable. | recommended | The tracked SQLite blob is weakly inspectable in GitHub UI. | Current repo + online review constraint | Low to medium. | High | Local Codex + human approval | Adopt only with real local verification. |
+| Archive-derived claims must be labeled `[Archive evidence]`. | required | History must remain visibly historical. | [Archive evidence] | Low | Low | Pro + Codex | Use in P3 and future reviews. |
+| Do not rewrite all scoped AGENTS files in one packet. | required | That would widen the change surface and destroy packet legibility. | Program constraint | High if violated. | Low | Local Codex | Touch only docs-root/operations in P0. |

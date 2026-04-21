@@ -48,6 +48,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/ralplan_2026-04-13_topology_hardening_rounding_incident.md` | completed topology planning | Reflected by topology history/lore and current manifests. |
 | `.omx/plans/ralplan_pre_merge_high_value_2026-04-12.md` | stale planning | Historical only. |
 | `.omx/plans/refit-preflight-six-packet-plan.md` | stale planning | Historical only unless refit preflight reopens. |
+| `.omx/plans/open-questions.md` | runtime planning scratch | Local runtime-only; not durable repo evidence for the authority reconstruction packet. |
 | `.omx/plans/test-spec-datafix_2026-04-11_probability_trace_foundation.md` | stale test spec | Historical only. |
 | `.omx/plans/test-spec-datafix_2026-04-12_dual_lane_backtest.md` | stale test spec | Historical only. |
 | `.omx/plans/test-spec-p3-ralph-loop.md` | closed packet test spec | Archive-only provenance. |
@@ -61,6 +62,8 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/test-spec-wave1-1b0-canonical-token-identity.md` | closed wave test spec | Archive-only provenance. |
 | `.omx/plans/test-spec-wave1-1b1-json-bankroll-cleanup.md` | blocked/stale test spec | Historical only. |
 | `.omx/plans/test-spec-zeus-data-improve-pre-tigge-repair-packet-2026-04-11.md` | stale test spec | Historical only. |
+| `.omx/plans/workspace-authority-reconstruction-p2-2026-04-20-initial-deliberate.md` | superseded ralplan draft | Superseded by revised P2 sequencing plan; keep local only unless packet evidence is explicitly archived. |
+| `.omx/plans/workspace_authority_reconstruction_p1_vs_p2_2026-04-20_revised.md` | current ralplan sequencing plan | Active local planning evidence for P2 sequencing; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons

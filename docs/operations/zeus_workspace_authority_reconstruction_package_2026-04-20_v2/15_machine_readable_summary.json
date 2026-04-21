@@ -1,0 +1,127 @@
+{
+  "recommended_first_packet": "P0",
+  "files_to_edit_p0": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/README.md",
+    "docs/AGENTS.md",
+    "docs/archive_registry.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "architecture/topology.yaml",
+    "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md",
+    "docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md",
+    "docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json"
+  ],
+  "files_forbidden_p0": [
+    "src/**",
+    "tests/**",
+    "scripts/**",
+    "docs/authority/**",
+    "docs/archives/**",
+    "state/**",
+    "raw/**",
+    ".omx/**",
+    ".omc/**",
+    ".code-review-graph/graph.db",
+    "architecture/** except architecture/topology.yaml"
+  ],
+  "verification_commands_p0": [
+    "python scripts/topology_doctor.py --planning-lock --changed-files AGENTS.md workspace_map.md docs/README.md docs/AGENTS.md docs/archive_registry.md docs/operations/AGENTS.md docs/operations/current_state.md architecture/topology.yaml docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files AGENTS.md workspace_map.md docs/README.md docs/AGENTS.md docs/archive_registry.md docs/operations/AGENTS.md docs/operations/current_state.md architecture/topology.yaml docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files AGENTS.md workspace_map.md docs/README.md docs/AGENTS.md docs/archive_registry.md docs/operations/AGENTS.md docs/operations/current_state.md architecture/topology.yaml docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json",
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files AGENTS.md workspace_map.md docs/README.md docs/AGENTS.md docs/archive_registry.md docs/operations/AGENTS.md docs/operations/current_state.md architecture/topology.yaml --json",
+    "git diff --cached --check",
+    "git status --short"
+  ],
+  "decisions": [
+    {
+      "decision": "Keep machine manifests as durable workspace law center",
+      "status": "required"
+    },
+    {
+      "decision": "Separate behavior-truth order from workspace-authority order",
+      "status": "required"
+    },
+    {
+      "decision": "Promote Code Review Graph to first-class derived context engine",
+      "status": "required"
+    },
+    {
+      "decision": "Keep `.code-review-graph/graph.db` tracked",
+      "status": "required"
+    },
+    {
+      "decision": "Keep Code Review Graph non-authority",
+      "status": "required"
+    },
+    {
+      "decision": "Add `docs/archive_registry.md` as visible history interface",
+      "status": "recommended"
+    },
+    {
+      "decision": "Keep archives historical-only and non-default-read",
+      "status": "required"
+    },
+    {
+      "decision": "Slim `docs/operations/current_state.md` into live control pointer only",
+      "status": "required"
+    },
+    {
+      "decision": "Prefer graph metadata sidecar in P2 if locally verifiable",
+      "status": "recommended"
+    }
+  ],
+  "risks": [
+    "Online snapshot may lag local branch tip.",
+    "Topology/schema coupling may require careful P1 adaptation.",
+    "Graph builder path mode and wrapper portability require local verification before P2.",
+    "Archive evidence contains secret references and junk artifacts; promotion without sanitization is unsafe."
+  ],
+  "assumptions": [
+    "online-only Pro/review workflows are now first-class",
+    "graph.db remains tracked absent severe blocker",
+    "unrelated dirty work may exist and must be preserved",
+    "P0 should avoid source/scripts/tests behavior edits"
+  ],
+  "blockers": [],
+  "graph_policy": {
+    "tracked": true,
+    "authority": false,
+    "role": "first-class derived context engine",
+    "stale_graph": "warning for repo health; blocker for graph-confidence claims",
+    "missing_or_untracked_db": "blocking contract defect",
+    "absolute_paths_now": "acceptable as temporary metadata only",
+    "target_path_mode": "repo_relative_or_explicit_mixed_mode",
+    "sidecar_recommended": true
+  },
+  "archives_policy": {
+    "default_read": false,
+    "historical_only": true,
+    "track_full_bodies": false,
+    "track_visible_index": true,
+    "visible_index": "docs/archive_registry.md",
+    "secret_scan_required_before_promotion": true,
+    "keep_overlay_and_local_scratch_separate": true
+  },
+  "topology_debt": [
+    "boot_surface_visibility_debt",
+    "current_state_overload_debt",
+    "hidden_archive_registry_debt",
+    "graph_underpromotion_debt",
+    "graph_wrapper_portability_debt",
+    "graph_previewability_debt",
+    "context_budget_debt",
+    "archive_contamination_debt"
+  ],
+  "expected_outputs": [
+    "P0 rewritten boot surfaces",
+    "visible archive registry",
+    "thinner current_state",
+    "P1 machine-law reinforcement",
+    "P2 graph portability hardening",
+    "P3 history compression improvements"
+  ]
+}

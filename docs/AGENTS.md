@@ -1,39 +1,52 @@
 # docs AGENTS
 
-Documentation root. Active subdirectories plus archives.
+Documentation root for the tracked docs mesh.
+
+This directory is a router, not a co-equal authority plane to source code or
+machine manifests. Use it to find the right live docs surface quickly.
 
 ## Design principle
 
-Flat mesh architecture. Each subdirectory contains only files actively referenced by the mesh network (rooted at root `AGENTS.md`). Everything historical lives in `archives/`. This keeps agent context loading fast — agents follow links, not directories.
+Keep the tracked docs surface thin and truthful:
+
+- active tracked docs live in declared subroots
+- visible historical protocol lives in `archive_registry.md`
+- raw archive bodies stay outside the default read path
 
 ## Navigation
 
-Read `README.md` in this directory for the docs index with full folder descriptions.
+Read `README.md` here for the tracked docs index.
+
+For historical needs, read `archive_registry.md` before opening any archive
+body or bundle.
 
 ## File registry
 
 | Item | Purpose |
 |------|---------|
-| `README.md` | Docs index — folder descriptions, naming rules, active doc list |
-| `known_gaps.md` | Active operational gap register (D1-D6 cross-layer epistemic gaps) |
-| `zeus-architecture-deep-map.md` | Generated deep refactor/reference map; evidence only, not authority |
-| `settlement-source-provenance.md` | Settlement source transition provenance and validation evidence; not authority by itself |
-| `settlement-validation-workflow.md` | Settlement validation workflow notes; procedural evidence, not authority |
-| `zeus-pathology-registry.md` | Refactor pathology registry; evidence/routing surface, not authority |
-| `zeus-refactor-plan.md` | Incremental refactor plan; planning evidence, not authority |
-| `zeus-system-constitution.md` | Refactor constitution artifact; subordinate to active authority docs and manifests |
-| `authority/` | Current architecture law + delivery law + packet/autonomy/boundary governance → `authority/AGENTS.md` |
-| `reference/` | Domain model, repo orientation, data inventory, quantitative research → `reference/AGENTS.md` |
-| `operations/` | Live control-entry pointer + active work packets → `operations/AGENTS.md` |
-| `runbooks/` | Operator runbooks → `runbooks/AGENTS.md` |
-| `reports/` | Generated diagnostic reports from declared writers only; evidence only → `reports/AGENTS.md` |
-| `to-do-list/` | Active checklist workbooks and audit queues; not authority → `to-do-list/AGENTS.md` |
-| `artifacts/` | Active evidence artifacts and workbooks; not authority → `artifacts/AGENTS.md` |
-| `archives/` | Historical only — never active authority → `archives/AGENTS.md` |
+| `README.md` | Tracked docs index and visibility guide |
+| `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
+| `known_gaps.md` | Active operational gap register |
+| `zeus-architecture-deep-map.md` | Generated deep refactor/reference map; evidence only |
+| `settlement-source-provenance.md` | Settlement provenance evidence; not authority by itself |
+| `settlement-validation-workflow.md` | Settlement validation notes; procedural evidence |
+| `zeus-pathology-registry.md` | Refactor pathology registry; evidence/routing surface |
+| `zeus-refactor-plan.md` | Incremental refactor plan; planning evidence |
+| `zeus-system-constitution.md` | Refactor constitution artifact subordinate to active authority |
+| `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
+| `reference/` | Domain, math, and repo reference docs -> `reference/AGENTS.md` |
+| `operations/` | Live control pointer, active packets, and package inputs -> `operations/AGENTS.md` |
+| `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
+| `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
+| `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |
+| `artifacts/` | Active evidence artifacts and inventories; not authority -> `artifacts/AGENTS.md` |
 
 ## Rules
 
-- New active docs go in `authority/`, `reference/`, `operations/`, `runbooks/`, `to-do-list/`, or `artifacts/` — never directly in `docs/`
-- Generated diagnostic reports from declared writers may go in `reports/`; it is not a general authoring surface
-- `known_gaps.md`, settlement/refactor reference artifacts, and `zeus-architecture-deep-map.md` are the top-level exceptions
-- Everything that is no longer active law → `archives/`
+- New active docs belong in declared tracked subroots, not directly under
+  `docs/`, except for approved root files such as `README.md`,
+  `archive_registry.md`, and `known_gaps.md`.
+- Historical needs route through `archive_registry.md`, not `archives/AGENTS.md`
+  or raw archive bodies.
+- Generated reports are evidence only and must not become authority by
+  placement.

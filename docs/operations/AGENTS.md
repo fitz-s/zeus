@@ -1,39 +1,51 @@
 # docs/operations AGENTS
 
-Live control surface — current state pointer, active work packets. This is where agents find what's in progress and what's next.
+Live control surface for Zeus.
+
+This directory contains:
+
+- the thin current control pointer
+- active execution packets
+- attached package inputs that shape active work
+
+Completed packet material belongs in archive after closeout. Do not let
+`current_state.md` turn back into a runtime diary.
 
 ## File registry
 
 | File | Purpose |
 |------|---------|
-| `current_state.md` | Single live control-entry pointer — current branch, active packet, what to read |
-| `task_2026-04-13_topology_compiler_program.md` | Active topology compiler program packet tracker |
-| `task_2026-04-13_remaining_repair_backlog.md` | Active backlog of remaining repair items after non-DB small-package loop; separates DB/rebuild dependencies from larger strategy/design packets |
-| `task_2026-04-14_session_backlog.md` | End-of-session backlog snapshot from the calibration-refactor session (df13308/45745ba/854cf5d/ed13310); groups open tasks by unblocking condition |
-| `task_2026-04-16_dual_track_metric_spine/` | Active dual-track metric spine refactor packet and evidence |
-| `task_2026-04-16_function_naming_freshness/` | Small governance package for function naming and script/test freshness metadata |
-| `task_2026-04-19_code_review_graph_topology_bridge/` | Active package coordinating local Code Review Graph cache with Zeus topology-first rules |
-| `task_2026-04-19_workspace_artifact_sync/` | Active package for syncing non-Phase-10A workspace artifacts and topology map updates |
-| `task_2026-04-20_code_impact_graph_context_pack/` | Active package adding derived Code Review Graph appendix to topology context packs |
-| `task_2026-04-20_code_review_graph_online_context/` | Active package tracking Code Review Graph DB as a non-authority online context artifact |
-| `data_rebuild_plan.md` | Active upstream data-rebuild plan; do not execute from topology packets |
-| `runtime_artifact_inventory.md` | Repo-facing inventory for `.omx/.omc` planning artifacts that must not live only in ignored runtime state |
+| `AGENTS.md` | Registry for live operations surfaces in this directory |
+| `current_state.md` | Single live control pointer: current program, active packet, required reads, next action |
+| `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | Attached reconstruction package; current source input for workspace-authority work |
+| `task_2026-04-20_workspace_authority_reconstruction/` | Active execution packet applying the reconstruction package |
+| `task_2026-04-19_execution_state_truth_upgrade/` | Local packet present on disk but not the active control surface |
+| `task_2026-04-13_topology_compiler_program.md` | Active topology compiler program tracker |
+| `task_2026-04-13_remaining_repair_backlog.md` | Deferred backlog after non-DB small-package loop |
+| `task_2026-04-14_session_backlog.md` | Session backlog snapshot from calibration-refactor work |
+| `task_2026-04-16_dual_track_metric_spine/` | Dual-track metric spine refactor packet and evidence |
+| `task_2026-04-16_function_naming_freshness/` | Governance package for naming and freshness metadata |
+| `task_2026-04-19_code_review_graph_topology_bridge/` | Code Review Graph topology-first integration package |
+| `task_2026-04-19_workspace_artifact_sync/` | Workspace artifact synchronization package |
+| `task_2026-04-20_code_impact_graph_context_pack/` | Code impact graph context-pack package |
+| `task_2026-04-20_code_review_graph_online_context/` | Tracked Code Review Graph online-context package |
+| `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
+| `runtime_artifact_inventory.md` | Inventory for runtime-local planning artifacts mirrored into repo control |
 
 ## Packet lifecycle
 
-1. **Active** → packet file or directory lives here in `docs/operations/`; listed in this file registry; `current_state.md` points to it
-2. **Completed** → remove from this directory, archive by git lineage under `docs/archives/work_packets/branches/<branch>/...`; remove from this file registry; update `current_state.md`
-3. **No active packet** → `current_state.md` says so explicitly; this registry lists only `current_state.md`
-
-Don't accumulate dead packets here. The live surface must reflect only what's actually in progress.
+1. Active execution packets live here, are listed in this registry, and are
+   referenced from `current_state.md`.
+2. Completed packets move to archive by git lineage.
+3. Attached source packages may remain here while they are actively driving a
+   packet, but they are not substitutes for the packet's own plan/work log.
 
 ## Rules
 
-- `current_state.md` is always current — update when switching packets/branches
-- Non-trivial repo-changing work updates a short work record before closeout; prefer `work_log.md` inside the active task folder
-- New single-file packets use `task_YYYY-MM-DD_name.md` naming
-- Active multi-file solution packages use `task_YYYY-MM-DD_name/` under `docs/operations/`
-- Archive completed work packets under `docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/`
-- Use `trees/<tree-name>/` instead of `branches/<branch>/` only when a package is tied to a persistent git worktree rather than a normal branch
-- Keep complete solution packages atomic; do not split their internal `docs/`, `src/`, `scripts/`, `migrations/`, or `tests/` folders across archive categories
-- Runtime-local `.omx/.omc` planning artifacts must either be listed in `runtime_artifact_inventory.md` or mirrored into a packet folder before they are treated as durable work evidence
+- `current_state.md` stays thin: current program, active packet, required
+  evidence, next action, and compact references to other registered surfaces
+- non-trivial repo changes update a short work record in the active task folder
+- new multi-file execution packets use `task_YYYY-MM-DD_name/`
+- do not leave completed packet material in the live surface after closeout
+- runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
+  before they are treated as durable work evidence
