@@ -186,6 +186,7 @@ files:
   src/data/polymarket_client.py: {zone: K2_runtime, authority_role: clob_boundary, why: "CLOB market data and order API boundary."}
   src/data/rebuild_validators.py: {zone: K2_runtime, authority_role: rebuild_row_validator, why: "Validates rebuild rows before authority-stamped output atoms are written.", write_routes: [script_repair_write]}
   src/data/solar_append.py: {zone: K2_runtime, authority_role: live_solar_append, why: "Appends deterministic sunrise/sunset rows and coverage for live solar_daily freshness."}
+  src/data/tier_resolver.py: {zone: K2_runtime, authority_role: observation_source_tier_resolver, why: "Deterministic (city -> Tier) mapping for observation_instants_v2 routing; encodes P1 settlement-source-IS-observation-source invariant with no OpenMeteo grid-snap escape hatch.", downstream: ["src/data/observation_instants_v2_writer.py", "scripts/backfill_obs_v2.py", "scripts/audit_observation_instants_v2.py"]}
   src/data/wu_scheduler.py: {zone: K2_runtime, authority_role: physical_clock_scheduler, why: "Computes per-city WU collection schedule from local peak time with DST-aware conversion."}
   src/data/wu_daily_collector.py: {zone: K2_runtime, authority_role: settlement_data_collector, why: "Collects WU daily settlement observations; must route through settlement semantics.", write_routes: [settlement_write]}
 
