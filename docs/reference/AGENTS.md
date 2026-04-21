@@ -8,10 +8,11 @@ Reference material — domain model, technical orientation, data status, methodo
 - `zeus_domain_model.md`
 
 **Conditional reads** (load only when the task directly requires them):
-- `zeus_architecture_reference.md` for deep architecture orientation
-- `zeus_market_settlement_reference.md` for settlement/market provenance
-- `zeus_data_and_replay_reference.md` for data/replay status
-- `zeus_failure_modes_reference.md` for failure-class reviews
+- `zeus_architecture_reference.md` for compact deep architecture orientation
+- `zeus_market_settlement_reference.md` for compact settlement/market routing
+- `settlement_source_provenance.md` when city/source settlement evidence matters
+- `zeus_data_and_replay_reference.md` for compact data/replay status
+- `zeus_failure_modes_reference.md` for compact failure-class reviews
 - `zeus_math_spec.md` when math fact/spec context matters; executable law and authority manifests win
 
 Temporary extraction sources:
@@ -32,10 +33,11 @@ Replacement/deletion eligibility is tracked in `architecture/reference_replaceme
 | File | Purpose |
 |------|---------|
 | `zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, four strategies, alpha decay, settlement semantics (incl. discrete support), worked examples, translation loss law, structural decisions methodology, data provenance model, DST case study |
-| `zeus_architecture_reference.md` | Canonical deep architecture reference anchor; P1 extraction target |
-| `zeus_market_settlement_reference.md` | Canonical market/settlement reference anchor; P1 extraction target |
-| `zeus_data_and_replay_reference.md` | Canonical data/replay reference anchor; P1 extraction target |
-| `zeus_failure_modes_reference.md` | Canonical failure modes reference anchor; P1 extraction target |
+| `zeus_architecture_reference.md` | Compact canonical architecture reference extracted from legacy snapshots |
+| `zeus_market_settlement_reference.md` | Compact canonical market/settlement reference and triage routing |
+| `settlement_source_provenance.md` | Detailed settlement source/station provenance registry; reference evidence only |
+| `zeus_data_and_replay_reference.md` | Compact canonical data/replay reference extracted from inventory/strategy/gaps |
+| `zeus_failure_modes_reference.md` | Compact canonical failure-mode reference extracted from pathology/gap evidence |
 | `repo_overview.md` | Technical orientation for first-time readers — architecture, runtime, testing, operations |
 | `data_inventory.md` | Current data source status — what's available, what's missing, utilization status, quality assessments |
 | `data_strategy.md` | Data improvement roadmap and priorities |

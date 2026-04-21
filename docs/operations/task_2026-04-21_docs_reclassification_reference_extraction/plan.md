@@ -54,3 +54,30 @@ semantics.
 - `python scripts/topology_doctor.py --history-lore --json`
 - `python -m pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"`
 - `git diff --check`
+
+## P1 Addendum
+
+Plan evidence:
+
+- `.omx/plans/docs-reclassification-p1-ralplan-revised.md`
+
+Allowed:
+
+- extract durable content into the four canonical reference files under
+  `docs/reference/`
+- move root-level legacy snapshots into `docs/artifacts/`, `docs/reports/`,
+  `docs/reference/`, or `docs/runbooks/` according to their role
+- update docs routers, `architecture/docs_registry.yaml`,
+  `architecture/reference_replacement.yaml`, `architecture/context_budget.yaml`,
+  and `architecture/topology.yaml`
+- update this packet's work log, receipt, and current-state pointer
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `raw/**`
+- `.code-review-graph/graph.db`
+- `docs/archives/**` or archive bundle ingestion
+- semantic law changes in `docs/authority/**`
+- deleting conditional reference sources or historical evidence files

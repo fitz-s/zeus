@@ -9,6 +9,7 @@ over making binary artifacts default reads.
 | File | Purpose |
 |------|---------|
 | `polymarket_city_settlement_audit_2026-04-14.md` | Historical evidence snapshot for city settlement-source/station changes; not current authority |
+| `zeus_architecture_deep_map_2026-04-16.md` | Legacy architecture deep-map snapshot; extracted to `docs/reference/zeus_architecture_reference.md`, evidence only |
 | `zeus_data_inventory.xlsx` | Data inventory workbook; evidence only |
 
 ## Rules

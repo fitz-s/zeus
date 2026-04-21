@@ -32,6 +32,7 @@ archives."
 - `reference/zeus_domain_model.md` - short domain model
 - `reference/zeus_architecture_reference.md` - canonical architecture reference anchor
 - `reference/zeus_market_settlement_reference.md` - canonical market/settlement reference anchor
+- `reference/settlement_source_provenance.md` - settlement source/station provenance evidence
 - `reference/zeus_data_and_replay_reference.md` - canonical data/replay reference anchor
 - `reference/zeus_failure_modes_reference.md` - canonical failure modes reference anchor
 - `operations/current_state.md` - live control pointer

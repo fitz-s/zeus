@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: P0 install docs registry and canonical reference anchors complete; P0 review required before P1
+- Status: P1 reference extraction and root-snapshot demotion implemented; P1 review/closeout required before P2
 - Docs reclassification P0 commit: `b1a9761`
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
@@ -25,13 +25,14 @@ Role: single live control pointer for the repo.
 - `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/08_execution_packets.md`
 - `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/17_apply_order.md`
 - `.omx/plans/docs-reclassification-p0-ralplan-revised.md`
+- `.omx/plans/docs-reclassification-p1-ralplan-revised.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
 
 ## Freeze point
 
-- P0 is closed locally. Do not begin P1 extraction/demotion until the P0 review
-  says `proceed_to_p1`.
+- P1 implementation is complete locally. Do not begin P2 deletion/archive
+  decisions until P1 review says `proceed_to_p2`.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -53,7 +54,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Run P0 follow-up review using the second package's
-  `18_pro_followup_prompt.md`
-- If review says `proceed_to_p1`, open P1 extraction/demotion planning
+- Run P1 follow-up review against moved docs, canonical references, manifests,
+  and validation evidence
+- If review says `proceed_to_p2`, open P2 deletion/archive planning
 - Keep unrelated dirty work and local archive inputs untouched

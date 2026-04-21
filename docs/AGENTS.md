@@ -27,12 +27,6 @@ body or bundle.
 | `README.md` | Tracked docs index and visibility guide |
 | `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
 | `operations/known_gaps.md` | Active operational gap register |
-| `zeus-architecture-deep-map.md` | Generated deep refactor/reference map; evidence only |
-| `settlement-source-provenance.md` | Settlement provenance evidence; not authority by itself |
-| `settlement-validation-workflow.md` | Settlement validation notes; procedural evidence |
-| `zeus-pathology-registry.md` | Refactor pathology registry; evidence/routing surface |
-| `zeus-refactor-plan.md` | Incremental refactor plan; planning evidence |
-| `zeus-system-constitution.md` | Refactor constitution artifact subordinate to active authority |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Domain, math, architecture, market/settlement, data/replay, and failure-mode references -> `reference/AGENTS.md` |
 | `operations/` | Live control pointer, active packets, and package inputs -> `operations/AGENTS.md` |

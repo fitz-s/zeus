@@ -1,4 +1,10 @@
 # Zeus Pathology Registry
+> LEGACY EXTRACTION SOURCE - NOT DEFAULT READ.
+> Durable failure classes have been extracted into
+> `docs/reference/zeus_failure_modes_reference.md`. Treat this file as
+> historical diagnostic evidence only; manifests, tests, and current source win
+> on disagreement.
+>
 > Verified against source code. Each entry includes exact file, line numbers, code evidence, and severity.
 > Last updated: 2026-04-16
 
