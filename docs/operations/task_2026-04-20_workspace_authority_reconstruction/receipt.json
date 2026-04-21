@@ -1,5 +1,5 @@
 {
-  "task": "workspace authority reconstruction p3",
+  "task": "workspace authority reconstruction final closeout",
   "packet": "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
@@ -8,33 +8,17 @@
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",
-    "architecture/AGENTS.md",
     "architecture/change_receipt_schema.yaml",
-    "architecture/history_lore.yaml",
     "architecture/topology.yaml",
-    "docs/AGENTS.md",
     "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
-    "workspace_map.md",
-    "docs/README.md",
-    "docs/AGENTS.md",
-    "docs/archive_registry.md",
-    "architecture/history_lore.yaml",
-    "architecture/context_budget.yaml",
-    "tests/test_topology_doctor.py",
-    "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md",
     "docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md",
     "docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json"
   ],
   "changed_files": [
-    "architecture/history_lore.yaml",
-    "docs/archive_registry.md",
     "docs/operations/current_state.md",
-    "docs/operations/runtime_artifact_inventory.md",
-    "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md",
     "docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json",
     "docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md"
   ],
@@ -51,11 +35,10 @@
   "tests_evidence": [
     "python scripts/topology_doctor.py --history-lore --json",
     "python scripts/topology_doctor.py --docs --json",
-    "pytest -q tests/test_topology_doctor.py -k \"history or docs or archive\"",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json",
+    "python scripts/topology_doctor.py --code-review-graph-status --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files docs/operations/current_state.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files docs/operations/current_state.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files docs/operations/current_state.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json",
     "git diff --cached --check"
   ]
 }

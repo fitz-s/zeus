@@ -239,3 +239,21 @@ Remaining known local dirty work outside P3:
 - `docs/archives.zip`
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`
 - `zeus_data_inventory.xlsx`
+
+Post-close review:
+
+- Third-party critic pass: PASS. The final P3 diff compressed archive policy
+  into the visible registry/lore surfaces without reopening raw archive bodies
+  or widening into runtime/source/graph tracked artifacts.
+- Verifier pass: PASS. After commit `0510357`, `python scripts/topology_doctor.py
+  --history-lore --json`, `python scripts/topology_doctor.py --docs --json`,
+  and `python scripts/topology_doctor.py --code-review-graph-status --json`
+  all pass. The ignored local `graph_meta.json` was refreshed to match the
+  live local graph DB and remains untracked.
+
+Packet outcome:
+
+- P0-P3 workspace authority reconstruction is complete.
+- P2B graph sidecar remains local/ignored per user direction that graph does
+  not need git synchronization.
+- No active reconstruction lane remains open after control-state closeout.

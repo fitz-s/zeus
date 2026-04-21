@@ -8,10 +8,12 @@ Role: single live control pointer for the repo.
 - Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
 - Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
 - Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: P3 historical compression and residual hygiene active
+- Status: Workspace Authority Reconstruction P0-P3 complete; no active reconstruction packet remains open
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
 - P2A commit: `d45ec40`
+- P2 closeout-state commit: `c39ed5a`
+- P3 commit: `0510357`
 - Supersession: user ruling in this thread makes the reconstruction package the
   current mainline control surface; older wait-for-ruling notes about
   P11/B055/B099 are stale for this packet
@@ -28,9 +30,7 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P3 allowlist: visible history docs, history lore, context budget/tests only
-  if needed, active packet evidence, plus approved preflight runtime inventory
-  LOCAL_ADAPTATION
+- No active reconstruction lane is open
 - No source, test, script, runtime DB, graph-db, or archive-body edits in this
   lane
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
@@ -52,7 +52,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Complete P3 historical compression and residual hygiene
-- Do not re-ingest archive bodies wholesale; use package policy and current
-  visible surfaces first
+- Choose the next mainline packet explicitly before new implementation work
+- Keep P2B graph sidecar local/ignored unless a future packet changes graph
+  artifact policy
 - Keep unrelated dirty work and local archive inputs untouched
