@@ -179,3 +179,111 @@ Next:
 
 - commit P1 implementation
 - run P1 follow-up review before any P2 deletion/archive decisions
+
+## P1 follow-up review
+
+Date: 2026-04-21
+Commit: `84d6d25`
+Task: Review P1 before P2.
+
+Changed files: none for review.
+
+Summary:
+
+- P1 moved legacy root snapshots into typed subroots and populated canonical
+  reference summaries.
+- Post-commit docs checks pass.
+- Default routers no longer point at old root snapshot paths.
+- P1 preserved evidence while removing mixed-class files from `docs/` root.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- negative router check for old root snapshot paths across default routers and
+  manifests -> no matches
+
+Verdict:
+
+- `proceed_to_p2`
+
+Next:
+
+- implement P2 runbook and operations routing normalization
+
+## P2 implementation
+
+Date: 2026-04-21
+Task: Normalize runbooks and operations routing.
+
+Changed files:
+
+- `architecture/artifact_lifecycle.yaml`
+- `architecture/context_budget.yaml`
+- `architecture/docs_registry.yaml`
+- `docs/artifacts/AGENTS.md`
+- `docs/runbooks/task_2026-04-19_tigge_cloud_download_zeus_wiring.md` -> `docs/artifacts/tigge_cloud_wiring_snapshot_2026-04-19.md`
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/runtime_artifact_inventory.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+- `docs/runbooks/AGENTS.md`
+- `docs/runbooks/tigge_cloud_download.md`
+
+Summary:
+
+- demoted the dated TIGGE local/cloud wiring note into artifacts evidence
+- preserved the current TIGGE note body, including the 2026-04-21 rebalance
+  evidence, under `docs/artifacts/tigge_cloud_wiring_snapshot_2026-04-19.md`
+- added a compact durable `docs/runbooks/tigge_cloud_download.md` without VM
+  project, IP, account, credential, or local absolute-path details
+- rewrote runbook routing into durable operator, packet-scoped,
+  contributor/workflow, and sensitive/local snapshot classes
+- rewrote operations routing into live pointer, active support, active packet,
+  packet evidence, and attached package input classes while preserving the
+  explicit registry needed by docs checks
+- recorded P1 follow-up review as `proceed_to_p2`
+- indexed P2 ralplan/context runtime artifacts
+- updated docs registry, artifact lifecycle, context budget, packet plan, and
+  receipt
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P2 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P2 files> --plan-evidence .omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P2 files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P2 files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P2 files> --plan-evidence .omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"` -> 42 passed, 139 deselected
+- `git diff --check -- <P2 files>` -> ok
+- `git diff -- docs/authority` -> no changes
+- TIGGE snapshot SHA-256 after demotion:
+  `699001cb3a31019c940f7e746bac61820a5e22d16a63edd7c7f15342a74a7cda`
+  (matches pre-move worktree body)
+- stale current-state freeze-text negative check -> no matches
+
+Pre-close review:
+
+- Critic: PASS. P2 uses demotion instead of risky sanitization for the
+  environment-specific TIGGE note, preserves the current dirty evidence as an
+  artifact, and keeps the durable runbook generic. The main tradeoff is that
+  `current_state.md` still lists visible non-default packet paths because the
+  docs checker requires them; it avoids restoring the old per-packet narrative
+  diary.
+- Verifier: PASS. Docs, context-budget, artifact-lifecycle, map-maintenance,
+  planning-lock, work-record, change-receipts, closeout, targeted tests,
+  diff-check, authority diff, stale freeze-text check, durable-runbook
+  sensitive-string check, old-TIGGE-path router check, and TIGGE body hash all
+  pass. Unrelated graph/state/archive/local workbook changes remain outside the
+  P2 staged set.
+
+Next:
+
+- commit P2 implementation
+- run P2 follow-up review before P3

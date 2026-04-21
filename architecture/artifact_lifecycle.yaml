@@ -194,3 +194,9 @@ liminal_artifacts:
     authority_behavior: "Demoted legacy architecture deep-map snapshot; evidence only and not a default read."
     canonical_owner: architecture/docs_registry.yaml
     guardrail: "Use docs/reference/zeus_architecture_reference.md for compact orientation and docs/authority/** plus manifests for law."
+  - path: docs/artifacts/tigge_cloud_wiring_snapshot_2026-04-19.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Dated local/cloud TIGGE wiring snapshot; evidence only and not a durable runbook."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance; do not route VM/project-specific details as default procedure."

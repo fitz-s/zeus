@@ -81,3 +81,29 @@ Forbidden:
 - `docs/archives/**` or archive bundle ingestion
 - semantic law changes in `docs/authority/**`
 - deleting conditional reference sources or historical evidence files
+
+## P2 Addendum
+
+Plan evidence:
+
+- `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md`
+
+Allowed:
+
+- normalize `docs/runbooks/**` and `docs/operations/**`
+- demote the TIGGE cloud wiring snapshot to evidence-only if sanitization is
+  uncertain
+- add a compact durable TIGGE cloud runbook without machine-specific details
+- update docs routers, `architecture/docs_registry.yaml`,
+  `architecture/artifact_lifecycle.yaml`, `architecture/context_budget.yaml`,
+  current-state pointer, work log, and receipt
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `raw/**`
+- `.code-review-graph/graph.db`
+- `docs/archives/**` or archive bundle ingestion
+- semantic law changes in `docs/authority/**`
+- deleting operator evidence without a replacement route

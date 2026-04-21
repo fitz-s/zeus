@@ -112,6 +112,13 @@ file_budgets:
       Keep as the live current packet pointer and evidence list. Move runtime
       diaries, packet histories, and historical detail into packets, lore, or
       archive registry surfaces.
+  - path: docs/runbooks/tigge_cloud_download.md
+    role: durable_operator_runbook
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as generic TIGGE cloud supervision and Zeus handoff guidance. Dated
+      VM/project/session details belong in evidence artifacts.
   - path: tests/AGENTS.md
     role: manifest_backed_scoped_registry
     max_lines: 80

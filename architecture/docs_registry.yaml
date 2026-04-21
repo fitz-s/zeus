@@ -522,6 +522,16 @@ entries:
     lifecycle_state: transitional
     coverage_scope: descendants
     parent_coverage_allowed: true
+  - path: docs/artifacts/tigge_cloud_wiring_snapshot_2026-04-19.md
+    doc_class: artifact
+    default_read: false
+    direct_reference_allowed: false
+    current_role: demoted local/cloud TIGGE wiring snapshot; evidence only
+    canonical_replaced_by: [docs/runbooks/tigge_cloud_download.md]
+    next_action: retain_as_evidence
+    lifecycle_state: transitional
+    coverage_scope: exact
+    parent_coverage_allowed: false
   - path: docs/to-do-list/
     doc_class: checklist
     default_read: false
@@ -536,9 +546,19 @@ entries:
     doc_class: runbook
     default_read: false
     direct_reference_allowed: true
-    current_role: operator runbooks
+    current_role: durable and packet-scoped operator/workflow runbooks
     canonical_replaced_by: []
     next_action: keep
     lifecycle_state: durable
     coverage_scope: descendants
     parent_coverage_allowed: true
+  - path: docs/runbooks/tigge_cloud_download.md
+    doc_class: runbook
+    default_read: false
+    direct_reference_allowed: true
+    current_role: durable TIGGE cloud download supervision and Zeus v2 handoff runbook
+    canonical_replaced_by: []
+    next_action: keep
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false

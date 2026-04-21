@@ -25,6 +25,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | Runtime path | Status | Repo disposition |
 |---|---|---|
 | `.omc/plans/open-questions.md` | stale planning backlog | Historical only; extract unresolved live decisions into `docs/operations/current_state.md` before deleting local runtime state. |
+| `.omc/plans/city_truth_sweep.md` | local city-truth sweep planning | Local planning evidence for a separate data/truth sweep; summarize in its owning packet before implementation. |
 | `.omc/plans/observation-instants-migration-iter2.md` | current ralplan for observation-instants migration | Local planning evidence for a separate high-risk data/schema migration; summarize in its owning packet before any implementation. |
 | `.omc/plans/zeus-fix-engineering.md` | stale engineering plan | Historical only; superseded by current operations packets and commit history. |
 | `.omx/plans/daily-loss-24h-repair.md` | stale plan | Archive/mirror only if daily-loss work reopens. |
@@ -74,6 +75,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/docs-reclassification-p1-concise-ralplan-2026-04-21.md` | superseded docs reclassification P1 draft | Planning evidence only; superseded by revised P1 plan and not authority. |
 | `.omx/plans/docs-reclassification-p1-ralplan-2026-04-21.md` | superseded docs reclassification P1 draft | Planning evidence only; superseded by revised P1 plan and not authority. |
 | `.omx/plans/docs-reclassification-p1-ralplan-revised.md` | current docs reclassification P1 ralplan | Active local planning evidence for P1 extraction/demotion; summarized in the active packet before P1 implementation. |
+| `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md` | current docs reclassification P2 ralplan | Active local planning evidence for P2 runbook/operations routing normalization; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons
@@ -86,3 +88,4 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/context/topology_provisional_context_ralplan-20260414T223842Z.md` | Context packets are starting assumptions, not fixed limits. | Already reflected in context-budget wording. |
 | `.omx/context/core_map_compiler_ralplan-20260415T022243Z.md` | Core map must be proof-backed, not agent-authored prose. | Reflected in core claims/core-map tests. |
 | `.omx/context/zeus_deferred_audit_backlog_20260412T174038Z.md` | Deferred audit backlog by wave. | Keep current deferred items in operations backlog before deleting local runtime state. |
+| `.omx/context/docs-reclassification-p2-20260421T223156Z.md` | P2 context snapshot for runbook/operations routing normalization. | Summarized in the active docs reclassification packet. |

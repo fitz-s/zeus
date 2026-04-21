@@ -8,53 +8,49 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: P1 reference extraction and root-snapshot demotion implemented; P1 review/closeout required before P2
+- Status: P2 runbook and operations routing normalization complete; final critic/verifier review passed
 - Docs reclassification P0 commit: `b1a9761`
-- P0 commit: `19e0178`
-- P1 commit: `ad73440`
-- P2A commit: `d45ec40`
-- P2 closeout-state commit: `c39ed5a`
-- P3 commit: `0510357`
+- Docs reclassification P1 commit: `84d6d25`
+- P1 follow-up review: `proceed_to_p2`
 - Prior workspace authority reconstruction is closed at `152f210`.
 
 ## Required evidence
 
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/00_executive_ruling.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/04_target_docs_topology.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/05_reference_extraction_matrix.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/08_execution_packets.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/17_apply_order.md`
-- `.omx/plans/docs-reclassification-p0-ralplan-revised.md`
-- `.omx/plans/docs-reclassification-p1-ralplan-revised.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/06_root_and_subtree_reclassification_audit.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/09_patch_blueprints/p2_patch_blueprint.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/12_codex_prompts/codex_p2_execute.md`
+- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/11_validation_matrix.md`
+- `.omx/context/docs-reclassification-p2-20260421T223156Z.md`
+- `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
 
 ## Freeze point
 
-- P1 implementation is complete locally. Do not begin P2 deletion/archive
-  decisions until P1 review says `proceed_to_p2`.
+- Do not begin P3 duplicate-fragment deletion or enforcement tightening until
+  P2 follow-up review says `proceed_to_p3`.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
-  and `state/**`, not here
+  and `state/**`, not here.
 
-## Other registered operations surfaces
+## Other operations surfaces
 
-- `docs/operations/task_2026-04-13_topology_compiler_program.md`
-- `docs/operations/task_2026-04-13_remaining_repair_backlog.md`
-- `docs/operations/task_2026-04-14_session_backlog.md`
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`
-- `docs/operations/task_2026-04-16_function_naming_freshness/plan.md`
-- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/plan.md`
+Use `docs/operations/AGENTS.md` for the registered operations-surface classes
+and non-default packet/package routing.
+
+Visible non-default packet evidence:
+
+- `docs/operations/task_2026-04-16_dual_track_metric_spine/`
+- `docs/operations/task_2026-04-16_function_naming_freshness/`
+- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/`
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`
-- `docs/operations/task_2026-04-19_workspace_artifact_sync/plan.md`
-- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/plan.md`
-- `docs/operations/task_2026-04-20_code_review_graph_online_context/plan.md`
-- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- `docs/operations/data_rebuild_plan.md`
+- `docs/operations/task_2026-04-19_workspace_artifact_sync/`
+- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/`
+- `docs/operations/task_2026-04-20_code_review_graph_online_context/`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/`
 - `docs/operations/task_2026-04-21_gate_f_data_backfill/`
 
 ## Next action
 
-- Run P1 follow-up review against moved docs, canonical references, manifests,
-  and validation evidence
-- If review says `proceed_to_p2`, open P2 deletion/archive planning
+- Run P2 follow-up review
+- If review says `proceed_to_p3`, open P3 planning
 - Keep unrelated dirty work and local archive inputs untouched

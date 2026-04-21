@@ -140,8 +140,8 @@ VM-side monitoring is installed instead:
 Current crontab on the VM:
 
 ```text
-*/30 * * * * ACCOUNT_LIMIT=5 MAX_WORKERS=2 /data/tigge/bin/tigge_cloud_self_monitor.sh >/data/tigge/logs/self_monitor/cron_last.log 2>&1
-@reboot sleep 90; ACCOUNT_LIMIT=5 MAX_WORKERS=2 /data/tigge/bin/tigge_cloud_self_monitor.sh >/data/tigge/logs/self_monitor/reboot_last.log 2>&1
+*/30 * * * * DATE_FROM=2024-01-01 DATE_TO=2026-04-18 ACCOUNT_LIMIT=5 MAX_WORKERS=2 /data/tigge/bin/tigge_cloud_self_monitor.sh >/data/tigge/logs/self_monitor/cron_last.log 2>&1
+@reboot sleep 90; DATE_FROM=2024-01-01 DATE_TO=2026-04-18 ACCOUNT_LIMIT=5 MAX_WORKERS=2 /data/tigge/bin/tigge_cloud_self_monitor.sh >/data/tigge/logs/self_monitor/reboot_last.log 2>&1
 ```
 
 The self-monitor checks:
@@ -153,6 +153,12 @@ The self-monitor checks:
 
 If a tmux session is missing, it runs the cloud helper's `remote-start` path to
 restore missing sessions. It does not blindly increase worker counts.
+
+`DATE_TO` is intentionally frozen at `2026-04-18`. Do not allow the VM-side
+self-monitor to use a dynamic `today - 2 days` target date during this run. A
+dynamic target date shifts the five-account shard boundaries after a restart and
+causes duplicate three-day batch windows to be downloaded under different
+directory names.
 
 ## Last Observed Evidence
 
@@ -168,6 +174,43 @@ total: 1270 / 4464
 Recent progress can look frozen during large perturbed-member GRIB transfers,
 but this is not sufficient evidence of a stall unless `.grib` mtimes and raw
 file sizes also stop moving.
+
+## 2026-04-21 Rebalance
+
+On 2026-04-21, the original five-account split had become imbalanced. The
+following lanes had completed:
+
+- `mx2t6`: `a1`, `a2`, `a5`
+- `mn2t6`: `a1`, `a2`, `a5`
+
+The remaining bottleneck was the middle shard:
+
+- `mx2t6 a3`: `2024-12-02 .. 2025-05-18`
+- `mn2t6 a3`: `2024-12-02 .. 2025-05-18`
+
+Idle accounts were reassigned to later 3-day-boundary-aligned subranges, while
+the original `a3` sessions continued on the earlier subrange. The helper
+sessions are:
+
+| Account | Sessions | Date range |
+|---------|----------|------------|
+| `account1` | `tigge-mx2t6-a1r`, `tigge-mn2t6-a1r` | `2025-03-17 .. 2025-04-03` |
+| `account2` | `tigge-mx2t6-a2r`, `tigge-mn2t6-a2r` | `2025-04-04 .. 2025-04-21` |
+| `account5` | `tigge-mx2t6-a5r`, `tigge-mn2t6-a5r` | `2025-04-22 .. 2025-05-09` |
+| `account4` | `tigge-mx2t6-a4r`, `tigge-mn2t6-a4r` | `2025-05-10 .. 2025-05-18` |
+
+Each helper uses `MAX_WORKERS=1` and its own status file:
+
+```text
+tmp/tigge_mx2t6_rebalance_a{1,2,4,5}.json
+tmp/tigge_mn2t6_rebalance_a{1,2,4,5}.json
+```
+
+The rebalanced helpers intentionally use the existing 3-day batch boundaries so
+they do not introduce new shifted-window duplicates. They may overlap logically
+with the original broad `a3` date range, but the downloader uses `overwrite=0`
+and skips files with existing `.grib.ok` markers when a queued task reaches an
+already-completed target.
 
 ## Stall Triage
 
