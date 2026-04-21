@@ -78,6 +78,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/docs-reclassification-p1-ralplan-revised.md` | current docs reclassification P1 ralplan | Active local planning evidence for P1 extraction/demotion; summarized in the active packet before P1 implementation. |
 | `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md` | current docs reclassification P2 ralplan | Active local planning evidence for P2 runbook/operations routing normalization; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md` | current docs reclassification P3 plan | Active local planning evidence for P3 reference-fragment freezing and enforcement tightening; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/docs-reclassification-closeout-plan-2026-04-21.md` | current docs reclassification closeout plan | Active local planning evidence for final package closeout; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons
@@ -92,3 +93,4 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/context/zeus_deferred_audit_backlog_20260412T174038Z.md` | Deferred audit backlog by wave. | Keep current deferred items in operations backlog before deleting local runtime state. |
 | `.omx/context/docs-reclassification-p2-20260421T223156Z.md` | P2 context snapshot for runbook/operations routing normalization. | Summarized in the active docs reclassification packet. |
 | `.omx/context/docs-reclassification-p3-20260421T231323Z.md` | P3 context snapshot for reference-fragment freezing and enforcement planning. | Summarized in the active docs reclassification packet. |
+| `.omx/context/docs-reclassification-closeout-20260421T233946Z.md` | Closeout context snapshot for final docs reclassification package planning. | Summarized in the active docs reclassification packet. |

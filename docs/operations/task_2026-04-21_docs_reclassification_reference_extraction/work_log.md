@@ -426,3 +426,78 @@ Next:
 
 - commit P3 implementation
 - run package closeout
+
+## P3 follow-up review
+
+Date: 2026-04-21
+Commit: `995c313`
+Task: Review P3 before closeout.
+
+Changed files:
+
+- none for P3 review
+
+Summary:
+
+- P3 froze the six temporary fragment references instead of deleting them.
+- `architecture/reference_replacement.yaml` still marks those docs as
+  non-delete-ready because they retain `unique_remaining` or explicit
+  non-delete rationale.
+- All six fragment references have not-default-read banners.
+- `docs/reference/AGENTS.md` routes them as frozen conditional support behind
+  canonical references.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- frozen fragment banner check -> ok
+- `git diff -- docs/authority` -> no changes
+- `git status --short` -> unrelated dirty work remains outside the package
+
+Verdict:
+
+- `proceed_to_closeout`
+
+Next:
+
+- draft closeout plan
+
+## Closeout plan
+
+Date: 2026-04-21
+Task: Plan final docs reclassification package closeout.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/runtime_artifact_inventory.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+
+Summary:
+
+- drafted `.omx/plans/docs-reclassification-closeout-plan-2026-04-21.md`
+- defined final canonical reference set, root docs set, frozen temporary docs,
+  closeout validation bundle, residual risks, and suggested post-closeout
+  review prompt
+- no closeout implementation was performed
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <review/plan files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <review/plan files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <review/plan files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <review/plan files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `git diff --check -- <review/plan files>` -> ok
+- `git diff -- docs/authority` -> no changes
+
+Next:
+
+- execute closeout only after explicit request
