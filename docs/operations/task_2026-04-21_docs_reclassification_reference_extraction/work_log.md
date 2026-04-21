@@ -362,3 +362,67 @@ Verification:
 Next:
 
 - implement P3 only after explicit request
+
+## P3 implementation
+
+Date: 2026-04-21
+Task: Freeze residual reference fragments and tighten routing.
+
+Changed files:
+
+- `architecture/docs_registry.yaml`
+- `architecture/reference_replacement.yaml`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+- `docs/reference/AGENTS.md`
+- `docs/reference/repo_overview.md`
+- `docs/reference/data_inventory.md`
+- `docs/reference/data_strategy.md`
+- `docs/reference/statistical_methodology.md`
+- `docs/reference/quantitative_research.md`
+- `docs/reference/market_microstructure.md`
+
+Summary:
+
+- no reference fragments were deleted because all six still have
+  `unique_remaining` or explicit non-delete rationale in
+  `architecture/reference_replacement.yaml`
+- added hard not-default-read / not-authority banners to all six fragment docs
+- rewrote `docs/reference/AGENTS.md` from temporary extraction-source routing
+  to frozen conditional support routing
+- updated `architecture/docs_registry.yaml` roles/lifecycle for the frozen
+  support files and aligned `data_inventory.md` with machine-inventory
+  replacement status
+- updated `architecture/reference_replacement.yaml` rationales to record P3
+  freeze decisions
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P3 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence .omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget or reference_replacement"` -> 50 passed, 131 deselected
+- `git diff --check -- <P3 files>` -> ok
+- `git diff -- docs/authority` -> no changes
+- frozen fragment route check -> only intentional frozen-support routes
+
+Pre-close review:
+
+- Critic: PASS. P3 correctly rejected deletion because all six fragment docs
+  still have `unique_remaining` or explicit non-delete rationale. Freezing them
+  as conditional support satisfies the cleanup goal without losing evidence.
+- Verifier: PASS. All six fragment files carry not-default-read/not-authority
+  banners, `docs/reference/AGENTS.md` routes them behind canonical references,
+  docs registry keeps them non-direct/non-default, reference replacement keeps
+  `delete_allowed: false`, and all P3 validation checks pass.
+
+Next:
+
+- commit P3 implementation
+- run package closeout

@@ -1,5 +1,10 @@
 # 统计方法论：数据从哪里出错，模型在哪里说谎
 
+> CONDITIONAL MATH METHODOLOGY - NOT DEFAULT READ.
+> Read `docs/reference/zeus_math_spec.md`, executable contracts, and targeted
+> tests first. This file remains frozen support for statistical methodology
+> narrative and small-sample reasoning. It is not authority.
+
 ---
 
 ## 第一部分：数据获取的统计陷阱

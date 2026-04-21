@@ -169,7 +169,8 @@ entries:
     rationale: >
       The orientation role is now mostly served by root AGENTS plus workspace
       map and machine manifests. The remaining short summaries should be
-      reassessed before deletion.
+      reassessed before deletion. P3 freezes this as conditional support rather
+      than deleting it because unique remaining summaries still exist.
 
   - path: docs/reference/data_inventory.md
     default_read: false
@@ -188,7 +189,8 @@ entries:
     rationale: >
       Data certification rules moved to machine topology, but current coverage
       facts still need a human-readable inventory until a generated inventory
-      exists.
+      exists. P3 freezes this as conditional support until that machine
+      inventory exists.
 
   - path: docs/reference/data_strategy.md
     default_read: false
@@ -205,7 +207,8 @@ entries:
     allowed_action: extract_lore_then_reassess
     rationale: >
       Strategic priorities are partly represented in data_rebuild_topology and
-      operations backlog, but the roadmap prose is not fully replaced.
+      operations backlog, but the roadmap prose is not fully replaced. P3
+      freezes this as conditional support pending lore extraction.
 
   - path: docs/reference/statistical_methodology.md
     default_read: false
@@ -224,7 +227,8 @@ entries:
     allowed_action: keep_conditional
     rationale: >
       Several lessons have been extracted, but this remains a conditional deep
-      reference for statistical design.
+      reference for statistical design. P3 freezes it as conditional support
+      while executable contracts and zeus_math_spec remain first-stop sources.
 
   - path: docs/reference/quantitative_research.md
     default_read: false
@@ -241,7 +245,9 @@ entries:
       - strategy-research background
     allowed_action: extract_lore_then_reassess
     rationale: >
-      This is a candidate for further lore extraction, not deletion.
+      This is a candidate for further lore extraction, not deletion. P3 freezes
+      it as conditional support until research findings are either extracted or
+      intentionally unpromoted.
 
   - path: docs/reference/market_microstructure.md
     default_read: false
@@ -259,7 +265,8 @@ entries:
     allowed_action: extract_lore_then_reassess
     rationale: >
       Some execution-price/vig lessons moved into contracts and lore, but the
-      broader market-structure research is not replaced.
+      broader market-structure research is not replaced. P3 freezes it as
+      conditional support pending lore/contract extraction.
 
   - path: docs/reference/zeus_math_spec.md
     default_read: false

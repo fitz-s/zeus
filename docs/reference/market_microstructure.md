@@ -1,5 +1,10 @@
 # 市场微观结构研究：谁在交易，价格在哪里错，Edge 能活多久
 
+> CONDITIONAL MARKET RESEARCH - NOT DEFAULT READ.
+> Read `docs/reference/zeus_market_settlement_reference.md` and executable
+> execution-price/vig contracts first. This file is frozen support for
+> participant-structure and liquidity research. It is not authority.
+
 ---
 
 ## 第一部分：市场参与者图谱
