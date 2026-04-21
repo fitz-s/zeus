@@ -4,6 +4,10 @@ Loads config/settings.json and config/cities.json from the project root.
 Missing keys raise KeyError immediately at startup, not at trade time.
 """
 
+# Created: pre-Phase-0 (K1 Phase 1 strict-contract commits 96b70a8 / f6f612e)
+# Last reused/audited: 2026-04-21
+# Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
+
 import json
 import logging
 import os
@@ -117,6 +121,8 @@ class Settings:
             "exit",
             "riskguard",
             "execution",
+            "bias_correction_enabled",
+            "feature_flags",
         ]
         for key in required:
             if key not in self._data:
@@ -139,13 +145,13 @@ class Settings:
 
     @property
     def bias_correction_enabled(self) -> bool:
-        """Whether bias correction is enabled. Replaces settings._data.get() bypass."""
-        return bool(self._data.get("bias_correction_enabled", False))
+        """Whether bias correction is enabled. Strict — missing key = startup KeyError (B001)."""
+        return bool(self._data["bias_correction_enabled"])
 
     @property
     def feature_flags(self) -> dict:
-        """Feature flags dict. Replaces settings._data.get('feature_flags', {}) bypass."""
-        return dict(self._data.get("feature_flags", {}))
+        """Feature flags dict. Strict — missing key = startup KeyError (B001)."""
+        return dict(self._data["feature_flags"])
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
