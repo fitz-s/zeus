@@ -1,11 +1,12 @@
 """Code Review Graph status checker family for topology_doctor."""
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
+# Lifecycle: created=2026-04-19; last_reviewed=2026-04-21; last_reused=2026-04-21
 # Purpose: Validate tracked code-review-graph online context without making it authority.
 # Reuse: Keep freshness/coverage warning-first; graph evidence must not bypass Zeus topology gates.
 
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import subprocess
 from fnmatch import fnmatch
@@ -15,6 +16,7 @@ from typing import Any
 
 GRAPH_DIR = ".code-review-graph"
 GRAPH_DB = ".code-review-graph/graph.db"
+GRAPH_META = ".code-review-graph/graph_meta.json"
 CODE_PATTERNS = ("src/*.py", "src/**/*.py", "scripts/*.py", "scripts/*.sh", "tests/test_*.py")
 GRAPH_UNUSABLE_WARNING_CODES = {
     "code_review_graph_missing",
@@ -84,6 +86,40 @@ def scalar(conn: sqlite3.Connection, sql: str) -> int:
     return int(row[0] if row else 0)
 
 
+def graph_file_paths(conn: sqlite3.Connection) -> list[str]:
+    return [
+        str(row["file_path"])
+        for row in conn.execute(
+            "SELECT file_path FROM nodes WHERE kind = 'File' AND file_path IS NOT NULL"
+        ).fetchall()
+    ]
+
+
+def infer_path_mode(api: Any, conn: sqlite3.Connection) -> str:
+    paths = graph_file_paths(conn)
+    if not paths:
+        return "unknown"
+    absolute = 0
+    repo_relative = 0
+    other = 0
+    for value in paths:
+        path = Path(value)
+        if path.is_absolute():
+            absolute += 1
+        elif value and not value.startswith(("../", "./")):
+            repo_relative += 1
+        else:
+            other += 1
+    modes = sum(1 for count in (absolute, repo_relative, other) if count)
+    if modes > 1:
+        return "mixed"
+    if absolute:
+        return "absolute"
+    if repo_relative:
+        return "repo_relative"
+    return "unknown"
+
+
 def graph_file_hash(conn: sqlite3.Connection, file_path: str) -> str | None:
     row = conn.execute(
         "SELECT file_hash FROM nodes WHERE kind = 'File' AND file_path = ? LIMIT 1",
@@ -102,6 +138,46 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def graph_meta_status(api: Any, *, db_meta: dict[str, str], counts: dict[str, int], path_mode: str) -> dict[str, Any]:
+    meta_path = api.ROOT / GRAPH_META
+    tracked = GRAPH_META in set(api._git_ls_files())
+    if not meta_path.exists():
+        return {
+            "path": GRAPH_META,
+            "present": False,
+            "tracked": tracked,
+            "parity_status": "absent",
+        }
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "path": GRAPH_META,
+            "present": True,
+            "tracked": tracked,
+            "parity_status": "unreadable",
+            "error": str(exc),
+        }
+    mismatches: list[str] = []
+    if str(data.get("git_head") or data.get("git_head_sha") or "") != str(db_meta.get("git_head_sha") or ""):
+        mismatches.append("git_head")
+    if str(data.get("git_branch") or "") != str(db_meta.get("git_branch") or ""):
+        mismatches.append("git_branch")
+    if str(data.get("path_mode") or "") != path_mode:
+        mismatches.append("path_mode")
+    data_counts = data.get("counts") or {}
+    for key, value in counts.items():
+        if key in data_counts and int(data_counts.get(key) or 0) != int(value):
+            mismatches.append(f"counts.{key}")
+    return {
+        "path": GRAPH_META,
+        "present": True,
+        "tracked": tracked,
+        "parity_status": "mismatch" if mismatches else "ok",
+        "mismatches": mismatches,
+    }
+
+
 def effective_changes(api: Any, changed_files: list[str] | None) -> dict[str, str]:
     try:
         return api._map_maintenance_changes(changed_files or [])
@@ -112,6 +188,17 @@ def effective_changes(api: Any, changed_files: list[str] | None) -> dict[str, st
 def run_code_review_graph_status(api: Any, changed_files: list[str] | None = None) -> Any:
     issues: list[Any] = []
     db_path = api.ROOT / GRAPH_DB
+    details: dict[str, Any] = {
+        "authority_status": "derived_code_impact_not_authority",
+        "graph_db": GRAPH_DB,
+        "path_mode": "unknown",
+        "graph_meta": {
+            "path": GRAPH_META,
+            "present": (api.ROOT / GRAPH_META).exists(),
+            "tracked": GRAPH_META in set(api._git_ls_files()),
+            "parity_status": "not_checked",
+        },
+    }
 
     if not db_path.exists():
         return api.StrictResult(
@@ -123,6 +210,7 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                     "local Code Review Graph DB is missing; graph evidence is unavailable",
                 )
             ],
+            details=details,
         )
 
     if not graph_db_tracked(api):
@@ -157,10 +245,24 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                 *issues,
                 api._warning("code_review_graph_unreadable", GRAPH_DB, f"could not read graph DB: {exc}"),
             ],
+            details=details,
         )
 
     try:
         meta = metadata(conn)
+        counts = graph_counts(conn)
+        path_mode = infer_path_mode(api, conn)
+        details.update(
+            {
+                "git_branch": meta.get("git_branch", ""),
+                "git_head_sha": meta.get("git_head_sha", ""),
+                "last_updated": meta.get("last_updated", ""),
+                "schema_version": meta.get("schema_version", ""),
+                "path_mode": path_mode,
+                "counts": counts,
+                "graph_meta": graph_meta_status(api, db_meta=meta, counts=counts, path_mode=path_mode),
+            }
+        )
         graph_head = meta.get("git_head_sha", "")
         graph_branch = meta.get("git_branch", "")
         if head and graph_head and graph_head != head:
@@ -180,9 +282,9 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                 )
             )
 
-        files_count = scalar(conn, "SELECT COUNT(*) FROM nodes WHERE kind = 'File'")
-        nodes_count = scalar(conn, "SELECT COUNT(*) FROM nodes")
-        edges_count = scalar(conn, "SELECT COUNT(*) FROM edges")
+        files_count = counts["files"]
+        nodes_count = counts["nodes"]
+        edges_count = counts["edges"]
         if files_count == 0 or nodes_count == 0 or edges_count == 0:
             issues.append(
                 api._warning(
@@ -192,8 +294,8 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                 )
             )
 
-        flows_count = scalar(conn, "SELECT COUNT(*) FROM flows")
-        communities_count = scalar(conn, "SELECT COUNT(*) FROM communities")
+        flows_count = counts["flows"]
+        communities_count = counts["communities"]
         if flows_count == 0 or communities_count == 0:
             issues.append(
                 api._warning(
@@ -238,7 +340,7 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
         conn.close()
 
     blocking = [issue for issue in issues if issue.severity == "error"]
-    return api.StrictResult(ok=not blocking, issues=issues)
+    return api.StrictResult(ok=not blocking, issues=issues, details=details)
 
 
 def relativize(api: Any, path: str) -> str:
@@ -379,12 +481,16 @@ def build_code_impact_graph(api: Any, files: list[str], task: str = "") -> dict[
 
     try:
         meta = metadata(conn)
+        counts = graph_counts(conn)
+        path_mode = infer_path_mode(api, conn)
         payload["graph_metadata"] = {
             "git_branch": meta.get("git_branch", ""),
             "git_head_sha": meta.get("git_head_sha", ""),
             "last_updated": meta.get("last_updated", ""),
             "schema_version": meta.get("schema_version", ""),
-            "counts": graph_counts(conn),
+            "path_mode": path_mode,
+            "graph_meta": graph_meta_status(api, db_meta=meta, counts=counts, path_mode=path_mode),
+            "counts": counts,
         }
         changed_rows: list[sqlite3.Row] = []
         for rel_path in code_files:

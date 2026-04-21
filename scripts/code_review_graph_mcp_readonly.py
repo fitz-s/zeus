@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Zeus-safe read-only MCP facade for Code Review Graph."""
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
+# Lifecycle: created=2026-04-19; last_reviewed=2026-04-21; last_reused=2026-04-21
 # Purpose: Expose Code Review Graph review/search tools without source-writing apply_refactor.
 # Reuse: Keep source-writing tools out of this facade; graph cache writes are allowed.
 
@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -34,8 +36,7 @@ from code_review_graph.tools import (
 )
 
 
-DEFAULT_REPO_ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
-_default_repo_root = DEFAULT_REPO_ROOT
+_default_repo_root: Optional[str] = os.environ.get("CRG_REPO_ROOT") or None
 
 mcp = FastMCP(
     "code-review-graph",
@@ -48,8 +49,19 @@ mcp = FastMCP(
 )
 
 
-def _repo(repo_root: Optional[str]) -> str:
-    return repo_root or _default_repo_root
+def _normalize_repo_root(repo_root: Optional[str]) -> Optional[str]:
+    if not repo_root:
+        return None
+    return str(Path(repo_root).expanduser().resolve())
+
+
+def _repo(repo_root: Optional[str]) -> Optional[str]:
+    """Resolve repo root without baking a workstation path into the repo."""
+    return (
+        _normalize_repo_root(repo_root)
+        or _normalize_repo_root(_default_repo_root)
+        or _normalize_repo_root(os.environ.get("CRG_REPO_ROOT"))
+    )
 
 
 @mcp.tool()
@@ -279,9 +291,13 @@ def refactor_tool(
 def main(argv: list[str] | None = None) -> int:
     global _default_repo_root
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", default=DEFAULT_REPO_ROOT, help="Repository root for graph operations")
+    parser.add_argument(
+        "--repo",
+        default=os.environ.get("CRG_REPO_ROOT"),
+        help="Repository root for graph operations; defaults to CRG_REPO_ROOT or upstream auto-detection",
+    )
     args = parser.parse_args(argv)
-    _default_repo_root = args.repo
+    _default_repo_root = _normalize_repo_root(args.repo)
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     mcp.run(transport="stdio")

@@ -8,8 +8,9 @@ Role: single live control pointer for the repo.
 - Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
 - Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
 - Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: P1 machine visibility and registry alignment is the active lane
+- Status: P2A graph portability/status disclosure is the active lane
 - P0 commit: `19e0178`
+- P1 commit: `ad73440`
 - Supersession: user ruling in this thread makes the reconstruction package the
   current mainline control surface; older wait-for-ruling notes about
   P11/B055/B099 are stale for this packet
@@ -26,11 +27,10 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P1 allowlist only: visibility/topology manifests, docs-root/current-state
-  routing surfaces, minimum topology_doctor checker/test changes, and the
-  active task folder
+- P2A allowlist only: graph wrapper portability, graph status disclosure,
+  targeted topology_doctor tests, and the active task folder
 - No source, test, script, runtime DB, graph-db, or archive-body edits in this
-  lane except the P1-approved topology_doctor checker/test files
+  lane except the P2A-approved topology_doctor wrapper/status/test files
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -50,7 +50,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Finish P1 machine protection for archive-interface and thin-current-state
-  policy
-- Run docs, strict, map-maintenance, targeted pytest, and closeout gates
+- Finish P2A graph wrapper portability and status disclosure
+- Do not create `graph_meta.json` or classify a sidecar until P2B provenance
+  and parity evidence exists
 - Keep unrelated dirty work and local archive inputs untouched

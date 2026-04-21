@@ -85,6 +85,27 @@ P1 therefore implements only the machine-protection layer for P0:
 P1 does not touch graph wrapper code, graph DB artifacts, runtime state, source
 runtime behavior, archive bodies, or package-defined P2 work.
 
+## P2A decision
+
+After P1, RALPLAN consensus split package-defined P2 into:
+
+- P2A: graph wrapper portability and status disclosure
+- P2B: optional `graph_meta.json` sidecar and lifecycle/classification work
+
+P2A is authorized now. P2B remains gated on real provenance/parity evidence.
+
+P2A implements only:
+
+- removal of workstation-specific `DEFAULT_REPO_ROOT` from
+  `scripts/code_review_graph_mcp_readonly.py`
+- status JSON disclosure for graph storage `path_mode`
+- explicit sidecar absence/presence disclosure
+- targeted tests for wrapper repo-root resolution and graph status details
+
+P2A explicitly does not create `.code-review-graph/graph_meta.json`, regenerate
+or stage `.code-review-graph/graph.db`, add sidecar lifecycle classification, or
+promote graph output into authority.
+
 ## Required reads
 
 - `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md`
