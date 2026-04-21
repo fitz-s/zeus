@@ -1,7 +1,16 @@
 # Zeus System Constitution
-> The authority document for refactoring Zeus. Defines contracts that must be preserved.
+> LEGACY EXTRACTION SOURCE - NOT DEFAULT READ.
+> Durable orientation has been extracted into
+> `docs/reference/zeus_architecture_reference.md`. Current law lives in
+> `docs/authority/**`, `architecture/**`, tests, and executable source.
+>
+> Historical source note: originally described as the authority document for
+> refactoring Zeus. That status is superseded by the current docs mesh.
+>
 > Source: extracted from live codebase on 2026-04-16, verified against source.
-> Companion to: `zeus-architecture-deep-map.md` (code topology), `zeus-pathology-registry.md` (known bugs)
+> Companion to:
+> `docs/artifacts/zeus_architecture_deep_map_2026-04-16.md` (code topology),
+> `docs/reports/zeus_pathology_registry_2026-04-16.md` (known bugs)
 
 ---
 

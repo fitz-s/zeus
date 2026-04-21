@@ -99,3 +99,83 @@ Next:
 
 - run package P0 follow-up review
 - do not start P1 until review says `proceed_to_p1`
+
+## P1 implementation
+
+Date: 2026-04-21
+Task: Extract durable reference content and demote legacy root snapshots.
+
+Changed files:
+
+- `architecture/context_budget.yaml`
+- `architecture/artifact_lifecycle.yaml`
+- `architecture/docs_registry.yaml`
+- `architecture/reference_replacement.yaml`
+- `architecture/topology.yaml`
+- `docs/AGENTS.md`
+- `docs/README.md`
+- `docs/artifacts/AGENTS.md`
+- `docs/zeus-architecture-deep-map.md` -> `docs/artifacts/zeus_architecture_deep_map_2026-04-16.md`
+- `docs/operations/current_state.md`
+- `docs/operations/runtime_artifact_inventory.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+- `docs/reference/AGENTS.md`
+- `docs/settlement-source-provenance.md` -> `docs/reference/settlement_source_provenance.md`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/reference/zeus_data_and_replay_reference.md`
+- `docs/reference/zeus_failure_modes_reference.md`
+- `docs/reference/zeus_market_settlement_reference.md`
+- `docs/reports/AGENTS.md`
+- `docs/zeus-pathology-registry.md` -> `docs/reports/zeus_pathology_registry_2026-04-16.md`
+- `docs/zeus-refactor-plan.md` -> `docs/reports/zeus_refactor_plan_2026-04-16.md`
+- `docs/zeus-system-constitution.md` -> `docs/reports/zeus_system_constitution_2026-04-16.md`
+- `docs/runbooks/AGENTS.md`
+- `docs/settlement-validation-workflow.md` -> `docs/runbooks/settlement_mismatch_triage.md`
+
+Summary:
+
+- populated the four compact canonical references for architecture,
+  market/settlement, data/replay, and failure modes
+- moved legacy docs-root snapshots out of `docs/` into their typed subroots
+- kept detailed settlement source evidence as a conditional reference and
+  settlement mismatch procedure as a runbook
+- added not-default-read/evidence banners to demoted legacy sources
+- updated docs routers, docs registry, reference-replacement matrix, topology
+  root-allowed docs list, artifact lifecycle, and context-budget roles
+- indexed P1 ralplan runtime artifacts in `runtime_artifact_inventory.md`
+
+Verification:
+
+- `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_docs_checks.py scripts/topology_doctor_map_maintenance.py` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --history-lore --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P1 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P1 files> --plan-evidence .omx/plans/docs-reclassification-p1-ralplan-revised.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P1 files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P1 files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P1 files> --plan-evidence .omx/plans/docs-reclassification-p1-ralplan-revised.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"` -> 42 passed, 139 deselected
+- `git diff --check -- <P1 files>` -> ok
+- `git diff -- docs/authority` -> no changes
+
+Pre-close review:
+
+- Critic: PASS. P1 extracted durable summaries into compact canonical
+  references, moved legacy root docs to typed subroots, and preserved detailed
+  provenance/runbook evidence without deleting conditional sources or touching
+  authority/source/runtime paths.
+- Verifier: PASS. Docs registry, reference replacement, context budget,
+  artifact lifecycle, planning-lock, work-record, receipt, map-maintenance,
+  closeout, and targeted topology tests all pass. `.code-review-graph/graph.db`,
+  `state/**`, archive bundles, and unrelated runbook dirty work remain
+  outside the P1 staged set.
+
+Next:
+
+- commit P1 implementation
+- run P1 follow-up review before any P2 deletion/archive decisions

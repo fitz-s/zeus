@@ -1,6 +1,9 @@
 # Settlement Validation Workflow
 
 > How to detect, investigate, and resolve discrepancies between our observation data and Polymarket settlement outcomes.
+>
+> Runbook status: operator procedure, not architecture law. Compact settlement
+> routing lives in `docs/reference/zeus_market_settlement_reference.md`.
 
 ## Axiom: Market Is Always Right
 
@@ -103,7 +106,7 @@ When a source change is confirmed:
    - `settlement_source_type` → `wu_icao`, `noaa`, `hko`, or `cwa_station`
    - Add entry to `change_log` array with timestamp and details
 
-2. **Update `docs/settlement-source-provenance.md`**:
+2. **Update `docs/reference/settlement_source_provenance.md`**:
    - Add the transition to the city's history table
    - Note the exact date range affected
 

@@ -80,12 +80,14 @@ entries:
     delete_allowed: false
     replaced_by: []
     unique_remaining:
-      - canonical architecture reference destination
-      - extraction outline for future deep architecture content
+      - compact runtime/workspace architecture map
+      - truth/control surface orientation
+      - dual-track architecture routing
+      - high-blast-radius code hotspot map
     allowed_action: keep_conditional
     rationale: >
-      P0 anchor for architecture reference extraction. It is intentionally
-      skeletal until P1 moves durable material out of root snapshots.
+      P1 populated this as the compact canonical architecture reference after
+      demoting legacy root snapshots to reports/artifacts evidence.
 
   - path: docs/reference/zeus_market_settlement_reference.md
     default_read: false
@@ -93,12 +95,31 @@ entries:
     delete_allowed: false
     replaced_by: []
     unique_remaining:
-      - canonical market and settlement reference destination
-      - extraction outline for settlement provenance and mismatch triage
+      - compact settlement semantics and market structure routing
+      - source provenance risk model
+      - settlement mismatch triage map
     allowed_action: keep_conditional
     rationale: >
-      P0 anchor for market/settlement extraction. It is not yet a complete
-      replacement for existing provenance/workflow material.
+      P1 populated this as the compact canonical market/settlement reference.
+      The detailed source table remains as a conditional reference because it
+      carries city/station evidence too dense for the compact anchor.
+
+  - path: docs/reference/settlement_source_provenance.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - docs/reference/zeus_market_settlement_reference.md
+    unique_remaining:
+      - current city/source/station settlement table
+      - source-change history by market family
+      - audit-specific settlement-source evidence
+    allowed_action: keep_conditional
+    rationale: >
+      Moved out of docs root in P1 and demoted to a conditional support
+      reference. Its compact concepts are represented in
+      zeus_market_settlement_reference.md, but the detailed table remains
+      useful evidence and is not deletion-ready.
 
   - path: docs/reference/zeus_data_and_replay_reference.md
     default_read: false
@@ -106,12 +127,14 @@ entries:
     delete_allowed: false
     replaced_by: []
     unique_remaining:
-      - canonical data and replay reference destination
-      - extraction outline for data coverage and replay limitations
+      - compact current data reality summary
+      - replay bottleneck map
+      - dual-track data identity implications
+      - active data-risk routing
     allowed_action: keep_conditional
     rationale: >
-      P0 anchor for data/replay extraction. Data facts remain in current
-      inventory, strategy, and operations gap sources until P1 extraction.
+      P1 populated this as the compact canonical data/replay reference while
+      keeping detailed inventory and roadmap sources conditional.
 
   - path: docs/reference/zeus_failure_modes_reference.md
     default_read: false
@@ -119,12 +142,13 @@ entries:
     delete_allowed: false
     replaced_by: []
     unique_remaining:
-      - canonical failure modes reference destination
-      - extraction outline for pathology and operational gap crosswalk
+      - compact durable failure-class taxonomy
+      - mitigation and antibody crosswalk
+      - authority/projection and workspace failure routing
     allowed_action: keep_conditional
     rationale: >
-      P0 anchor for failure-mode extraction. It is intentionally skeletal until
-      P1 extracts durable failure classes from snapshot/evidence sources.
+      P1 populated this as the compact canonical failure-mode reference after
+      demoting the legacy pathology registry to reports evidence.
 
   - path: docs/reference/repo_overview.md
     default_read: false

@@ -10,6 +10,9 @@ manifests, tests, contracts, or authority docs before they become binding.
 | File | Purpose |
 |------|---------|
 | `task_2026-04-18_external_reality_review.md` | External-reality review of Zeus execution/state/settlement risks; evidence only |
+| `zeus_pathology_registry_2026-04-16.md` | Legacy refactor pathology registry; extracted to `docs/reference/zeus_failure_modes_reference.md`, evidence only |
+| `zeus_refactor_plan_2026-04-16.md` | Legacy incremental refactor plan; extracted to canonical references, evidence only |
+| `zeus_system_constitution_2026-04-16.md` | Legacy refactor constitution snapshot; superseded by current authority/manifests, evidence only |
 
 ## Rules
 

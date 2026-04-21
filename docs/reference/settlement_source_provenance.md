@@ -1,8 +1,14 @@
 # Settlement Source Provenance Registry
 
-> **Purpose**: Authoritative record of which data source Polymarket uses to settle each city's daily temperature market. Polymarket can and does change sources without notice.
+> **Purpose**: Durable reference record for which data source Polymarket uses
+> to settle each city's daily temperature market. Polymarket can and does change
+> sources without notice.
 >
 > **Last full audit**: 2026-04-17 (Gamma API tag_id=103040, 1721 events)
+>
+> Authority status: reference evidence only. Settlement code, current
+> configuration, tests, and `docs/authority/**` win on disagreement. Compact
+> routing lives in `docs/reference/zeus_market_settlement_reference.md`.
 
 ## Current Settlement Sources (as of 2026-04-17)
 

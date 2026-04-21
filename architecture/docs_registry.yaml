@@ -336,40 +336,50 @@ entries:
     doc_class: reference
     default_read: false
     direct_reference_allowed: true
-    current_role: canonical deep architecture reference anchor
+    current_role: compact canonical architecture reference extracted from legacy snapshots
     canonical_replaced_by: []
     next_action: keep
-    lifecycle_state: transitional
+    lifecycle_state: durable
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/zeus_market_settlement_reference.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: true
-    current_role: canonical market and settlement reference anchor
+    current_role: compact canonical market and settlement reference
     canonical_replaced_by: []
     next_action: keep
-    lifecycle_state: transitional
+    lifecycle_state: durable
+    coverage_scope: exact
+    parent_coverage_allowed: false
+  - path: docs/reference/settlement_source_provenance.md
+    doc_class: reference
+    default_read: false
+    direct_reference_allowed: true
+    current_role: detailed settlement source and station provenance reference
+    canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
+    next_action: keep
+    lifecycle_state: durable
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/zeus_data_and_replay_reference.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: true
-    current_role: canonical data and replay reference anchor
+    current_role: compact canonical data and replay reference
     canonical_replaced_by: []
     next_action: keep
-    lifecycle_state: transitional
+    lifecycle_state: durable
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/zeus_failure_modes_reference.md
     doc_class: reference
     default_read: false
     direct_reference_allowed: true
-    current_role: canonical failure modes reference anchor
+    current_role: compact canonical failure modes reference
     canonical_replaced_by: []
     next_action: keep
-    lifecycle_state: transitional
+    lifecycle_state: durable
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reference/zeus_math_spec.md
@@ -442,64 +452,54 @@ entries:
     lifecycle_state: temporary
     coverage_scope: exact
     parent_coverage_allowed: false
-  - path: docs/zeus-architecture-deep-map.md
-    doc_class: extraction_source
+  - path: docs/artifacts/zeus_architecture_deep_map_2026-04-16.md
+    doc_class: artifact
     default_read: false
     direct_reference_allowed: false
-    current_role: legacy root snapshot; extract architecture reference then demote
+    current_role: demoted legacy architecture deep-map snapshot; evidence only
     canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
+    next_action: retain_as_evidence
+    lifecycle_state: historical
     coverage_scope: exact
     parent_coverage_allowed: false
-  - path: docs/settlement-source-provenance.md
-    doc_class: extraction_source
+  - path: docs/runbooks/settlement_mismatch_triage.md
+    doc_class: runbook
     default_read: false
-    direct_reference_allowed: false
-    current_role: legacy root settlement provenance source
+    direct_reference_allowed: true
+    current_role: settlement mismatch operator triage procedure
     canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
+    next_action: keep
+    lifecycle_state: durable
     coverage_scope: exact
     parent_coverage_allowed: false
-  - path: docs/settlement-validation-workflow.md
-    doc_class: extraction_source
+  - path: docs/reports/zeus_pathology_registry_2026-04-16.md
+    doc_class: report
     default_read: false
     direct_reference_allowed: false
-    current_role: legacy root settlement workflow source
-    canonical_replaced_by: [docs/reference/zeus_market_settlement_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
-    coverage_scope: exact
-    parent_coverage_allowed: false
-  - path: docs/zeus-pathology-registry.md
-    doc_class: extraction_source
-    default_read: false
-    direct_reference_allowed: false
-    current_role: legacy root failure-mode source
+    current_role: demoted legacy pathology registry; evidence only
     canonical_replaced_by: [docs/reference/zeus_failure_modes_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
+    next_action: retain_as_evidence
+    lifecycle_state: historical
     coverage_scope: exact
     parent_coverage_allowed: false
-  - path: docs/zeus-refactor-plan.md
-    doc_class: extraction_source
+  - path: docs/reports/zeus_refactor_plan_2026-04-16.md
+    doc_class: report
     default_read: false
     direct_reference_allowed: false
-    current_role: legacy root refactor planning source
+    current_role: demoted legacy refactor plan; evidence only
     canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
+    next_action: retain_as_evidence
+    lifecycle_state: historical
     coverage_scope: exact
     parent_coverage_allowed: false
-  - path: docs/zeus-system-constitution.md
-    doc_class: extraction_source
+  - path: docs/reports/zeus_system_constitution_2026-04-16.md
+    doc_class: report
     default_read: false
     direct_reference_allowed: false
-    current_role: legacy root system constitution source
+    current_role: demoted legacy refactor constitution snapshot; evidence only
     canonical_replaced_by: [docs/reference/zeus_architecture_reference.md]
-    next_action: extract_then_move
-    lifecycle_state: temporary
+    next_action: retain_as_evidence
+    lifecycle_state: historical
     coverage_scope: exact
     parent_coverage_allowed: false
   - path: docs/reports/

@@ -1,5 +1,10 @@
 # Zeus Architecture Deep Map — Refactor Reference
 
+> LEGACY EXTRACTION SOURCE - NOT DEFAULT READ.
+> Durable orientation has been extracted into
+> `docs/reference/zeus_architecture_reference.md`. Treat this file as
+> historical evidence only; it does not create current architecture law.
+
 > Generated: 2026-04-16. Scope: first-principles understanding for incremental refactor.
 > System status: **STOPPED**. Data contamination cleaned. Rebuild in progress.
 

@@ -188,3 +188,9 @@ liminal_artifacts:
     authority_behavior: "Records replacement/deletion eligibility and claim proofs for reference docs; it does not delete or promote docs by itself."
     canonical_owner: architecture/reference_replacement.yaml
     guardrail: "Deletion or demotion requires replacement status, proof targets, and safe allowed_action."
+  - path: docs/artifacts/zeus_architecture_deep_map_2026-04-16.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Demoted legacy architecture deep-map snapshot; evidence only and not a default read."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/reference/zeus_architecture_reference.md for compact orientation and docs/authority/** plus manifests for law."

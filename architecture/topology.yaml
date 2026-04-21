@@ -195,12 +195,6 @@ root_governed_files:
     zone: root
     authority_role: scratch_artifact
     forbidden_misread: Root-level DB artifact is not canonical; canonical world DB path is state/zeus-world.db.
-  - path: "zeus-architecture-deep-map.md"
-    status: generated
-    scope: historical
-    zone: root
-    authority_role: derived_diagnostic
-    forbidden_misread: Generated deep map is refactor/reference evidence, not active authority.
 
 state_surfaces:
   - path: "state/LIVE_LOCK"
@@ -441,12 +435,6 @@ docs_root_allowed_files:
   - docs/AGENTS.md
   - docs/README.md
   - docs/archive_registry.md
-  - docs/zeus-architecture-deep-map.md
-  - docs/settlement-source-provenance.md
-  - docs/settlement-validation-workflow.md
-  - docs/zeus-pathology-registry.md
-  - docs/zeus-refactor-plan.md
-  - docs/zeus-system-constitution.md
 
 active_operations_registry:
   current_state: docs/operations/current_state.md

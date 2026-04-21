@@ -25,6 +25,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | Runtime path | Status | Repo disposition |
 |---|---|---|
 | `.omc/plans/open-questions.md` | stale planning backlog | Historical only; extract unresolved live decisions into `docs/operations/current_state.md` before deleting local runtime state. |
+| `.omc/plans/observation-instants-migration-iter2.md` | current ralplan for observation-instants migration | Local planning evidence for a separate high-risk data/schema migration; summarize in its owning packet before any implementation. |
 | `.omc/plans/zeus-fix-engineering.md` | stale engineering plan | Historical only; superseded by current operations packets and commit history. |
 | `.omx/plans/daily-loss-24h-repair.md` | stale plan | Archive/mirror only if daily-loss work reopens. |
 | `.omx/plans/daily-low-support-2026-04-15.md` | recent plan | Keep as runtime-local until dual-track low-support packet decides whether to mirror it. |
@@ -70,6 +71,9 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/workspace-authority-reconstruction-p3-2026-04-21-ralplan.md` | current P3 ralplan | Active local planning evidence for P3 historical compression; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/docs-reclassification-p0-ralplan.md` | superseded docs reclassification P0 plan | Planning evidence only; superseded by revised P0 plan and not authority. |
 | `.omx/plans/docs-reclassification-p0-ralplan-revised.md` | current docs reclassification P0 ralplan | Active local planning evidence for docs reclassification P0; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/docs-reclassification-p1-concise-ralplan-2026-04-21.md` | superseded docs reclassification P1 draft | Planning evidence only; superseded by revised P1 plan and not authority. |
+| `.omx/plans/docs-reclassification-p1-ralplan-2026-04-21.md` | superseded docs reclassification P1 draft | Planning evidence only; superseded by revised P1 plan and not authority. |
+| `.omx/plans/docs-reclassification-p1-ralplan-revised.md` | current docs reclassification P1 ralplan | Active local planning evidence for P1 extraction/demotion; summarized in the active packet before P1 implementation. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons

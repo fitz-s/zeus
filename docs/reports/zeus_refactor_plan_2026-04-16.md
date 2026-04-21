@@ -1,10 +1,16 @@
 # Zeus Incremental Refactor Plan
 
+> LEGACY EXTRACTION SOURCE - NOT DEFAULT READ.
+> Durable architecture orientation has been extracted into
+> `docs/reference/zeus_architecture_reference.md`; durable failure classes route
+> through `docs/reference/zeus_failure_modes_reference.md`. This plan is
+> historical planning evidence, not active work authority.
+>
 > **Version:** 1.0
 > **Author:** Venus/Mars collaborative session
 > **Date:** 2026-04-16
 > **Branch:** `data-improve` (base) → feature branches per phase
-> **Companion docs:** `zeus-architecture-deep-map.md`, `zeus-system-constitution.md`, `zeus-pathology-registry.md`
+> **Companion docs:** `docs/artifacts/zeus_architecture_deep_map_2026-04-16.md`, `docs/reports/zeus_system_constitution_2026-04-16.md`, `docs/reports/zeus_pathology_registry_2026-04-16.md`
 > **Status:** PLANNING — no code changes until Phase 0 acceptance criteria are defined
 
 ---
