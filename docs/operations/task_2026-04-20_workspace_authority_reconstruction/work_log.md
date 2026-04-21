@@ -157,3 +157,10 @@ Known verification note:
 - P2A closeout reports graph dirty-file-stale warnings for the changed P2A
   files. These warnings are expected until graph DB refresh policy is handled;
   they do not block the P2A portability/status change.
+
+P2B gate:
+
+- P2A committed as `d45ec40`.
+- `graph_meta.json` was not created.
+- Sidecar lifecycle/classification work is deferred until provenance and DB
+  parity can be proved and sidecar tracking is explicitly approved.

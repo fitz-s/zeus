@@ -8,9 +8,10 @@ Role: single live control pointer for the repo.
 - Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
 - Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
 - Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: P2A graph portability/status disclosure is the active lane
+- Status: P2A graph portability/status disclosure complete; P2B sidecar work is gated/deferred
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
+- P2A commit: `d45ec40`
 - Supersession: user ruling in this thread makes the reconstruction package the
   current mainline control surface; older wait-for-ruling notes about
   P11/B055/B099 are stale for this packet
@@ -27,10 +28,10 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P2A allowlist only: graph wrapper portability, graph status disclosure,
-  targeted topology_doctor tests, and the active task folder
+- P2B is not active unless graph sidecar provenance/parity evidence is
+  established and sidecar tracking is explicitly approved
 - No source, test, script, runtime DB, graph-db, or archive-body edits in this
-  lane except the P2A-approved topology_doctor wrapper/status/test files
+  lane
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here
 
@@ -50,7 +51,8 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Finish P2A graph wrapper portability and status disclosure
-- Do not create `graph_meta.json` or classify a sidecar until P2B provenance
-  and parity evidence exists
+- Decide whether to run P2B sidecar/classification work after explicit
+  provenance/parity evidence, or move to P3 historical compression
+- Do not create `graph_meta.json` or classify a sidecar until P2B is explicitly
+  opened
 - Keep unrelated dirty work and local archive inputs untouched
