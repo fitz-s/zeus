@@ -9,3 +9,6 @@ plotly>=5.18
 pytest>=7.4
 
 PyYAML>=6.0
+pytz>=2024.1
+requests>=2.31
+py-clob-client>=0.25
