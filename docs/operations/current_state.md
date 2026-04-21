@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: Closeout plan drafted; await implementation request
+- Status: Docs reclassification package closeout complete; post-closeout review pending
 - Docs reclassification P0 commit: `b1a9761`
 - Docs reclassification P1 commit: `84d6d25`
 - P1 follow-up review: `proceed_to_p2`
@@ -29,8 +29,9 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Do not delete reference fragments in P3 unless
-  `architecture/reference_replacement.yaml` marks them deletion-ready.
+- Do not open a later reference-fragment deletion packet until post-closeout
+  review confirms it is safe and `architecture/reference_replacement.yaml`
+  marks the target file deletion-ready.
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
   and `state/**`, not here.
 
@@ -53,5 +54,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- If approved, execute closeout from `.omx/plans/docs-reclassification-closeout-plan-2026-04-21.md`
+- Run post-closeout review using the suggested prompt in the work log.
+- Keep later deletion/archive work in a separate packet.
 - Keep unrelated dirty work and local archive inputs untouched

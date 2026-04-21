@@ -501,3 +501,90 @@ Verification:
 Next:
 
 - execute closeout only after explicit request
+
+## Package closeout
+
+Date: 2026-04-21
+Task: Final closeout for docs reclassification/reference extraction package.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+
+Closeout verdict:
+
+- PASS. P0-P3 are committed and the package has a clear post-closeout state.
+
+Package commits:
+
+- P0 docs registry and canonical reference anchors: `b1a9761`
+- P1 canonical reference extraction and root snapshot demotion: `84d6d25`
+- P2 runbook and operations routing normalization: `1e1b9a7`
+- P3 residual fragment freeze and routing tightening: `995c313`
+
+Final canonical reference set:
+
+- `docs/reference/zeus_domain_model.md`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/reference/zeus_market_settlement_reference.md`
+- `docs/reference/settlement_source_provenance.md`
+- `docs/reference/zeus_data_and_replay_reference.md`
+- `docs/reference/zeus_failure_modes_reference.md`
+- `docs/reference/zeus_math_spec.md`
+
+Final docs root set:
+
+- `docs/AGENTS.md`
+- `docs/README.md`
+- `docs/archive_registry.md`
+
+Frozen conditional support docs:
+
+- `docs/reference/repo_overview.md`
+- `docs/reference/data_inventory.md`
+- `docs/reference/data_strategy.md`
+- `docs/reference/statistical_methodology.md`
+- `docs/reference/quantitative_research.md`
+- `docs/reference/market_microstructure.md`
+
+Unresolved human-review items:
+
+- Decide whether any frozen fragment can be deleted in a later packet after
+  `reference_replacement.yaml` records `replacement_status: replaced`,
+  `unique_remaining: []`, and `delete_allowed: true`.
+- Decide whether package artifacts should be archived after post-closeout review.
+- Existing unrelated dirty files remain outside this package:
+  `.code-review-graph/graph.db`, runtime `state/**`, `docs/archives.zip`,
+  `zeus_data_inventory.xlsx`, and unrelated operations/data-backfill inputs.
+- Repository git-gc loose-object warning remains a maintenance issue, not a docs
+  package blocker.
+
+Validation:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --artifact-lifecycle --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget or reference_replacement"` -> 50 passed, 131 deselected
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <closeout files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json` -> ok
+- `git diff --check -- <closeout files>` -> ok
+- `git diff -- docs/authority` -> no changes
+
+Suggested post-closeout review prompt:
+
+Review the completed docs reclassification package after P0-P3 and closeout.
+Confirm whether the package preserved authority/reference/operations/evidence
+separation, whether the canonical reference set is now clear, whether frozen
+fragment docs are correctly non-default, and whether any later deletion packet
+is safe to open.
+
+Next:
+
+- run post-closeout review
+- keep later deletion/archive work in a separate packet
