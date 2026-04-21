@@ -86,23 +86,18 @@ logger = logging.getLogger(__name__)
 # WU ICAO client (duplicated from scripts/backfill_wu_daily_all.py — Path A)
 # ---------------------------------------------------------------------------
 
-# Security S1 fix: fail-closed if the env var is not set. The previous
-# `os.environ.get("WU_API_KEY", "<hex>")` default baked a WU API key
-# literal into the source tree and therefore into git history. A deploy
-# where WU_API_KEY is unset silently fell back to that committed key,
-# hiding config drift behind HTTP 401/403 rather than a loud startup
-# failure. Anyone who cloned the repo had the same key. The value has
-# been removed from source; the operator must set WU_API_KEY in launchd/
-# systemd/.env before starting the daemon. (The matching removal is in
-# scripts/backfill_wu_daily_all.py. The legacy wu_daily_collector.py
-# still has its own hardcoded fallback but that module is dead code —
-# deprecated by K2 and unregistered in src/main.py; Phase C removes it.)
+# WU ICAO historical public web key. This is NOT a secret — it is the
+# same key that wunderground.com's own browser UI embeds in every
+# ICAO historical page. A prior "Security S1 fix" mis-classified it as
+# a leaked secret and removed the default, breaking the daemon on any
+# deploy without an explicit env-var override (operator 2026-04-21
+# correction: "wu key 是公开的，可能你之前修复 100 个 bug 的时候当作敏感
+# 信息删除了"). Restored as a documented public default. Operators can
+# still override via the WU_API_KEY env var to route through a paid
+# WU account if needed.
 _WU_API_KEY_ENV = "WU_API_KEY"
-WU_API_KEY = os.environ.get(_WU_API_KEY_ENV)
-if not WU_API_KEY:
-    # Lazy-fail: allow import without the env so unit tests that don't
-    # hit WU can import the module. The actual fetch path will raise.
-    WU_API_KEY = None
+_WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY = os.environ.get(_WU_API_KEY_ENV) or _WU_PUBLIC_WEB_KEY
 WU_ICAO_HISTORY_URL = (
     "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
 )
@@ -149,12 +144,9 @@ def _fetch_wu_icao_daily_highs_lows(
     before grouping, so a fetch crossing a UTC midnight still attributes each
     observation to the right local day.
     """
-    if not WU_API_KEY:
-        raise RuntimeError(
-            f"{_WU_API_KEY_ENV} environment variable is required but not set. "
-            "Set it in the daemon launch environment (launchd plist, systemd "
-            "service, or .env) before running K2 daily_obs_append."
-        )
+    # WU_API_KEY always set (public fallback or env-var override), so no
+    # runtime guard needed. Kept as an assertion for defensive confidence.
+    assert WU_API_KEY, "WU_API_KEY resolved empty; _WU_PUBLIC_WEB_KEY fallback broken?"
     url = WU_ICAO_HISTORY_URL.format(icao=icao, cc=cc)
     unit_code = "m" if unit == "C" else "e"
 

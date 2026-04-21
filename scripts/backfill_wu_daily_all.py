@@ -111,25 +111,18 @@ def _write_atom_to_observations(
 
 logger = logging.getLogger(__name__)
 
-# Fail-closed on missing env var — see src/data/daily_obs_append.py
-# module comment for the security rationale. The key value is never
-# embedded in source. The check is deferred to run time (inside main())
-# rather than module load time, so relationship tests that import this
-# script for CITY_STATIONS cross-check do not crash when run in an env
-# without WU_API_KEY set.
-WU_API_KEY = os.environ.get("WU_API_KEY")
+# WU ICAO public web key — see src/data/daily_obs_append.py for the full
+# rationale. Same key wunderground.com embeds in its browser UI. Operator
+# can override via WU_API_KEY env var to route through a paid account.
+_WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY = os.environ.get("WU_API_KEY") or _WU_PUBLIC_WEB_KEY
 
 
 def _require_wu_api_key() -> None:
-    """Fail-closed if the env var is missing. Call from main()."""
-    if not WU_API_KEY:
-        import sys as _sys
-        print(
-            "ERROR: WU_API_KEY environment variable is required. "
-            "Export it before running this script.",
-            file=_sys.stderr,
-        )
-        raise SystemExit(2)
+    """Defensive assertion — public fallback guarantees WU_API_KEY is never
+    empty, but the check is kept so future refactors that strip the fallback
+    surface loudly."""
+    assert WU_API_KEY, "WU_API_KEY resolved empty; _WU_PUBLIC_WEB_KEY fallback broken?"
 # Default preserves existing behavior; set WU_API_KEY env var to override.
 WU_ICAO_HISTORY_URL = "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
 
