@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Workspace Authority Reconstruction (2026-04-20 V2)
 - Active package source: `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/README.md`
 - Active execution packet: `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
-- Status: P2A graph portability/status disclosure complete; P2B sidecar work is gated/deferred
+- Status: P3 historical compression and residual hygiene active
 - P0 commit: `19e0178`
 - P1 commit: `ad73440`
 - P2A commit: `d45ec40`
@@ -28,8 +28,9 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P2B is not active unless graph sidecar provenance/parity evidence is
-  established and sidecar tracking is explicitly approved
+- P3 allowlist: visible history docs, history lore, context budget/tests only
+  if needed, active packet evidence, plus approved preflight runtime inventory
+  LOCAL_ADAPTATION
 - No source, test, script, runtime DB, graph-db, or archive-body edits in this
   lane
 - Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
@@ -51,8 +52,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Decide whether to run P2B sidecar/classification work after explicit
-  provenance/parity evidence, or move to P3 historical compression
-- Do not create `graph_meta.json` or classify a sidecar until P2B is explicitly
-  opened
+- Complete P3 historical compression and residual hygiene
+- Do not re-ingest archive bodies wholesale; use package policy and current
+  visible surfaces first
 - Keep unrelated dirty work and local archive inputs untouched

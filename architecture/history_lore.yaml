@@ -206,6 +206,69 @@ cards:
       Do not summarize history wholesale. Promote only dense, actionable lessons
       that route future agents and have antibodies or explicit residual risk.
 
+  - id: ARCHIVE_CONTAMINATION_PROMOTION_GATE
+    status: active_law
+    severity: high
+    sources:
+      - docs/archive_registry.md
+      - docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/05_archives_policy.md
+      - docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/08_patch_blueprints/p3_patch_blueprint.md
+    failure_mode: >
+      Agents promote raw archive content, secret-bearing historical prose, or
+      binary/scratch debris into active docs because the archive is locally
+      available and appears to answer a current question.
+    trigger_context:
+      - archive lookup
+      - historical compression
+      - lore extraction
+      - packet reconstruction
+      - online review context
+    wrong_moves:
+      - copy archive prose wholesale into active docs
+      - track archive bodies or bundles as default context
+      - quote secret-bearing archive lines into current authority
+      - treat archived DBs/spreadsheets/reports as canonical runtime truth
+      - omit the [Archive evidence] label on archive-derived claims
+    correct_rule: >
+      Use archives only as historical evidence. Promote only sanitized,
+      rewritten, dense lessons through the visible archive registry or
+      history-lore path, and never let archive prose outrank current manifests,
+      tests, source, packets, or canonical DB truth.
+    antibodies:
+      docs:
+        - docs/archive_registry.md
+        - docs/AGENTS.md
+        - docs/README.md
+      tests:
+        - tests/test_topology_doctor.py
+      gates:
+        - python scripts/topology_doctor.py --docs
+        - python scripts/topology_doctor.py --history-lore
+    residual_risk: >
+      Local ignored archive bundles can still be opened manually. The gate is
+      procedural unless a future secret-scan or archive-reader tool enforces
+      sanitization before promotion.
+    invalidation_condition: >
+      Only a reviewed archive ingestion system with secret scanning,
+      provenance labeling, and machine-enforced non-authority status may replace
+      this manual promotion gate.
+    routing:
+      task_terms: [archive, archives.zip, cold storage, promotion, contamination, secret, historical evidence]
+      file_patterns:
+        - docs/archive_registry.md
+        - architecture/history_lore.yaml
+        - docs/archives/**
+        - docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/05_archives_policy.md
+    downstream_blast_radius:
+      - docs/README.md
+      - docs/AGENTS.md
+      - workspace_map.md
+      - architecture/context_budget.yaml
+    zero_context_digest: >
+      Archive material is cold evidence, not law. Sanitize, label
+      [Archive evidence], and rewrite into dense current guidance before
+      promotion.
+
   - id: WMO_ROUNDING_BANKER_FAILURE
     status: active_law
     severity: critical

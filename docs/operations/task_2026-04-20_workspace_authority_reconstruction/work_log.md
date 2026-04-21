@@ -164,3 +164,78 @@ P2B gate:
 - `graph_meta.json` was not created.
 - Sidecar lifecycle/classification work is deferred until provenance and DB
   parity can be proved and sidecar tracking is explicitly approved.
+
+## P2B local sidecar update
+
+Date: 2026-04-21
+Branch: data-improve
+Task: Local live graph sidecar, not git-synced.
+
+Summary:
+
+- user confirmed graph DB updates near real time and does not need git
+  synchronization
+- generated ignored `.code-review-graph/graph_meta.json` from the local live
+  graph DB
+- verified `python scripts/topology_doctor.py --code-review-graph-status --json`
+  reports `graph_meta.present=true`, `graph_meta.tracked=false`,
+  `graph_meta.parity_status=ok`, and `path_mode=absolute`
+
+Not tracked:
+
+- `.code-review-graph/graph.db`
+- `.code-review-graph/graph_meta.json`
+
+## P3 update
+
+Date: 2026-04-21
+Branch: data-improve
+Task: Historical compression and residual hygiene.
+
+Changed files:
+
+- `docs/operations/runtime_artifact_inventory.md` (preflight LOCAL_ADAPTATION)
+- `docs/archive_registry.md`
+- `architecture/history_lore.yaml`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md`
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json`
+
+Summary:
+
+- indexed P2B/P3 ralplan runtime artifacts so docs validation starts clean
+- enriched archive registry with retrieval decision tree, category guide,
+  promotion checklist, and contamination examples
+- added dense lore card `ARCHIVE_CONTAMINATION_PROMOTION_GATE`
+- updated current state and active packet evidence for P3
+
+Verification:
+
+- `python scripts/topology_doctor.py --history-lore --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "history or docs or archive"` -> 27 passed, 149 deselected
+- `python scripts/topology_doctor.py --planning-lock --changed-files architecture/history_lore.yaml docs/archive_registry.md docs/operations/current_state.md docs/operations/runtime_artifact_inventory.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files architecture/history_lore.yaml docs/archive_registry.md docs/operations/current_state.md docs/operations/runtime_artifact_inventory.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files architecture/history_lore.yaml docs/archive_registry.md docs/operations/current_state.md docs/operations/runtime_artifact_inventory.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files architecture/history_lore.yaml docs/archive_registry.md docs/operations/current_state.md docs/operations/runtime_artifact_inventory.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files architecture/history_lore.yaml docs/archive_registry.md docs/operations/current_state.md docs/operations/runtime_artifact_inventory.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --plan-evidence docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md --work-record-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md --receipt-path docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json --json` -> ok
+- `git diff --check -- docs/operations/runtime_artifact_inventory.md docs/archive_registry.md architecture/history_lore.yaml docs/operations/current_state.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/work_log.md docs/operations/task_2026-04-20_workspace_authority_reconstruction/receipt.json` -> clean
+
+Pre-close review:
+
+- Critic: PASS. P3 stayed inside visible-history scope; no archive bodies,
+  source, runtime state, or graph DB artifacts were edited. The new lore card is
+  dense and non-duplicative relative to existing density/edit-loss/closeout
+  cards.
+- Verifier: PASS. Required P3 validation and compiled closeout passed. Changed
+  files match the receipt and no `docs/archives/**` paths are in the diff.
+
+Remaining known local dirty work outside P3:
+
+- `.code-review-graph/graph.db`
+- `state/auto_pause_failclosed.tombstone`
+- `state/status_summary.json`
+- `docs/archives.zip`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`
+- `zeus_data_inventory.xlsx`

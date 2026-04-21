@@ -64,6 +64,10 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/test-spec-zeus-data-improve-pre-tigge-repair-packet-2026-04-11.md` | stale test spec | Historical only. |
 | `.omx/plans/workspace-authority-reconstruction-p2-2026-04-20-initial-deliberate.md` | superseded ralplan draft | Superseded by revised P2 sequencing plan; keep local only unless packet evidence is explicitly archived. |
 | `.omx/plans/workspace_authority_reconstruction_p1_vs_p2_2026-04-20_revised.md` | current ralplan sequencing plan | Active local planning evidence for P2 sequencing; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/p2b-graph-meta-sidecar-ralplan.md` | superseded P2B ralplan draft | P2B planning evidence only; superseded by revised/final P2B plans and not authority. |
+| `.omx/plans/p2b-graph-meta-sidecar-ralplan-revised.md` | superseded P2B ralplan draft | P2B planning evidence only; superseded by final P2B plan and not authority. |
+| `.omx/plans/p2b-graph-meta-sidecar-ralplan-final.md` | final P2B ralplan | Records local live graph sidecar decision; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/workspace-authority-reconstruction-p3-2026-04-21-ralplan.md` | current P3 ralplan | Active local planning evidence for P3 historical compression; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons

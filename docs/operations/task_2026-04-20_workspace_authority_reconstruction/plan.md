@@ -106,6 +106,30 @@ P2A explicitly does not create `.code-review-graph/graph_meta.json`, regenerate
 or stage `.code-review-graph/graph.db`, add sidecar lifecycle classification, or
 promote graph output into authority.
 
+## P2B local decision
+
+The user confirmed that the graph DB updates near real time and does not need
+git synchronization. A local ignored `.code-review-graph/graph_meta.json` was
+generated and validated against the local live graph DB; it is not tracked and
+does not change package P3 scope.
+
+## P3 decision
+
+P3 is the package's fourth execution packet:
+
+- P0: online boot surface realignment
+- P1: machine visibility and registry alignment
+- P2: graph portability and online summary upgrade
+- P3: historical compression and residual hygiene
+
+Package manifest entries: 27 tracked entries. The `15_machine_readable_summary`
+file is a numbered package file, not the file count.
+
+P3 runs after an approved preflight LOCAL_ADAPTATION to
+`docs/operations/runtime_artifact_inventory.md` that indexes P2B and P3
+runtime-local ralplan artifacts. P3 proper keeps archives cold and improves
+visible historical guidance through `docs/archive_registry.md` and dense lore.
+
 ## Required reads
 
 - `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/00_executive_ruling.md`
