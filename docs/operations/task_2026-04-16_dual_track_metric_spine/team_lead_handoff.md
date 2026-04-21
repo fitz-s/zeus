@@ -1,17 +1,30 @@
-# Team-Lead Handoff (post-P9C + e2e audit, 2026-04-19)
+# Team-Lead Handoff — DT Program CLOSED 2026-04-21
 
-**Written**: 2026-04-18 post Phase 5 + 6 + 7A. **Updated 2026-04-19 post P9C closure + post-close e2e independent audit.** Gen-Verifier mode. Team-lead (Opus, main context) + rotating persistent critic (beth retired after P5fix/P7A/P7B; carol retired after P8/P9A/P9B; **dave active** cycle 1 after P9C) + ephemeral subagents.
+**Program**: Zeus Dual-Track Metric Spine Refactor (Phase 0 opened 2026-04-16 → Phase 10 closed 2026-04-19 → **DT Program CLOSED 2026-04-21**).
 
-## ⚠️ CRITICAL POST-COMPACT FIRST READ
+**Written**: 2026-04-18 post Phase 5 + 6 + 7A. **Updated 2026-04-19 post P9C + e2e audit.** **Closed 2026-04-21 after bug100 routing + closure stamp landed on `data-improve`.** Gen-Verifier mode throughout. Team-lead (Opus, main context) + rotating persistent critic (beth retired after P5fix/P7A/P7B; carol retired after P8/P9A/P9B; dave retired after P9C/P10A/P10B; eve retired after P10C/P10D/P10E PASS-WITH-RESERVATIONS) + ephemeral subagents.
 
-**The dual-track refactor is STRUCTURALLY COMPLETE but has a CRITICAL pre-existing production bug (monitor_refresh NameError, HIGH+LOW Day0 both affected) + Gate C was never actually closed (v2 tables empty; HIGH still reads legacy).**
+## ⚠️ CLOSURE NOTICE (2026-04-21)
 
-**Before any other work, read**:
-`docs/operations/task_2026-04-16_dual_track_metric_spine/e2e_audit/synthesis_and_remediation_plan.md`
+**DT is closed. All R1-R13 remediation items resolved or forward-logged. bug100 is 100/100 routed — zero `STILL_OPEN`. No further DT code work owed on `data-improve`.**
 
-That file contains the full compact remediation plan (R1-R13) with file:line citations + prioritized packet recommendations (P10A/B/C). Supporting audits at same directory:
-- `architect_end_state_audit.md` — structural audit (PARTIAL verdict, "ship seaworthy, cargo never loaded")
-- `runtime_trace.md` — runtime trace (3 silent-failure risks + discriminating probe for ingest metric stamp)
+- **Commit trail**: P10A `81294d2` → P10B `8d46f44+f632a9f` → P10C `18b510b` → P10D `f55f4e1` → P10E `553347c` → `fbf5ce8` (docs COMPLETE) → `ad73440` (local HEAD at close).
+- **Regression envelope at close**: 144-147 failed / 1950-1951 passed / 92 skipped / 1 xfailed (flake range from pre-existing topology_doctor test-order pollution, deterministic, non-blocking).
+- **77+ structural antibodies** deployed across R-CH..R-DH families. All 19 DT markers wired. All seams metric-aware.
+- **DT#1 PARTIAL / DT#2-6 LIVE / DT#7 DORMANT** — DT#7 activation awaits Gate F (Golden Window + TIGGE cloud downloads).
+- **bug100 closure**: 100 rows routed — PRE_EXISTING_FIX (40) + RESOLVED (24) + ABSORBED_DUAL_TRACK (20) + FORWARDED_PRE_EXISTING (8) + FORWARDED_P11_PRECURSOR (4) + FORWARDED_ARCHITECT_BACKLOG (2) + ABSORBED_PRE_OR_DUAL (1) + SEMANTICS_CHANGED (1). See `work_log.md` §DT Program CLOSED.
+- **Physical archive** of this packet + the bug100 CSV deferred to merge time. `current_state.md` / `archive_registry.md` pointer updates deferred to the same merge.
+
+## Historical context (preserved for provenance)
+
+The original post-P9C audit is preserved below. Read the closure notice above as the authoritative current state; the audit remains as evidence of the structural gaps P10A-E closed.
+
+**Original post-P9C audit (2026-04-19)**: The dual-track refactor is STRUCTURALLY COMPLETE but has a CRITICAL pre-existing production bug (monitor_refresh NameError, HIGH+LOW Day0 both affected) + Gate C was never actually closed (v2 tables empty; HIGH still reads legacy). → **All resolved**: R1 monitor_refresh NameError fixed in P10A `81294d2`; Gate C v2-empty state documented as intentional Golden-Window posture (not a gap); HIGH legacy-read path preserved deliberately via P10D `ensemble_snapshots.temperature_metric` column (forward-log for v2 cutover).
+
+**Reference material** (historical audit, 2026-04-19):
+- `e2e_audit/synthesis_and_remediation_plan.md` — R1-R13 remediation plan (all items closed or forward-logged)
+- `e2e_audit/architect_end_state_audit.md` — structural audit (verdict superseded by P10 closure)
+- `e2e_audit/runtime_trace.md` — runtime trace (3 silent-failure risks all closed by P10 antibodies)
 
 ## IMMEDIATE NEXT ACTIONS (post-compact, in order)
 
