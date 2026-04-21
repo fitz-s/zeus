@@ -89,10 +89,16 @@ class Day0ObservationContext:
 
 logger = logging.getLogger(__name__)
 
-WU_API_KEY = os.environ.get("WU_API_KEY", "")
-# Guard moved from module level to callsite: module must be importable without the key
-# so that transitive importers (tests, monitor_refresh) don't crash on missing env var.
-# Callers that need WU must call _require_wu_api_key() before making requests.
+# WU public web key — see src/data/daily_obs_append.py for the full rationale.
+# A prior "Security S1 fix" removed the default and forced env-var-only. When
+# WU_API_KEY is unset, _require_wu_api_key() raises SystemExit, which kills the
+# daemon before it can even reach the OpenMeteo fallback chain. Operator
+# correction 2026-04-21: the key is WU's own browser-embedded key (verified
+# HTTP 200 against /v1/geocode/*/observations/timeseries.json returning
+# obs_id=KORD — the same ICAO station that Polymarket settles against).
+# Public fallback restored; operator can still override via WU_API_KEY env.
+_WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY = os.environ.get("WU_API_KEY") or _WU_PUBLIC_WEB_KEY
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 
@@ -213,10 +219,11 @@ def get_current_observation(
 
 
 def _require_wu_api_key() -> None:
-    """Raise at callsite if WU_API_KEY is missing. Module-level guard was moved here so
-    transitive importers (tests, monitor_refresh) don't crash on missing env var."""
-    if not WU_API_KEY:
-        raise SystemExit("CRITICAL ERROR: WU_API_KEY environment variable is missing.")
+    """Defensive assertion — the public fallback guarantees WU_API_KEY is
+    never empty. Kept so a future refactor that strips the fallback surfaces
+    loudly instead of silently falling through to OpenMeteo (ghost-trade risk
+    per operator 2026-04-21 analysis)."""
+    assert WU_API_KEY, "WU_API_KEY resolved empty; _WU_PUBLIC_WEB_KEY fallback broken?"
 
 
 def _fetch_wu_observation(
