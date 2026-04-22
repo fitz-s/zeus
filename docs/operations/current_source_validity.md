@@ -95,3 +95,32 @@ Only update this file from:
 - explicit operator validation
 
 Do not update it from memory, old provenance tables, or inference only.
+
+## Refresh Protocol
+
+Refresh trigger:
+
+- a source/provider audit lands
+- `config/cities.json` source routing changes
+- a provider stalls, advances unexpectedly, or changes endpoint behavior
+- this file is older than 14 days and is being used for source/backfill
+  planning
+
+Required evidence:
+
+- fresh per-city source audit
+- config/runtime cross-check
+- dated report or packet evidence for any source transition
+
+Manual refresh rule:
+
+- update from evidence only
+- keep durable semantics in `docs/reference/zeus_market_settlement_reference.md`
+- keep dated evidence in reports/artifacts
+- preserve `Last audited`
+- do not update from memory or old provenance snapshots
+
+Maximum staleness:
+
+- 14 days for source/backfill planning
+- otherwise re-audit before relying on the file

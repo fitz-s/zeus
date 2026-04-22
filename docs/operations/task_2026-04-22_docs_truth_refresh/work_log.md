@@ -260,3 +260,72 @@ Next:
 
 - commit P2
 - run P2 follow-up review before P3
+
+## P2 follow-up review
+
+Date: 2026-04-22
+Commit: `8b687da`
+Task: Review P2 before P3.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+
+Summary:
+
+- P2 added freshness/truth metadata to docs registry entries.
+- P2 added stale-truth checks for canonical-only reference routing and current
+  state hygiene.
+- P2 kept `architecture/reference_replacement.yaml` as a compatibility manifest;
+  retirement is deferred to a dedicated compatibility packet.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+
+Verdict:
+
+- `proceed_to_p3`
+
+Next:
+
+- implement P3 current-fact refresh workflow
+
+## P3 implementation
+
+Date: 2026-04-22
+Task: Current-fact refresh workflow.
+
+Changed files:
+
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+
+Summary:
+
+- chose manual refresh protocol instead of adding a script in P3
+- added refresh triggers, required evidence, maximum staleness, and
+  no-memory-update rules to `current_data_state.md`
+- added matching source-validity refresh protocol to
+  `current_source_validity.md`
+- updated operations router rules to require evidence-based current-fact
+  updates
+
+Verification:
+
+- pending
+
+Pre-close review:
+
+- pending
+
+Next:
+
+- pending

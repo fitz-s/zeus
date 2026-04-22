@@ -93,3 +93,6 @@ make a surface default-read unless `current_state.md` routes it.
 - Do not leave completed packet material in the live pointer after closeout.
 - Runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
   before they are treated as durable work evidence.
+- Current-fact surfaces require fresh packet/operator evidence. Do not update
+  them from memory, and re-audit if they are older than their refresh protocol
+  allows for the task at hand.
