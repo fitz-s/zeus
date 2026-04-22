@@ -149,6 +149,17 @@ def _hourly_obs_to_v2_row(
 ) -> ObsV2Row:
     """Build an ObsV2Row from a client's HourlyObservation.
 
+    Extremum-preserving mapping (plan v3 + 2026-04-21 operator correction):
+    - ``running_max`` <- ``hour_max_temp``  (THE settlement-correct field)
+    - ``running_min`` <- ``hour_min_temp``
+    - ``temp_current`` <- ``hour_max_temp`` for legacy HIGH-track consumers
+      that still ``SELECT temp_current`` without track awareness. LOW-track
+      and strict consumers MUST use ``running_min`` / ``running_max``
+      explicitly; see Phase 3 consumer audit.
+    - ``observation_count`` = raw obs in the bucket
+    - ``provenance_json`` carries both raw timestamps + count so audits
+      can verify the extremum is a legitimate SPECI.
+
     Authority is always 'VERIFIED' for Phase 0 pilot (no HK in pilot).
     Phase 1 HK rows will use 'ICAO_STATION_NATIVE' via a separate code
     path (accumulator, not this driver).
@@ -156,8 +167,10 @@ def _hourly_obs_to_v2_row(
     provenance = {
         "tier": tier_name,
         "station_id": obs.station_id,
-        "raw_obs_ts": obs.raw_obs_ts,
-        "snap_window_sec": 1800,
+        "hour_max_raw_ts": obs.hour_max_raw_ts,
+        "hour_min_raw_ts": obs.hour_min_raw_ts,
+        "raw_obs_count": obs.observation_count,
+        "aggregation": "utc_hour_bucket_extremum",
     }
     return ObsV2Row(
         city=obs.city,
@@ -172,7 +185,9 @@ def _hourly_obs_to_v2_row(
         is_ambiguous_local_hour=obs.is_ambiguous_local_hour,
         is_missing_local_hour=obs.is_missing_local_hour,
         time_basis=obs.time_basis,
-        temp_current=obs.temp_current,
+        temp_current=obs.hour_max_temp,  # legacy HIGH-track default
+        running_max=obs.hour_max_temp,  # explicit per-hour maximum
+        running_min=obs.hour_min_temp,  # explicit per-hour minimum
         temp_unit=obs.temp_unit,
         station_id=obs.station_id,
         observation_count=obs.observation_count,

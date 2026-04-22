@@ -68,9 +68,15 @@ _ALLOWED_WRITE_AUTHORITIES: frozenset[str] = frozenset(
 _DATA_VERSION_RE = re.compile(r"^v1\.[a-z0-9\-\._]+$")
 
 # Time basis values — must match what daily_obs_append uses for
-# consistency with legacy observation_instants.
+# consistency with legacy observation_instants, plus the Phase 0
+# extremum-preserving variant emitted by the new WU/Ogimet clients.
 _ALLOWED_TIME_BASIS: frozenset[str] = frozenset(
-    {"utc_hour_aligned", "station_local", "hourly_accumulator"}
+    {
+        "utc_hour_aligned",  # legacy OpenMeteo snap (no aggregation)
+        "utc_hour_bucket_extremum",  # Phase 0 extremum-preserving aggregate
+        "station_local",
+        "hourly_accumulator",
+    }
 )
 
 _ALLOWED_TEMP_UNITS: frozenset[str] = frozenset({"F", "C"})

@@ -5,25 +5,30 @@
 """Ogimet METAR hourly-observation client for observation_instants_v2 backfill.
 
 Wraps ``https://www.ogimet.com/cgi-bin/getmetar`` which mirrors NOAA METAR
-bulletins for any ICAO station in near-real-time. Phase 0 uses this only
-for the three cities whose ``settlement_source_type == 'noaa'``:
-Istanbul (LTFM), Moscow (UUWW), Tel Aviv (LLBG). NOAA's own
-``weather.gov/wrh/timeseries`` endpoint is server-rendered HTML and
-unsuited to programmatic fetching; Ogimet carries the same raw METAR
-byte-for-byte.
+bulletins (including off-hour SPECI at extremes) for any ICAO station.
+Phase 0 uses this only for the three cities whose
+``settlement_source_type == 'noaa'``: Istanbul (LTFM), Moscow (UUWW),
+Tel Aviv (LLBG).
 
-The client snaps each requested UTC hour to the nearest METAR within
-±30 minutes (same algorithm as ``wu_hourly_client``). METAR's native
-unit is °C; all three current consumers (cities.json settlement_unit=='C'
-for Istanbul/Moscow/Tel Aviv) match natively with no conversion.
+**Extremum-preserving semantics (critical)**. Same aggregation contract
+as ``wu_hourly_client``: each UTC hour bucket emits one
+``HourlyObservation`` carrying ``hour_max_temp`` / ``hour_min_temp`` /
+raw timestamps across ALL raw reports in the bucket, never a single
+"closest to HH:00" snapshot. The rationale lives in wu_hourly_client's
+docstring — picking a snap-point erases intra-hour SPECI peaks and
+poisons both Platt calibration and Day-0 stop-loss monitoring.
+
+METAR's native unit is °C; all three current consumers
+(cities.json settlement_unit=='C' for Istanbul/Moscow/Tel Aviv) match
+natively with no conversion. An F conversion path exists for future
+use.
 
 Public API
 ----------
 - ``fetch_ogimet_hourly(station, start_date, end_date, *, city_name,
   timezone_name, source_tag, unit='C') -> OgimetHourlyFetchResult``.
-  Returns snap-to-hour observations. Accepts the tier_resolver expected
-  ``source_tag`` (e.g. 'ogimet_metar_uuww') so the backfill driver does
-  not need to compute it separately.
+  Returns per-hour bucket extrema. Accepts the tier_resolver expected
+  ``source_tag`` so the backfill driver doesn't recompute it.
 """
 from __future__ import annotations
 
@@ -49,9 +54,6 @@ OGIMET_HEADERS = {
 #: Max window per HTTP request. Matches the existing daily backfill
 #: script's behavior; Ogimet throttles if windows exceed ~30 days.
 OGIMET_CHUNK_DAYS = 30
-
-#: ±30 minutes around each UTC hour. Same as WU snap window.
-_SNAP_WINDOW_SECONDS = 30 * 60
 
 # METAR temp/dewpoint group regex. Copied from
 # scripts/backfill_ogimet_metar.py::_METAR_TEMP_RE so a single-file change
@@ -186,7 +188,7 @@ def fetch_ogimet_hourly(
         if result.failed:
             return OgimetHourlyFetchResult(
                 observations=list(
-                    _snap(
+                    _aggregate(
                         all_rows,
                         station=station,
                         unit_out=unit,
@@ -207,7 +209,7 @@ def fetch_ogimet_hourly(
         current = chunk_end + timedelta(seconds=1)
 
     observations = list(
-        _snap(
+        _aggregate(
             all_rows,
             station=station,
             unit_out=unit,
@@ -298,11 +300,11 @@ def _fetch_one_chunk(
 
 
 # ----------------------------------------------------------------------
-# Snap-to-hour (shared algorithm with WU client)
+# Extremum-preserving hourly aggregation (shared semantics with WU client)
 # ----------------------------------------------------------------------
 
 
-def _snap(
+def _aggregate(
     rows: list[tuple[datetime, float]],
     *,
     station: str,
@@ -313,37 +315,49 @@ def _snap(
     start_date: date,
     end_date: date,
 ):
-    """Generator: yield one ``HourlyObservation`` per UTC hour bucket."""
+    """Generator: yield one ``HourlyObservation`` per UTC hour bucket.
+
+    Each yielded row carries the bucket's maximum and minimum
+    temperature (with their raw METAR timestamps), preserving intra-hour
+    SPECI extremes that the old snap-to-HH:00 logic would have erased.
+    See wu_hourly_client module docstring for why this matters.
+
+    Temperature-unit conversion (C -> F) applies AFTER aggregation, so
+    rounding behavior is identical regardless of unit.
+    """
     tz = ZoneInfo(timezone_name)
-    buckets: dict[datetime, tuple[int, datetime, float]] = {}
+
+    # Bucket: hour_floor -> list of (temp_c, raw_utc_dt)
+    buckets: dict[datetime, list[tuple[float, datetime]]] = {}
     for utc_dt, temp_c in rows:
         hour_floor = utc_dt.replace(minute=0, second=0, microsecond=0)
-        delta_seconds = abs((utc_dt - hour_floor).total_seconds())
-        if delta_seconds > 30 * 60:
-            hour_floor = hour_floor + timedelta(hours=1)
-            delta_seconds = abs((utc_dt - hour_floor).total_seconds())
-        if delta_seconds > _SNAP_WINDOW_SECONDS:
-            continue
-        existing = buckets.get(hour_floor)
-        if existing is None or delta_seconds < existing[0]:
-            buckets[hour_floor] = (int(delta_seconds), utc_dt, temp_c)
+        buckets.setdefault(hour_floor, []).append((temp_c, utc_dt))
+
+    def _convert(temp_c: float) -> float:
+        if unit_out == "F":
+            return temp_c * 9.0 / 5.0 + 32.0
+        return temp_c
 
     for hour_floor in sorted(buckets):
-        _, raw_utc, temp_c = buckets[hour_floor]
+        obs_list = buckets[hour_floor]
         local_dt = hour_floor.astimezone(tz)
         local_date = local_dt.date()
         if local_date < start_date or local_date > end_date:
             continue
+
+        max_temp, max_dt = obs_list[0]
+        min_temp, min_dt = obs_list[0]
+        for temp_v, dt_v in obs_list[1:]:
+            if temp_v > max_temp or (temp_v == max_temp and dt_v < max_dt):
+                max_temp, max_dt = temp_v, dt_v
+            if temp_v < min_temp or (temp_v == min_temp and dt_v < min_dt):
+                min_temp, min_dt = temp_v, dt_v
+
         utc_offset = local_dt.utcoffset()
         dst_offset = local_dt.dst()
         dst_active = bool(dst_offset and dst_offset.total_seconds() > 0)
         is_missing = _detect_missing_local_hour(hour_floor, tz)
         is_ambiguous = bool(getattr(local_dt, "fold", 0))
-
-        if unit_out == "F":
-            temp_out = temp_c * 9.0 / 5.0 + 32.0
-        else:
-            temp_out = temp_c
 
         yield HourlyObservation(
             city=city_name,
@@ -357,12 +371,14 @@ def _snap(
             dst_active=1 if dst_active else 0,
             is_ambiguous_local_hour=1 if is_ambiguous else 0,
             is_missing_local_hour=1 if is_missing else 0,
-            time_basis="utc_hour_aligned",
-            temp_current=float(temp_out),
+            time_basis="utc_hour_bucket_extremum",
+            hour_max_temp=_convert(max_temp),
+            hour_min_temp=_convert(min_temp),
+            hour_max_raw_ts=max_dt.isoformat(),
+            hour_min_raw_ts=min_dt.isoformat(),
             temp_unit=unit_out,
             station_id=station,
-            observation_count=1,
-            raw_obs_ts=raw_utc.isoformat(),
+            observation_count=len(obs_list),
         )
 
 

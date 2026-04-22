@@ -1,12 +1,18 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
-# Authority basis: plan v3 Phase 0 files #4/#5 (.omc/plans/observation-
-#                  instants-migration-iter3.md L86-93).
-"""Networkless parse + snap tests for WU/Ogimet hourly clients.
+# Last reused/audited: 2026-04-21 (extremum-preservation redesign per operator)
+# Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
+#                  correction 2026-04-21 (operator).
+"""Networkless parse + aggregate tests for WU/Ogimet hourly clients.
 
-End-to-end HTTP tests live in the backfill driver's own live-probe
-script — this file pins the parse/snap logic deterministically so a
-CI without network can verify behavior.
+Two invariant families:
+1. METAR/CSV parsing correctness (regex + field extraction).
+2. Extremum-preserving hourly aggregation — the contract that each UTC
+   hour bucket emits one row carrying the max AND min observed across
+   all raw reports in that hour, with their raw timestamps preserved.
+
+A regression in #2 would reintroduce the "closest-to-HH:00 snap" bug
+that would erase intra-hour SPECI peaks (fatal for PM daily-max
+settlement and for Day-0 stop-loss monitoring).
 """
 from __future__ import annotations
 
@@ -16,15 +22,15 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.data.ogimet_hourly_client import (
+    _aggregate as ogimet_aggregate,
     _parse_metar_csv_line,
     _parse_metar_temp_c,
-    _snap as ogimet_snap,
 )
-from src.data.wu_hourly_client import HourlyObservation, _snap_to_hourly
+from src.data.wu_hourly_client import HourlyObservation, _aggregate_hourly
 
 
 # ----------------------------------------------------------------------
-# METAR temperature parse
+# METAR temperature parse (unchanged)
 # ----------------------------------------------------------------------
 
 
@@ -46,7 +52,7 @@ def test_parse_metar_temp_missing_group():
 
 
 # ----------------------------------------------------------------------
-# CSV line parse (Ogimet format)
+# CSV line parse (Ogimet format, unchanged)
 # ----------------------------------------------------------------------
 
 
@@ -69,18 +75,25 @@ def test_parse_csv_line_bad_date_returns_none():
 
 
 # ----------------------------------------------------------------------
-# WU snap: sub-hourly → one per top-of-hour
+# WU extremum-preserving aggregation (the critical contract)
 # ----------------------------------------------------------------------
 
 
-def test_wu_snap_picks_closest_to_top_of_hour():
-    """Two obs in the same hour bucket: the one closer to HH:00 wins."""
-    # Both in the 14:00 UTC bucket; one at 14:05, one at 14:58.
-    raw = [
-        {"valid_time_gmt": int(datetime(2024, 1, 15, 14, 5, tzinfo=timezone.utc).timestamp()), "temp": 10.0},
-        {"valid_time_gmt": int(datetime(2024, 1, 15, 14, 58, tzinfo=timezone.utc).timestamp()), "temp": 12.0},
-    ]
-    snapped = _snap_to_hourly(
+def _wu_obs(hour: int, minute: int, temp: float, *, month: int = 1, day: int = 15) -> dict:
+    dt = datetime(2024, month, day, hour, minute, tzinfo=timezone.utc)
+    return {"valid_time_gmt": int(dt.timestamp()), "temp": temp}
+
+
+def test_wu_aggregate_emits_hour_max_and_min_from_same_bucket():
+    """The KEY extremum invariant: a SPECI peak MUST land in hour_max.
+
+    Scenario: 14:00 METAR=79°F, 14:35 SPECI=82°F, 15:00 METAR=80°F.
+    The 14:00 bucket carries MAX=82°F (the SPECI), not 79°F.
+    The old snap-to-HH:00 logic would have kept 79°F and the 82°F
+    would be erased forever — fatal for PM settlement alignment.
+    """
+    raw = [_wu_obs(14, 0, 79.0), _wu_obs(14, 35, 82.0), _wu_obs(15, 0, 80.0)]
+    out = _aggregate_hourly(
         raw,
         icao="KORD",
         unit="F",
@@ -89,21 +102,38 @@ def test_wu_snap_picks_closest_to_top_of_hour():
         start_date=date(2024, 1, 15),
         end_date=date(2024, 1, 15),
     )
-    # 14:05 is 5 min from 14:00, 14:58 is 2 min from 15:00 (goes to 15:00 bucket).
-    # So 14:00 gets 10.0, and 15:00 gets 12.0.
-    by_hour = {o.utc_timestamp: o.temp_current for o in snapped}
-    assert by_hour["2024-01-15T14:00:00+00:00"] == 10.0
-    assert by_hour["2024-01-15T15:00:00+00:00"] == 12.0
+    by_hour = {o.utc_timestamp: o for o in out}
+    bucket_14 = by_hour["2024-01-15T14:00:00+00:00"]
+    bucket_15 = by_hour["2024-01-15T15:00:00+00:00"]
+    # 14:00 bucket: max=82 (the SPECI), min=79 (the METAR)
+    assert bucket_14.hour_max_temp == 82.0
+    assert bucket_14.hour_min_temp == 79.0
+    assert bucket_14.hour_max_raw_ts.startswith("2024-01-15T14:35:00")
+    assert bucket_14.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
+    assert bucket_14.observation_count == 2
+    # 15:00 bucket has a single obs; max == min == 80
+    assert bucket_15.hour_max_temp == 80.0
+    assert bucket_15.hour_min_temp == 80.0
+    assert bucket_15.observation_count == 1
 
 
-def test_wu_snap_drops_obs_outside_snap_window():
-    """An obs at HH:31 is equidistant to HH:00 and (HH+1):00 — still snaps."""
-    # At exactly HH:30 the code snaps to next hour. Try HH:31 — still 29 min
-    # from next hour top, so should snap to HH+1:00.
+def test_wu_aggregate_daily_max_equals_settlement():
+    """MAX(hour_max_temp) across the day == the WU daily settlement high.
+
+    If this invariant breaks, Platt calibration learns a phantom bias.
+    """
+    # Mixed-hour day with one clear SPECI peak inside hour 14.
     raw = [
-        {"valid_time_gmt": int(datetime(2024, 1, 15, 14, 31, tzinfo=timezone.utc).timestamp()), "temp": 7.0},
+        _wu_obs(10, 0, 75.0),
+        _wu_obs(11, 0, 77.0),
+        _wu_obs(12, 0, 79.0),
+        _wu_obs(13, 0, 80.0),
+        _wu_obs(14, 0, 79.0),
+        _wu_obs(14, 35, 82.0),  # <-- the peak, an off-hour SPECI
+        _wu_obs(15, 0, 80.0),
+        _wu_obs(16, 0, 78.0),
     ]
-    snapped = _snap_to_hourly(
+    out = _aggregate_hourly(
         raw,
         icao="KORD",
         unit="F",
@@ -112,54 +142,102 @@ def test_wu_snap_drops_obs_outside_snap_window():
         start_date=date(2024, 1, 15),
         end_date=date(2024, 1, 15),
     )
-    # Should snap to 15:00 (29 min from 14:31)
-    by_hour = {o.utc_timestamp: o.temp_current for o in snapped}
-    assert "2024-01-15T15:00:00+00:00" in by_hour
+    daily_max = max(o.hour_max_temp for o in out if o.target_date == "2024-01-15")
+    assert daily_max == 82.0  # NOT 80.0 (the snap-to-HH:00 value)
 
 
-def test_wu_snap_attaches_all_fields():
-    """Ensures the HourlyObservation has every field the writer needs."""
+def test_wu_aggregate_multi_obs_bucket_tracks_both_max_and_min():
+    """Bucket with 4 obs: hour_max and hour_min come from correct rows."""
     raw = [
-        {
-            "valid_time_gmt": int(
-                datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc).timestamp()
-            ),
-            "temp": 32.0,
-        },
+        _wu_obs(14, 0, 70.0),
+        _wu_obs(14, 15, 75.0),
+        _wu_obs(14, 30, 78.0),
+        _wu_obs(14, 45, 72.0),
     ]
-    [obs] = _snap_to_hourly(
-        raw,
-        icao="KORD",
-        unit="F",
-        timezone_name="America/Chicago",
-        city_name="Chicago",
-        start_date=date(2024, 1, 15),
-        end_date=date(2024, 1, 16),
+    out = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
     )
-    assert obs.city == "Chicago"
-    assert obs.station_id == "KORD"
-    assert obs.temp_unit == "F"
-    assert obs.time_basis == "utc_hour_aligned"
-    assert obs.utc_timestamp == "2024-01-15T14:00:00+00:00"
-    assert obs.local_timestamp.startswith("2024-01-15T08:00:00")  # CST = UTC-6
-    assert obs.local_hour == 8.0
-    assert obs.utc_offset_minutes == -360
-    assert obs.observation_count == 1
-    assert obs.is_ambiguous_local_hour == 0
-    assert obs.is_missing_local_hour == 0
+    [bucket] = [o for o in out if o.utc_timestamp == "2024-01-15T14:00:00+00:00"]
+    assert bucket.hour_max_temp == 78.0
+    assert bucket.hour_max_raw_ts.startswith("2024-01-15T14:30:00")
+    assert bucket.hour_min_temp == 70.0
+    assert bucket.hour_min_raw_ts.startswith("2024-01-15T14:00:00")
+    assert bucket.observation_count == 4
+
+
+def test_wu_aggregate_single_obs_bucket_max_equals_min():
+    raw = [_wu_obs(14, 0, 32.0)]
+    [bucket] = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert bucket.hour_max_temp == 32.0
+    assert bucket.hour_min_temp == 32.0
+    assert bucket.observation_count == 1
+
+
+def test_wu_aggregate_attaches_all_fields():
+    raw = [_wu_obs(14, 0, 32.0), _wu_obs(14, 35, 35.0)]
+    [bucket] = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert bucket.city == "Chicago"
+    assert bucket.station_id == "KORD"
+    assert bucket.temp_unit == "F"
+    assert bucket.time_basis == "utc_hour_bucket_extremum"
+    assert bucket.utc_timestamp == "2024-01-15T14:00:00+00:00"
+    assert bucket.local_timestamp.startswith("2024-01-15T08:00:00")  # CST = UTC-6
+    assert bucket.local_hour == 8.0
+    assert bucket.utc_offset_minutes == -360
+
+
+def test_wu_aggregate_filters_by_local_date_window():
+    """Obs whose local date is outside the window are dropped."""
+    raw = [
+        _wu_obs(5, 0, 30.0),   # Chicago CST: 2024-01-14 23:00 (drop)
+        _wu_obs(14, 0, 32.0),  # Chicago CST: 2024-01-15 08:00 (keep)
+    ]
+    out = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert len(out) == 1
+    assert out[0].target_date == "2024-01-15"
+
+
+def test_wu_aggregate_determinism_on_temp_tie():
+    """If two obs in the same bucket have equal temp, the earlier wins for max AND min.
+
+    Pins the tiebreak so provenance_json.hour_max_raw_ts is stable across
+    re-runs.
+    """
+    raw = [
+        _wu_obs(14, 15, 32.0),  # earlier
+        _wu_obs(14, 45, 32.0),  # later, same temp
+    ]
+    [bucket] = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert bucket.hour_max_raw_ts.startswith("2024-01-15T14:15:00")
+    assert bucket.hour_min_raw_ts.startswith("2024-01-15T14:15:00")
 
 
 # ----------------------------------------------------------------------
-# Ogimet snap: unit conversion + emit
+# Ogimet extremum-preserving aggregation
 # ----------------------------------------------------------------------
 
 
-def test_ogimet_snap_emits_celsius_natively():
+def test_ogimet_aggregate_preserves_extremum():
     rows = [
         (datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 10.0),
+        (datetime(2024, 1, 15, 14, 35, tzinfo=timezone.utc), 13.0),  # SPECI peak
+        (datetime(2024, 1, 15, 15, 0, tzinfo=timezone.utc), 11.0),
     ]
     out = list(
-        ogimet_snap(
+        ogimet_aggregate(
             rows,
             station="UUWW",
             unit_out="C",
@@ -170,114 +248,97 @@ def test_ogimet_snap_emits_celsius_natively():
             end_date=date(2024, 1, 15),
         )
     )
-    assert len(out) == 1
-    obs = out[0]
-    assert obs.temp_current == 10.0
-    assert obs.temp_unit == "C"
-    assert obs.station_id == "UUWW"
+    by_hour = {o.utc_timestamp: o for o in out}
+    bucket_14 = by_hour["2024-01-15T14:00:00+00:00"]
+    assert bucket_14.hour_max_temp == 13.0
+    assert bucket_14.hour_min_temp == 10.0
+    assert bucket_14.observation_count == 2
 
 
-def test_ogimet_snap_converts_to_fahrenheit_on_request():
-    rows = [
-        (datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 0.0),  # 0°C → 32°F
-    ]
-    out = list(
-        ogimet_snap(
-            rows,
-            station="UUWW",
-            unit_out="F",
-            timezone_name="Europe/Moscow",
-            city_name="Moscow",
-            source_tag="ogimet_metar_uuww",
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
+def test_ogimet_aggregate_emits_celsius_natively():
+    rows = [(datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 10.0)]
+    [bucket] = ogimet_aggregate(
+        rows, station="UUWW", unit_out="C", timezone_name="Europe/Moscow",
+        city_name="Moscow", source_tag="ogimet_metar_uuww",
+        start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
     )
-    assert len(out) == 1
-    assert out[0].temp_current == 32.0
-    assert out[0].temp_unit == "F"
+    assert bucket.hour_max_temp == 10.0
+    assert bucket.temp_unit == "C"
+    assert bucket.station_id == "UUWW"
 
 
-def test_ogimet_snap_filters_by_local_date_window():
-    """Observations whose local date falls outside the window are dropped."""
-    # Moscow is UTC+3. 2024-01-15 22:00 UTC = 2024-01-16 01:00 local
-    # → should be excluded when end_date=2024-01-15.
+def test_ogimet_aggregate_converts_to_fahrenheit_on_request():
+    rows = [(datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 0.0)]
+    [bucket] = ogimet_aggregate(
+        rows, station="UUWW", unit_out="F", timezone_name="Europe/Moscow",
+        city_name="Moscow", source_tag="ogimet_metar_uuww",
+        start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
+    )
+    assert bucket.hour_max_temp == 32.0
+    assert bucket.temp_unit == "F"
+
+
+def test_ogimet_aggregate_filters_by_local_date_window():
+    """Moscow is UTC+3. 2024-01-15 22:00 UTC = 2024-01-16 01:00 local (drop)."""
     rows = [
         (datetime(2024, 1, 15, 14, 0, tzinfo=timezone.utc), 10.0),  # keep
         (datetime(2024, 1, 15, 22, 0, tzinfo=timezone.utc), 5.0),  # drop
     ]
     out = list(
-        ogimet_snap(
-            rows,
-            station="UUWW",
-            unit_out="C",
-            timezone_name="Europe/Moscow",
-            city_name="Moscow",
-            source_tag="ogimet_metar_uuww",
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
+        ogimet_aggregate(
+            rows, station="UUWW", unit_out="C", timezone_name="Europe/Moscow",
+            city_name="Moscow", source_tag="ogimet_metar_uuww",
+            start_date=date(2024, 1, 15), end_date=date(2024, 1, 15),
         )
     )
     assert len(out) == 1
-    assert out[0].temp_current == 10.0
-
-
-def test_ogimet_snap_same_hour_keeps_closer_obs():
-    """Two obs in the 14:00 bucket: the closer wins."""
-    rows = [
-        (datetime(2024, 1, 15, 14, 2, tzinfo=timezone.utc), 5.0),  # closer
-        (datetime(2024, 1, 15, 14, 28, tzinfo=timezone.utc), 7.0),  # farther
-    ]
-    out = list(
-        ogimet_snap(
-            rows,
-            station="UUWW",
-            unit_out="C",
-            timezone_name="Europe/Moscow",
-            city_name="Moscow",
-            source_tag="ogimet_metar_uuww",
-            start_date=date(2024, 1, 15),
-            end_date=date(2024, 1, 15),
-        )
-    )
-    assert len(out) == 1
-    assert out[0].temp_current == 5.0  # the 14:02 obs
+    assert out[0].hour_max_temp == 10.0
 
 
 # ----------------------------------------------------------------------
-# DST handling — Chicago spring-forward on 2024-03-10
+# DST regression
 # ----------------------------------------------------------------------
 
 
-def test_wu_snap_detects_missing_local_hour_on_dst_spring_forward():
-    """2024-03-10 07:00 UTC = 01:00 CST (standard), 08:00 UTC = 03:00 CDT.
+def test_wu_aggregate_handles_dst_spring_forward_correctly():
+    """2024-03-10 Chicago: 07:00 UTC = 01:00 CST, 08:00 UTC = 03:00 CDT.
 
-    The 2:00 local wall-clock hour doesn't exist. Our algorithm snaps
-    to UTC hours, so the raw row at 07:30 UTC lands in the 07:00 bucket
-    which maps to local 01:00 (fine) or 08:00 bucket mapping to 03:00
-    (fine). A "missing local hour" is flagged when the round-trip
-    local→UTC doesn't match. For CST→CDT at 08:00 UTC the local is
-    03:00 CDT which round-trips correctly, so is_missing=0. The only
-    time this flag fires is if someone tries to stamp 02:00 local —
-    which our UTC-first algorithm never does.
+    The local 02:00 wall-clock is non-existent. Our UTC-first aggregation
+    never synthesizes that hour — we just have the UTC buckets.
     """
-    raw = [
-        {
-            "valid_time_gmt": int(
-                datetime(2024, 3, 10, 8, 0, tzinfo=timezone.utc).timestamp()
-            ),
-            "temp": 35.0,
-        },
-    ]
-    [obs] = _snap_to_hourly(
-        raw,
-        icao="KORD",
-        unit="F",
-        timezone_name="America/Chicago",
-        city_name="Chicago",
-        start_date=date(2024, 3, 10),
-        end_date=date(2024, 3, 10),
+    raw = [_wu_obs(8, 0, 35.0, month=3, day=10)]  # 2024-03-10 08:00 UTC = 03:00 CDT
+    out = _aggregate_hourly(
+        raw, icao="KORD", unit="F", timezone_name="America/Chicago",
+        city_name="Chicago", start_date=date(2024, 3, 10), end_date=date(2024, 3, 10),
     )
-    assert obs.local_hour == 3.0  # Correctly lands at 03:00 CDT
-    assert obs.dst_active == 1  # DST now in effect
-    assert obs.is_missing_local_hour == 0  # UTC-first snap never produces 02:00 local
+    [bucket] = out
+    assert bucket.local_hour == 3.0  # jumped from 01:00 CST to 03:00 CDT
+    assert bucket.dst_active == 1
+    assert bucket.is_missing_local_hour == 0  # UTC-first never hits 02:00 local
+
+
+# ----------------------------------------------------------------------
+# Negative: the old snap-to-HH:00 bug pattern must not reappear
+# ----------------------------------------------------------------------
+
+
+def test_no_hourly_observation_field_named_temp_current():
+    """Regression antibody against the broken snap semantics.
+
+    The old HourlyObservation had a single ``temp_current`` field which
+    carried the closest-to-HH:00 obs (erasing extrema). The new struct
+    carries hour_max_temp + hour_min_temp instead. If someone re-adds
+    temp_current to the struct, this test fails and forces the PR
+    author to confront the extremum semantics before merging.
+    """
+    fields = set(HourlyObservation.__dataclass_fields__.keys())
+    assert "temp_current" not in fields, (
+        "HourlyObservation.temp_current re-introduced — this was the "
+        "snap-to-HH:00 field whose removal is enforced by "
+        "extremum-preservation semantics. Use hour_max_temp + "
+        "hour_min_temp instead."
+    )
+    assert "hour_max_temp" in fields
+    assert "hour_min_temp" in fields
+    assert "hour_max_raw_ts" in fields
+    assert "hour_min_raw_ts" in fields

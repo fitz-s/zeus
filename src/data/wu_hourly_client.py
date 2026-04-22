@@ -63,28 +63,37 @@ WU_HOURLY_SOURCE = "wu_icao_history"
 
 @dataclass(frozen=True)
 class HourlyObservation:
-    """One top-of-hour observation, ready for ``ObsV2Row`` construction.
+    """One UTC-hour bucket of observations, extremum-preserving.
 
-    Fields map 1:1 to ``observation_instants_v2`` columns. The backfill
-    driver is responsible for attaching ``authority``, ``data_version``,
-    and ``provenance_json`` before handing the row to the writer.
+    Fields map to ``observation_instants_v2`` columns via the backfill
+    driver's ``_hourly_obs_to_v2_row`` translator. Critically, this
+    struct carries the **maximum and minimum** observed temperature
+    across the bucket's [HH:00, HH+1:00) window, NOT a single
+    snap-to-HH:00 point (see module docstring for rationale).
+
+    The daily extremum that matches WU settlement is computed downstream
+    as ``MAX(hour_max_temp)`` / ``MIN(hour_min_temp)`` grouped by
+    ``target_date``.
     """
 
     city: str  # settlement-station city name (cities.json key)
     target_date: str  # 'YYYY-MM-DD' local date
     local_hour: float
     local_timestamp: str  # ISO with offset
-    utc_timestamp: str  # ISO with +00:00
+    utc_timestamp: str  # ISO with +00:00 at HH:00 bucket boundary
     utc_offset_minutes: int
     dst_active: int
     is_ambiguous_local_hour: int
     is_missing_local_hour: int
-    time_basis: str  # 'utc_hour_aligned' for snap-to-hour
-    temp_current: float
+    time_basis: str  # 'utc_hour_bucket_extremum' for per-hour aggregate
+    # --- extremum-preserving temperature fields ---
+    hour_max_temp: float  # max(temp) across all obs in [HH:00, HH+1:00)
+    hour_min_temp: float  # min(temp) across all obs in [HH:00, HH+1:00)
+    hour_max_raw_ts: str  # raw METAR timestamp where max was observed
+    hour_min_raw_ts: str  # raw METAR timestamp where min was observed
     temp_unit: str  # 'F' or 'C'
     station_id: str  # ICAO (e.g. 'KORD')
-    observation_count: int  # raw METAR reports that contributed (1 after snap)
-    raw_obs_ts: str  # the actual METAR valid_time ISO, for audit
+    observation_count: int  # raw METAR/SPECI reports in the bucket
 
 
 @dataclass(frozen=True)
@@ -106,10 +115,6 @@ class WuHourlyFetchResult:
 # ----------------------------------------------------------------------
 # Fetch
 # ----------------------------------------------------------------------
-
-# Snap window: ±30 minutes around each UTC top-of-hour.
-_SNAP_WINDOW_SECONDS = 30 * 60
-
 
 def fetch_wu_hourly(
     icao: str,
@@ -221,7 +226,7 @@ def fetch_wu_hourly(
             error=f"json parse failed: {exc}",
         )
     raw_observations = body.get("observations", []) or []
-    snapped = _snap_to_hourly(
+    aggregated = _aggregate_hourly(
         raw_observations,
         icao=icao,
         unit=unit,
@@ -231,17 +236,17 @@ def fetch_wu_hourly(
         end_date=end_date,
     )
     return WuHourlyFetchResult(
-        observations=snapped,
+        observations=aggregated,
         raw_observation_count=len(raw_observations),
     )
 
 
 # ----------------------------------------------------------------------
-# Snap-to-hour
+# Extremum-preserving hourly aggregation
 # ----------------------------------------------------------------------
 
 
-def _snap_to_hourly(
+def _aggregate_hourly(
     raw_observations: list[dict],
     *,
     icao: str,
@@ -251,19 +256,29 @@ def _snap_to_hourly(
     start_date: date,
     end_date: date,
 ) -> list[HourlyObservation]:
-    """Snap METAR-cadence observations to one ``HourlyObservation`` per UTC hour.
+    """Aggregate METAR-cadence observations into per-UTC-hour bucket extrema.
 
-    Algorithm:
-    1. Parse each raw obs into (utc_dt, temp).
-    2. Bucket by UTC hour (truncate to :00).
-    3. Within each bucket, pick the obs closest to the bucket's HH:00.
-    4. Emit one ``HourlyObservation`` per bucket for hours within the
-       local-date range [start_date, end_date].
+    Each raw obs is parsed into ``(utc_dt, temp, raw_ts_iso)`` and
+    assigned to the UTC hour floor ``[HH:00, HH+1:00)``. For every
+    bucket that contains ≥1 obs AND whose bucket hour falls within the
+    local-date range ``[start_date, end_date]``, emit exactly one
+    ``HourlyObservation`` carrying:
+
+    - ``hour_max_temp`` = max temp in the bucket
+    - ``hour_min_temp`` = min temp in the bucket
+    - ``hour_max_raw_ts`` = raw METAR timestamp of the max
+    - ``hour_min_raw_ts`` = raw METAR timestamp of the min
+    - ``observation_count`` = number of raw obs in the bucket
+
+    This preserves intra-hour extremes (e.g. a 14:35 SPECI reporting the
+    day's peak) so downstream daily-max queries
+    (``MAX(hour_max_temp) GROUP BY target_date``) equal the WU daily
+    settlement value exactly.
     """
     tz = ZoneInfo(timezone_name)
 
-    # (utc_hour_floor, seconds_from_top_of_hour, obs_dict)
-    buckets: dict[datetime, tuple[int, dict]] = {}
+    # Bucket: hour_floor -> list of (temp, raw_utc_dt)
+    buckets: dict[datetime, list[tuple[float, datetime]]] = {}
     for obs in raw_observations:
         temp = obs.get("temp")
         epoch = obs.get("valid_time_gmt")
@@ -271,40 +286,36 @@ def _snap_to_hourly(
             continue
         try:
             utc_dt = datetime.fromtimestamp(int(epoch), timezone.utc)
-        except (ValueError, OSError, OverflowError):
+            temp_f = float(temp)
+        except (ValueError, OSError, OverflowError, TypeError):
             continue
         hour_floor = utc_dt.replace(minute=0, second=0, microsecond=0)
-        delta_seconds = abs((utc_dt - hour_floor).total_seconds())
-        # Handle the >30min case: snap to the next hour if closer
-        if delta_seconds > 30 * 60:
-            hour_floor = hour_floor + timedelta(hours=1)
-            delta_seconds = abs((utc_dt - hour_floor).total_seconds())
-        if delta_seconds > _SNAP_WINDOW_SECONDS:
-            continue  # too far from any hour (shouldn't happen if math is right)
-        existing = buckets.get(hour_floor)
-        if existing is None or delta_seconds < existing[0]:
-            buckets[hour_floor] = (int(delta_seconds), obs)
+        buckets.setdefault(hour_floor, []).append((temp_f, utc_dt))
 
     out: list[HourlyObservation] = []
     for hour_floor in sorted(buckets):
-        _, obs = buckets[hour_floor]
+        obs_list = buckets[hour_floor]
         local_dt = hour_floor.astimezone(tz)
         local_date = local_dt.date()
         if local_date < start_date or local_date > end_date:
             continue
+
+        # Find max and min, tracking their raw timestamps.
+        # In the (rare) tie case pick the earlier obs for determinism.
+        max_temp, max_dt = obs_list[0]
+        min_temp, min_dt = obs_list[0]
+        for temp_v, dt_v in obs_list[1:]:
+            if temp_v > max_temp or (temp_v == max_temp and dt_v < max_dt):
+                max_temp, max_dt = temp_v, dt_v
+            if temp_v < min_temp or (temp_v == min_temp and dt_v < min_dt):
+                min_temp, min_dt = temp_v, dt_v
+
         utc_offset = local_dt.utcoffset()
         dst_offset = local_dt.dst()
         dst_active = bool(dst_offset and dst_offset.total_seconds() > 0)
-        # is_missing_local_hour: the wall clock at this moment doesn't
-        # exist in the local tz (spring-forward). ZoneInfo handles this
-        # via fold; a normalized compare is the cleanest detection.
         is_missing = _detect_missing_local_hour(hour_floor, tz)
         is_ambiguous = bool(getattr(local_dt, "fold", 0))
 
-        temp = obs.get("temp")
-        raw_ts = datetime.fromtimestamp(
-            int(obs["valid_time_gmt"]), timezone.utc
-        ).isoformat()
         out.append(
             HourlyObservation(
                 city=city_name,
@@ -318,12 +329,14 @@ def _snap_to_hourly(
                 dst_active=1 if dst_active else 0,
                 is_ambiguous_local_hour=1 if is_ambiguous else 0,
                 is_missing_local_hour=1 if is_missing else 0,
-                time_basis="utc_hour_aligned",
-                temp_current=float(temp),
+                time_basis="utc_hour_bucket_extremum",
+                hour_max_temp=max_temp,
+                hour_min_temp=min_temp,
+                hour_max_raw_ts=max_dt.isoformat(),
+                hour_min_raw_ts=min_dt.isoformat(),
                 temp_unit=unit,
                 station_id=icao,
-                observation_count=1,
-                raw_obs_ts=raw_ts,
+                observation_count=len(obs_list),
             )
         )
     return out
