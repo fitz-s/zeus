@@ -1,5 +1,9 @@
 # 市场微观结构研究：谁在交易，价格在哪里错，Edge 能活多久
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > CONDITIONAL MARKET RESEARCH - NOT DEFAULT READ.
 > Read `docs/reference/zeus_market_settlement_reference.md` and executable
 > execution-price/vig contracts first. This file is frozen support for
@@ -343,7 +347,7 @@ ECMWF 00Z 运行数据通常在 ~06:00-07:00 UTC 完成，通过 Open-Meteo 在 
 
 ## 综合定位建议
 
-将以上分析综合，Rainstorm 的最优定位不是"更好的天气预报系统"，而是：
+将以上分析综合，zeus 的最优定位不是"更好的天气预报系统"，而是：
 
 **一个利用市场结构性低效的高频小额交易系统。**
 

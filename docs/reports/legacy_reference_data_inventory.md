@@ -1,5 +1,9 @@
 # Data We Have
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > CONDITIONAL DATA INVENTORY - NOT DEFAULT READ.
 > Read `docs/reference/zeus_data_and_replay_reference.md` and
 > `architecture/data_rebuild_topology.yaml` first. This file remains frozen

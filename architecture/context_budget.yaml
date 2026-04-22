@@ -49,12 +49,6 @@ file_budgets:
     diet_target: >
       Lore may grow, but digest routing must stay selective. If this registry
       keeps growing, split cards by domain only after routing stays precise.
-  - path: docs/reference/statistical_methodology.md
-    role: conditional_deep_reference
-    max_lines: 800
-    enforcement: advisory
-    diet_target: >
-      Keep as conditional math methodology. Do not make it a default read path.
   - path: docs/reference/zeus_math_spec.md
     role: conditional_fact_spec
     max_lines: 800
@@ -71,25 +65,18 @@ file_budgets:
       snapshot; route detailed evidence to reports/artifacts.
   - path: docs/reference/zeus_market_settlement_reference.md
     role: compact_canonical_market_settlement_reference
-    max_lines: 220
+    max_lines: 320
     enforcement: advisory
     diet_target: >
-      Keep as compact market/settlement routing. Detailed city/source evidence
-      belongs in settlement_source_provenance.md.
-  - path: docs/reference/settlement_source_provenance.md
-    role: conditional_settlement_source_reference
-    max_lines: 360
-    enforcement: advisory
-    diet_target: >
-      Keep as detailed conditional settlement-source evidence. Compact concepts
-      belong in zeus_market_settlement_reference.md.
+      Keep as durable market/settlement concepts. Current city/source facts
+      belong in operations current-fact surfaces, not reference support docs.
   - path: docs/reference/zeus_data_and_replay_reference.md
     role: compact_canonical_data_replay_reference
-    max_lines: 220
+    max_lines: 320
     enforcement: advisory
     diet_target: >
-      Keep as compact data/replay routing. Detailed inventory and strategy
-      sources remain conditional until replaced by generated inventory.
+      Keep as durable data/replay concepts. Current row counts and source state
+      belong in operations current-fact surfaces.
   - path: docs/reference/zeus_failure_modes_reference.md
     role: compact_canonical_failure_modes_reference
     max_lines: 220
@@ -112,6 +99,20 @@ file_budgets:
       Keep as the live current packet pointer and evidence list. Move runtime
       diaries, packet histories, and historical detail into packets, lore, or
       archive registry surfaces.
+  - path: docs/operations/current_data_state.md
+    role: volatile_current_fact_surface
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as compact audited data posture. Do not turn it into a data inventory
+      dump or authority law.
+  - path: docs/operations/current_source_validity.md
+    role: volatile_current_fact_surface
+    max_lines: 140
+    enforcement: advisory
+    diet_target: >
+      Keep as compact audited source-validity posture. Detailed dated audits
+      belong in reports/artifacts.
   - path: docs/runbooks/tigge_cloud_download.md
     role: durable_operator_runbook
     max_lines: 120

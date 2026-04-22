@@ -1,5 +1,9 @@
 # Zeus Data Strategy
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > CONDITIONAL ROADMAP EVIDENCE - NOT DEFAULT READ.
 > Read `docs/reference/zeus_data_and_replay_reference.md`,
 > `architecture/data_rebuild_topology.yaml`, and active operations packets

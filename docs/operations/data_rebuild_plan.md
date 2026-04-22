@@ -27,7 +27,7 @@ to the math-spec `1e-6` in a measured refit experiment.
 |---|---|
 | Math spec (`docs/reference/zeus_math_spec.md`) | v2 locked, includes WMO rounding + decision_group + open-boundary bins + logit clipping |
 | `AGENTS.md` §1 "Why settlement is integer" | Patched to WMO asymmetric half-up |
-| `docs/reference/statistical_methodology.md` | Patched (np.round → np.floor(x+0.5)) |
+| `docs/reports/legacy_reference_statistical_methodology.md` | Patched (np.round → np.floor(x+0.5)); historical evidence only |
 | TIGGE cache | 14 GB at `/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/` |
 | TIGGE regions multi-step (48-168h lead) | 11 GB, 2024-01-01 → 2026-03-09, GRIB files only, **no JSON extraction yet** |
 | TIGGE per-city 24h lead | 2.2 GB, 2023-10-23 → 2026-04-09, JSON already extracted |
@@ -880,8 +880,8 @@ The post-packet's job is to make Platt fit consume those inputs correctly. No da
 
 - `AGENTS.md` §1 — domain authority. Contains the patched WMO rounding rule.
 - `docs/reference/zeus_math_spec.md` v2 — math contract. Every rule in this plan must be consistent with it.
-- `docs/reference/statistical_methodology.md` — detailed statistics (Chinese). Rounding section patched.
-- `docs/reference/quantitative_research.md` — market microstructure and domain rationale.
+- `docs/reports/legacy_reference_statistical_methodology.md` — detailed statistics (Chinese), historical evidence only. Rounding section patched.
+- `docs/reports/legacy_reference_quantitative_research.md` — market microstructure and domain rationale, historical evidence only.
 - `docs/reference/zeus_domain_model.md` — 16-city worked example of the probability chain.
 - Archived packet `docs/archives/work_packets/branches/data-improve/data_rebuild/2026-04-13_zeus_data_improve_large_pack/DB rebuild/` — investigator reports (zeus-understanding-*.md), tracer evidence (data-flow-trace-*.md), K5-refactor _superseded/ files. Historical reference; not authoritative.
 

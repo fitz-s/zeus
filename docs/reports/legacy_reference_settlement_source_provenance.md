@@ -1,5 +1,9 @@
 # Settlement Source Provenance Registry
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > **Purpose**: Durable reference record for which data source Polymarket uses
 > to settle each city's daily temperature market. Polymarket can and does change
 > sources without notice.

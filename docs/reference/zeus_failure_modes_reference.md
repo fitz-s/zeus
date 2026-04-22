@@ -87,6 +87,23 @@ Mitigation: update `architecture/docs_registry.yaml`, scoped `AGENTS.md`,
 `current_state.md`, receipts, work logs, and topology checks with every
 material docs/workspace move.
 
+## Docs Truth Freshness Failure Modes
+
+Recurring class: stale factual docs remain in trusted reference locations after
+being bannered or frozen, so future agents still treat old current-tense facts
+as usable context.
+
+Examples:
+
+- volatile data/source facts stored under `docs/reference/`
+- canonical references pointing back to demoted support docs for current facts
+- current-state pointers left on closed packages
+- dated audit tables treated as durable source truth
+
+Mitigation: keep `docs/reference/` canonical-only, route current facts through
+`docs/operations/current_*.md`, and move dated analytical/support material to
+reports or artifacts.
+
 ## Mitigation And Antibody Crosswalk
 
 - Authority/projection boundary: `architecture/invariants.yaml`,

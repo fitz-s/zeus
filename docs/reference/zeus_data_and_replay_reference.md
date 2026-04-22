@@ -1,57 +1,84 @@
 # Zeus Data And Replay Reference
 
-Purpose: canonical descriptive reference for data availability, load-bearing
-surfaces, replay limitations, rebuild status, and data-quality risks. This file
-is not authority; runtime code, DB truth, manifests, active operations packets,
-and tests win on disagreement.
+Purpose: canonical descriptive reference for Zeus data surfaces, provenance
+expectations, replay limits, and current-state routing. This file is not
+authority; source code, DB truth, machine manifests, authority docs, and active
+packet evidence win on disagreement.
 
-Extracted from: `docs/reference/data_inventory.md`,
-`docs/reference/data_strategy.md`, `docs/operations/known_gaps.md`, and
-`docs/authority/zeus_dual_track_architecture.md`.
+## Data Truth Layers
 
-## Current Data Reality
+Zeus data is not one flat pool. It is layered:
 
-Zeus has multiple data classes with different authority levels:
+1. canonical DB/event truth
+2. current audited data-state surfaces
+3. replay/backtest diagnostic outputs
+4. reports/artifacts/workbooks as evidence
 
-- Canonical runtime/trade truth lives in DB/event/projection surfaces.
-- Weather/world truth lives in world-data tables and must preserve provenance.
-- Backtest/replay outputs are diagnostic and cannot authorize live behavior.
-- Reports, workbooks, and JSON exports are evidence/projections, not authority.
+Rows existing in a table do not automatically mean training eligibility,
+live-certification readiness, replay completeness, or authority to change
+runtime behavior.
 
-The active gap register now lives at `docs/operations/known_gaps.md`. It should
-be read for present-tense blockers, but it is still an operations surface, not
-architecture law.
+## Canonical DB Split
 
-## Load-Bearing Data Surfaces
+Current repo posture distinguishes:
 
-Key load-bearing surfaces include:
+- `state/zeus-world.db`: authoritative data/world DB
+- `state/zeus_trades.db`: trades DB
+- `state/zeus.db`: legacy DB, not the current canonical data surface
 
-- observations and observation provenance
-- hourly/local-time observation facts
-- solar/daylight context
-- settlement rows and PM outcome truth
-- ensemble snapshots and `p_raw` materialization
-- calibration pairs and Platt models
-- token price and execution facts
-- position events/projections for trade lifecycle truth
+Any reference text still centered on older primary-store names rather than the
+current split above is stale.
+
+## Legacy Versus v2 Posture
+
+Zeus currently has a structural split between:
+
+- legacy populated tables
+- v2 dual-track schema surfaces
+
+The current audited posture is:
+
+- v2 schemas exist
+- several v2 tables remain structurally empty
+- legacy daily and instant surfaces still carry the live historical data burden
+
+Read `docs/operations/current_data_state.md` for the present-tense audited
+posture. Do not duplicate volatile row counts here.
+
+## Load-Bearing Data Concepts
+
+Durable concepts:
+
+- provenance on write
+- point-in-time truth
+- authority/verification gates
+- metric identity: `temperature_metric`, `physical_quantity`,
+  `observation_field`, `data_version`
+- explicit distinction between canonical truth and diagnostic replay
 
 Data writes that matter for training or runtime decisions must carry provenance,
 authority, and point-in-time meaning. Rows existing in a table are not enough.
 
-## Replay Bottlenecks
+## Replay Remains Diagnostic Until Proven Otherwise
 
-Replay remains diagnostic unless it can reconstruct the decision-time truth
-surface. Major blockers historically include:
+Replay is not made truthful by having some historical settlements, having some
+forecasts, reconstructing a plausible outcome path, or producing attractive
+metrics.
 
-- missing forecast references
-- vector shape mismatch between live decisions and historical reconstruction
-- synthetic timestamps or fabricated decision-time context
-- settlement/source mismatch
-- incomplete price/microstructure history
-- calibration rows without authority/provenance separation
+Replay is only trustworthy when it preserves decision-time truth and the
+required point-in-time surfaces. Until then, it stays
+`diagnostic_non_promotion`.
 
-Backtest output is `diagnostic_non_promotion`: useful for investigation, not
-live authorization.
+## Current Fact Routing
+
+For present-tense data posture, read:
+
+- `docs/operations/current_data_state.md`
+- `docs/operations/known_gaps.md`
+- relevant Gate F packet evidence when needed
+
+This canonical reference is intentionally durable. It should not become a moving
+inventory dump.
 
 ## Dual-Track Implications
 
@@ -67,28 +94,18 @@ runtime degradation, but not canonical training. Daily-low Day0 causality is not
 a mirror of high Day0 and must route through nowcast behavior when the local day
 has already started.
 
-## Open Data Risks
+## What This File Is For
 
-Known high-level risks:
+Use this file to answer:
 
-- DST-safe historical rebuild for diurnal/hourly aggregates remains an active
-  certification concern.
-- Alternative data sources can be collected but still be unverified.
-- Forecast and observation coverage may be uneven across cities/time windows.
-- Root workbooks and reports can contain useful evidence but must be promoted
-  through manifests/tests/packets before changing behavior.
+- what data classes exist
+- what makes a data surface authoritative versus diagnostic
+- why replay promotion is hard
+- how dual-track identity interacts with data truth
 
 ## What This File Is Not
 
+- not a data inventory snapshot
 - not a rebuild approval
-- not a data inventory dump
-- not runtime DB truth
-- not a replacement for `architecture/data_rebuild_topology.yaml`
-
-Where to go next:
-
-- Current blockers: `docs/operations/known_gaps.md`
-- Rebuild law: `architecture/data_rebuild_topology.yaml`
-- Dual-track law: `docs/authority/zeus_dual_track_architecture.md`
-- Data source details pending extraction:
-  `docs/reference/data_inventory.md`, `docs/reference/data_strategy.md`
+- not a present-tense ingest dashboard
+- not a replacement for active current-fact surfaces

@@ -23,6 +23,8 @@ index, or archive catalog.
 | File | Purpose |
 |------|---------|
 | `known_gaps.md` | Active operational gap register; moved from docs root |
+| `current_data_state.md` | Active current-fact surface for audited data posture |
+| `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `runtime_artifact_inventory.md` | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
 
@@ -30,7 +32,7 @@ index, or archive catalog.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-21_docs_reclassification_reference_extraction/` | Active docs reclassification/reference extraction packet |
+| `task_2026-04-22_docs_truth_refresh/` | Active docs truth refresh / stale-reference purge packet |
 
 ### Packet Evidence
 
@@ -61,9 +63,12 @@ make a surface default-read unless `current_state.md` routes it.
 | `AGENTS.md` | operations router | Registry for live operations surfaces in this directory |
 | `current_state.md` | live pointer | Single current program, active packet, required evidence, freeze point, next action |
 | `known_gaps.md` | active support | Active operational gap register |
+| `current_data_state.md` | current fact | Current audited data posture; not authority law |
+| `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `runtime_artifact_inventory.md` | active support | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
-| `task_2026-04-21_docs_reclassification_reference_extraction/` | active packet | Active docs reclassification/reference extraction packet |
+| `task_2026-04-21_docs_reclassification_reference_extraction/` | packet evidence | Closed docs reclassification/reference extraction packet |
+| `task_2026-04-22_docs_truth_refresh/` | active packet | Active docs truth refresh / stale-reference purge packet |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |

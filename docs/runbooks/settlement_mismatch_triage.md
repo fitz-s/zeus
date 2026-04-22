@@ -106,9 +106,11 @@ When a source change is confirmed:
    - `settlement_source_type` → `wu_icao`, `noaa`, `hko`, or `cwa_station`
    - Add entry to `change_log` array with timestamp and details
 
-2. **Update `docs/reference/settlement_source_provenance.md`**:
-   - Add the transition to the city's history table
-   - Note the exact date range affected
+2. **Update current source-validity routing**:
+   - Update `docs/operations/current_source_validity.md` from fresh packet
+     evidence
+   - Add or refresh a dated audit report under `docs/reports/` when a new
+     source change is proven
 
 3. **Update daemon code** if source type changed (e.g., adding a new fetcher):
    - `src/data/daily_obs_append.py` — live observation pipeline

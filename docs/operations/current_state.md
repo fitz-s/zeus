@@ -5,40 +5,39 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
-- Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
-- Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: Docs reclassification package post-closeout review complete
-- Docs reclassification P0 commit: `b1a9761`
-- Docs reclassification P1 commit: `84d6d25`
-- P1 follow-up review: `proceed_to_p2`
-- Docs reclassification P2 commit: `1e1b9a7`
-- P2 follow-up review: `proceed_to_p3`
-- Docs reclassification P3 commit: `995c313`
-- P3 follow-up review: `proceed_to_closeout`
-- Prior workspace authority reconstruction is closed at `152f210`.
+- Mainline task: Docs Truth Refresh / Stale-Authority Purge (2026-04-22 package)
+- Active package source: `zeus_docs_truth_refresh_reconstruction_package_2026-04-22`
+- Active execution packet: `docs/operations/task_2026-04-22_docs_truth_refresh/plan.md`
+- Status: P0 stale truth purge and current-fact install complete; P0 review pending before P1
+- Prior docs reclassification package closed at `169b014`; post-closeout review
+  recorded at `6f51a8c`.
 
 ## Required evidence
 
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/12_codex_prompts/codex_closeout.md`
-- `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/11_validation_matrix.md`
-- `.omx/context/docs-reclassification-closeout-20260421T233946Z.md`
-- `.omx/plans/docs-reclassification-closeout-plan-2026-04-21.md`
-- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
-- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json`
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
+- `docs/operations/task_2026-04-21_gate_f_data_backfill/step1_schema_audit.md`
+- `docs/operations/task_2026-04-21_gate_f_data_backfill/step1b_source_validity.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/plan.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
 
 ## Freeze point
 
-- Do not open a later reference-fragment deletion packet until post-closeout
-  review confirms it is safe and `architecture/reference_replacement.yaml`
-  marks the target file deletion-ready.
-- Runtime-local details live in `docs/operations/runtime_artifact_inventory.md`
-  and `state/**`, not here.
+- Do not widen this package into runtime source, DB mutation, graph DB changes,
+  archive-body ingestion, or authority-law rewrites.
+- P2 owns freshness-aware registry schema and retirement of
+  `architecture/reference_replacement.yaml`; P0 only performs path/class cleanup.
+
+## Current fact companions
+
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
 
 ## Other operations surfaces
 
-Use `docs/operations/AGENTS.md` for the registered operations-surface classes
-and non-default packet/package routing.
+Use `docs/operations/AGENTS.md` for registered operations-surface classes and
+non-default packet/package routing.
 
 Visible non-default packet evidence:
 
@@ -50,10 +49,11 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-20_code_impact_graph_context_pack/`
 - `docs/operations/task_2026-04-20_code_review_graph_online_context/`
 - `docs/operations/task_2026-04-20_workspace_authority_reconstruction/`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/`
 - `docs/operations/task_2026-04-21_gate_f_data_backfill/`
 
 ## Next action
 
-- Later reference deletion/archive work requires a separate packet.
-- Keep later deletion/archive work in a separate packet.
-- Keep unrelated dirty work and local archive inputs untouched
+- Run P0 follow-up review
+- If review says `proceed_to_p1`, plan P1 reference/runbook completion
+- Preserve unrelated dirty work and local archive inputs

@@ -11,7 +11,7 @@ override current architecture law.
 Extracted from: `docs/artifacts/zeus_architecture_deep_map_2026-04-16.md`,
 `docs/reports/zeus_system_constitution_2026-04-16.md`,
 `docs/reports/zeus_refactor_plan_2026-04-16.md`, and
-`docs/reference/repo_overview.md`.
+`docs/reports/legacy_reference_repo_overview.md`.
 
 ## What Zeus Is
 

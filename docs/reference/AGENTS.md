@@ -1,6 +1,8 @@
 # docs/reference AGENTS
 
-Reference material — domain model, technical orientation, data status, methodology, and research. Read-only context for understanding Zeus. Not authority; authority lives in `docs/authority/`.
+Canonical reference material for Zeus. Reference docs explain durable concepts
+and orientation; they are not authority. Authority lives in `docs/authority/**`,
+machine manifests, tests, and executable source.
 
 ## Default vs conditional read path
 
@@ -8,46 +10,37 @@ Reference material — domain model, technical orientation, data status, methodo
 - `zeus_domain_model.md`
 
 **Conditional reads** (load only when the task directly requires them):
-- `zeus_architecture_reference.md` for compact deep architecture orientation
-- `zeus_market_settlement_reference.md` for compact settlement/market routing
-- `settlement_source_provenance.md` when city/source settlement evidence matters
-- `zeus_data_and_replay_reference.md` for compact data/replay status
-- `zeus_failure_modes_reference.md` for compact failure-class reviews
-- `zeus_math_spec.md` when math fact/spec context matters; executable law and authority manifests win
+- `zeus_architecture_reference.md` for architecture orientation
+- `zeus_market_settlement_reference.md` for settlement/market concepts
+- `zeus_data_and_replay_reference.md` for data/replay concepts
+- `zeus_failure_modes_reference.md` for failure-class reviews
+- `zeus_math_spec.md` when math fact/spec context matters
 
-Frozen conditional support:
-- `repo_overview.md` -> first read `zeus_architecture_reference.md`,
-  root `AGENTS.md`, and `workspace_map.md`
-- `data_inventory.md` -> first read `zeus_data_and_replay_reference.md` and
-  `architecture/data_rebuild_topology.yaml`
-- `data_strategy.md` -> first read `zeus_data_and_replay_reference.md`,
-  `architecture/data_rebuild_topology.yaml`, and active operations packets
-- `statistical_methodology.md` -> first read `zeus_math_spec.md`,
-  executable contracts, and targeted tests
-- `quantitative_research.md` -> first read `zeus_domain_model.md`,
-  `zeus_failure_modes_reference.md`, and `zeus_math_spec.md`
-- `market_microstructure.md` -> first read
-  `zeus_market_settlement_reference.md` and execution-price/vig contracts
+Current data/source facts live under operations current-fact surfaces, not in
+this directory. Dated analytical/support snapshots live under the reports
+subroot.
 
-Use frozen conditional support only when canonical references are not sufficient.
-Do not cite these files as durable defaults or authority.
-
-Replacement/deletion eligibility is tracked in `architecture/reference_replacement.yaml`.
+Replacement/deletion eligibility is now governed by
+`architecture/docs_registry.yaml` and packet evidence; do not recreate the old
+support-reference layer.
 
 ## File registry
 
 | File | Purpose |
 |------|---------|
-| `zeus_domain_model.md` | "Zeus in 5 minutes" — probability chain, four strategies, alpha decay, settlement semantics (incl. discrete support), worked examples, translation loss law, structural decisions methodology, data provenance model, DST case study |
-| `zeus_architecture_reference.md` | Compact canonical architecture reference extracted from legacy snapshots |
-| `zeus_market_settlement_reference.md` | Compact canonical market/settlement reference and triage routing |
-| `settlement_source_provenance.md` | Detailed settlement source/station provenance registry; reference evidence only |
-| `zeus_data_and_replay_reference.md` | Compact canonical data/replay reference extracted from inventory/strategy/gaps |
-| `zeus_failure_modes_reference.md` | Compact canonical failure-mode reference extracted from pathology/gap evidence |
-| `repo_overview.md` | Frozen conditional orientation support; superseded for default routing by architecture reference, root AGENTS, and workspace map |
-| `data_inventory.md` | Frozen conditional data inventory; keep until generated machine inventory replaces detailed coverage/source facts |
-| `data_strategy.md` | Frozen conditional data-roadmap evidence; extract lore before deletion |
-| `statistical_methodology.md` | Frozen conditional math methodology; executable contracts and `zeus_math_spec.md` win |
-| `quantitative_research.md` | Frozen conditional research evidence; extract lore before deletion |
-| `market_microstructure.md` | Frozen conditional market research; settlement reference and execution contracts win |
-| `zeus_math_spec.md` | Reference math/specification notes; executable law and authority manifests win on disagreement |
+| `zeus_domain_model.md` | Short domain model and first conceptual reference |
+| `zeus_architecture_reference.md` | Durable descriptive architecture reference |
+| `zeus_market_settlement_reference.md` | Durable market/settlement concepts and source-risk taxonomy |
+| `zeus_data_and_replay_reference.md` | Durable data/replay concepts and current-fact routing |
+| `zeus_failure_modes_reference.md` | Durable failure-mode and mitigation reference |
+| `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
+
+## Rules
+
+- Do not add stale support, dated audit, packet-evidence, workbook, or current
+  operational fact files here.
+- Do not route canonical references to demoted legacy-reference reports for
+  present-tense facts.
+- Use `docs/operations/current_data_state.md` and
+  `docs/operations/current_source_validity.md` for current audited facts.
+- Do not recreate a frozen support layer.

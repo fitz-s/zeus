@@ -1,5 +1,9 @@
 # 数学体系与数据架构研究
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > CONDITIONAL RESEARCH EVIDENCE - NOT DEFAULT READ.
 > Read `docs/reference/zeus_domain_model.md`,
 > `docs/reference/zeus_failure_modes_reference.md`, and

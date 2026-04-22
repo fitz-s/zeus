@@ -1,100 +1,99 @@
 # Zeus Market And Settlement Reference
 
-Purpose: canonical descriptive reference for market structure, settlement
-semantics, source provenance, and mismatch triage. This file is not authority;
-source code, tests, `SettlementSemantics`, manifests, and `docs/authority/**`
-win on disagreement.
-
-Extracted from: `docs/reference/settlement_source_provenance.md`,
-`docs/runbooks/settlement_mismatch_triage.md`,
-`docs/reference/market_microstructure.md`,
-`docs/artifacts/polymarket_city_settlement_audit_2026-04-14.md`, and
-`docs/reference/zeus_domain_model.md`.
+Purpose: canonical descriptive reference for market structure, discrete
+settlement semantics, provider/source risk classes, and mismatch triage
+routing. This file is not authority; executable contracts, manifests, authority
+docs, tests, and current audited source evidence win on disagreement.
 
 ## Why Settlement Semantics Dominate
 
-Polymarket weather markets resolve to discrete settlement values. Temperature
-intuition based on continuous intervals is unsafe unless converted through the
-city/unit settlement contract.
+Zeus is not predicting a continuous atmospheric quantity for its own sake. It is
+trading venue contracts that resolve on:
 
-Rules to remember:
+- city
+- local date
+- settlement unit
+- discrete integer/bin semantics
+- provider/source-specific reporting behavior
 
-- WU-style integer settlement uses WMO asymmetric half-up rounding:
-  `floor(x + 0.5)`.
-- Some oracle/provider families may use different semantics, such as HKO floor
-  behavior.
-- Settlement support is discrete: `point`, `finite_range`, or `open_shoulder`.
-- Shoulder bins stay in raw probability space and are not width-normalized
-  density bins.
+Continuous intuition must always be converted through settlement semantics
+before it becomes market truth.
+
+## Durable Settlement Rules
+
+Keep these durable concepts visible:
+
+- `bin_contract_kind`
+- `bin_settlement_cardinality`
+- `settlement_support_geometry`
+- WMO half-up style integer settlement where applicable
+- unit-specific contract structure
+- source/provider/date interactions as a risk model
+
+Use `SettlementSemantics` instead of ad hoc rounding. Do not use Python
+`round()`, `numpy.round`, or integer coercion for settlement values.
+
+## Durable Source-Risk Classes
+
+The durable source lesson is not a frozen city table. It is the risk taxonomy:
+
+- stable provider routes
+- provider/source changes
+- station mismatch between observed data and PM resolution source
+- provider/API versus website/UI disagreement
+- date-mapping and rounding bugs in Zeus
+- partial or quarantined observation data
+
+Those classes belong in the canonical reference. The exact current city/provider
+map does not.
+
+## Current Source Truth
+
+For present-tense city/provider validity, read:
+
+- `docs/operations/current_source_validity.md`
+
+For dated older audit evidence, read reports and artifacts. Do not treat dated
+audit tables as durable current reference.
 
 ## Market Structure
 
-Weather markets are bin families, not isolated binary propositions. The full
-family must cover all possible integer settlement values exactly once. A single
-bad parse can corrupt calibration, FDR family definition, and edge selection.
+Weather markets are not isolated binary bets. They are bin families with exact
+coverage and discrete settlement support. A bad parse or bad source assumption
+corrupts calibration, family definition, edge selection, replay interpretation,
+and settlement validation.
 
 Execution semantics matter because Zeus trades live CLOB markets:
 
-- Entry orders are limit orders.
-- Fill probability, bid/ask, queue, fees, and adverse selection affect whether
-  modeled edge is executable.
-- Market price is derived context for posterior/edge computation; it is not
-  settlement truth.
+- entry orders are limit orders
+- fill probability, bid/ask, queue, fees, and adverse selection affect whether
+  modeled edge is executable
+- market price is derived context for posterior/edge computation; it is not
+  settlement truth
 
-## Source Provenance Model
+## Mismatch Triage Routing
 
-Settlement truth depends on city, station/source, local date, unit, and provider
-semantics. `docs/reference/settlement_source_provenance.md` records current
-known city/provider behavior and source-change evidence.
+When Zeus and Polymarket settlement disagree, triage should consider:
 
-Durable source-risk classes:
+1. wrong station or wrong provider
+2. source/provider drift
+3. bad or partial observation data
+4. date-mapping/local-day bug
+5. rounding/semantic bug inside Zeus
 
-- stable WU cities with no observed source changes
-- cities with source/provider changes
-- station mismatch between Zeus observations and PM settlement source
-- data quality incidents where provider/API summaries disagree with final PM
-  resolution
-- date mapping or rounding bugs in Zeus code
+Operator procedure:
 
-## Rounding And Bin Semantics
+- `docs/runbooks/settlement_mismatch_triage.md`
 
-Use `SettlementSemantics` instead of ad hoc rounding. Do not use Python
-`round()`, `numpy.round`, or integer coercion for settlement values. Celsius and
-Fahrenheit families differ in bin width/cardinality and cannot be mixed blindly.
+## External Execution Reminder
 
-Open-ended shoulder bins, range bins, and point bins must keep their
-`bin_contract_kind` visible through probability, calibration, replay, and
-settlement scoring.
-
-## Mismatch Triage Model
-
-When Zeus and Polymarket settlement disagree, do not assume the model is wrong
-or the source is wrong without triage.
-
-Triage categories:
-
-1. Wrong station or data source.
-2. Polymarket source/provider changed.
-3. Bad or partial observation data.
-4. Date mapping, local day, or rounding bug.
-
-The durable operator procedure lives in
-`docs/runbooks/settlement_mismatch_triage.md`.
-
-## Supporting Tables And Evidence
-
-- Source/provenance registry:
-  `docs/reference/settlement_source_provenance.md`
-- Operator procedure:
-  `docs/runbooks/settlement_mismatch_triage.md`
-- City audit evidence:
-  `docs/artifacts/polymarket_city_settlement_audit_2026-04-14.md`
-- Domain overview:
-  `docs/reference/zeus_domain_model.md`
+Modeled edge is not executable edge. Venue order lifecycle, fees, and partial
+fills matter. Those are durable market truths, but they belong here as concepts,
+not as a stale changelog dump.
 
 ## What This File Is Not
 
-- not live settlement law
-- not an operator runbook
-- not a PM source override
+- not a frozen city/provider table
+- not a current source-validity dashboard
 - not a packet diary
+- not authority law

@@ -1,5 +1,9 @@
 # 统计方法论：数据从哪里出错，模型在哪里说谎
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > CONDITIONAL MATH METHODOLOGY - NOT DEFAULT READ.
 > Read `docs/reference/zeus_math_spec.md`, executable contracts, and targeted
 > tests first. This file remains frozen support for statistical methodology

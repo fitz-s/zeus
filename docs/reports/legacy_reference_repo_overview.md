@@ -1,5 +1,9 @@
 # Zeus: Technical Orientation
 
+> LEGACY REFERENCE SNAPSHOT - historical analytical/support material.
+> Not a canonical reference. Not default-read.
+> Use the canonical reference in `docs/reference/` first.
+
 > SUPERSEDED ORIENTATION - NOT DEFAULT READ.
 > Read `docs/reference/zeus_architecture_reference.md`, root `AGENTS.md`, and
 > `workspace_map.md` first. This file is frozen conditional support for

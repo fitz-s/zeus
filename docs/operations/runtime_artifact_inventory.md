@@ -79,6 +79,7 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/docs-reclassification-p2-ralplan-2026-04-21.md` | current docs reclassification P2 ralplan | Active local planning evidence for P2 runbook/operations routing normalization; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/docs-reclassification-p3-ralplan-2026-04-21.md` | current docs reclassification P3 plan | Active local planning evidence for P3 reference-fragment freezing and enforcement tightening; summarize in active packet before deleting local runtime state. |
 | `.omx/plans/docs-reclassification-closeout-plan-2026-04-21.md` | current docs reclassification closeout plan | Active local planning evidence for final package closeout; summarize in active packet before deleting local runtime state. |
+| `.omx/plans/docs-truth-refresh-p0-ralplan-2026-04-22.md` | current docs truth refresh P0 ralplan | Active local planning evidence for P0 stale-truth purge and current-fact install; summarize in the 2026-04-22 packet before deleting local runtime state. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
 
 ## Runtime Context Artifacts With Durable Lessons
@@ -94,3 +95,4 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/context/docs-reclassification-p2-20260421T223156Z.md` | P2 context snapshot for runbook/operations routing normalization. | Summarized in the active docs reclassification packet. |
 | `.omx/context/docs-reclassification-p3-20260421T231323Z.md` | P3 context snapshot for reference-fragment freezing and enforcement planning. | Summarized in the active docs reclassification packet. |
 | `.omx/context/docs-reclassification-closeout-20260421T233946Z.md` | Closeout context snapshot for final docs reclassification package planning. | Summarized in the active docs reclassification packet. |
+| `.omx/context/docs-truth-refresh-p0-20260422T084000Z.md` | P0 context snapshot for docs truth refresh stale-reference purge. | Summarize in the 2026-04-22 docs truth refresh packet. |

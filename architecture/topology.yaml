@@ -48,7 +48,7 @@ coverage_roots:
     scope: scoped
     zone: docs_reference
     authority_role: reference_only
-    forbidden_misread: Reference docs are fact/evidence surfaces, not authority by themselves.
+    forbidden_misread: Reference docs are canonical durable references only; volatile current facts, dated audits, packet evidence, and support snapshots must not live here.
   - path: "docs/operations"
     status: active
     scope: scoped
@@ -411,6 +411,10 @@ state_surfaces:
 required_active_pointers:
   - path: "docs/operations/current_state.md"
     rationale: Single live control-entry pointer required by root AGENTS.
+  - path: "docs/operations/current_data_state.md"
+    rationale: Current audited data posture lives in operations, not durable reference.
+  - path: "docs/operations/current_source_validity.md"
+    rationale: Current audited source-validity posture lives in operations, not durable reference.
 
 registry_directories:
   - path: "architecture"
@@ -445,7 +449,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md
+    - docs/operations/task_2026-04-22_docs_truth_refresh/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
@@ -638,7 +642,7 @@ digest_profiles:
       - "python scripts/audit_replay_fidelity.py"
     downstream:
       - "state/zeus_backtest.db"
-      - "docs/reference/data_inventory.md"
+      - "docs/operations/current_data_state.md"
     stop_conditions:
       - "Do not promote replay/backtest output into live strategy authority."
       - "If PnL is N/A due missing prices, do not coerce it to zero."
