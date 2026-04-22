@@ -25,7 +25,7 @@ Default navigation command:
 |------|---------|----------|-----------------|
 | tracked visible text | Tracked human-readable routing, law, plans, and docs | `AGENTS.md`, `workspace_map.md`, `docs/**`, `architecture/**` | Default-read when relevant |
 | tracked derived context | Tracked artifacts that help review and retrieval but are not authority | `.code-review-graph/graph.db` | Read as derived context, never as law |
-| historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, `docs/archives.zip` | Do not default-read; route through `docs/archive_registry.md` |
+| historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, local archive bundles | Do not default-read; route through `docs/archive_registry.md` |
 | runtime-local scratch and control | Runtime state, DBs, locks, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
 | generated evidence sinks | Reports, checklists, workbooks, and raw captures | `docs/reports/**`, `docs/to-do-list/**`, `docs/artifacts/**`, `raw/**` | Evidence only unless promoted through a packet |
 
@@ -70,7 +70,7 @@ Prefer these over prose when they exist:
 
 ## Do not default-read
 
-- `docs/archives/**` and local bundles such as `docs/archives.zip`
+- `docs/archives/**` and local archive bundles
 - `.code-review-graph/graph.db` as if it were authority
 - `docs/reports/**` as if placement made them law
 - `.omx/context/**` and `.omc/**` runtime scratch

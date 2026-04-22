@@ -55,7 +55,15 @@ The durable workspace kernel is:
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
 
-## Default read order
+## Default Navigation
+
+For high-risk zero-context work, also use:
+
+- `architecture/self_check/zero_context_entry.md`
+- `architecture/self_check/authority_index.md`
+
+The runtime mode manifest is `architecture/runtime_modes.yaml`; the supported
+discovery modes are `opening_hunt`, `update_reaction`, and `day0_capture`.
 
 1. `AGENTS.md`
 2. `workspace_map.md`
@@ -69,6 +77,22 @@ The durable workspace kernel is:
 If the read set grows beyond the budget in `architecture/context_budget.yaml`,
 narrow with `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`.
+
+## Topology and graph workflow
+
+Use derived routing proactively, but keep authority order intact:
+
+- For source, test, script, governance, or review work, run
+  `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+  or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`
+  before widening the read set.
+- For code-impact or review work, also run
+  `python scripts/topology_doctor.py --code-review-graph-status --json` when
+  `.code-review-graph/graph.db` is present. Use Code Review Graph to guide file
+  discovery, blast-radius checks, and review order.
+- Graph output is derived context only. If graph status is stale, partial, or
+  mismatched, keep going with topology, manifests, source rationale, and tests;
+  do not treat graph warnings as authority or as permission to skip gates.
 
 ## Authority vs context vs history
 
@@ -175,9 +199,10 @@ Check:
 
 `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`
 
-## What to read by task
+## What To Read By Task
 
-- Source edits: scoped `src/**/AGENTS.md`, `architecture/source_rationale.yaml`,
+- Source edits: scoped `src/**/AGENTS.md`, topology navigation/digest,
+  `architecture/source_rationale.yaml`, Code Review Graph status when present,
   targeted code, targeted tests
 - K0/K1 truth or lifecycle work: `docs/authority/zeus_current_architecture.md`,
   `architecture/kernel_manifest.yaml`, targeted rationale entries
