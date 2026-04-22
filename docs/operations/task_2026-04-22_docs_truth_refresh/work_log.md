@@ -320,12 +320,100 @@ Summary:
 
 Verification:
 
-- pending
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P3 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json` -> ok
+- `git diff --check -- <P3 files>` -> ok
+- `git diff -- docs/authority` -> no changes
 
 Pre-close review:
 
-- pending
+- Critic: PASS. P3 lands an explicit manual refresh protocol without adding
+  read/write tooling that could overfit an unstable DB/query contract.
+- Verifier: PASS. Current-fact surfaces now include refresh triggers, evidence
+  requirements, staleness window, and no-memory update rules.
 
 Next:
 
-- pending
+- commit P3
+- run package closeout
+
+## Package closeout
+
+Date: 2026-04-22
+Task: Close docs truth refresh package.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+
+Closeout verdict:
+
+- PASS. P0-P3 are committed and the stale-reference contamination channel has
+  been removed from `docs/reference/`.
+
+Package commits:
+
+- P0 stale truth purge and current-fact install: `80c0051`
+- P1 canonical reference completion and runbook cleanup: `d742083`
+- P2 freshness-aware docs registry and stale-truth checks: `8b687da`
+- P3 current-fact refresh protocol: `55eb285`
+
+Final canonical reference set:
+
+- `docs/reference/zeus_domain_model.md`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/reference/zeus_market_settlement_reference.md`
+- `docs/reference/zeus_data_and_replay_reference.md`
+- `docs/reference/zeus_failure_modes_reference.md`
+- `docs/reference/zeus_math_spec.md`
+
+Current-fact surfaces:
+
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
+
+Demoted legacy reference snapshots:
+
+- `docs/reports/legacy_reference_repo_overview.md`
+- `docs/reports/legacy_reference_data_inventory.md`
+- `docs/reports/legacy_reference_data_strategy.md`
+- `docs/reports/legacy_reference_settlement_source_provenance.md`
+- `docs/reports/legacy_reference_statistical_methodology.md`
+- `docs/reports/legacy_reference_quantitative_research.md`
+- `docs/reports/legacy_reference_market_microstructure.md`
+
+Residual risks:
+
+- `architecture/reference_replacement.yaml` remains as a compatibility manifest;
+  retirement needs a later dedicated compatibility packet.
+- P3 uses a manual refresh protocol, not generated current-fact tooling.
+- Unrelated dirty graph/state/artifact files remain outside this package.
+
+Validation:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"` -> 44 passed, 139 deselected
+
+Suggested post-closeout review prompt:
+
+Review the completed docs truth refresh package after P0-P3 and closeout. Check
+whether stale factual influence was removed from trusted docs surfaces, whether
+current fact surfaces are sufficiently compact and evidence-bound, whether
+canonical references are standalone enough, and whether a later packet should
+retire `architecture/reference_replacement.yaml` or add generated refresh
+tooling.
+
+Next:
+
+- run post-closeout review
+- keep registry retirement or generated refresh tooling in a separate packet
