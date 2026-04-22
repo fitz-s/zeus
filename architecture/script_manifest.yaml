@@ -261,6 +261,7 @@ scripts:
   audit_architecture_alignment.py: {class: diagnostic}
   audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
   audit_divergence_counterfactual.py: {class: diagnostic}
+  audit_observation_instants_v2.py: {class: diagnostic_report_writer, write_targets: [stdout], required_helpers: [src.data.tier_resolver], read_from: [observation_instants_v2], notes: "Read-only Phase 0 Gate 0→1 auditor; returns 0 iff tier_violations + source_tier_mismatches + openmeteo_rows + authority_unverified_rows all 0 AND every non-HK city has >=min_expected rows for the given data_version."}
   audit_divergence_exit_counterfactual.py: {class: diagnostic}
   audit_divergence_hindsight.py: {class: diagnostic}
   audit_divergence_postchange.py: {class: diagnostic}
