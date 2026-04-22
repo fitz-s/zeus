@@ -33,8 +33,13 @@ What it reports
 - ``openmeteo_rows``: count of rows with source LIKE '%openmeteo%'
   (AC4 — Day-0 ghost-trade regression pin).
 - ``cities_below_threshold``: cities whose row count is below
-  ``--min-expected`` (default 18000 for a 2024-01-01 → 2026-04-21
-  pilot; HK excluded per Phase 0 design).
+  ``--min-expected`` (default 20000 for a 2024-01-01 → 2026-04-21
+  pilot, 842 days × 24h = 20,208 expected; HK excluded per Phase 0 design).
+- ``dates_under_threshold``: per-city per-day gaps; the CRITICAL check
+  caught nothing at the per-city level because 22-hour DST holes
+  represent only 0.1% of 20,208. Per-day check surfaces them. Valid
+  ranges: 22-25 UTC hours per local date (23 = DST spring-forward,
+  25 = DST fall-back).
 - ``gate_0_1_ready``: boolean — true iff all thresholds pass.
 
 Exit code
@@ -67,9 +72,17 @@ from src.data.tier_resolver import (  # noqa: E402
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 
 # Expected row count per city for a 2024-01-01 → 2026-04-21 hourly pilot.
-# 24h × 832 days = ~19,968 hours. Allow ±10% (plan specifies ±5% in
-# AC5 but gap-tolerant starting threshold is 18000 for 832 days).
-_DEFAULT_MIN_EXPECTED_PER_CITY = 18_000
+# Inclusive days = julianday('2026-04-21') - julianday('2024-01-01') + 1 = 842.
+# 842 × 24 = 20,208 expected UTC hours per non-HK city. Tight tolerance
+# (20,000) catches missing-days better than the earlier loose 18,000 which
+# hid 22-hour DST-day gaps.
+_DEFAULT_MIN_EXPECTED_PER_CITY = 20_000
+
+# Per-day sanity threshold. Normal day = 24 UTC hours; DST spring-forward
+# = 23 hours (local); DST fall-back = 25 hours (local). UTC is always 24
+# but the aggregator's local-date filter converts back. Accept 22-25.
+_MIN_HOURS_PER_DAY = 22
+_MAX_HOURS_PER_DAY = 25
 
 
 def _all_cities_for_data_version(
@@ -195,6 +208,36 @@ def _cities_below_threshold(
     ]
 
 
+def _dates_under_threshold(
+    conn: sqlite3.Connection, data_version: str
+) -> list[dict[str, Any]]:
+    """Per (city, target_date) buckets whose UTC-hour count is outside [22, 25].
+
+    22: DST-spring-forward low bound (23-hour local day).
+    25: DST-fall-back high bound (25-hour local day).
+    <22: suspect DST upstream hole (WU) or chunk-boundary clip.
+    >25: overlap/duplicate; shouldn't happen with UNIQUE(city,source,utc_timestamp)
+         unless multiple sources write different utc values for the same hour.
+
+    Returns each offending (city, target_date, distinct_utc_hour_count).
+    HK is excluded (accumulator-only, gap expected).
+    """
+    sql = f"""
+        SELECT city, target_date, COUNT(DISTINCT utc_timestamp) AS hours
+        FROM observation_instants_v2
+        WHERE data_version = ?
+          AND city != 'Hong Kong'
+        GROUP BY city, target_date
+        HAVING hours < {_MIN_HOURS_PER_DAY} OR hours > {_MAX_HOURS_PER_DAY}
+        ORDER BY city, target_date
+    """
+    rows = conn.execute(sql, (data_version,)).fetchall()
+    return [
+        {"city": city, "target_date": td, "hours": int(h)}
+        for city, td, h in rows
+    ]
+
+
 def _build_report(
     conn: sqlite3.Connection,
     data_version: str,
@@ -206,6 +249,7 @@ def _build_report(
     auth_bad = _authority_unverified_rows(conn, data_version)
     om_rows = _openmeteo_rows(conn, data_version)
     below_thresh = _cities_below_threshold(per_city, min_expected)
+    bad_dates = _dates_under_threshold(conn, data_version)
 
     # Hong Kong is expected-gap; filter from below-threshold list.
     below_thresh = [b for b in below_thresh if b["city"] != "Hong Kong"]
@@ -216,6 +260,7 @@ def _build_report(
         and auth_bad == 0
         and om_rows == 0
         and len(below_thresh) == 0
+        and len(bad_dates) == 0
     )
 
     return {
@@ -228,7 +273,10 @@ def _build_report(
         "authority_unverified_rows": auth_bad,
         "openmeteo_rows": om_rows,
         "cities_below_threshold": below_thresh,
+        "dates_under_threshold": bad_dates,
         "min_expected_per_city": min_expected,
+        "min_hours_per_day": _MIN_HOURS_PER_DAY,
+        "max_hours_per_day": _MAX_HOURS_PER_DAY,
         "gate_0_1_ready": gate_ready,
     }
 
@@ -254,6 +302,10 @@ def _format_human(report: dict[str, Any]) -> str:
         f"  cities_below_threshold:   {len(report['cities_below_threshold'])} "
         f"(min_expected={report['min_expected_per_city']})"
     )
+    lines.append(
+        f"  dates_under_threshold:    {len(report['dates_under_threshold'])} "
+        f"(per-day range=[{report['min_hours_per_day']},{report['max_hours_per_day']}])"
+    )
     lines.append("")
     lines.append(
         f"Gate 0→1: {'✅ READY' if report['gate_0_1_ready'] else '❌ NOT READY'}"
@@ -270,6 +322,15 @@ def _format_human(report: dict[str, Any]) -> str:
             lines.append(
                 f"  {m['city']:16s} expected={m['expected']!r:30s} "
                 f"got={m['source']!r} count={m['count']}"
+            )
+    if report["dates_under_threshold"]:
+        lines.append("")
+        lines.append(
+            f"Dates under/over threshold (first 20 of {len(report['dates_under_threshold'])}):"
+        )
+        for d in report["dates_under_threshold"][:20]:
+            lines.append(
+                f"  {d['city']:16s} {d['target_date']} hours={d['hours']}"
             )
     return "\n".join(lines)
 

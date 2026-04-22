@@ -149,16 +149,22 @@ def _hourly_obs_to_v2_row(
 ) -> ObsV2Row:
     """Build an ObsV2Row from a client's HourlyObservation.
 
-    Extremum-preserving mapping (plan v3 + 2026-04-21 operator correction):
+    Extremum-preserving mapping (plan v3 + 2026-04-22 critic correction):
     - ``running_max`` <- ``hour_max_temp``  (THE settlement-correct field)
     - ``running_min`` <- ``hour_min_temp``
-    - ``temp_current`` <- ``hour_max_temp`` for legacy HIGH-track consumers
-      that still ``SELECT temp_current`` without track awareness. LOW-track
-      and strict consumers MUST use ``running_min`` / ``running_max``
-      explicitly; see Phase 3 consumer audit.
+    - ``temp_current`` <- ``None``  (see M1 below)
     - ``observation_count`` = raw obs in the bucket
     - ``provenance_json`` carries both raw timestamps + count so audits
       can verify the extremum is a legitimate SPECI.
+
+    M1 footgun fix: temp_current is set to NULL, NOT hour_max_temp. A
+    prior revision stamped temp_current = hour_max_temp so legacy
+    HIGH-track consumers reading ``SELECT temp_current`` still got a
+    settlement-correct value. But LOW-track consumers reading the same
+    column would silently receive the per-hour MAXIMUM — a systematic
+    high bias that poisons any LOW-track query. NULL forces consumers
+    to make track awareness explicit via running_max / running_min, or
+    crash loudly at query time.
 
     Authority is always 'VERIFIED' for Phase 0 pilot (no HK in pilot).
     Phase 1 HK rows will use 'ICAO_STATION_NATIVE' via a separate code
@@ -185,7 +191,7 @@ def _hourly_obs_to_v2_row(
         is_ambiguous_local_hour=obs.is_ambiguous_local_hour,
         is_missing_local_hour=obs.is_missing_local_hour,
         time_basis=obs.time_basis,
-        temp_current=obs.hour_max_temp,  # legacy HIGH-track default
+        temp_current=None,  # M1: force track-awareness (no HIGH-biased default)
         running_max=obs.hour_max_temp,  # explicit per-hour maximum
         running_min=obs.hour_min_temp,  # explicit per-hour minimum
         temp_unit=obs.temp_unit,
@@ -217,6 +223,18 @@ def _backfill_wu_city(
     log_path: Path,
     dry_run: bool,
 ) -> BackfillStats:
+    """WU backfill for one city.
+
+    Windows OVERLAP by 1 day (C2 fix): ``cursor_date = window_end`` for the
+    next iteration, not ``window_end + 1``. Without overlap the aggregator's
+    local-date filter drops UTC hours whose local date belongs to the
+    boundary local-date (e.g. UTC 2024-02-29 21:00 in Moscow tz = local
+    2024-03-01 00:00 — the filter rejects it under window [2024-01-01,
+    2024-02-29] and the NEXT window starting UTC 2024-03-01 00:00 = local
+    03:00 doesn't retrieve the missing 00-02 local hours). Overlap + INSERT
+    OR REPLACE re-fetches the boundary UTC hours under the next window's
+    filter, so every local hour of every local date is captured.
+    """
     city = cities_by_name[city_name]
     icao = city.wu_station
     cc = city.country_code
@@ -270,7 +288,9 @@ def _backfill_wu_city(
                 break
         if result.failed:
             windows_failed += 1
-            cursor_date = window_end + timedelta(days=1)
+            if window_end >= end_date:
+                break
+            cursor_date = window_end  # C2 fix: overlap by 1 day (INSERT OR REPLACE dedupes)
             continue
 
         total_raw += result.raw_observation_count
@@ -314,7 +334,9 @@ def _backfill_wu_city(
                 conn.execute("ROLLBACK")
                 raise
             total_written += written
-        cursor_date = window_end + timedelta(days=1)
+        if window_end >= end_date:
+            break
+        cursor_date = window_end  # C2 fix: overlap by 1 day
 
     return BackfillStats(
         city=city_name,
@@ -396,7 +418,9 @@ def _backfill_ogimet_city(
                 break
         if result.failed:
             windows_failed += 1
-            cursor_date = window_end + timedelta(days=1)
+            if window_end >= end_date:
+                break
+            cursor_date = window_end  # C2 fix: overlap by 1 day
             continue
 
         total_raw += result.raw_metar_count
@@ -438,7 +462,9 @@ def _backfill_ogimet_city(
                 conn.execute("ROLLBACK")
                 raise
             total_written += written
-        cursor_date = window_end + timedelta(days=1)
+        if window_end >= end_date:
+            break
+        cursor_date = window_end  # C2 fix: overlap by 1 day
 
     return BackfillStats(
         city=city_name,
