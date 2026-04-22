@@ -75,7 +75,8 @@ Steps 1-4 can all commit before any live HTTP is made, preserving roll-forward a
 
 All must be true before Phase 1 starts:
 
-- Pilot row count per city within ±5% of expected (~19,968 hourly observations per city at 24h × ~832 days)
+- Pilot row count per city within ±5% of expected (**20,208** hourly observations per city at 24h × **842 inclusive days**; prior plan versions incorrectly stated 19,968 / 832 days — corrected 2026-04-22 per critic M6)
+- Per-day `COUNT(DISTINCT utc_timestamp)` must be in `[22, 25]` for every non-HK (city, target_date) — 22=DST spring-forward, 25=DST fall-back. Anything outside signals a WU upstream hole or chunk-boundary clip. (Added 2026-04-22 per critic C3 — original per-city ±5% tolerance hid 22-hour daily holes that passed as 0.1% of the city total.)
 - Zero rows where `source LIKE '%openmeteo%'` (no Tier 4)
 - Zero rows where `authority = 'UNVERIFIED'` or `'QUARANTINED'`
 - Moscow pilot writes `source='ogimet_metar_uuww'`, Chicago/London/Tokyo/Sao Paulo write `source='wu_icao_history'`
