@@ -177,3 +177,86 @@ Next:
 
 - commit P1
 - run P1 follow-up review before P2
+
+## P1 follow-up review
+
+Date: 2026-04-22
+Commit: `d742083`
+Task: Review P1 before P2.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+
+Summary:
+
+- P1 completed targeted architecture-reference and live-runbook cleanup.
+- Docs/reference remains canonical-only.
+- Runbooks no longer point operators at legacy first-boot trade DB or stale
+  heartbeat path.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- stale runbook/reference grep -> only intentional current-fact/reference
+  statements or legacy report paths remain
+
+Verdict:
+
+- `proceed_to_p2`
+
+Next:
+
+- implement P2 freshness-aware docs registry and stale-truth enforcement
+
+## P2 implementation
+
+Date: 2026-04-22
+Task: Freshness-aware docs registry and stale-truth enforcement.
+
+Changed files:
+
+- `architecture/docs_registry.yaml`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+- `scripts/topology_doctor_docs_checks.py`
+- `tests/test_topology_doctor.py`
+
+Summary:
+
+- added freshness/truth fields to docs registry entries
+- added docs checker validation for truth/freshness fields
+- added stale-truth checks for non-canonical reference docs, removed support-doc
+  path leaks, local absolute paths in `current_state.md`, and stale truth
+  markers in trusted docs
+- added targeted tests for non-canonical reference rejection and removed path
+  leaks
+- retained `architecture/reference_replacement.yaml` for compatibility in P2;
+  P0 already removed moved support-doc entries, and a later packet can retire
+  the manifest after downstream references/tests are updated
+
+Verification:
+
+- `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_docs_checks.py scripts/topology_doctor_registry_checks.py` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"` -> 44 passed, 139 deselected
+
+Pre-close review:
+
+- Critic: PASS. P2 adds freshness-aware registry/checker behavior without
+  crossing into runtime/source behavior. Full retirement of
+  `reference_replacement.yaml` is explicitly deferred because existing tests and
+  generated topology surfaces still depend on that transitional manifest.
+- Verifier: PASS. Docs checks, context budget, reference replacement, py_compile,
+  and targeted topology tests pass.
+
+Next:
+
+- commit P2
+- run P2 follow-up review before P3

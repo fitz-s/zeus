@@ -1,5 +1,5 @@
 {
-  "task": "docs truth refresh p1 reference and runbook completion",
+  "task": "docs truth refresh p2 freshness-aware docs enforcement",
   "packet": "docs/operations/task_2026-04-22_docs_truth_refresh/plan.md",
   "route_source": "ralplan",
   "route_evidence": [
@@ -14,25 +14,24 @@
     "architecture/change_receipt_schema.yaml",
     "architecture/docs_registry.yaml",
     "architecture/topology.yaml",
-    "docs/operations/AGENTS.md",
-    "docs/reference/AGENTS.md",
-    "docs/runbooks/AGENTS.md"
+    "architecture/script_manifest.yaml",
+    "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
+    "architecture/docs_registry.yaml",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md",
     "docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json",
-    "docs/reference/zeus_architecture_reference.md",
-    "docs/runbooks/live-operation.md",
-    "docs/runbooks/live-phase-1-first-boot.md"
+    "scripts/topology_doctor_docs_checks.py",
+    "tests/test_topology_doctor.py"
   ],
   "changed_files": [
+    "architecture/docs_registry.yaml",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md",
     "docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json",
-    "docs/reference/zeus_architecture_reference.md",
-    "docs/runbooks/live-operation.md",
-    "docs/runbooks/live-phase-1-first-boot.md"
+    "scripts/topology_doctor_docs_checks.py",
+    "tests/test_topology_doctor.py"
   ],
   "forbidden_files": [
     "src/**",
@@ -43,14 +42,16 @@
     "docs/authority/**"
   ],
   "tests_evidence": [
+    "python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_docs_checks.py scripts/topology_doctor_registry_checks.py",
     "python scripts/topology_doctor.py --docs --json",
     "python scripts/topology_doctor.py --context-budget --json",
     "python scripts/topology_doctor.py --reference-replacement --json",
-    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P1 files> --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <P1 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <P1 files> --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <P1 files> --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <P1 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P2 files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <P2 files> --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P2 files> --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-22_docs_truth_refresh/plan.md --work-record-path docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md --receipt-path docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json --json",
+    "pytest -q tests/test_topology_doctor.py -k \"docs or map_maintenance or context_budget\"",
     "git diff --check",
     "git diff -- docs/authority"
   ]

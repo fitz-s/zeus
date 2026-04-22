@@ -838,6 +838,14 @@ def _docs_registry_entry(path: str, **overrides):
         "lifecycle_state": "durable",
         "coverage_scope": "exact",
         "parent_coverage_allowed": False,
+        "truth_profile": "durable_reference",
+        "freshness_class": "slow_changing",
+        "supersedes": [],
+        "superseded_by": [],
+        "may_live_in_reference": True,
+        "contains_volatile_metrics": False,
+        "current_tense_allowed": False,
+        "refresh_source": "code_and_manifest",
     }
     entry.update(overrides)
     return entry
@@ -878,6 +886,9 @@ def test_docs_registry_parent_entry_covers_operations_packet(monkeypatch, tmp_pa
         "allowed_next_actions": ["keep"],
         "allowed_lifecycle_states": ["transitional"],
         "allowed_coverage_scopes": ["descendants"],
+        "allowed_truth_profiles": ["package_input"],
+        "allowed_freshness_classes": ["packet_bound"],
+        "allowed_refresh_sources": ["n/a"],
         "entries": [
             _docs_registry_entry(
                 "docs/operations/task_*/",
@@ -885,6 +896,11 @@ def test_docs_registry_parent_entry_covers_operations_packet(monkeypatch, tmp_pa
                 lifecycle_state="transitional",
                 coverage_scope="descendants",
                 parent_coverage_allowed=True,
+                truth_profile="package_input",
+                freshness_class="packet_bound",
+                may_live_in_reference=False,
+                current_tense_allowed=True,
+                refresh_source="n/a",
             )
         ],
     }
@@ -965,6 +981,59 @@ def test_docs_registry_rejects_direct_reference_leak(monkeypatch, tmp_path):
     issues = topology_doctor._check_docs_registry({})
 
     assert any(issue.code == "docs_registry_direct_reference_leak" for issue in issues)
+
+
+def test_docs_registry_rejects_noncanonical_reference_doc(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["reference"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["durable"],
+        "allowed_coverage_scopes": ["exact"],
+        "allowed_truth_profiles": ["durable_reference", "report_evidence"],
+        "allowed_freshness_classes": ["slow_changing"],
+        "allowed_refresh_sources": ["code_and_manifest"],
+        "entries": [
+            _docs_registry_entry(
+                "docs/reference/legacy_reference_a.md",
+                truth_profile="report_evidence",
+                may_live_in_reference=False,
+            )
+        ],
+    }
+    _install_docs_registry_fixture(monkeypatch, tmp_path, registry, ["docs/reference/legacy_reference_a.md"])
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_reference_not_canonical" for issue in issues)
+
+
+def test_docs_registry_rejects_removed_reference_path_leak(monkeypatch, tmp_path):
+    registry = {
+        "allowed_doc_classes": ["router"],
+        "allowed_next_actions": ["keep"],
+        "allowed_lifecycle_states": ["durable"],
+        "allowed_coverage_scopes": ["exact"],
+        "allowed_truth_profiles": ["router"],
+        "allowed_freshness_classes": ["stable"],
+        "allowed_refresh_sources": ["n/a"],
+        "entries": [
+            _docs_registry_entry(
+                "docs/README.md",
+                doc_class="router",
+                truth_profile="router",
+                freshness_class="stable",
+                may_live_in_reference=False,
+                current_tense_allowed=True,
+                refresh_source="n/a",
+            )
+        ],
+    }
+    _install_docs_registry_fixture(monkeypatch, tmp_path, registry, ["docs/README.md"])
+    (tmp_path / "docs" / "README.md").write_text("Read docs/reference/data_inventory.md.\n", encoding="utf-8")
+
+    issues = topology_doctor._check_docs_registry({})
+
+    assert any(issue.code == "docs_removed_reference_path_leak" for issue in issues)
 
 
 def test_current_state_operation_paths_accept_markdown_and_bare_paths():

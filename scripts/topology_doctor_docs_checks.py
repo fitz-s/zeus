@@ -38,7 +38,31 @@ DOCS_REGISTRY_REQUIRED_FIELDS = {
     "lifecycle_state",
     "coverage_scope",
     "parent_coverage_allowed",
+    "truth_profile",
+    "freshness_class",
+    "supersedes",
+    "superseded_by",
+    "may_live_in_reference",
+    "contains_volatile_metrics",
+    "current_tense_allowed",
+    "refresh_source",
 }
+
+REMOVED_REFERENCE_SUPPORT_PATTERNS = (
+    "docs/reference/repo_overview.md",
+    "docs/reference/data_inventory.md",
+    "docs/reference/data_strategy.md",
+    "docs/reference/settlement_source_provenance.md",
+    "docs/reference/statistical_methodology.md",
+    "docs/reference/quantitative_research.md",
+    "docs/reference/market_microstructure.md",
+)
+
+STALE_TRUTH_PATTERNS = (
+    re.compile(r"\brainstorm\.db\b", re.IGNORECASE),
+    re.compile(r"\bdetails pending extraction\b", re.IGNORECASE),
+    re.compile(r"\bUpdated:\s*`?2026-04-01`?", re.IGNORECASE),
+)
 
 DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/task_*/",
@@ -172,6 +196,9 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     allowed_next = set(registry.get("allowed_next_actions") or [])
     allowed_lifecycle = set(registry.get("allowed_lifecycle_states") or [])
     allowed_scopes = set(registry.get("allowed_coverage_scopes") or [])
+    allowed_truth_profiles = set(registry.get("allowed_truth_profiles") or [])
+    allowed_freshness_classes = set(registry.get("allowed_freshness_classes") or [])
+    allowed_refresh_sources = set(registry.get("allowed_refresh_sources") or [])
     seen: set[str] = set()
 
     for entry in entries:
@@ -197,6 +224,22 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
             issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid lifecycle_state {entry.get('lifecycle_state')!r}"))
         if entry.get("coverage_scope") not in allowed_scopes:
             issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid coverage_scope {entry.get('coverage_scope')!r}"))
+        if entry.get("truth_profile") not in allowed_truth_profiles:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid truth_profile {entry.get('truth_profile')!r}"))
+        if entry.get("freshness_class") not in allowed_freshness_classes:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid freshness_class {entry.get('freshness_class')!r}"))
+        if entry.get("refresh_source") not in allowed_refresh_sources:
+            issues.append(api._issue("docs_registry_invalid_enum", path, f"invalid refresh_source {entry.get('refresh_source')!r}"))
+        if not isinstance(entry.get("supersedes"), list):
+            issues.append(api._issue("docs_registry_invalid_enum", path, "supersedes must be a list"))
+        if not isinstance(entry.get("superseded_by"), list):
+            issues.append(api._issue("docs_registry_invalid_enum", path, "superseded_by must be a list"))
+        for bool_field in ("may_live_in_reference", "contains_volatile_metrics", "current_tense_allowed"):
+            if not isinstance(entry.get(bool_field), bool):
+                issues.append(api._issue("docs_registry_invalid_enum", path, f"{bool_field} must be boolean"))
+        if path.startswith("docs/reference/") and path != "docs/reference/AGENTS.md":
+            if entry.get("truth_profile") != "durable_reference" or entry.get("may_live_in_reference") is not True:
+                issues.append(api._issue("docs_reference_not_canonical", path, "docs/reference may contain only durable canonical reference docs"))
         if entry.get("coverage_scope") == "descendants":
             if not entry.get("parent_coverage_allowed"):
                 issues.append(api._issue("docs_registry_parent_not_allowed", path, "descendant coverage requires parent_coverage_allowed=true"))
@@ -220,6 +263,8 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     for rel in sorted(visible_docs):
         if rel.startswith("docs/archives/"):
             continue
+        if rel.startswith("docs/reference/") and Path(rel).name.startswith("legacy_reference_"):
+            issues.append(api._issue("docs_reference_legacy_snapshot", rel, "legacy reference snapshots must live outside docs/reference"))
         if not docs_registry_covers(rel, entries):
             issues.append(api._issue("docs_registry_unclassified_doc", rel, "tracked docs file is not classified by architecture/docs_registry.yaml"))
 
@@ -243,6 +288,56 @@ def check_docs_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
                         f"default-read router references non-direct doc {path}",
                     )
                 )
+
+    trusted_scan = [
+        api.ROOT / "AGENTS.md",
+        api.ROOT / "workspace_map.md",
+        api.ROOT / "docs" / "AGENTS.md",
+        api.ROOT / "docs" / "README.md",
+        api.ROOT / "docs" / "reference" / "AGENTS.md",
+        api.ROOT / "docs" / "operations" / "current_state.md",
+    ]
+    for surface in trusted_scan:
+        if not surface.exists():
+            continue
+        text = surface.read_text(encoding="utf-8", errors="ignore")
+        for removed in REMOVED_REFERENCE_SUPPORT_PATTERNS:
+            if removed in text:
+                issues.append(
+                    api._issue(
+                        "docs_removed_reference_path_leak",
+                        surface.relative_to(api.ROOT).as_posix(),
+                        f"trusted router references removed support doc path: {removed}",
+                    )
+                )
+
+    current_state = api.ROOT / "docs" / "operations" / "current_state.md"
+    if current_state.exists():
+        text = current_state.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"/Users/[^\\s`]+", text):
+            issues.append(api._issue("docs_current_state_local_path", "docs/operations/current_state.md", "current_state must not contain local absolute paths"))
+
+    trusted_docs = [
+        path for path in (api.ROOT / "docs" / "reference").glob("*.md")
+        if path.name != "AGENTS.md"
+    ]
+    trusted_docs.extend((api.ROOT / "docs" / "runbooks").glob("*.md"))
+    trusted_docs.extend([
+        api.ROOT / "docs" / "operations" / "current_state.md",
+        api.ROOT / "docs" / "operations" / "current_data_state.md",
+        api.ROOT / "docs" / "operations" / "current_source_validity.md",
+    ])
+    for path in trusted_docs:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        rel = path.relative_to(api.ROOT).as_posix()
+        for removed in REMOVED_REFERENCE_SUPPORT_PATTERNS:
+            if removed in text:
+                issues.append(api._issue("docs_removed_reference_path_leak", rel, f"trusted doc references removed support doc path: {removed}"))
+        for pattern in STALE_TRUTH_PATTERNS:
+            if pattern.search(text):
+                issues.append(api._issue("docs_stale_truth_phrase", rel, f"trusted doc contains stale truth marker: {pattern.pattern}"))
     return issues
 
 
