@@ -62,14 +62,23 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data.tier_resolver import (  # noqa: E402
+    ALLOWED_SOURCES_BY_CITY,
     EXPECTED_SOURCE_BY_CITY,
     TIER_ALLOWED_SOURCES,
     TIER_SCHEDULE,
     Tier,
+    allowed_sources_for_city,
     tier_for_city,
 )
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
+DEFAULT_GAPS_ALLOWLIST_PATH = (
+    _REPO_ROOT
+    / "docs"
+    / "operations"
+    / "task_2026-04-21_gate_f_data_backfill"
+    / "confirmed_upstream_gaps.yaml"
+)
 
 # Expected row count per city for a 2024-01-01 → 2026-04-21 hourly pilot.
 # Inclusive days = julianday('2026-04-21') - julianday('2024-01-01') + 1 = 842.
@@ -110,29 +119,32 @@ def _per_city_rowcounts(
 def _tier_violations(
     conn: sqlite3.Connection, data_version: str
 ) -> list[dict[str, Any]]:
-    """Rows whose source is not in its tier's allowed set (tier-wide check)."""
+    """Rows whose source is not in its city's allowed set.
+
+    Updated 2026-04-22 (critic C1 fix): uses per-city allowed-sources
+    (ALLOWED_SOURCES_BY_CITY) rather than per-tier TIER_ALLOWED_SOURCES,
+    so Tier 1 cities' Ogimet fallback rows (source='ogimet_metar_<icao>')
+    no longer register as violations. A violation now means the row's
+    source is neither the city's primary nor its documented fallback.
+    """
     violations: list[dict[str, Any]] = []
-    for tier, allowed in TIER_ALLOWED_SOURCES.items():
-        cities_in_tier = [
-            name for name, t in TIER_SCHEDULE.items() if t is tier
-        ]
-        if not cities_in_tier:
-            continue
-        placeholders = ",".join(["?"] * len(cities_in_tier))
-        allowed_list = sorted(allowed)
-        allowed_placeholders = ",".join(["?"] * len(allowed_list))
+    cities = _all_cities_for_data_version(conn, data_version)
+    for city in cities:
+        if city not in ALLOWED_SOURCES_BY_CITY:
+            continue  # unknown city — handled by source_tier_mismatches
+        allowed = sorted(ALLOWED_SOURCES_BY_CITY[city])
+        placeholders = ",".join(["?"] * len(allowed))
         sql = (
-            f"SELECT city, source, COUNT(*) FROM observation_instants_v2 "
-            f"WHERE data_version = ? "
-            f"  AND city IN ({placeholders}) "
-            f"  AND source NOT IN ({allowed_placeholders}) "
-            f"GROUP BY city, source"
+            f"SELECT source, COUNT(*) FROM observation_instants_v2 "
+            f"WHERE data_version = ? AND city = ? "
+            f"  AND source NOT IN ({placeholders}) "
+            f"GROUP BY source"
         )
-        params: list[Any] = [data_version] + cities_in_tier + allowed_list
-        for city, source, count in conn.execute(sql, params).fetchall():
+        params: list[Any] = [data_version, city] + allowed
+        for source, count in conn.execute(sql, params).fetchall():
             violations.append(
                 {
-                    "tier": tier.name,
+                    "tier": tier_for_city(city).name,
                     "city": city,
                     "source": source,
                     "count": int(count),
@@ -144,33 +156,41 @@ def _tier_violations(
 def _source_tier_mismatches(
     conn: sqlite3.Connection, data_version: str
 ) -> list[dict[str, Any]]:
-    """Rows whose source != expected_source_for_city(city)."""
+    """Rows whose source is not in the city's allowed-set.
+
+    Semantically identical to _tier_violations now that allowed-sets are
+    per-city; kept as a separate function for API compatibility with
+    earlier Gate 0→1 docs. A row is a mismatch if its source is not
+    in ``allowed_sources_for_city``.
+    """
     mismatches: list[dict[str, Any]] = []
     cities = _all_cities_for_data_version(conn, data_version)
     for city in cities:
-        expected = EXPECTED_SOURCE_BY_CITY.get(city)
-        if expected is None:
+        if city not in ALLOWED_SOURCES_BY_CITY:
             mismatches.append(
                 {
                     "city": city,
                     "expected": None,
                     "source": None,
                     "count": 0,
-                    "note": "city not in EXPECTED_SOURCE_BY_CITY",
+                    "note": "city not in ALLOWED_SOURCES_BY_CITY",
                 }
             )
             continue
-        rows = conn.execute(
-            "SELECT source, COUNT(*) FROM observation_instants_v2 "
-            "WHERE data_version = ? AND city = ? AND source != ? "
-            "GROUP BY source",
-            (data_version, city, expected),
-        ).fetchall()
-        for source, count in rows:
+        allowed = ALLOWED_SOURCES_BY_CITY[city]
+        placeholders = ",".join(["?"] * len(allowed))
+        sql = (
+            f"SELECT source, COUNT(*) FROM observation_instants_v2 "
+            f"WHERE data_version = ? AND city = ? "
+            f"  AND source NOT IN ({placeholders}) "
+            f"GROUP BY source"
+        )
+        params: list[Any] = [data_version, city] + sorted(allowed)
+        for source, count in conn.execute(sql, params).fetchall():
             mismatches.append(
                 {
                     "city": city,
-                    "expected": expected,
+                    "expected_set": sorted(allowed),
                     "source": source,
                     "count": int(count),
                 }
@@ -208,6 +228,38 @@ def _cities_below_threshold(
     ]
 
 
+def _load_gaps_allowlist(path: Path) -> set[tuple[str, str]]:
+    """Return {(city, target_date)} of confirmed-upstream gaps.
+
+    Reads a minimal YAML subset without requiring PyYAML. The file
+    format is stable and small so a hand-rolled parser is cheaper than
+    adding a dependency.
+    """
+    if not path.exists():
+        return set()
+    accepted: set[tuple[str, str]] = set()
+    current_city: str | None = None
+    current_date: str | None = None
+    with path.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip()
+            if not line or line.lstrip().startswith("#"):
+                continue
+            stripped = line.strip()
+            if stripped.startswith("- city:"):
+                if current_city and current_date:
+                    accepted.add((current_city, current_date))
+                current_city = stripped.split(":", 1)[1].strip().strip("'\"")
+                current_date = None
+            elif stripped.startswith("city:"):
+                current_city = stripped.split(":", 1)[1].strip().strip("'\"")
+            elif stripped.startswith("target_date:"):
+                current_date = stripped.split(":", 1)[1].strip().strip("'\"")
+        if current_city and current_date:
+            accepted.add((current_city, current_date))
+    return accepted
+
+
 def _dates_under_threshold(
     conn: sqlite3.Connection, data_version: str
 ) -> list[dict[str, Any]]:
@@ -242,6 +294,7 @@ def _build_report(
     conn: sqlite3.Connection,
     data_version: str,
     min_expected: int,
+    gaps_allowlist: set[tuple[str, str]],
 ) -> dict[str, Any]:
     per_city = _per_city_rowcounts(conn, data_version)
     tier_viol = _tier_violations(conn, data_version)
@@ -249,10 +302,20 @@ def _build_report(
     auth_bad = _authority_unverified_rows(conn, data_version)
     om_rows = _openmeteo_rows(conn, data_version)
     below_thresh = _cities_below_threshold(per_city, min_expected)
-    bad_dates = _dates_under_threshold(conn, data_version)
+    bad_dates_raw = _dates_under_threshold(conn, data_version)
 
     # Hong Kong is expected-gap; filter from below-threshold list.
     below_thresh = [b for b in below_thresh if b["city"] != "Hong Kong"]
+
+    # Split bad_dates into blocking vs confirmed-upstream-gap.
+    blocking_dates: list[dict[str, Any]] = []
+    accepted_dates: list[dict[str, Any]] = []
+    for d in bad_dates_raw:
+        key = (d["city"], d["target_date"])
+        if key in gaps_allowlist:
+            accepted_dates.append(d)
+        else:
+            blocking_dates.append(d)
 
     gate_ready = (
         len(tier_viol) == 0
@@ -260,7 +323,7 @@ def _build_report(
         and auth_bad == 0
         and om_rows == 0
         and len(below_thresh) == 0
-        and len(bad_dates) == 0
+        and len(blocking_dates) == 0
     )
 
     return {
@@ -273,7 +336,8 @@ def _build_report(
         "authority_unverified_rows": auth_bad,
         "openmeteo_rows": om_rows,
         "cities_below_threshold": below_thresh,
-        "dates_under_threshold": bad_dates,
+        "dates_under_threshold": blocking_dates,
+        "confirmed_upstream_gaps_accepted": accepted_dates,
         "min_expected_per_city": min_expected,
         "min_hours_per_day": _MIN_HOURS_PER_DAY,
         "max_hours_per_day": _MAX_HOURS_PER_DAY,
@@ -306,6 +370,10 @@ def _format_human(report: dict[str, Any]) -> str:
         f"  dates_under_threshold:    {len(report['dates_under_threshold'])} "
         f"(per-day range=[{report['min_hours_per_day']},{report['max_hours_per_day']}])"
     )
+    if report.get("confirmed_upstream_gaps_accepted"):
+        lines.append(
+            f"  confirmed_upstream_gaps:  {len(report['confirmed_upstream_gaps_accepted'])} (accepted via allowlist)"
+        )
     lines.append("")
     lines.append(
         f"Gate 0→1: {'✅ READY' if report['gate_0_1_ready'] else '❌ NOT READY'}"
@@ -360,6 +428,16 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--gaps-allowlist",
+        type=Path,
+        default=DEFAULT_GAPS_ALLOWLIST_PATH,
+        help=(
+            f"Path to the confirmed-upstream-gaps YAML "
+            f"(default: {DEFAULT_GAPS_ALLOWLIST_PATH}). "
+            "Entries here are exempted from the per-day completeness check."
+        ),
+    )
+    p.add_argument(
         "--json",
         action="store_true",
         help="Emit the raw report as JSON (for jq / CI).",
@@ -387,7 +465,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        report = _build_report(conn, args.data_version, args.min_expected)
+        allowlist = _load_gaps_allowlist(args.gaps_allowlist)
+        report = _build_report(
+            conn,
+            args.data_version,
+            args.min_expected,
+            gaps_allowlist=allowlist,
+        )
     finally:
         conn.close()
 

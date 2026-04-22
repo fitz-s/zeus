@@ -75,7 +75,17 @@ _MIN_HOURS_PER_DAY = 22
 def _find_gaps(
     conn: sqlite3.Connection, data_version: str
 ) -> list[tuple[str, str, int]]:
-    """Return [(city, target_date, hours_present)] for Tier 1 cities under threshold."""
+    """Return [(city, target_date, hours_present)] for Tier 1 + Tier 2
+    cities under threshold.
+
+    Tier 1 (WU_ICAO): Ogimet fallback addresses WU upstream gaps.
+    Tier 2 (OGIMET_METAR): widened-window re-fetch addresses pilot-boundary
+        clips (first/last local-date hours need UTC from adjacent days that
+        were outside the initial fetch window). Same Ogimet client, just
+        wider date range.
+    Tier 3 (HKO_NATIVE): skipped — HK is intentionally gap-accepting per
+        plan v3 L31 (accumulator forward-only, no historical).
+    """
     rows = conn.execute(
         """
         SELECT city, target_date, COUNT(DISTINCT utc_timestamp) AS h
@@ -87,11 +97,10 @@ def _find_gaps(
         """,
         (data_version, _MIN_HOURS_PER_DAY),
     ).fetchall()
-    # Only Tier 1 WU cities get Ogimet fallback; Tier 2 is already Ogimet,
-    # Tier 3 HK is intentionally gap-accepting.
     out: list[tuple[str, str, int]] = []
     for city, td, h in rows:
-        if tier_for_city(city) is Tier.WU_ICAO:
+        t = tier_for_city(city)
+        if t in (Tier.WU_ICAO, Tier.OGIMET_METAR):
             out.append((city, td, int(h)))
     return out
 
@@ -104,10 +113,34 @@ def _fill_one_date(
     log_path: Path,
     dry_run: bool,
 ) -> int:
-    """Fetch Ogimet for target_date ±1 day and write rows for local date == target_date."""
+    """Fetch Ogimet for target_date ±1 day and write rows for local date == target_date.
+
+    - Tier 1 (WU_ICAO) cities: write with fallback source tag
+      ``ogimet_metar_<icao>`` (fallback per plan v3 allowed-sources).
+    - Tier 2 (OGIMET_METAR) cities: write with the SAME primary source tag
+      used by the main driver (e.g. ``ogimet_metar_uuww`` for Moscow).
+      The widened window closes pilot-boundary clips where the initial
+      fetch missed UTC hours belonging to the first/last local date.
+    """
     city = cities_by_name[city_name]
-    icao = city.wu_station
-    source_tag = f"ogimet_metar_{icao.lower()}"
+    tier = tier_for_city(city_name)
+    if tier is Tier.WU_ICAO:
+        icao = city.wu_station
+        source_tag = f"ogimet_metar_{icao.lower()}"
+        tier_label = "WU_ICAO_OGIMET_FALLBACK"
+    elif tier is Tier.OGIMET_METAR:
+        # Use the primary Ogimet source; station is the same one the
+        # main driver already uses.
+        _OGIMET_STATION_MAP = {
+            "Istanbul": "LTFM",
+            "Moscow": "UUWW",
+            "Tel Aviv": "LLBG",
+        }
+        icao = _OGIMET_STATION_MAP[city_name]
+        source_tag = f"ogimet_metar_{icao.lower()}"
+        tier_label = "OGIMET_METAR_BOUNDARY_FILL"
+    else:
+        raise RuntimeError(f"Unsupported tier for gap fill: {tier}")
 
     # Widen window by ±1 day so bucket filter captures all UTC hours
     # belonging to the local target_date.
@@ -186,13 +219,17 @@ def _fill_one_date(
                     data_version=data_version,
                     provenance_json=json.dumps(
                         {
-                            "tier": "WU_ICAO_OGIMET_FALLBACK",
+                            "tier": tier_label,
                             "station_id": obs.station_id,
                             "hour_max_raw_ts": obs.hour_max_raw_ts,
                             "hour_min_raw_ts": obs.hour_min_raw_ts,
                             "raw_obs_count": obs.observation_count,
                             "aggregation": obs.time_basis,
-                            "fallback_reason": "wu_dst_hole",
+                            "fallback_reason": (
+                                "wu_dst_hole"
+                                if tier_label == "WU_ICAO_OGIMET_FALLBACK"
+                                else "ogimet_pilot_boundary"
+                            ),
                         },
                         separators=(",", ":"),
                     ),

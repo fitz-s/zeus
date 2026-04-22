@@ -1,0 +1,38 @@
+# Created: 2026-04-22
+# Authority basis: Phase 0 pilot Gate 0→1; critic 2026-04-22 C1/C3 fixes.
+#
+# Confirmed-upstream-gap allowlist for observation_instants_v2. Each entry
+# documents a (city, target_date) where < 22 UTC hours were collected AND
+# exhaustive probing of independent upstream sources (WU, Ogimet, IEM ASOS)
+# confirmed the gap is fundamental upstream (not a collection bug).
+#
+# Audit script (scripts/audit_observation_instants_v2.py) exempts these
+# entries from the Gate 0→1 per-day completeness check.
+#
+# Entry schema:
+#   city: <cities.json name>
+#   target_date: YYYY-MM-DD (local date)
+#   hours_collected: <int, actual count>
+#   missing_utc_hours: [<int>, ...]
+#   sources_probed:
+#     wu: <count>
+#     ogimet: <count>
+#     iem_asos: <count>
+#   rationale: <one-line reason>
+
+gaps:
+  - city: Chicago
+    target_date: "2026-04-03"
+    hours_collected: 21
+    missing_utc_hours: [7, 9, 10]
+    sources_probed:
+      wu: 19
+      ogimet: 21
+      iem_asos: 21  # 21 hours with real temp values; 3 missing match WU+Ogimet
+    rationale: >-
+      KORD instrument-outage on 2026-04-03 UTC 07:00-10:59.
+      All three upstream providers (WU Underground, Ogimet NOAA METAR
+      mirror, IEM ASOS 5-minute feed) confirm zero observations during
+      this 3-hour window. Probed 2026-04-22 via direct API calls; gap
+      is fundamental at the KORD sensor / ASOS pipeline.
+      Downstream consumers must tolerate NaN for this hour range.
