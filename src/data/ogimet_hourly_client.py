@@ -43,6 +43,15 @@ import httpx
 
 from src.data.wu_hourly_client import HourlyObservation
 
+
+# Force IPv4-only HTTP transport. Ogimet's IPv6 route intermittently
+# stalls in SYN_SENT from some home-ISP IPv6 transports, causing
+# minute-scale hangs even though the IPv4 path is fast and reliable.
+# Phase 0 pilot 2026-04-22 hit a sustained IPv6 hang mid-Moscow backfill;
+# binding outgoing sockets to the IPv4 wildcard forces httpx to pick A
+# records over AAAA during DNS resolution.
+_OGIMET_TRANSPORT = httpx.HTTPTransport(local_address="0.0.0.0")
+
 logger = logging.getLogger(__name__)
 
 
@@ -265,12 +274,14 @@ def _fetch_one_chunk(
         "end": end.strftime("%Y%m%d%H%M"),
     }
     try:
-        resp = httpx.get(
-            OGIMET_METAR_URL,
-            params=params,
-            timeout=timeout_seconds,
-            headers=OGIMET_HEADERS,
-        )
+        # Use a short-lived Client bound to IPv4 so flaky home-ISP IPv6
+        # routes can't stall us in SYN_SENT.
+        with httpx.Client(transport=_OGIMET_TRANSPORT, timeout=timeout_seconds) as client:
+            resp = client.get(
+                OGIMET_METAR_URL,
+                params=params,
+                headers=OGIMET_HEADERS,
+            )
         _last_ogimet_request_at = _time.monotonic()
     except (httpx.HTTPError, httpx.RequestError) as exc:
         logger.warning(
