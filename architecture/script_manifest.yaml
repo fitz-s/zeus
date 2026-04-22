@@ -277,6 +277,7 @@ scripts:
   backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_hko_daily.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
   backfill_hourly_openmeteo.py: {class: etl_writer}
+  backfill_obs_v2.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client], external_inputs: [WU historical.json, Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_backfill_log.jsonl]}
   backfill_ogimet_metar.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics], external_inputs: [Ogimet METAR/SYNOP], target_db: state/zeus-world.db}
   backfill_observations_from_settlements.py: {class: etl_writer}
   # backfill_open_positions_canonical.py: REMOVED — dead script calling deleted function
