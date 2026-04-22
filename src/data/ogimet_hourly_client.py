@@ -55,6 +55,16 @@ OGIMET_HEADERS = {
 #: script's behavior; Ogimet throttles if windows exceed ~30 days.
 OGIMET_CHUNK_DAYS = 30
 
+#: Ogimet documents a rate limit of "one query per remote IP every 20s"
+#: (HTTP 501 response: "your quota limit for slow queries rate").
+#: We sleep 21s between requests to stay safely under the threshold.
+OGIMET_MIN_INTERVAL_SECONDS = 21.0
+
+# Module-level last-request timestamp so the interval is enforced across
+# multiple fetch_ogimet_hourly calls within one driver run (e.g. one
+# city's multiple 30-day chunks, or multiple Ogimet cities in sequence).
+_last_ogimet_request_at: float = 0.0
+
 # METAR temp/dewpoint group regex. Copied from
 # scripts/backfill_ogimet_metar.py::_METAR_TEMP_RE so a single-file change
 # to one parser doesn't silently diverge the other; the A7 antibody test
@@ -242,6 +252,13 @@ class _ChunkResult:
 def _fetch_one_chunk(
     station: str, begin: datetime, end: datetime, timeout_seconds: float
 ) -> _ChunkResult:
+    global _last_ogimet_request_at
+    # Enforce Ogimet's documented 20s rate limit per remote IP.
+    import time as _time
+
+    elapsed = _time.monotonic() - _last_ogimet_request_at
+    if elapsed < OGIMET_MIN_INTERVAL_SECONDS:
+        _time.sleep(OGIMET_MIN_INTERVAL_SECONDS - elapsed)
     params = {
         "icao": station,
         "begin": begin.strftime("%Y%m%d%H%M"),
@@ -254,6 +271,7 @@ def _fetch_one_chunk(
             timeout=timeout_seconds,
             headers=OGIMET_HEADERS,
         )
+        _last_ogimet_request_at = _time.monotonic()
     except (httpx.HTTPError, httpx.RequestError) as exc:
         logger.warning(
             "Ogimet fetch raised %s for %s %s..%s: %s",
