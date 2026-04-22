@@ -135,12 +135,15 @@ TIER_ALLOWED_SOURCES: dict[Tier, frozenset[str]] = {
 # whitelist above is necessary but not sufficient. This mapping collapses
 # to a single expected source per city, catching cross-station mis-writes
 # (e.g. Moscow row with LLBG source) at write time instead of audit time.
-def _build_expected_source_by_city() -> dict[str, str]:
-    """One expected source string per city, derived from station identity.
+def _ogimet_source_for_icao(icao: str) -> str:
+    """Canonical Ogimet source tag for an ICAO station."""
+    return f"ogimet_metar_{icao.lower()}"
 
-    Iterates ``TIER_SCHEDULE`` directly (not ``cities_in_tier``) because
-    this helper runs at module-import time, before ``cities_in_tier`` is
-    bound to a name.
+
+def _build_expected_source_by_city() -> dict[str, str]:
+    """Primary source per city. Iterates ``TIER_SCHEDULE`` directly (not
+    ``cities_in_tier``) because this helper runs at module-import time,
+    before ``cities_in_tier`` is bound to a name.
     """
     # Ogimet tier: source tag encodes the specific station.
     _OGIMET_STATION_MAP = {
@@ -151,7 +154,7 @@ def _build_expected_source_by_city() -> dict[str, str]:
     expected: dict[str, str] = {}
     for name, tier in TIER_SCHEDULE.items():
         if tier is Tier.WU_ICAO:
-            # All WU cities share the generic 'wu_icao_history' source;
+            # All WU cities share the generic 'wu_icao_history' primary;
             # station_id disambiguates downstream queries.
             expected[name] = "wu_icao_history"
         elif tier is Tier.OGIMET_METAR:
@@ -173,16 +176,49 @@ def _build_expected_source_by_city() -> dict[str, str]:
     return expected
 
 
+def _build_allowed_sources_by_city() -> dict[str, frozenset[str]]:
+    """ALL legitimate source tags per city (primary + documented fallbacks).
+
+    Tier 1 (WU_ICAO): primary ``wu_icao_history`` + Ogimet fallback
+    ``ogimet_metar_<icao>``. The fallback exists because WU's historical
+    archive has known upstream gaps on DST-spring-forward days (verified
+    2026-04-22: KORD 2024-03-10 returned 2 observations instead of 23).
+    Ogimet mirrors raw NOAA METAR for the same station and fills the gap.
+    Rows written with either source are equally authoritative — both
+    ultimately trace to the settlement station's METAR report.
+
+    Tier 2 (OGIMET_METAR) and Tier 3 (HKO_NATIVE) have single-source sets
+    (no documented fallback path exists for HKO; Ogimet cities ARE the
+    fallback).
+    """
+    from src.config import cities_by_name as _cbn
+    allowed: dict[str, frozenset[str]] = {}
+    for name, tier in TIER_SCHEDULE.items():
+        if tier is Tier.WU_ICAO:
+            icao = _cbn[name].wu_station
+            allowed[name] = frozenset({
+                "wu_icao_history",
+                _ogimet_source_for_icao(icao),
+            })
+        elif tier is Tier.OGIMET_METAR:
+            allowed[name] = frozenset({EXPECTED_SOURCE_BY_CITY[name]})
+        elif tier is Tier.HKO_NATIVE:
+            allowed[name] = frozenset({"hko_hourly_accumulator"})
+    return allowed
+
+
 EXPECTED_SOURCE_BY_CITY: dict[str, str] = _build_expected_source_by_city()
+ALLOWED_SOURCES_BY_CITY: dict[str, frozenset[str]] = (
+    _build_allowed_sources_by_city()
+)
 
 
 def expected_source_for_city(city_name: str) -> str:
-    """Return the ONE source string the v2 writer accepts for *city_name*.
+    """Return the PRIMARY source string for *city_name*.
 
-    Stronger than ``allowed_sources_for_tier`` because it pins per-station
-    identity within multi-station tiers. This is what the v2 writer's A2
-    check actually uses; the tier-level whitelist remains available for
-    audit scripts that want to see the tier's full option space.
+    Primary is what the main-path backfill driver writes by default.
+    Fallback sources (e.g. Ogimet for DST-day gap fills on WU cities)
+    are in ``allowed_sources_for_city`` and accepted by the writer.
     """
     if city_name not in EXPECTED_SOURCE_BY_CITY:
         raise UnsupportedTierError(
@@ -192,6 +228,23 @@ def expected_source_for_city(city_name: str) -> str:
             )
         )
     return EXPECTED_SOURCE_BY_CITY[city_name]
+
+
+def allowed_sources_for_city(city_name: str) -> frozenset[str]:
+    """Return every source tag the writer accepts for *city_name* (A2 set).
+
+    Includes the primary source plus any documented fallback. A row whose
+    ``source`` is in this set passes A2 regardless of whether it was
+    written by the main-path driver or a gap-fill script.
+    """
+    if city_name not in ALLOWED_SOURCES_BY_CITY:
+        raise UnsupportedTierError(
+            reason=(
+                f"{city_name!r} is not in ALLOWED_SOURCES_BY_CITY; "
+                "tier_resolver may be out of sync with cities.json."
+            )
+        )
+    return ALLOWED_SOURCES_BY_CITY[city_name]
 
 
 def tier_for_city(city_name: str, target_date: Optional[date] = None) -> Tier:

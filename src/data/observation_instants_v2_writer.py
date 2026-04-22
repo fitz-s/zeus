@@ -50,6 +50,7 @@ from typing import Any, Iterable, Optional
 
 from src.data.tier_resolver import (
     Tier,
+    allowed_sources_for_city,
     expected_source_for_city,
     tier_for_city,
 )
@@ -178,22 +179,22 @@ class ObsV2Row:
                 "contract)."
             )
 
-        # A2: source must match the per-city expected source (stronger
-        # than tier-level whitelist — pins station identity within a tier
-        # that has multiple station-specific sources, e.g. Ogimet).
+        # A2: source must be in the per-city allowed set (primary +
+        # fallback). Tier 1 WU cities accept either ``wu_icao_history``
+        # (primary) or ``ogimet_metar_<icao>`` (DST-gap fallback). Tier 2
+        # / Tier 3 are single-source sets.
         try:
             tier = tier_for_city(self.city)
-            expected = expected_source_for_city(self.city)
+            allowed = allowed_sources_for_city(self.city)
         except Exception as exc:
             raise InvalidObsV2RowError(
                 f"A2 violation: city={self.city!r} has no tier mapping: {exc}"
             )
-        if self.source != expected:
+        if self.source not in allowed:
             raise InvalidObsV2RowError(
                 f"A2 violation (city={self.city}, tier={tier.name}): "
-                f"source={self.source!r} does not match expected "
-                f"{expected!r}. Source string must trace 1:1 to the "
-                "settlement station."
+                f"source={self.source!r} not in allowed {sorted(allowed)}. "
+                "Source string must trace to the settlement station."
             )
 
         # A6: Hong Kong explicit — the VHHH/WU category error pin

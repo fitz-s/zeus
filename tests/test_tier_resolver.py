@@ -18,12 +18,15 @@ import pytest
 
 from src.config import cities_by_name
 from src.data.tier_resolver import (
+    ALLOWED_SOURCES_BY_CITY,
     TIER_ALLOWED_SOURCES,
     TIER_SCHEDULE,
     Tier,
     UnsupportedTierError,
+    allowed_sources_for_city,
     allowed_sources_for_tier,
     cities_in_tier,
+    expected_source_for_city,
     tier_for_city,
 )
 
@@ -139,3 +142,62 @@ def test_tier_split_matches_plan_v3():
 def test_ogimet_tier_cities_are_istanbul_moscow_tel_aviv():
     """Pins the Tier 2 membership to the three NOAA-settled cities."""
     assert set(cities_in_tier(Tier.OGIMET_METAR)) == {"Istanbul", "Moscow", "Tel Aviv"}
+
+
+# ----------------------------------------------------------------------
+# ALLOWED_SOURCES_BY_CITY — C1 fix (DST gap fallback)
+# ----------------------------------------------------------------------
+
+
+def test_wu_cities_allow_both_primary_and_ogimet_fallback():
+    """Tier 1 cities accept either wu_icao_history or ogimet_metar_<icao>.
+
+    The Ogimet fallback exists because WU has silent upstream gaps on
+    DST-spring-forward days (verified 2026-04-22: KORD 2024-03-10 returned
+    2 obs instead of 23). Ogimet mirrors raw NOAA METAR for the same
+    station and fills the gap. Both source tags are equally legitimate.
+    """
+    for city_name, city in __import__("src.config", fromlist=["cities_by_name"]).cities_by_name.items():
+        if city.settlement_source_type != "wu_icao":
+            continue
+        allowed = allowed_sources_for_city(city_name)
+        assert "wu_icao_history" in allowed, f"{city_name} missing WU primary"
+        assert len(allowed) >= 2, f"{city_name} has no Ogimet fallback"
+        # Ogimet fallback tag must match ICAO
+        expected_ogimet = f"ogimet_metar_{city.wu_station.lower()}"
+        assert expected_ogimet in allowed, (
+            f"{city_name} missing Ogimet fallback {expected_ogimet!r}; got {sorted(allowed)}"
+        )
+
+
+def test_ogimet_cities_have_no_fallback():
+    """Tier 2 cities are already Ogimet — no secondary source defined."""
+    for city in ("Istanbul", "Moscow", "Tel Aviv"):
+        allowed = allowed_sources_for_city(city)
+        assert len(allowed) == 1
+        assert expected_source_for_city(city) in allowed
+
+
+def test_hong_kong_has_no_fallback():
+    """HKO is the only source for HK; no fallback is valid under A6."""
+    allowed = allowed_sources_for_city("Hong Kong")
+    assert allowed == frozenset({"hko_hourly_accumulator"})
+
+
+def test_allowed_sources_primary_is_subset():
+    """For every city, the primary source MUST be in the allowed set."""
+    for city_name in TIER_SCHEDULE:
+        primary = expected_source_for_city(city_name)
+        allowed = allowed_sources_for_city(city_name)
+        assert primary in allowed, (
+            f"{city_name}: primary {primary!r} not in allowed {sorted(allowed)}"
+        )
+
+
+def test_allowed_sources_never_contains_openmeteo():
+    """No tier-level escape hatch to grid-snap routing, even via fallback."""
+    for city, allowed in ALLOWED_SOURCES_BY_CITY.items():
+        for src in allowed:
+            assert "openmeteo" not in src.lower(), (
+                f"{city}: fallback source {src!r} must not reference openmeteo"
+            )
