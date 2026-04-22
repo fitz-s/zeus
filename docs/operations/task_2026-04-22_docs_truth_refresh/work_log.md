@@ -95,3 +95,85 @@ Next:
 
 - commit P0
 - run P0 follow-up review before P1
+
+## P0 follow-up review
+
+Date: 2026-04-22
+Commit: `80c0051`
+Task: Review P0 before P1.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+
+Summary:
+
+- P0 removed all seven non-canonical support docs from `docs/reference/`.
+- P0 created `current_data_state.md` and `current_source_validity.md`.
+- P0 rerouted canonical data/market references away from stale support docs.
+- P0 preserved unrelated dirty work and staged only the intended P0 subset.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `find docs/reference -maxdepth 1 -type f -name "*.md" | sort` -> canonical-only whitelist
+- stale trusted-path grep -> no live trusted-router/manifests hits outside packet evidence and moved legacy reports
+
+Verdict:
+
+- `proceed_to_p1`
+
+Next:
+
+- implement P1 canonical reference completion and runbook cleanup
+
+## P1 implementation
+
+Date: 2026-04-22
+Task: Canonical reference completion and runbook cleanup.
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/runbooks/live-operation.md`
+- `docs/runbooks/live-phase-1-first-boot.md`
+
+Summary:
+
+- expanded `zeus_architecture_reference.md` with workspace questions, current
+  fact surfaces, derived context engines, and docs trust layers
+- updated `live-operation.md` heartbeat path to `state/daemon-heartbeat.json`
+- updated `live-phase-1-first-boot.md` to use `get_trade_connection()` instead
+  of legacy `state_path("zeus.db")`
+- confirmed data/replay and market/settlement canonical references were already
+  completed during P0 and no longer route to stale support docs for current
+  facts
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- stale runbook/reference negative check for `state/zeus.db`,
+  `daemon-heartbeat-live`, `settlement_source_provenance.md`,
+  `rainstorm.db`, and `details pending extraction` -> only intentional
+  current-fact/reference statements or legacy report paths remain
+
+Pre-close review:
+
+- Critic: PASS. P1 stayed within docs/reference and runbook cleanup; no source,
+  state, graph DB, archives, or authority-law files are included.
+- Verifier: PASS. Runbooks no longer teach legacy trade DB paths for first boot,
+  heartbeat path matches `src/main.py`, and canonical refs are standalone enough
+  for ordinary current understanding.
+
+Next:
+
+- commit P1
+- run P1 follow-up review before P2

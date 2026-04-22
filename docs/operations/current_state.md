@@ -8,7 +8,9 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Truth Refresh / Stale-Authority Purge (2026-04-22 package)
 - Active package source: `zeus_docs_truth_refresh_reconstruction_package_2026-04-22`
 - Active execution packet: `docs/operations/task_2026-04-22_docs_truth_refresh/plan.md`
-- Status: P0 stale truth purge and current-fact install complete; P0 review pending before P1
+- Status: P1 canonical reference completion and runbook cleanup complete; P1 review pending before P2
+- Docs truth refresh P0 commit: `80c0051`
+- P0 follow-up review: `proceed_to_p1`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -54,6 +56,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Run P0 follow-up review
-- If review says `proceed_to_p1`, plan P1 reference/runbook completion
+- Run P1 follow-up review
+- If review says `proceed_to_p2`, plan freshness-aware docs registry enforcement
 - Preserve unrelated dirty work and local archive inputs

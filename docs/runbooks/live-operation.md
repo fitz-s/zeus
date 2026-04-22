@@ -101,7 +101,7 @@ echo $! > state/zeus-live.pid
 
 ### Daemon heartbeat
 
-The daemon writes `state/daemon-heartbeat-live.json` every 60 seconds.
+The daemon writes `state/daemon-heartbeat.json` every 60 seconds.
 
 Check staleness:
 

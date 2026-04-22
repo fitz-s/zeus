@@ -94,9 +94,8 @@ After `--once`, verify:
 ```bash
 # Check trade DB for any new trade_decisions rows
 ZEUS_MODE=live python - <<'EOF'
-import sqlite3, os
-from src.config import state_path
-conn = sqlite3.connect(str(state_path("zeus.db")))
+from src.state.db import get_trade_connection
+conn = get_trade_connection()
 rows = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
 print(f"trade_decisions rows: {rows}")
 conn.close()
@@ -109,11 +108,11 @@ For a first boot with no open markets matching current criteria, expect 0 rows. 
 ZEUS_MODE=live python -m src.analysis dashboard
 # or
 ZEUS_MODE=live python - <<'EOF'
-import sqlite3
-from src.config import state_path
-conn = sqlite3.connect(str(state_path("zeus.db")))
-for row in conn.execute("SELECT * FROM trade_decisions ORDER BY created_at DESC LIMIT 10").fetchall():
-    print(dict(zip([d[0] for d in conn.execute('PRAGMA table_info(trade_decisions)').fetchall()], row)))
+from src.state.db import get_trade_connection
+conn = get_trade_connection()
+rows = conn.execute("SELECT * FROM trade_decisions ORDER BY created_at DESC LIMIT 10").fetchall()
+for row in rows:
+    print(dict(row))
 conn.close()
 EOF
 ```

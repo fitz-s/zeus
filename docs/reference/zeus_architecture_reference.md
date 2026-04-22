@@ -26,6 +26,14 @@ and historical cold storage. The current workspace law is in `architecture/**`,
 `AGENTS.md`, `workspace_map.md`, scoped `AGENTS.md` files, and
 `docs/operations/current_state.md`.
 
+The workspace exists to answer five questions quickly:
+
+1. what is law
+2. what is current
+3. what is durable reference
+4. what is derived context
+5. where history lives without becoming default context
+
 ## Runtime Boundary
 
 Main runtime flow:
@@ -57,6 +65,8 @@ Important surfaces:
 - `state/zeus-world.db`: weather, calibration, forecast, and settlement-world data.
 - `position_events` and `position_current`: append-first event/projection model.
 - `docs/operations/current_state.md`: repo-facing active work pointer, not runtime truth.
+- `docs/operations/current_data_state.md`: current audited data posture, not law.
+- `docs/operations/current_source_validity.md`: current audited source-validity posture, not law.
 - `.code-review-graph/graph.db`: tracked derived context, not authority.
 
 Risk/control outputs must change behavior. Advisory-only RED/YELLOW/ORANGE
@@ -79,6 +89,34 @@ states are not safety mechanisms.
 
 Use `architecture/zones.yaml` and `architecture/source_rationale.yaml` for
 file-level ownership. This reference is descriptive only.
+
+## Derived Context Engines
+
+`topology_doctor` is the repo-native routing and governance checker. Use it for
+navigation, docs checks, registry drift, map maintenance, planning lock, and
+closeout discipline.
+
+Code Review Graph is a first-class derived structural context engine. Use it
+for blast radius, review order, structural discovery, and minimal context. Do
+not use it as authority or as a substitute for current factual docs, manifests,
+tests, or source.
+
+## Docs Trust Layers
+
+The tracked docs mesh is:
+
+- `docs/authority/`: law
+- `docs/reference/`: canonical durable understanding
+- `docs/operations/`: live current facts and packets
+- `docs/runbooks/`: procedures
+- `docs/reports/`: dated analytical evidence
+- `docs/artifacts/`: snapshot/workbook evidence
+- `docs/to-do-list/`: checklist evidence
+- `docs/archive_registry.md`: visible historical interface
+
+Current facts should route through operations current-fact surfaces. Dated
+evidence should route through reports or artifacts. Neither belongs in
+canonical reference.
 
 ## Dual-Track Architecture
 
