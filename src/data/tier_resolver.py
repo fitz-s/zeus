@@ -130,6 +130,70 @@ TIER_ALLOWED_SOURCES: dict[Tier, frozenset[str]] = {
 }
 
 
+# Per-city expected source (antibody A2-strong). The Ogimet tier has
+# three distinct source tags — one per station — so the tier-level
+# whitelist above is necessary but not sufficient. This mapping collapses
+# to a single expected source per city, catching cross-station mis-writes
+# (e.g. Moscow row with LLBG source) at write time instead of audit time.
+def _build_expected_source_by_city() -> dict[str, str]:
+    """One expected source string per city, derived from station identity.
+
+    Iterates ``TIER_SCHEDULE`` directly (not ``cities_in_tier``) because
+    this helper runs at module-import time, before ``cities_in_tier`` is
+    bound to a name.
+    """
+    # Ogimet tier: source tag encodes the specific station.
+    _OGIMET_STATION_MAP = {
+        "Istanbul": "ogimet_metar_ltfm",
+        "Moscow": "ogimet_metar_uuww",
+        "Tel Aviv": "ogimet_metar_llbg",
+    }
+    expected: dict[str, str] = {}
+    for name, tier in TIER_SCHEDULE.items():
+        if tier is Tier.WU_ICAO:
+            # All WU cities share the generic 'wu_icao_history' source;
+            # station_id disambiguates downstream queries.
+            expected[name] = "wu_icao_history"
+        elif tier is Tier.OGIMET_METAR:
+            if name not in _OGIMET_STATION_MAP:
+                raise UnsupportedTierError(
+                    reason=(
+                        f"Ogimet city {name!r} has no station→source "
+                        "mapping. Add to _OGIMET_STATION_MAP in "
+                        "tier_resolver.py."
+                    )
+                )
+            expected[name] = _OGIMET_STATION_MAP[name]
+        elif tier is Tier.HKO_NATIVE:
+            expected[name] = "hko_hourly_accumulator"
+        else:  # pragma: no cover - defensive, Tier enum is closed
+            raise UnsupportedTierError(
+                reason=f"Tier {tier!r} has no expected-source rule."
+            )
+    return expected
+
+
+EXPECTED_SOURCE_BY_CITY: dict[str, str] = _build_expected_source_by_city()
+
+
+def expected_source_for_city(city_name: str) -> str:
+    """Return the ONE source string the v2 writer accepts for *city_name*.
+
+    Stronger than ``allowed_sources_for_tier`` because it pins per-station
+    identity within multi-station tiers. This is what the v2 writer's A2
+    check actually uses; the tier-level whitelist remains available for
+    audit scripts that want to see the tier's full option space.
+    """
+    if city_name not in EXPECTED_SOURCE_BY_CITY:
+        raise UnsupportedTierError(
+            reason=(
+                f"{city_name!r} is not in EXPECTED_SOURCE_BY_CITY; "
+                "tier_resolver may be out of sync with cities.json."
+            )
+        )
+    return EXPECTED_SOURCE_BY_CITY[city_name]
+
+
 def tier_for_city(city_name: str, target_date: Optional[date] = None) -> Tier:
     """Resolve *city_name* to its hourly-observation tier.
 

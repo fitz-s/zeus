@@ -57,6 +57,9 @@ categories:
     - tests/test_semantic_linter.py
     - tests/test_structural_linter.py
     - tests/test_supervisor_contracts.py
+    - tests/test_backfill_scripts_match_live_config.py
+    - tests/test_hk_rejects_vhhh_source.py
+    - tests/test_obs_v2_writer.py
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
     - tests/test_topology_doctor.py

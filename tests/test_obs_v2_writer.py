@@ -1,0 +1,319 @@
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-21
+# Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
+#                  migration-iter3.md L119-120); step2 Phase 0 file #9.
+"""Antibody A1 (missing provenance) + A2 (source-tier consistency) for the
+observation_instants_v2 writer.
+
+HK-specific A6 lives in ``tests/test_hk_rejects_vhhh_source.py`` so the
+regression for the exact VHHH/WU category error is pinned separately.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+
+import pytest
+
+from src.data.observation_instants_v2_writer import (
+    InvalidObsV2RowError,
+    ObsV2Row,
+    insert_rows,
+)
+from src.data.tier_resolver import Tier, tier_for_city
+from src.state.schema.v2_schema import apply_v2_schema
+
+
+def _minimal_valid_kwargs(**overrides) -> dict:
+    """A Chicago WU row that passes all validators; tests override one field."""
+    base = dict(
+        city="Chicago",
+        target_date="2024-01-15",
+        source="wu_icao_history",
+        timezone_name="America/Chicago",
+        local_timestamp="2024-01-15T08:00:00-06:00",
+        utc_timestamp="2024-01-15T14:00:00+00:00",
+        utc_offset_minutes=-360,
+        time_basis="utc_hour_aligned",
+        temp_unit="F",
+        imported_at="2026-04-21T23:30:00+00:00",
+        authority="VERIFIED",
+        data_version="v1.wu-native.pilot",
+        provenance_json=json.dumps({"tier": "WU_ICAO", "icao": "KORD"}),
+        temp_current=32.0,
+        running_max=34.0,
+        station_id="KORD",
+    )
+    base.update(overrides)
+    return base
+
+
+def _make_row(**overrides) -> ObsV2Row:
+    return ObsV2Row(**_minimal_valid_kwargs(**overrides))
+
+
+# ----------------------------------------------------------------------
+# Baseline: minimal valid row passes
+# ----------------------------------------------------------------------
+
+
+def test_minimal_valid_row_constructs_without_error():
+    row = _make_row()
+    assert row.city == "Chicago"
+    assert row.authority == "VERIFIED"
+
+
+# ----------------------------------------------------------------------
+# A1: missing / wrong authority
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_authority", ["UNVERIFIED", "QUARANTINED", "", "random"])
+def test_a1_rejects_non_write_authority(bad_authority):
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*authority"):
+        _make_row(authority=bad_authority)
+
+
+def test_a1_accepts_icao_station_native():
+    """HK forward-only rows use ICAO_STATION_NATIVE; writer must allow it.
+
+    This is the write-side counterpart to A4 reader filter.
+    """
+    # Construct an HK row with valid HK-specific source so we exercise the
+    # authority check specifically.
+    row = ObsV2Row(
+        **_minimal_valid_kwargs(
+            city="Hong Kong",
+            source="hko_hourly_accumulator",
+            authority="ICAO_STATION_NATIVE",
+            provenance_json=json.dumps({"tier": "HKO_NATIVE", "note": "accumulator"}),
+            station_id="HKO",
+            timezone_name="Asia/Hong_Kong",
+            local_timestamp="2024-01-15T22:00:00+08:00",
+            utc_timestamp="2024-01-15T14:00:00+00:00",
+            utc_offset_minutes=480,
+        )
+    )
+    assert row.authority == "ICAO_STATION_NATIVE"
+
+
+# ----------------------------------------------------------------------
+# A1: data_version
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_version",
+    [
+        "",  # empty
+        "v0",  # pre-cutover sentinel — MUST NOT appear on a row
+        "v2.future",  # wrong family
+        "wu-native",  # missing prefix
+        "V1.wu-native",  # case-sensitive
+    ],
+)
+def test_a1_rejects_bad_data_version(bad_version):
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*data_version"):
+        _make_row(data_version=bad_version)
+
+
+@pytest.mark.parametrize(
+    "good_version",
+    ["v1.wu-native.pilot", "v1.wu-native", "v1.hk-accumulator.forward"],
+)
+def test_a1_accepts_v1_family(good_version):
+    _make_row(data_version=good_version)  # must not raise
+
+
+# ----------------------------------------------------------------------
+# A1: provenance_json
+# ----------------------------------------------------------------------
+
+
+def test_a1_rejects_empty_provenance():
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*provenance_json"):
+        _make_row(provenance_json="")
+
+
+def test_a1_rejects_default_provenance():
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*provenance_json"):
+        _make_row(provenance_json="{}")
+
+
+def test_a1_rejects_non_json_provenance():
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*not.*valid JSON"):
+        _make_row(provenance_json="{not json")
+
+
+def test_a1_rejects_non_object_provenance():
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*must be.*JSON object"):
+        _make_row(provenance_json=json.dumps([1, 2, 3]))
+
+
+def test_a1_rejects_provenance_without_tier_key():
+    with pytest.raises(InvalidObsV2RowError, match="A1 violation.*tier.*key"):
+        _make_row(provenance_json=json.dumps({"icao": "KORD"}))
+
+
+# ----------------------------------------------------------------------
+# A2: source-tier consistency
+# ----------------------------------------------------------------------
+
+
+def test_a2_wu_city_rejects_ogimet_source():
+    with pytest.raises(InvalidObsV2RowError, match="A2 violation.*WU_ICAO"):
+        _make_row(city="Chicago", source="ogimet_metar_uuww")
+
+
+def test_a2_wu_city_rejects_openmeteo_source():
+    """The Day-0 ghost-trade root: openmeteo_archive_hourly rows leaking in."""
+    with pytest.raises(InvalidObsV2RowError, match="A2 violation"):
+        _make_row(source="openmeteo_archive_hourly")
+
+
+def test_a2_ogimet_city_accepts_correct_source():
+    row = _make_row(
+        city="Moscow",
+        source="ogimet_metar_uuww",
+        timezone_name="Europe/Moscow",
+        local_timestamp="2024-01-15T17:00:00+03:00",
+        utc_timestamp="2024-01-15T14:00:00+00:00",
+        utc_offset_minutes=180,
+        station_id="UUWW",
+        provenance_json=json.dumps({"tier": "OGIMET_METAR", "station": "UUWW"}),
+    )
+    assert tier_for_city(row.city) is Tier.OGIMET_METAR
+
+
+def test_a2_ogimet_city_rejects_wrong_station_source():
+    """Moscow (UUWW) cannot be written with LLBG (Tel Aviv) source tag."""
+    with pytest.raises(InvalidObsV2RowError, match="A2 violation"):
+        _make_row(
+            city="Moscow",
+            source="ogimet_metar_llbg",  # wrong station for Moscow
+            timezone_name="Europe/Moscow",
+            local_timestamp="2024-01-15T17:00:00+03:00",
+            utc_timestamp="2024-01-15T14:00:00+00:00",
+            utc_offset_minutes=180,
+        )
+
+
+def test_a2_unknown_city_rejected():
+    with pytest.raises(InvalidObsV2RowError, match="A2 violation.*no tier mapping"):
+        _make_row(city="Atlantis")
+
+
+# ----------------------------------------------------------------------
+# Structural sanity
+# ----------------------------------------------------------------------
+
+
+def test_rejects_bad_time_basis():
+    with pytest.raises(InvalidObsV2RowError, match="time_basis"):
+        _make_row(time_basis="random")
+
+
+def test_rejects_bad_temp_unit():
+    with pytest.raises(InvalidObsV2RowError, match="temp_unit"):
+        _make_row(temp_unit="K")
+
+
+def test_rejects_bad_target_date():
+    with pytest.raises(InvalidObsV2RowError, match="target_date"):
+        _make_row(target_date="2024/01/15")
+
+
+def test_rejects_bad_utc_timestamp():
+    with pytest.raises(InvalidObsV2RowError, match="utc_timestamp"):
+        _make_row(utc_timestamp="not a timestamp")
+
+
+# ----------------------------------------------------------------------
+# Batch insert against an in-memory DB
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def mem_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    apply_v2_schema(conn)
+    yield conn
+    conn.close()
+
+
+def test_insert_rows_writes_expected_row(mem_db):
+    row = _make_row()
+    n = insert_rows(mem_db, [row])
+    assert n == 1
+    (count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_instants_v2 WHERE city=?",
+        (row.city,),
+    ).fetchone()
+    assert count == 1
+
+
+def test_insert_rows_empty_batch_is_noop(mem_db):
+    n = insert_rows(mem_db, [])
+    assert n == 0
+
+
+def test_insert_rows_upserts_on_unique_collision(mem_db):
+    """INSERT OR REPLACE: same (city, source, utc_timestamp) = update, not dupe."""
+    r1 = _make_row(temp_current=30.0)
+    r2 = _make_row(temp_current=35.0)  # same key, different value
+    insert_rows(mem_db, [r1])
+    insert_rows(mem_db, [r2])
+    (count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_instants_v2"
+    ).fetchone()
+    assert count == 1
+    (temp,) = mem_db.execute(
+        "SELECT temp_current FROM observation_instants_v2"
+    ).fetchone()
+    assert temp == 35.0
+
+
+def test_insert_rows_round_trip_preserves_provenance(mem_db):
+    row = _make_row()
+    insert_rows(mem_db, [row])
+    (auth, dv, prov) = mem_db.execute(
+        "SELECT authority, data_version, provenance_json FROM observation_instants_v2"
+    ).fetchone()
+    assert auth == "VERIFIED"
+    assert dv == "v1.wu-native.pilot"
+    parsed = json.loads(prov)
+    assert parsed["tier"] == "WU_ICAO"
+    assert parsed["icao"] == "KORD"
+
+
+def test_view_stays_empty_until_zeus_meta_flips(mem_db):
+    """observation_instants_current VIEW returns 0 rows pre-cutover.
+
+    Pilot data_version='v1.wu-native.pilot' does NOT match
+    zeus_meta.observation_data_version='v0', so the VIEW hides it.
+    This is the core atomic-cutover invariant — Phase 2 flips this.
+    """
+    row = _make_row()  # data_version='v1.wu-native.pilot'
+    insert_rows(mem_db, [row])
+    (view_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_instants_current"
+    ).fetchone()
+    assert view_count == 0, "VIEW must be empty pre-cutover"
+    (table_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_instants_v2"
+    ).fetchone()
+    assert table_count == 1, "Base table has the row"
+
+
+def test_view_activates_after_zeus_meta_flip(mem_db):
+    """Phase 2 simulation: flipping zeus_meta instantly exposes rows."""
+    row = _make_row()
+    insert_rows(mem_db, [row])
+    mem_db.execute(
+        "UPDATE zeus_meta SET value='v1.wu-native.pilot' "
+        "WHERE key='observation_data_version'"
+    )
+    (view_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_instants_current"
+    ).fetchone()
+    assert view_count == 1
