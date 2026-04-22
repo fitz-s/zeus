@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Docs Reclassification / Reference Extraction (2026-04-21 package)
 - Active package source: `/Users/leofitz/Downloads/zeus_docs_reclassification_reference_extraction_package_2026-04-21/README.md`
 - Active execution packet: `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md`
-- Status: Docs reclassification package closeout complete; post-closeout review pending
+- Status: Docs reclassification package post-closeout review complete
 - Docs reclassification P0 commit: `b1a9761`
 - Docs reclassification P1 commit: `84d6d25`
 - P1 follow-up review: `proceed_to_p2`
@@ -54,6 +54,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Run post-closeout review using the suggested prompt in the work log.
+- Later reference deletion/archive work requires a separate packet.
 - Keep later deletion/archive work in a separate packet.
 - Keep unrelated dirty work and local archive inputs untouched

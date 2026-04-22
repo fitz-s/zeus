@@ -1,28 +1,28 @@
 {
-  "task": "docs reclassification package closeout",
+  "task": "docs reclassification post-closeout review",
   "packet": "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md",
-  "route_source": "ralplan",
+  "route_source": "current_state",
   "route_evidence": [
-    ".omx/plans/docs-reclassification-closeout-plan-2026-04-21.md",
-    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md",
     "docs/operations/current_state.md"
   ],
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",
-    "architecture/AGENTS.md",
     "architecture/change_receipt_schema.yaml",
     "architecture/docs_registry.yaml",
-    "architecture/reference_replacement.yaml",
     "architecture/topology.yaml",
     "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
   ],
   "changed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
     "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
@@ -39,15 +39,14 @@
   "tests_evidence": [
     "python scripts/topology_doctor.py --docs --json",
     "python scripts/topology_doctor.py --context-budget --json",
-    "python scripts/topology_doctor.py --reference-replacement --json",
-    "python scripts/topology_doctor.py --artifact-lifecycle --json",
-    "pytest -q tests/test_topology_doctor.py -k \"docs or map_maintenance or context_budget or reference_replacement\"",
-    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <closeout files> --plan-evidence .omx/plans/docs-reclassification-closeout-plan-2026-04-21.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --receipt-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json --json",
-    "git diff --check -- <closeout files>",
+    "python scripts/topology_doctor.py --agents-coherence --json",
+    "python scripts/topology_doctor.py --self-check-coherence --json",
+    "python scripts/topology_doctor.py --runtime-modes --json",
+    "python scripts/topology_doctor.py --code-review-graph-status --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files AGENTS.md workspace_map.md --json",
+    "python scripts/topology_doctor.py closeout --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json",
+    "git diff --check -- AGENTS.md workspace_map.md",
     "git diff -- docs/authority"
   ]
 }
