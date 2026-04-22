@@ -588,3 +588,59 @@ Next:
 
 - run post-closeout review
 - keep later deletion/archive work in a separate packet
+
+## Post-closeout review
+
+Date: 2026-04-21
+Task: Verify package closeout and boot-routing clarity.
+
+Changed files:
+
+- `AGENTS.md`
+- `workspace_map.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md`
+
+Summary:
+
+- post-closeout review passed
+- fixed one docs check regression by removing a literal local archive-bundle
+  path from `workspace_map.md`
+- strengthened root `AGENTS.md` so agents proactively run
+  `topology_doctor` navigation/digest and Code Review Graph status for source,
+  review, and code-impact work
+- clarified that Code Review Graph is derived context only and cannot waive
+  manifests, receipts, planning locks, or tests
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --agents-coherence --json` -> ok
+- `python scripts/topology_doctor.py --self-check-coherence --json` -> ok
+- `python scripts/topology_doctor.py --runtime-modes --json` -> ok
+- `python scripts/topology_doctor.py --code-review-graph-status --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files AGENTS.md workspace_map.md --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json` -> ok
+- `git diff --check -- AGENTS.md workspace_map.md` -> ok
+- `git diff -- docs/authority` -> no changes
+
+Review verdict:
+
+- PASS. Topology map usage flow is now explicit in root `AGENTS.md` and
+  `workspace_map.md`; agents are instructed to proactively use topology
+  navigation/digest and Code Review Graph status for source/review work while
+  treating graph output as non-authoritative derived context.
+
+Residual risks:
+
+- Full `--navigation` with source files still reports unrelated pre-existing
+  source-rationale/self-check/runtime-mode debt in the wider repo; that does
+  not block the docs package closeout or the boot-routing clarification.
+- `.code-review-graph/graph.db` remains locally dirty as a derived context
+  artifact and is intentionally not staged here.
+
+Next:
+
+- Later reference deletion/archive work requires a separate packet.
