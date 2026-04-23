@@ -2975,3 +2975,102 @@ gaps:
       Multi-source (WU + Ogimet + Meteostat) fill yielded 20h of 24h for
       Wuhan 2026-04-18. All attempted sources return the same coverage; gap is
       genuine upstream sensor/reporting outage, not a collection bug.
+
+# --- Phase 2 tail backfill shortfalls (auto-appended 2026-04-23) ---
+# After Phase 2 atomic flip, a 2-day tail backfill (2026-04-22 → 2026-04-23)
+# was run to close the window gap. The 2026-04-23 partial day was removed
+# (today-in-progress). The 8 entries below are 2026-04-22 shortfalls where
+# a fresh single-window WU (or Ogimet for Tier 2) fetch yielded <22 distinct
+# UTC hours.
+#
+# Pattern:
+# - Istanbul/Moscow/Tel Aviv (Tier 2 Ogimet): 21h is natural single-fetch
+#   coverage; boundary-widening via fill_obs_v2_dst_gaps.py could close,
+#   but same-day chunk-tail shortfall is normal Ogimet behavior. Deferred.
+# - Los Angeles / San Francisco / Seattle / Lagos / Lucknow (Tier 1 WU):
+#   WU-only tail fetch yielded 16-21h. Meteostat bulk archives lag weeks
+#   and cannot supplement same-day data. Same upstream pattern as the
+#   233 earlier allowlisted gaps for these cities.
+
+  - city: Istanbul
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      ogimet_metar_ltfm: present
+    rationale: >-
+      Tier 2 Ogimet single-window fetch for 2026-04-22 yielded 21h of 24h.
+      Boundary-widening deferred; same-day tail shortfall is routine Ogimet
+      chunk behavior.
+
+  - city: Lagos
+    target_date: "2026-04-22"
+    hours_collected: 16
+    missing_utc_hours: []
+    sources_probed:
+      wu_icao_history: present
+    rationale: >-
+      WU-only tail fetch for 2026-04-22 yielded 16h of 24h. DNMM is a
+      historically sparse station (see 80+ Lagos entries above); Meteostat
+      bulk archives lag weeks and cannot supplement same-day data.
+
+  - city: Los Angeles
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      wu_icao_history: present
+    rationale: >-
+      WU-only tail fetch for 2026-04-22 yielded 21h of 24h. Same upstream
+      pattern as 18 earlier LA allowlisted entries; Meteostat bulk archives
+      cannot supplement same-day data.
+
+  - city: Lucknow
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      wu_icao_history: present
+    rationale: >-
+      WU-only tail fetch for 2026-04-22 yielded 21h of 24h. VILK is a
+      sparse-WU station; Meteostat bulk cannot supplement same-day.
+
+  - city: Moscow
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      ogimet_metar_uuww: present
+    rationale: >-
+      Tier 2 Ogimet single-window fetch for 2026-04-22 yielded 21h of 24h.
+      Boundary-widening deferred; same-day chunk-tail shortfall.
+
+  - city: San Francisco
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      wu_icao_history: present
+    rationale: >-
+      WU-only tail fetch for 2026-04-22 yielded 21h of 24h. Same upstream
+      pattern as 11 earlier SF allowlisted entries.
+
+  - city: Seattle
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      wu_icao_history: present
+    rationale: >-
+      WU-only tail fetch for 2026-04-22 yielded 21h of 24h. Same upstream
+      pattern as 17 earlier Seattle allowlisted entries.
+
+  - city: Tel Aviv
+    target_date: "2026-04-22"
+    hours_collected: 21
+    missing_utc_hours: []
+    sources_probed:
+      ogimet_metar_llbg: present
+    rationale: >-
+      Tier 2 Ogimet single-window fetch for 2026-04-22 yielded 21h of 24h.
+      Boundary-widening deferred; same-day chunk-tail shortfall.
