@@ -144,8 +144,18 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
 
     conn.executescript(load_architecture_kernel_sql())
     _ensure_token_suppression_reason_schema(conn)
-    for column in ("token_id", "no_token_id", "condition_id"):
-        if column not in table_columns(conn, "position_current"):
+    # Legacy-DB column reconciliation: `CREATE TABLE IF NOT EXISTS` in the
+    # kernel SQL no-ops when position_current exists from a pre-kernel
+    # schema. Backfill every canonical column that the legacy table is
+    # missing. Plain TEXT affinity matches the existing 3-token-column
+    # pattern and satisfies assert_canonical_transaction_schema's set-
+    # membership check below. Runtime writers go through
+    # require_payload_fields and always supply every canonical field, so
+    # the absence of NOT NULL / CHECK constraints on ALTER-migrated
+    # columns does not affect write-path correctness.
+    existing_columns = table_columns(conn, "position_current")
+    for column in CANONICAL_POSITION_CURRENT_COLUMNS:
+        if column not in existing_columns:
             conn.execute(f"ALTER TABLE position_current ADD COLUMN {column} TEXT;")
     assert_canonical_transaction_schema(conn)
 

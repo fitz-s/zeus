@@ -28,7 +28,72 @@
 | T7.b AST-walk guard | closed | `beea8a9` | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
 | T1.a 15-file header wave | closed | `67b5908` | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
 | T1.b provenance_registry skipif cleanup | closed | `4943d0d` | 4 stale `skipif(not REGISTRY_YAML.exists(), ...)` markers removed; 19/19 test_provenance_enforcement tests still pass | 2026-04-23 |
-| T3.1 execute_discovery_phase 5-caller env kwarg fix | closed | pending | 6 TypeError failures → pass (2 day0_runtime + 2 discovery_phase_entry_path + 2 discovery_phase_records); zero new failures; delta-direction on 3 modified files: 28F→22F, 166P→172P | 2026-04-23 |
+| T3.1 execute_discovery_phase 5-caller env kwarg fix | closed | `716bfdd` | 6 TypeError failures → pass (2 day0_runtime + 2 discovery_phase_entry_path + 2 discovery_phase_records); zero new failures; delta-direction on 3 modified files: 28F→22F, 166P→172P | 2026-04-23 |
+| T3.3 position_current ALTER TABLE canonical-column backfill | closed | pending | surrogate critic (code-reviewer@opus) CLEAR; fixes test_kernel_schema_adds_token_identity_columns; planning-lock GREEN; delta: -1 failure, 0 new failures; INV-14 runtime enforcement preserved per grep of direct-SQL writers | 2026-04-23 |
+
+## T3.3 — execution notes (2026-04-23)
+
+Fix-plan premise correction (third such correction in this packet, after
+T4.0 and implicit T3.2 overlap):
+
+**Plan said**: "Canonical `position_current` schema bootstrap fix. Diff
+`apply_architecture_kernel_schema()` against
+`CANONICAL_POSITION_CURRENT_COLUMNS`; add missing columns to bootstrap
+SQL."
+
+**Reality (factually verified)**: the kernel migration at
+`architecture/2026_04_02_architecture_kernel.sql:82-129` CREATE TABLE
+already declares all 31 canonical columns. A fresh DB probe via
+`sqlite3 :memory: + apply_architecture_kernel_schema(conn)` yields
+exactly 31 columns, zero missing, zero extra. **Bootstrap is already
+correct.**
+
+The actual defect is in the LEGACY-DB migration path (not fresh
+bootstrap): when `apply_architecture_kernel_schema` runs on an
+existing-but-pre-kernel `position_current` table, the
+`CREATE TABLE IF NOT EXISTS` no-ops, and the explicit ALTER TABLE
+loop at L147-149 only adds 3 token columns. Missing canonical columns
+like `temperature_metric` remain absent, causing
+`assert_canonical_transaction_schema` at L150 to raise.
+
+### Fix
+
+Expanded the ALTER TABLE loop to iterate over all
+`CANONICAL_POSITION_CURRENT_COLUMNS` (not just the 3-tuple), adding
+each missing column with plain TEXT affinity. Cached the column set
+once before the loop (idempotency correctness confirmed by critic).
+Multi-line comment explains the design trade-off (TEXT affinity +
+runtime `require_payload_fields` guard).
+
+### Critic review (surrogate code-reviewer@opus)
+
+**Verdict: CLEAR — APPROVE for commit.**
+
+Findings summary:
+- F1 (low, non-blocking): TEXT affinity for REAL-typed legacy columns —
+  documented trade-off; SQLite dynamic typing preserves values.
+- F2 (low, non-blocking): INV-14 CHECK constraint lost for
+  ALTER-migrated `temperature_metric`, but runtime guard at
+  `src/state/projection.py:50-53` catches invalid writes BEFORE the
+  DB; critic greped `nuke_rebuild_projections.py:124` as the only
+  direct-SQL mutator and confirmed it touches only `phase`+`updated_at`.
+- F3, F4: positive observations on idempotency and inline documentation.
+
+All seven rubric axes: CORRECTNESS pass, TYPE_SEMANTICS acceptable,
+IDEMPOTENCY correct, ORDERING safe, INV_14_CONSEQUENCE preserved,
+PLANNING_LOCK verified green (path correction noted), TEST_EXPECTATION
+fixed target green, no new regression.
+
+### Regression evidence
+
+- `pytest -q tests/test_architecture_contracts.py::test_kernel_schema_adds_token_identity_columns_to_existing_position_current`
+  → passes (was failing pre-T3.3).
+- `pytest -q tests/test_architecture_contracts.py::test_kernel_schema_migrates_existing_token_suppression_reason_check`
+  → passes (not regressed).
+- `pytest -q tests/test_architecture_contracts.py::test_apply_architecture_kernel_schema_bootstraps_fresh_db`
+  → still fails, but the failure is on `_canonical_projection()` missing
+  `temperature_metric` field in the fixture — T3.2 scope, not T3.3.
+  My T3.3 change is orthogonal.
 
 ## T3.1 — execution notes (2026-04-23)
 

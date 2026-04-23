@@ -170,7 +170,7 @@
     {
       "slice_id": "T3.1",
       "name": "execute_discovery_phase_env_kwarg_5_caller_fix",
-      "commit": "pending",
+      "commit": "716bfdd",
       "date": "2026-04-23",
       "critic_status": "self_verified_6_failures_to_pass_zero_new_failures",
       "planning_lock": "GREEN",
@@ -198,6 +198,35 @@
         ".venv/bin/python -m pytest -q tests/test_day0_runtime_observation_context.py → 4 passed",
         ".venv/bin/python -m pytest -q tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db tests/test_runtime_guards.py::test_discovery_phase_records_observation_unavailable_as_no_trade tests/test_runtime_guards.py::test_discovery_phase_records_rate_limited_decision_as_availability_fact → 4 passed"
       ]
+    },
+    {
+      "slice_id": "T3.3",
+      "name": "position_current_alter_table_canonical_column_backfill",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_CLEAR_approve_for_commit",
+      "planning_lock": "GREEN",
+      "files_changed": [
+        "src/state/ledger.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "factual_correction_to_plan": "Plan T3.3 premise 'bootstrap fix — add missing columns' was wrong. architecture/2026_04_02_architecture_kernel.sql CREATE TABLE already declares all 31 canonical columns (verified via sqlite3 :memory: probe). The actual defect was in the LEGACY-DB ALTER TABLE loop at src/state/ledger.py:147-149 which only added 3 token columns; other canonical columns (notably temperature_metric) stayed absent on legacy DBs, tripping assert_canonical_transaction_schema.",
+      "fix_summary": "Expanded ALTER TABLE loop to iterate CANONICAL_POSITION_CURRENT_COLUMNS (31 columns); each missing column added with TEXT affinity. Cached existing_columns before loop for idempotency clarity. Multi-line comment documents TEXT-affinity + runtime-guard rationale.",
+      "critic_findings_integrated": {
+        "surrogate_critic": "code-reviewer@opus read-only review 2026-04-23",
+        "F1_low_nonblocking": "TEXT affinity vs REAL for numeric columns on ALTER path — SQLite dynamic typing preserves values; production already has fresh CREATE schema",
+        "F2_low_nonblocking": "INV-14 CHECK constraint lost for ALTER-migrated temperature_metric; runtime guard at src/state/projection.py:50-53 + grep of only-direct-SQL-mutator (scripts/nuke_rebuild_projections.py:124, touches phase+updated_at only) confirms no violation path",
+        "F3_positive": "cached-before-loop idempotency pattern is correct",
+        "F4_positive": "inline comment satisfies Fitz constraint #2 (encode insight into structure)"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_adds_token_identity_columns_to_existing_position_current → passes (was failing)",
+        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_migrates_existing_token_suppression_reason_check → passes (not regressed)",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/ledger.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json → {ok: true, issues: []}",
+        "sqlite3 :memory: + apply_architecture_kernel_schema → 31 canonical columns, zero missing, zero extra (confirms bootstrap itself is correct; fix is legacy-migration path only)"
+      ],
+      "out_of_scope_remaining": "test_apply_architecture_kernel_schema_bootstraps_fresh_db still fails on _canonical_projection() fixture missing 'temperature_metric' — T3.2 scope, not T3.3. Orthogonal to my change."
     }
   ],
   "slices_in_review": [
