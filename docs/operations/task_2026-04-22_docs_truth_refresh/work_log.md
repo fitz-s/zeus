@@ -417,3 +417,44 @@ Next:
 
 - run post-closeout review
 - keep registry retirement or generated refresh tooling in a separate packet
+
+## Post-closeout review
+
+Date: 2026-04-22
+Task: Review docs truth refresh package after closeout.
+
+Changed files:
+
+- `architecture/topology.yaml`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+
+Summary:
+
+- post-closeout review passed after one compatibility fix
+- new Gate F packet evidence introduced
+  `docs/operations/task_2026-04-21_gate_f_data_backfill/confirmed_upstream_gaps.yaml`
+- updated `architecture/topology.yaml` so operations packet evidence may include
+  `.yaml` / `.yml`
+- package results remain intact: `docs/reference/` is canonical-only, current
+  facts live in operations, and demoted support docs live in reports
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --reference-replacement --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files architecture/topology.yaml --plan-evidence docs/operations/current_state.md --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files architecture/topology.yaml --json` -> ok
+- `pytest -q tests/test_topology_doctor.py -k "docs or map_maintenance or context_budget"` -> 44 passed, 139 deselected
+- `git diff --check -- architecture/topology.yaml` -> ok
+
+Verdict:
+
+- PASS. Docs truth refresh is closed and post-closeout reviewed.
+
+Next:
+
+- Later registry retirement/deletion or generated current-fact tooling requires
+  a separate packet.
