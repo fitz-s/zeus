@@ -651,7 +651,7 @@
     {
       "slice_id": "T5.c",
       "name": "neg_risk_sdk_passthrough_audit_not_typed_contract",
-      "commit": "pending",
+      "commit": "63c5c36",
       "date": "2026-04-23",
       "critic_status": "self_verified_verification_driven_skip_decision_con_nyx_dispatched",
       "planning_lock": "GREEN (tests/* only)",
@@ -683,6 +683,54 @@
         ".venv/bin/python -m pytest -q tests/test_neg_risk_passthrough.py -> 4 passed in 0.41s",
         "grep -rn 'neg_risk|negRisk|NegRisk' src/ scripts/ -> zero hits (verified before writing audit)",
         "SDK reference: .venv/lib/python3.14/site-packages/py_clob_client/client.py:441-448,517-533,572-575 (get_neg_risk + create_order auto-detection paths)"
+      ]
+    },
+    {
+      "slice_id": "T5.d",
+      "name": "realized_fill_plus_slippage_bps_typed_contracts",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_contract_shell_pattern_proven_in_T5a_T5b_con_nyx_dispatched",
+      "planning_lock": "GREEN on 3 files (src/contracts/slippage_bps.py + src/contracts/realized_fill.py + tests/test_realized_fill.py)",
+      "files_changed": [
+        "src/contracts/slippage_bps.py (NEW — SlippageBps frozen dataclass + from_prices factory + fraction property)",
+        "src/contracts/realized_fill.py (NEW — RealizedFill frozen dataclass + from_prices factory threading ExecutionPrice×2 + SlippageBps)",
+        "tests/test_realized_fill.py (NEW, 32 tests in 6 classes)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "design_rationale_fresh_not_aliased": "Plan explicitly directed NO alias on TemperatureDelta. Temperature deltas and price-slippage basis points share numeric shape (signed-magnitude-with-unit) but carry orthogonal domain semantics. Aliasing would type-check `TemperatureDelta(5, 'F')` and `TemperatureDelta(10, 'bps')` identically, opening a cross-domain type-reuse category of bugs. Fresh SlippageBps carries explicit domain-restricted direction Literal['adverse','favorable','zero'] so every constructed instance is unambiguously interpretable without the caller remembering a sign convention.",
+      "direction_semantics_side_dependent": {
+        "buy_side": "actual > expected → adverse (paid more); actual < expected → favorable; equal → zero",
+        "sell_side": "actual > expected → favorable (received more); actual < expected → adverse; equal → zero",
+        "rationale": "Keeping direction as a distinct field (not sign-of-magnitude) forces callers to specify side explicitly at construction, preventing the 'negative slippage means what?' failure mode that bare signed floats routinely produce."
+      },
+      "shell_vs_integration_scope": "T5.d ships contract SHELLS only — no existing Zeus code touched. Rationale: the plan row T5.d is marked size=3 with dependencies T5.a + T5.b (both contracts); consumer integration (wiring into OrderResult, fill_tracker execution_report path, DB execution_slippage_usd column) is additional surface that expands the blast radius without a clear executional demand today. Integration will follow as T5.d-followup once a consumer call site emerges — e.g., Phase2 Kelly-attribution surface that needs per-fill RealizedFill for learning.",
+      "t5_family_effective_closure": {
+        "T5_a_ExecutionPrice": "closed abd5bb6 (entry-path Kelly boundary)",
+        "T5_b_TickSize": "closed c5c916b (tick contract + exit-path NaN closure)",
+        "T5_c_NegRisk_skip": "closed 63c5c36 (SDK passthrough audit; plan's may-reduce-to-passthrough clause invoked)",
+        "T5_d_RealizedFill_SlippageBps": "closed pending (contract shells ready for integration)",
+        "effective_denominator": 3,
+        "effective_progress": "3/3 CONDITIONAL T5 gate closed"
+      },
+      "test_coverage_breakdown": {
+        "TestSlippageBpsInvariants": 9,
+        "TestSlippageBpsFraction": 3,
+        "TestSlippageBpsFromPrices": 8,
+        "TestRealizedFillInvariants": 7,
+        "TestRealizedFillFactoryConsistency": 4,
+        "total_new": 32,
+        "narrow_T5_slab_post_T5_d": "tests/test_realized_fill.py + tests/test_neg_risk_passthrough.py + tests/test_tick_size.py -> 59 passed in 0.47s (32 + 4 + 23)"
+      },
+      "regression_delta_direction_L28": {
+        "delta_from_source_change": "N/A — contract shells, no existing src mutation",
+        "new_test_count": 32
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_realized_fill.py -> 32 passed",
+        ".venv/bin/python -m pytest -q tests/test_realized_fill.py tests/test_neg_risk_passthrough.py tests/test_tick_size.py -> 59 passed in 0.47s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/contracts/slippage_bps.py src/contracts/realized_fill.py tests/test_realized_fill.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
       ]
     }
   ],
