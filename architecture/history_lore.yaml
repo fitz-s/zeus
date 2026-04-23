@@ -1496,3 +1496,161 @@ cards:
     zero_context_digest: >
       HKO truncates temperatures (floor), not WMO half-up. Use
       SettlementSemantics.for_city() to dispatch the correct rounding law.
+
+  - id: TRUTH_SURFACE_HIERARCHY_BEATS_STATUS_SUMMARY
+    status: active_law
+    severity: high
+    sources:
+      - docs/archives/audits/legacy_audit_truth_surfaces.md
+      - docs/reference/modules/state.md
+      - docs/reference/modules/data.md
+      - docs/reference/modules/observability.md
+    failure_mode: >
+      Agents trust JSON/status/report outputs because they are easy to read,
+      then quietly demote canonical DB/event truth into one signal among many.
+    trigger_context:
+      - state debugging
+      - data routing
+      - observability review
+      - operator status work
+    wrong_moves:
+      - treat status_summary as canonical runtime truth
+      - route current truth from a JSON export instead of DB/event surfaces
+      - let rebuild/report artifacts outrank typed writers
+    correct_rule: >
+      Canonical DB/event truth outranks status JSON, reports, and derived
+      read models. Derived operator surfaces are evidence and convenience only.
+    antibodies:
+      docs:
+        - docs/reference/modules/state.md
+        - docs/reference/modules/data.md
+        - docs/reference/modules/observability.md
+      tests:
+        - tests/test_truth_surface_health.py
+        - tests/test_cross_module_invariants.py
+      gates:
+        - python scripts/topology_doctor.py --docs
+    residual_risk: >
+      Humans still prefer readable JSON over canonical truth. Module books and
+      docs routing reduce but do not eliminate that temptation.
+    invalidation_condition: >
+      Only a deliberate architecture packet that changes truth ownership may
+      alter this hierarchy.
+    routing:
+      task_terms: [truth surface, status_summary, canonical truth, derived json, operator status]
+      file_patterns:
+        - src/state/db.py
+        - src/observability/status_summary.py
+        - docs/reference/modules/state.md
+        - docs/reference/modules/observability.md
+    downstream_blast_radius:
+      - src/data/observation_client.py
+      - docs/operations/current_data_state.md
+      - docs/reference/modules/data.md
+    zero_context_digest: >
+      Readable status is not canonical truth. Start with DB/event truth, then
+      treat JSON/status/report surfaces as derived.
+
+  - id: EXIT_BEHAVIOR_CAN_DOMINATE_SIGNAL_QUALITY
+    status: active_law
+    severity: high
+    sources:
+      - docs/archives/findings/exit_failure_analysis.md
+      - docs/archives/reports/strategy_failure_analysis.md
+      - docs/reference/modules/engine.md
+      - docs/reference/modules/execution.md
+      - docs/reference/modules/riskguard.md
+    failure_mode: >
+      Correct predictive signal still loses money because exit timing,
+      execution semantics, or risk actuation are wrong.
+    trigger_context:
+      - exit triggers
+      - day0 monitoring
+      - execution review
+      - riskguard tuning
+    wrong_moves:
+      - debug only signal quality when losses cluster around exits
+      - treat exit as local close instead of a lifecycle/economic boundary
+      - let riskguard remain advisory under narrow-edge strategies
+    correct_rule: >
+      Review engine, execution, and riskguard together when exit behavior is in
+      question. Signal quality does not compensate for wrong actuation.
+    antibodies:
+      docs:
+        - docs/reference/modules/engine.md
+        - docs/reference/modules/execution.md
+        - docs/reference/modules/riskguard.md
+      tests:
+        - tests/test_day0_exit_gate.py
+        - tests/test_exit_authority.py
+        - tests/test_live_safety_invariants.py
+      gates:
+        - python scripts/topology_doctor.py --tests
+    residual_risk: >
+      Cross-module exit failures still require human review because graph and
+      local tests each see only slices of the behavior.
+    invalidation_condition: >
+      Only a runtime architecture change that redefines exit/settlement/risk
+      boundaries may supersede this lesson.
+    routing:
+      task_terms: [exit failure, churn defense, day0 exit, risk actuation, execution semantics]
+      file_patterns:
+        - src/execution/exit_triggers.py
+        - src/execution/executor.py
+        - src/engine/monitor_refresh.py
+        - src/riskguard/riskguard.py
+    downstream_blast_radius:
+      - src/engine/evaluator.py
+      - src/execution/harvester.py
+      - docs/reference/modules/strategy.md
+    zero_context_digest: >
+      If exit behavior is wrong, signal quality is not the first question.
+      Review engine, execution, and risk actuation as one slice.
+
+  - id: PACKET_DISCIPLINE_PREVENTS_EDIT_LOSS
+    status: active_law
+    severity: medium
+    sources:
+      - docs/archives/investigations/agent_edit_loss_investigation.md
+      - docs/reference/modules/state.md
+      - docs/archive_registry.md
+    failure_mode: >
+      Valuable work disappears because it lives only in local edits, ad hoc
+      scratch, or uncaptured reasoning instead of packet artifacts and commits.
+    trigger_context:
+      - long-running doc refactors
+      - schema/state work
+      - multi-phase packets
+      - local scratch cleanup
+    wrong_moves:
+      - leave load-bearing progress only in the working tree
+      - skip packet work logs or receipts because the change feels obvious
+      - rely on memory instead of explicit commit and packet boundaries
+    correct_rule: >
+      High-sensitivity work needs packet evidence, receipts, and regular commit
+      boundaries so partial progress survives interruptions and context loss.
+    antibodies:
+      docs:
+        - docs/archive_registry.md
+        - docs/operations/current_state.md
+      gates:
+        - python scripts/topology_doctor.py --work-record
+        - python scripts/topology_doctor.py --change-receipts
+    residual_risk: >
+      Humans can still delay commits. The protocol lowers loss probability but
+      cannot eliminate it.
+    invalidation_condition: >
+      Only a stronger persistent execution log or automated packet recorder may
+      supersede this rule.
+    routing:
+      task_terms: [edit loss, packet discipline, work log, receipt, interrupted work]
+      file_patterns:
+        - docs/operations/current_state.md
+        - docs/operations/task_*/work_log.md
+        - docs/operations/task_*/receipt.json
+    downstream_blast_radius:
+      - architecture/history_lore.yaml
+      - docs/reference/modules/state.md
+    zero_context_digest: >
+      Packet evidence and commit hygiene are not ceremony; they are the
+      antibody against losing real work to interruption or scratch drift.

@@ -86,9 +86,9 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 - Harvester/settlement paths fail to rejoin state truth cleanly.
 
 ## 14. Historical failures and lessons
-- [Archive evidence] `findings/exit_failure_analysis.md` is the clearest historic proof that execution and exit logic, not just signal quality, can dominate losses.
-- [Archive evidence] `traces/settlement_crisis_trace.md` shows why execution/settlement metadata must not be mistaken for canonical outcomes.
-- [Archive evidence] `reports/strategy_failure_analysis.md` reinforces that narrow-edge strategies are especially sensitive to exit and lifecycle mis-semantics.
+- [Archive evidence] `docs/archives/findings/exit_failure_analysis.md` is the clearest historic proof that execution and exit logic, not just signal quality, can dominate losses.
+- [Archive evidence] `docs/archives/traces/settlement_crisis_trace.md` shows why execution/settlement metadata must not be mistaken for canonical outcomes.
+- [Archive evidence] `docs/archives/reports/strategy_failure_analysis.md` reinforces that narrow-edge strategies are especially sensitive to exit and lifecycle mis-semantics.
 
 ## 15. Code graph high-impact nodes
 - `src/execution/executor.py` — likely bridge from engine, riskguard, state, and supervisor inputs into live market actuation.

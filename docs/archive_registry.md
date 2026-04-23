@@ -132,6 +132,24 @@ Before promoting any historical lesson, confirm:
 - Placement: durable law goes to manifests/tests/authority docs; compressed
   memory goes to `architecture/history_lore.yaml`; access policy stays here.
 
+## Rehydration Extraction Ledger
+
+The 2026-04-23 authority rehydration packet mined the following archive bodies
+for durable lessons, then rewrote those lessons into active docs or lore rather
+than promoting the bodies themselves:
+
+| Archive evidence consulted | Durable load rehydrated into |
+|---|---|
+| `docs/archives/audits/legacy_audit_truth_surfaces.md` | `docs/reference/modules/state.md`, `docs/reference/modules/data.md`, `docs/reference/modules/observability.md`, `architecture/history_lore.yaml` |
+| `docs/archives/findings/exit_failure_analysis.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `docs/reference/modules/riskguard.md`, `architecture/history_lore.yaml` |
+| `docs/archives/traces/settlement_crisis_trace.md` | `docs/reference/modules/contracts.md`, `docs/reference/modules/state.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
+| `docs/archives/architecture/zeus_blueprint_v2.md` | `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md`, `architecture/history_lore.yaml` |
+| `docs/archives/reports/strategy_failure_analysis.md` | `docs/reference/modules/strategy.md`, `docs/reference/modules/engine.md`, `docs/reference/modules/execution.md` |
+| `docs/archives/investigations/agent_edit_loss_investigation.md` | `docs/reference/modules/state.md`, `architecture/history_lore.yaml` |
+
+This ledger documents extraction only. The archive bodies remain historical-only
+and non-default.
+
 ## Contamination warning
 
 Treat archive bodies as potentially contaminated until proven otherwise.

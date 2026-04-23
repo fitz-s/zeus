@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/reference/manifest
-Phase: P3 topology and context-pack support
+Phase: P4 archive extraction and closeout
 
 ## Objective
 
@@ -164,6 +164,31 @@ Forbidden:
   current-fact dependencies, and graph appendix hints
 - new checks are warning-first rather than blocking by default
 - topology_doctor tests cover the new lanes and context-pack payload fields
+
+## P4 Scope
+
+Allowed:
+
+- `architecture/history_lore.yaml`
+- `docs/reference/modules/*.md`
+- `docs/archive_registry.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/**`
+
+Forbidden:
+
+- archive bodies themselves
+- runtime/source behavior
+- DB files
+- `.code-review-graph/graph.db`
+- current law order rewrites
+
+## P4 Acceptance
+
+- archive-derived lessons are rewritten into active docs or history lore
+- `docs/archive_registry.md` records which archive bodies were mined and where
+  their durable load was rehydrated
+- archive bodies remain historical-only and non-default
 
 ## Verification
 

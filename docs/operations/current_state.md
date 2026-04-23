@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
-- Status: P3 topology-doctor and context-pack module support complete; P4 archive/graph extraction next
+- Status: Authority Rehydration packet complete through P4 archive/history extraction
 
 ## Required evidence
 
@@ -26,6 +26,8 @@ Role: single live control pointer for the repo.
   routing manifests for the sharpest families.
 - P3 taught topology_doctor and context packs to understand module books and
   module manifest routing.
+- P4 extracted durable archive lessons into active module references and
+  history lore without reactivating archive bodies.
 - Do not modify runtime source, DB/state files, graph DB, current city/source
   truth, archive bodies, or the authority kernel unless a later packet phase
   explicitly authorizes that scope.
@@ -61,6 +63,5 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Land P4 archive/graph extraction and final closeout for the rehydration
-  packet.
+- Authority Rehydration packet is complete.
 - Preserve unrelated dirty work and local archive inputs.
