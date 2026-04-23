@@ -14,16 +14,31 @@ Role: single live control pointer for the repo.
 
 ## Concurrent parallel packet
 
-A parallel agent is executing upstream data-readiness repair
-(`docs/operations/task_2026-04-23_data_readiness_remediation/`).
-Scope-disjoint from midstream by design: upstream owns `src/data/*`,
-`scripts/ingest/*`, `src/state/db.py` forecasts schema, launchd plists.
-Midstream owns `tests/*`, `src/strategy/*`, `src/engine/evaluator.py`,
-`src/engine/cycle_runtime.py`, `src/execution/{executor,exit_triggers}.py`,
-`src/contracts/*`. Shared files (`current_state.md`, `known_gaps.md`,
-`architecture/source_rationale.yaml`, `architecture/script_manifest.yaml`)
-are touched only at slice boundaries with `git pull --rebase` immediately
-before the edit.
+**Data-readiness remediation CLOSED 2026-04-23** (8/8 packets APPROVED by
+critic-opus). Closure banner + App-C R3-## traceability:
+`docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md`.
+Full audit trail: `docs/operations/task_2026-04-23_data_readiness_remediation/work_log.md`.
+Outcome: `settlements` table is canonical-authority-grade (1,561 rows,
+1,469 VERIFIED + 92 QUARANTINED; INV-14 identity + provenance_json +
+`settlements_authority_monotonic` trigger). Rollback chain preserved on
+disk (4 snapshot md5 sidecars committed).
+
+**DR-33-A** (live-harvester enablement, code-only scaffold): landed
+2026-04-23 at `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/`.
+Feature-flagged `ZEUS_HARVESTER_LIVE_ENABLED` default OFF — no runtime
+behavior change until explicit operator flip under DR-33-C review.
+
+Scope boundary with midstream retained: upstream-data-readiness owned
+`src/data/*`, `src/execution/harvester.py`, `src/state/db.py` settlements
+schema (the P-B migration added 5 columns + trigger), plus the new DR-33-A
+additions to `architecture/source_rationale.yaml::write_routes::settlement_write`
+and `architecture/test_topology.yaml`. Midstream owns `tests/*`,
+`src/strategy/*`, `src/engine/evaluator.py`, `src/engine/cycle_runtime.py`,
+`src/execution/{executor,exit_triggers}.py`, `src/contracts/*`. Shared
+files (`current_state.md`, `known_gaps.md`,
+`architecture/source_rationale.yaml`, `architecture/script_manifest.yaml`,
+`architecture/test_topology.yaml`) were touched by upstream only at slice
+boundaries with surgical diffs to avoid midstream work loss.
 
 ## Required evidence
 

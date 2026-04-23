@@ -1,6 +1,21 @@
 # P-0: First Principles of Zeus Quant Data Integrity
 
-**Status**: DRAFT — awaiting critic-opus approval
+**Status**: **CLOSED (8 of 8 packets APPROVED by critic-opus, 2026-04-23)**. Originally drafted 2026-04-23; approved by critic-opus (MD5 `29715433...` initial baseline + §5 step 6 addendum at `e238cf80...`); used as the decision framework for all 8 packets in the workstream.
+
+**Workstream outcome** (at closure):
+- `state/zeus-world.db` settlements table: 1,561 rows (1,469 VERIFIED earned by SettlementSemantics gate + 92 QUARANTINED with 8 enumerable reasons)
+- Every row carries the 4 INV-14 identity columns + `provenance_json` with `decision_time_snapshot_id`
+- Writer signature on all 1,561 rows: `p_e_reconstruction_2026-04-23`
+- Schema carries `settlements_authority_monotonic` trigger (P-B)
+- Rollback chain: 4 binary snapshots + md5 sidecars on disk (pre-pg / pre-pb / pre-pf / pre-pe)
+- DR-33-A follow-up (code-only harvester-live scaffold, flag OFF by default) committed at `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/`
+
+**One-sentence summary**: 1,562 provenance-hostile bulk-batch rows → 1,561 canonical-authority-grade rows whose every VERIFIED is earned via per-row evidence and every QUARANTINED carries a closed-set reason in machine-readable provenance_json.
+
+Full audit trail in `work_log.md`. Closed R3-## traceability in Appendix C below. Per-packet evidence at `evidence/bulk_writer_rca_final.md` (P-A), `evidence/harvester_gamma_probe.md` (P-D), `evidence/settlement_observation_agreement_audit.md` (P-C), `evidence/pg_corrections_plan.md` + `evidence/pg_execution_log.md` (P-G), `evidence/pb_schema_plan.md` + `evidence/pb_execution_log.md` (P-B), `evidence/pf_quarantine_plan.md` + `evidence/pf_execution_log.md` (P-F), `evidence/pe_reconstruction_plan.md` + `evidence/pe_execution_log.md` (P-E).
+
+---
+
 **Created**: 2026-04-23
 **Authority basis**: AGENTS.md + architecture/invariants.yaml + architecture/fatal_misreads.yaml + docs/authority/zeus_current_architecture.md + 3 rounds of review lessons (v3/v4/v5/v6)
 **Purpose**: establish the DECISION FRAMEWORK that every packet P-A through P-H anchors to. Without this, each packet drifts into ad-hoc patching that introduces new bugs per-round.
