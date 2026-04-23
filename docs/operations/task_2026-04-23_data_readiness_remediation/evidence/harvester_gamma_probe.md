@@ -64,7 +64,9 @@ print(f"absent={absent} present={present}")
 
 ## Section 4 — Complete API Shape (for reference)
 
-### 4.1 Event-level keys (all 50 events carry these 25 fields)
+### 4.1 Event-level keys (representative subset observed in 50 events)
+
+*Note: list is representative, not exhaustive. Current Gamma API schema may evolve; critic-opus independent re-probe noted 44 event-level fields including `negRisk`, `seriesSlug`, `automaticallyResolved`, etc. The invariant `winningOutcome` absence holds regardless of field-count drift.*
 
 ```
 id, ticker, slug, title, description, resolutionSource, startDate,
@@ -79,7 +81,9 @@ Notable absences:
 - No `resolvedOutcome`
 - No event-level settlement reference
 
-### 4.2 Market-level keys (all 412 markets carry these 40 fields)
+### 4.2 Market-level keys (representative subset observed in 412 markets)
+
+*Note: list is representative, not exhaustive. critic-opus full-field enumeration observed 76 market-level fields including `negRisk`, `clobTokenIds`, `customLiveness`, `umaBond`, etc. `winningOutcome` absence holds across both enumerations.*
 
 ```
 id, question, conditionId, slug, resolutionSource, endDate, startDate,
@@ -92,7 +96,7 @@ volumeNum, endDateIso, startDateIso, hasReviewedDates, volume1wk,
 volume1mo, volume1yr
 ```
 
-**`winningOutcome` IS NOT IN THIS LIST.** Harvester's call `market.get("winningOutcome", "")` returns `""` every time, `.lower()` gives `""`, `if winning == "yes"` never matches, `continue` fires, `_write_settlement_truth` never invoked.
+**`winningOutcome` IS NOT IN THIS LIST (or in any extended enumeration).** Harvester's call `market.get("winningOutcome", "")` returns `""` every time, `.lower()` gives `""`, `if winning == "yes"` never matches, `continue` fires, `_write_settlement_truth` never invoked.
 
 ---
 
@@ -118,17 +122,21 @@ From the Dallas 2025-12-30 event, the winning bin IS visible:
 
 **`outcomePrices=["1","0"]` with `outcomes=["Yes","No"]` → YES won → this market's bin IS the winning bin.**
 
-### 5.2 Distribution across 412 markets
+### 5.2 Distribution across 412 markets (critic-opus full-scan correction)
+
+**Full 412-market tally** (critic-opus independent re-probe 2026-04-23):
 
 ```
 --- outcomePrices patterns (post-resolution) ---
- 122  NO_won_[0,1]
-  20  YES_won_[1,0]
+  50  YES_won_[1,0]   (one winner per event × 50 events)
+ 362  NO_won_[0,1]
 --- umaResolutionStatus values ---
- 142  'resolved'
+ 412  'resolved'      (100%)
 ```
 
-Note: the systematic tally iterated ~164 markets in the detailed-probe subsample; 142 were `resolved` with valid outcomePrices. Remaining markets (in the broader 412-market set across 50 events) may be partially-resolved or pending UMA finalization. For a given (city, target_date) event, typically 1 market out of 7-9 carries `outcomePrices=["1","0"]` — that's the winning bin.
+*(Correction per critic F2: my initial subsample in the execution log reported 142 resolved of ~164 markets = 87%. Full 412-scan shows 100% resolution + clean 1-winner-per-event topology. The subsample was an early-probe artifact.)*
+
+Topology finding: every event has **exactly one winning market** (50/50) where `outcomePrices=["1","0"]`. The remaining 362 markets per event are `["0","1"]` (NO won, which is the complement). For a (city, target_date) event with N bin markets (typical 7-9), N-1 show `["0","1"]` and exactly 1 shows `["1","0"]` — that's the winning bin.
 
 ### 5.3 Why this is NOT the R3-09 removed fallback
 
@@ -168,6 +176,15 @@ def _find_winning_bin(event: dict) -> tuple[Optional[str], Optional[str]]:
     live-trading signal. This reads ONLY resolved markets where
     outcomePrices is the UMA oracle's binary vote result encoded
     as ("1","0") = YES-won or ("0","1") = NO-won.
+
+    Precedent note (per P-D critic-opus verification): existing
+    production code at scripts/_build_pm_truth.py:137-139 already uses
+    the same `outcomePrices[0] == "1"` pattern WITHOUT the
+    umaResolutionStatus gate. This fix is STRICTER than current
+    production practice — it adds the gate to ensure we only read the
+    binary encoding after UMA finalization. Aligning harvester with
+    _build_pm_truth.py while tightening the authority bar above
+    current practice.
     """
     for market in event.get("markets", []):
         if market.get("umaResolutionStatus") != "resolved":
@@ -299,8 +316,15 @@ Denver 2026-04-15 events: 0
 **For DR-33 implementation** (lands in P-B or separate micro-packet, TBD):
 - Apply §6.1 minimal diff to `src/execution/harvester.py::_find_winning_bin`
 - Cite §8 (decision-reversal check) explicitly in commit message and/or docstring
+- Cite `scripts/_build_pm_truth.py:137-139` precedent to strengthen non-reversal argument (fix is strictly more conservative than existing production code)
 - Test fixture: mock event with `umaResolutionStatus='resolved' + outcomePrices=["1","0"]` → verify `_find_winning_bin` returns the matching market's question
 - Test fixture: mock event with `umaResolutionStatus='pending'` + high outcomePrices → verify NO return (proves gate works)
+
+### 11.1 Non-blocking hazards for DR-33 test coverage (critic-opus NH-D*)
+
+- **NH-D1 outcomes order invariant**: current 412/412 markets show `outcomes=["Yes","No"]`. `src/data/market_scanner.py:582-595` has a `_labels_swapped` compensation for `["No","Yes"]` order. §6.1 fix does NOT swap — correctly fails closed on unexpected order. Test fixture: verify `continue` on `["No","Yes"]` instead of silent swap.
+- **NH-D2 outcomePrices string representation**: current 412/412 markets show `["1","0"]` (strings). §6.1 uses `str(prices[0]) == "1"` which matches this exactly. If Polymarket ever ships `["1.0","0.0"]` or `[1.0,0.0]`, match silently fails and returns None. Test fixture: both `"1"` and `"1.0"` representations — either accept both OR explicitly fail-closed with logging.
+- **NH-D3 umaResolutionStatus state machine**: current 412/412 show `'resolved'` only. Other values exist in Polymarket's workflow (`'pending'`, `'disputed'`, `'proposed'`). §6.1 fails closed on any non-`'resolved'` — correct. Test fixtures: explicit `'disputed'`, `'proposed'` inputs confirm gate rejection.
 
 **For P-E reconstruction**:
 - Harvester fix is NOT a precondition for P-E (P-E reconstructs from observations + SettlementSemantics, not from harvester). P-D is purely upstream-data-source investigation; it informs FUTURE live harvesting, not historical re-derivation.

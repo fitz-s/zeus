@@ -441,7 +441,7 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-06 | architect P0-5 | cross-packet coordination (dual-track) | P-B schema | PENDING |
 | R3-07 | architect P0-6, P0-7 | AP-16 (zone laundering) | P-B schema / separate K0 schema_packet | PENDING |
 | R3-08 | architect P0-9, critic P0-1 | AP-10 (vacuous AC) | P-H atomicity | PENDING |
-| R3-09 | critic P0-2 | AP-11 (reinstated removed architecture) | P-D harvester probe | PENDING |
+| R3-09 | critic P0-2 | AP-11 (reinstated removed architecture) | P-D harvester probe | **CLOSED-BY-P-D** (2026-04-23; AP-11 review-gate concern resolved: P-D §5.3+§8 proves semantic distinction between removed pre-resolution price fallback and proposed post-UMA-resolution oracle-vote read; critic-opus verified `_build_pm_truth.py:137-139` uses the same pattern WITHOUT gate, so fix is stricter than existing production. DR-33 code implementation is a separate downstream implementation task — not blocking this review closure.) |
 | R3-10 | critic P0-3 | AP-7 (deprecated API proliferation) | P-B schema | PENDING |
 | R3-11 | critic P0-4, scientist D2 | AP-12 (count unstable) | P-E reconstruction (single canonical containment script) | PENDING |
 | R3-12 | critic P0-5, scientist D3 | AP-14 (type-incompatible fabrication) | P-E / P-G DST handling | PENDING |
@@ -453,7 +453,7 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | PENDING |
 | R3-19 | architect P1-7 | AP-15 (NC-13 enforcement deferred) | P-B schema / P-E | PENDING |
 | R3-20 | critic P1-1 | AP-4 (source role collapse) | P-C WU audit (Tel Aviv decoupling) / P-E | PENDING |
-| R3-21 | scientist D4 | AP-15 (market identity lost) | P-D harvester probe (multi-market Gamma check) | PENDING |
+| R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** (per critic-opus P-D closure: reconciliation scope, not signal scope; optional 5-event Gamma probe add-on in P-G) | PENDING |
 | R3-22 | scientist D5 | AP-1 (obs_v2 corrupt rows) | P-G pre-existing corrections | PENDING |
 | R3-23 | scientist D7 | AP-1 (Denver orphan) | P-D extension §9.1 (Gamma probe: 250-event scan, 0 Denver matches → synthetic orphan) → P-G DELETE | **CLOSED-BY-P-D** (2026-04-23; Denver not in Gamma; P-G to DELETE in execution phase) |
 | R3-24 | architect cumulative | meta: candidate 8th and 9th fatal_misreads | Separate guidance_kernel packet (out of v6 scope) | NOTED |

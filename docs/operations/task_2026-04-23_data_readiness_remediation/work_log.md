@@ -281,19 +281,36 @@ Fatal misreads all preserved (no collapse).
 
 ### Closure request → critic-opus
 
-[to be sent next]
+- 2026-04-23T17:15:00Z — P-D closure request sent with reproducible API probe commands and §8 Q9 non-reversal attestation
 
-### critic-opus verdict
+### critic-opus verdict (2026-04-23)
 
-[pending]
+**APPROVE** with 3 MINOR findings + 3 NH-D* test-coverage notes + R3-## guidance:
+
+- F1 MINOR: §4 field lists were representative subset, not full API schema. Fixed: added "representative, not exhaustive" language; referenced critic's 44 event-fields / 76 market-fields extended enumeration.
+- F2 MINOR: §5.2 reported subsample tally (142 resolved / 87%). critic's full 412-scan: 412 resolved / 100% / clean 1-winner-per-event topology (50 YES-won + 362 NO-won). Fixed: replaced §5.2 with full-scan numbers; noted subsample was early-probe artifact.
+- F3 MINOR: §6.1 docstring now cites `scripts/_build_pm_truth.py:137-139` precedent (same outcomePrices[0]=="1" pattern WITHOUT umaResolutionStatus gate → P-D fix is STRICTER than existing production). Strengthens non-reversal argument.
+- NH-D1 outcomes-order invariant → added to §11.1 test-fixture requirements
+- NH-D2 string-representation fragility → added to §11.1
+- NH-D3 umaResolutionStatus state-machine coverage → added to §11.1
+- **Non-reversal attestation accepted**: §5.3 + §8 prove semantic distinction is sound. R3-09 AP-11 concern is closed at review-gate level.
+- Added insight (critic §R3-23 nuance): pm_settlements_full.json HAS Denver 2026-04-15 with pm_bin_lo=68, pm_bin_hi=69, pm_exact_value=None. Bulk writer rule `settlement_value = pm_bin_lo if lo==hi` produces NULL for 68≠69 → MATCHES current DB (Denver settlement_value=NULL). Writer likely read BOTH JSONs with pm_settlement_truth precedence, NOT just pm_settlement_truth alone. Consistent with P-A NH-A3 (90% confidence on single source).
+
+App-C status updates (per critic-opus confirmation):
+- R3-09: PENDING → **CLOSED-BY-P-D** (critic's marginal preference; AP-11 review-gate resolved; DR-33 impl is separate downstream task)
+- R3-21: stays PENDING; routed to **P-G** (reconciliation scope, not signal scope)
+- R3-23: PENDING → **CLOSED-BY-P-D** (conclusive 250-event Gamma scan + 3-way cross-reference)
 
 ### Closure action
 
-[pending verdict]
+- 2026-04-23T17:30:00Z — Applied F1 (§4 representative language), F2 (full-412 tally in §5.2), F3 (§6.1 _build_pm_truth.py precedent citation)
+- 2026-04-23T17:32:00Z — Added §11.1 NH-D1/D2/D3 test-fixture requirements for future DR-33 implementation
+- 2026-04-23T17:34:00Z — Updated App-C: R3-09 → CLOSED-BY-P-D; R3-21 routing clarified to P-G; R3-23 remains CLOSED-BY-P-D (confirmed)
+- 2026-04-23T17:35:00Z — P-D formally closed. Per P-0 §6 dependency graph, **P-C (WU product audit) is now the remaining parallel investigation** before the gate to P-G. P-A + P-D complete; P-G blocks on P-C.
 
 ---
 
-## P-C: WU Product Identity Audit — deferred pending P-D closure
+## P-C: WU Product Identity Audit — started 2026-04-23T17:40:00Z
 
 ### Pre-packet (Q1-Q10 answers)
 
