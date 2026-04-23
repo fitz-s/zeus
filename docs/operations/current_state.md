@@ -59,6 +59,7 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-20_workspace_authority_reconstruction/`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/`
 - `docs/operations/task_2026-04-21_gate_f_data_backfill/`
+- `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
 
 ## Next action
 

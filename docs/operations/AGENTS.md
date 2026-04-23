@@ -82,6 +82,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-20_code_review_graph_online_context/` | packet evidence | Tracked Code Review Graph online-context package |
 | `task_2026-04-20_workspace_authority_reconstruction/` | packet evidence | Workspace-authority reconstruction execution packet |
 | `task_2026-04-21_gate_f_data_backfill/` | packet evidence | Local Gate F data backfill packet present on disk |
+| `task_2026-04-22_orphan_artifact_cleanup/` | packet evidence | Cleanup of stale root scratch files and inactive workbook artifacts |
 
 ## Rules
 

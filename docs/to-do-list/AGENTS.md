@@ -7,8 +7,6 @@ task queues or audit inventories. They are operational evidence, not authority.
 
 | File | Purpose |
 |------|---------|
-| `zeus_data_improve_bug_audit_75.xlsx` | Data-improvement bug-audit checklist workbook; evidence/task inventory only |
-| `zeus_data_improve_bug_audit_100.xlsx` | Expanded 100-bug data-improvement audit workbook; evidence/task inventory only |
 | `zeus_data_improve_bug_audit_100_dual_track_reassessment.md` | Dual-track reassessment notes for the 100-bug audit; evidence only |
 | `zeus_bug100_reassessment_table.csv` | Machine-readable reassessment table for the 100-bug audit; evidence only |
 
