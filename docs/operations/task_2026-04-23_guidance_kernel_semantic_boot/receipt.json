@@ -1,0 +1,53 @@
+{
+  "task": "guidance kernel phase -1 packet activation",
+  "packet": "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
+  "route_source": "ralplan",
+  "route_evidence": [
+    ".omx/plans/guidance-kernel-semantic-boot-ralplan-2026-04-23.md",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
+    "docs/operations/current_state.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "architecture/change_receipt_schema.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "architecture/topology.yaml",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
+  ],
+  "changed_files": [
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "architecture/topology.yaml",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md",
+    "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    ".code-review-graph/graph.db",
+    "docs/authority/**",
+    "docs/archives/**"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <phase files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <phase files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <phase files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <phase files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <phase files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
+    "git diff --check"
+  ]
+}
