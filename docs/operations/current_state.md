@@ -5,24 +5,24 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Official Graph Refresh Integration
-- Active package source: `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json`
-- Status: official graph refresh path verified and official-first graph guidance integrated into AGENTS/protocol docs
+- Mainline task: Graph Rendering Integration
+- Active package source: `docs/operations/task_2026-04-23_graph_rendering_integration/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-23_graph_rendering_integration/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-23_graph_rendering_integration/receipt.json`
+- Status: graph deep-rendering packet opened; implementation plan in preparation
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
-- `docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md`
-- `docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json`
+- `docs/operations/task_2026-04-23_graph_rendering_integration/plan.md`
+- `docs/operations/task_2026-04-23_graph_rendering_integration/work_log.md`
+- `docs/operations/task_2026-04-23_graph_rendering_integration/receipt.json`
 
 ## Freeze point
 
-- Authority Rehydration is closed.
-- This packet may verify official `code-review-graph` refresh behavior and
-  update guidance/protocol docs, but it must not stage `.code-review-graph/graph.db`
-  or modify runtime/source behavior.
+- Authority Rehydration and official graph refresh verification are closed.
+- This packet may prepare and later implement graph deep-rendering integration,
+  but it must not change runtime/source behavior or stage `.code-review-graph/graph.db`
+  without an explicit later phase.
 
 ## Current fact companions
 
@@ -52,9 +52,11 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/`
 - `docs/operations/task_2026-04-23_authority_kernel_gamechanger/`
 - `docs/operations/task_2026-04-23_authority_rehydration/`
+- `docs/operations/task_2026-04-23_graph_refresh_official_integration/`
 - `docs/operations/task_2026-04-23_data_readiness_remediation/`
 
 ## Next action
 
-- Official graph refresh verification packet is complete.
+- Prepare the implementation packet that turns graph deep-rendering results
+  into repo-relative text summaries and module/context-pack integrations.
 - Preserve unrelated dirty work and local archive inputs.
