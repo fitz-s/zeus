@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/authority
-Phase: P2 side authority demotion/merge
+Phase: P3 current-fact hardening and closeout
 
 ## Objective
 
@@ -126,6 +126,36 @@ Forbidden:
   `docs/authority/*` paths.
 - Remaining source/test/historical packet references are classified in the work
   log as comments or historical evidence, not active authority.
+
+## P3 Scope
+
+Allowed:
+
+- `docs/operations/current_state.md`
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
+- `docs/operations/AGENTS.md`
+- `architecture/docs_registry.yaml`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- new data/source audits
+- runtime/data/source implementation
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- authority-history content edits
+
+## P3 Acceptance
+
+- `current_state.md` is pointer-only and receipt-bound.
+- `current_data_state.md` and `current_source_validity.md` have Status, Last
+  audited, Max staleness, Evidence packet, Receipt path, stale do-not-use
+  policy, and Refresh trigger.
+- Current-fact files are summary-only and below context budget.
+- No new current data/source truth is invented.
+- Package closeout/post-close review is recorded.
 
 ## P0 Acceptance
 

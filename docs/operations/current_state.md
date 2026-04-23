@@ -9,28 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
-- Status: P2 side authority demotion/merge in progress
-- Docs truth refresh P0 commit: `80c0051`
-- P0 follow-up review: `proceed_to_p1`
-- Docs truth refresh P1 commit: `d742083`
-- P1 follow-up review: `proceed_to_p2`
-- Docs truth refresh P2 commit: `8b687da`
-- P2 follow-up review: `proceed_to_p3`
-- Docs truth refresh P3 commit: `55eb285`
-- P3 follow-up review: `proceed_to_closeout`
-- Docs truth refresh closeout commit: `36d2f64`
-- Docs truth refresh post-closeout review: complete
-- Guidance kernel Phase -1 commit: `b90c345`
-- Guidance kernel Phase 0 commit: `1d5b724`
-- Guidance kernel Phase 1 commit: `e3e8178`
-- Guidance kernel Phase 2 commit: `ec22a02`
-- Guidance kernel Phase 3 commit: `24b501a`
-- Guidance kernel Phase 4 commit: `f887e9b`
-- Guidance kernel closeout commit: `65bd122`
-- Authority kernel P0 commit: `dc68379`
-- Authority kernel P1 commit: `0ee9179`
-- Prior docs reclassification package closed at `169b014`; post-closeout review
-  recorded at `6f51a8c`.
+- Status: P3 current-fact hardening pre-close review complete
 
 ## Required evidence
 
@@ -42,15 +21,15 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P2 demotes side authority files after P1 core absorption and retargets active
-  references.
-- Do not modify runtime behavior, DB/state files, graph DB, current city/source
-  truth, or Python source semantics in P2.
+- P3 hardens current-fact surfaces and closes the authority-kernel package.
+- Do not modify runtime source, DB/state files, graph DB, current city/source
+  truth, archive bodies, or authority history content in P3.
 
 ## Current fact companions
 
 - `docs/operations/current_data_state.md`
 - `docs/operations/current_source_validity.md`
+- `docs/operations/known_gaps.md`
 
 ## Other operations surfaces
 
@@ -75,7 +54,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Finish P2 validation and review.
-- If P2 review passes, open P3 current-fact hardening.
+- Commit P3 current-fact hardening.
+- After commit, run post-close review and record package closeout.
 - Preserve unrelated dirty work and local archive inputs.
-- Preserve unrelated dirty work and local archive inputs

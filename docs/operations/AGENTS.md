@@ -28,6 +28,10 @@ index, or archive catalog.
 | `runtime_artifact_inventory.md` | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
 
+Current-fact files must stay summary-only, receipt/evidence-backed,
+expiry-bound, and fail-closed when stale. They are planning truth, not durable
+law or implementation permission.
+
 ### Active Execution Packet
 
 | Path | Purpose |
@@ -99,3 +103,5 @@ make a surface default-read unless `current_state.md` routes it.
 - Current-fact surfaces require fresh packet/operator evidence. Do not update
   them from memory, and re-audit if they are older than their refresh protocol
   allows for the task at hand.
+- Current-fact surfaces must state Status, Last audited, Max staleness,
+  Evidence packet, Receipt path, stale do-not-use policy, and refresh trigger.
