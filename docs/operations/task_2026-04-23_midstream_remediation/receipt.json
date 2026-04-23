@@ -496,7 +496,7 @@
     {
       "slice_id": "T4.2-Phase1",
       "name": "exit_side_decision_evidence_audit_only_symmetry_check",
-      "commit": "pending",
+      "commit": "0206428",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_APPROVE_3_LOW_2_polish_addressed_inline_con_nyx_dispatched",
       "planning_lock": "GREEN on 3 files (src/state/decision_chain.py + src/engine/cycle_runtime.py + tests/test_exit_evidence_audit.py)",
@@ -539,6 +539,42 @@
         ".venv/bin/python -m pytest -q tests/test_exit_evidence_audit.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 56 passed in 0.13s",
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/decision_chain.py src/engine/cycle_runtime.py tests/test_exit_evidence_audit.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}",
         "git stash verification: pre-T4.2-Phase1 source + 6-file regression = 2 failed / 127 passed (identical to post delta-subtract of 11 new-test passes) -> ZERO delta"
+      ]
+    },
+    {
+      "slice_id": "T4.3b",
+      "name": "decision_evidence_runtime_invocation_antibody",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_test_only_1_file_no_src_change_surrogate_skipped_given_minimal_scope_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/* only)",
+      "files_changed": [
+        "tests/test_decision_evidence_runtime_invocation.py (new, 1 test; test-only, no src edit)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_ten": "Plan T4.3b cited unittest.mock.patch('src.contracts.decision_evidence.DecisionEvidence.__init__', wraps=original_init). Minor fixture re-targeting required: Day0Signal symbol was refactored to Day0Router.route during a prior session (handoff flagged this under T2.d). Updated monkeypatch target to 'src.signal.day0_router.Day0Router.route' with staticmethod wrapping of the lambda. Also stubbed DT7 _read_v2_snapshot_metadata -> {} so test is independent of ensemble_snapshots_v2 fixture state.",
+      "test_mechanism": "Wrap DecisionEvidence.__init__ via monkeypatch.setattr with delegation to original_init (preserves frozen-dataclass field assignment + __post_init__ validation invariants). Run one full evaluator_module.evaluate_candidate cycle on fixture DB with min_order_usd=0.01 so sizing gate ADMITS the edge. Assert ≥1 invocation with evidence_type='entry' AND accept EdgeDecision.decision_evidence carries the right statistical_method + fdr_corrected + sample_size fields. Catches the dead-code-path gap that T4.3 static AST-walk cannot — a refactor silently routing around L1700+ construction.",
+      "dependencies_paired_with": [
+        "tests/test_decision_evidence_entry_emission.py (T4.1b static emission antibodies)",
+        "tests/test_decision_evidence_persistence.py (T4.1a primitive round-trip)",
+        "tests/test_exit_evidence_audit.py (T4.2-Phase1 exit-side audit)"
+      ],
+      "fixture_tuning_notes": [
+        "4-bin outcomes (left-shoulder + 2 finite + right-shoulder) to satisfy validate_bin_topology's expected -inf leftmost",
+        "Differentiated p_posterior vs p_market so bin 0 carries real edge (>0) after BH-family selection",
+        "ENS snapshot persistence stubbed out (orthogonal to T4.3b claim) to avoid modeling full production ENS instance surface (bias_corrected / member_extrema / etc.)",
+        "bins-sized p_vector returned from Day0Router.route stub to keep FDR family scan within array bounds"
+      ],
+      "regression_delta_direction_L28": {
+        "narrow_T4_slab_post_T4_3b": "pytest tests/test_decision_evidence_runtime_invocation.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py tests/test_exit_evidence_audit.py -> 57 passed in 1.19s",
+        "delta_from_source_change": "N/A — test-only addition, zero source code mutation; broader regression baseline unchanged",
+        "new_test_count": 1
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_decision_evidence_runtime_invocation.py -> 1 passed in 1.18s",
+        ".venv/bin/python -m pytest -q tests/test_decision_evidence_runtime_invocation.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py tests/test_exit_evidence_audit.py -> 57 passed in 1.19s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_decision_evidence_runtime_invocation.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
       ]
     }
   ],
