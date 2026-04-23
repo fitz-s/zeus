@@ -3563,6 +3563,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         summary,
         150.0,
         datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
+        env="paper",
         deps=deps,
     )
 

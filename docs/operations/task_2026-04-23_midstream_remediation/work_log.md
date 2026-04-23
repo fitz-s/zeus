@@ -27,7 +27,50 @@
 | T4.0 persistence design rev2 | closed | `9365b20` | surrogate critic CLEAR (Option E); con-nyx informed | 2026-04-23 |
 | T7.b AST-walk guard | closed | `beea8a9` | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
 | T1.a 15-file header wave | closed | `67b5908` | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
-| T1.b provenance_registry skipif cleanup | closed | pending | 4 stale `skipif(not REGISTRY_YAML.exists(), ...)` markers removed; 19/19 test_provenance_enforcement tests still pass | 2026-04-23 |
+| T1.b provenance_registry skipif cleanup | closed | `4943d0d` | 4 stale `skipif(not REGISTRY_YAML.exists(), ...)` markers removed; 19/19 test_provenance_enforcement tests still pass | 2026-04-23 |
+| T3.1 execute_discovery_phase 5-caller env kwarg fix | closed | pending | 6 TypeError failures → pass (2 day0_runtime + 2 discovery_phase_entry_path + 2 discovery_phase_records); zero new failures; delta-direction on 3 modified files: 28F→22F, 166P→172P | 2026-04-23 |
+
+## T3.1 — execution notes (2026-04-23)
+
+Scope per plan: "patch ALL 7 execute_discovery_phase callers in
+tests/ + audit materialize_position callers". L20 grep-gate resolved
+the true call-site inventory to **5 patches**, not 7:
+
+- `tests/test_day0_runtime_observation_context.py:41` (MISSING env)
+- `tests/test_day0_runtime_observation_context.py:84` (MISSING env)
+- `tests/test_runtime_guards.py:717` already has `env="paper"` — NO PATCH
+- `tests/test_runtime_guards.py:4877` (MISSING env) — DAY0_CAPTURE mode
+- `tests/test_runtime_guards.py:5027` (MISSING env) — OPENING_HUNT mode
+- `tests/test_architecture_contracts.py:3555` (MISSING env) — UPDATE_REACTION
+- `tests/test_phase10e_closeout.py:352` resolved to a FUNCTION NAME,
+  not a call — the grep hit was on `def test_r_df_5_*`, not on an
+  actual `execute_discovery_phase(...)` invocation. No patch needed.
+- `tests/test_runtime_guards.py:2010, 2057` (materialize_position)
+  already carry `state="entered", env="paper"` — NO PATCH.
+
+Applied uniform `env="paper"` to all 5 missing sites. Paper is the
+safe test-context value per the pattern already established at
+`test_runtime_guards.py:717`. Real production uses `env="live"` for
+live runs.
+
+Regression evidence (delta-direction per memory L28):
+- Targeted tests:
+  - `pytest -q tests/test_day0_runtime_observation_context.py`
+    → `4 passed` (was 2 failed, 2 passed)
+  - 4 T3.1-target tests (entry_path × 2, discovery_phase_records × 2)
+    → `4 passed`
+- Broader 3-file regression:
+  - Pre-T3.1 baseline: 28 failed / 166 passed / 22 skipped
+    (normalized to same 3 files as post-run by subtracting
+    test_phase10e_closeout.py's 13 passing tests from the 4-file
+    pre-run)
+  - Post-T3.1: **22 failed / 172 passed / 22 skipped**
+  - Delta: **-6 failures, +6 passes, 0 new failures**
+- Remaining 22 failures on these files are out-of-T3.1-scope:
+  T3.3 schema bootstrap (apply_architecture_kernel_schema,
+  kernel_schema_adds_token_identity_columns, cycle_runtime_entry_dual_write_helper),
+  T2.g fail-closed (test_fdr already handled), INV-08 atomicity,
+  unrelated INV-14 projection drift → owned by T3.2, T3.2b, T3.3, T2.g.
 
 ## T1.b — execution notes (2026-04-23)
 

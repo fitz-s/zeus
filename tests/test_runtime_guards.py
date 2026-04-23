@@ -4885,6 +4885,7 @@ def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch
         summary=summary,
         entry_bankroll=100.0,
         decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="paper",
         deps=deps,
     )
 
@@ -5035,6 +5036,7 @@ def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_
         summary=summary,
         entry_bankroll=100.0,
         decision_time=datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        env="paper",
         deps=deps,
     )
 
