@@ -11,6 +11,7 @@ preserves the existing public helper surface during migration.
 from __future__ import annotations
 
 import glob
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -538,6 +539,126 @@ def current_state_operation_paths(api: Any, text: str, surface_prefix: str) -> s
     return {path for path in paths if path.startswith(surface_prefix)}
 
 
+def current_state_label_value(text: str, label: str) -> str | None:
+    match = re.search(rf"^- {re.escape(label)}:\s+`([^`]+)`", text, re.MULTILINE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def load_receipt(api: Any, receipt_rel: str) -> tuple[dict[str, Any] | None, str | None]:
+    path = api.ROOT / receipt_rel
+    if not path.exists():
+        return None, "missing"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except json.JSONDecodeError as exc:
+        return None, f"invalid json: {exc}"
+
+
+def check_current_state_receipt_bound(api: Any, topology: dict[str, Any]) -> list[Any]:
+    registry = topology.get("active_operations_registry") or {}
+    rel = str(registry.get("current_state") or "docs/operations/current_state.md")
+    path = api.ROOT / rel
+    if not path.exists():
+        return [api._issue("current_state_receipt_missing", rel, "current_state missing")]
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    active_packet = current_state_label_value(text, "Active execution packet")
+    active_source = current_state_label_value(text, "Active package source")
+    receipt_source = current_state_label_value(text, "Receipt-bound source")
+    issues: list[Any] = []
+    if not active_packet:
+        issues.append(api._issue("current_state_receipt_missing", rel, "missing Active execution packet"))
+        return issues
+    if active_source and active_source.startswith((".omx/", ".omc/")):
+        issues.append(api._issue("current_state_receipt_mismatch", rel, "Active package source must be tracked packet evidence, not runtime-local scratch"))
+    expected_receipt = (Path(active_packet).parent / "receipt.json").as_posix()
+    if not receipt_source:
+        issues.append(api._issue("current_state_receipt_missing", rel, "missing Receipt-bound source"))
+        receipt_source = expected_receipt
+    if receipt_source != expected_receipt:
+        issues.append(
+            api._issue(
+                "current_state_receipt_mismatch",
+                rel,
+                f"Receipt-bound source {receipt_source} does not match active packet receipt {expected_receipt}",
+            )
+        )
+    receipt, error = load_receipt(api, receipt_source)
+    if error:
+        issues.append(api._issue("current_state_receipt_missing", receipt_source, f"receipt unavailable: {error}"))
+        return issues
+    if str(receipt.get("packet") or "") != active_packet:
+        issues.append(
+            api._issue(
+                "current_state_receipt_mismatch",
+                receipt_source,
+                f"receipt packet {receipt.get('packet')!r} does not match active execution packet {active_packet!r}",
+            )
+        )
+    if receipt_source not in text:
+        issues.append(api._issue("current_state_receipt_missing", rel, "current_state does not mention its receipt source"))
+    if rel not in (receipt.get("changed_files") or []):
+        issues.append(
+            api._issue(
+                "current_state_receipt_mismatch",
+                receipt_source,
+                f"receipt changed_files must include {rel}",
+            )
+        )
+    return issues
+
+
+def build_current_state_candidate(api: Any, receipt_path: str) -> dict[str, Any]:
+    receipt, error = load_receipt(api, receipt_path)
+    if error or receipt is None:
+        return {
+            "ok": False,
+            "authority_status": "generated_current_state_candidate_not_authority",
+            "source_receipt": receipt_path,
+            "issues": [
+                {
+                    "code": "current_state_receipt_missing",
+                    "path": receipt_path,
+                    "message": f"receipt unavailable: {error}",
+                    "severity": "error",
+                }
+            ],
+        }
+    packet = str(receipt.get("packet") or "")
+    task = str(receipt.get("task") or "")
+    markdown = "\n".join(
+        [
+            "# Current State",
+            "",
+            "Role: single live control pointer for the repo.",
+            "",
+            "## Active program",
+            "",
+            "- Branch: `data-improve`",
+            f"- Mainline task: `{task}`",
+            f"- Active package source: `{packet}`",
+            f"- Active execution packet: `{packet}`",
+            f"- Receipt-bound source: `{receipt_path}`",
+            "- Status: generated candidate; review before applying",
+            "",
+            "## Required evidence",
+            "",
+            *[f"- `{item}`" for item in receipt.get("route_evidence") or []],
+            f"- `{receipt_path}`",
+        ]
+    )
+    return {
+        "ok": True,
+        "authority_status": "generated_current_state_candidate_not_authority",
+        "source_receipt": receipt_path,
+        "packet": packet,
+        "task": task,
+        "current_state_markdown": markdown,
+        "issues": [],
+    }
+
+
 def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list[Any]:
     registry = topology.get("active_operations_registry") or {}
     rel = str(registry.get("current_state") or "docs/operations/current_state.md")
@@ -614,4 +735,5 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
             )
     issues.extend(check_operations_task_folders(api, topology))
     issues.extend(check_runtime_plan_inventory(api, topology))
+    issues.extend(check_current_state_receipt_bound(api, topology))
     return issues

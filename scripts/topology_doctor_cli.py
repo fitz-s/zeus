@@ -31,6 +31,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--work-record", action="store_true", help="Check that repo-changing work has a short work record")
     parser.add_argument("--change-receipts", action="store_true", help="Check high-risk route/change receipts")
     parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
+    parser.add_argument("--current-state-receipt-bound", action="store_true", help="Check current_state receipt-bound pointer integrity")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
     parser.add_argument("--self-check-coherence", action="store_true", help="Check zero-context self-check alignment with root navigation")
@@ -112,6 +113,10 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     semantic_bootstrap.add_argument("--task", default="", help="Task statement")
     semantic_bootstrap.add_argument("--files", nargs="*", default=[], help="Files in scope")
     semantic_bootstrap.add_argument("--json", action="store_true", help="Emit JSON")
+
+    current_state = sub.add_parser("current-state", help="Emit generated current_state candidate from receipt")
+    current_state.add_argument("--from-receipt", required=True, help="Receipt JSON path")
+    current_state.add_argument("--json", action="store_true", help="Emit JSON")
     return parser
 
 
@@ -171,6 +176,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("context_budget", api.run_context_budget),
         ("artifact_lifecycle", api.run_artifact_lifecycle),
         ("context_packs", api.run_context_packs),
+        ("current_state_receipt_bound", api.run_current_state_receipt_bound),
         ("agents_coherence", api.run_agents_coherence),
         ("idioms", api.run_idioms),
         ("self_check_coherence", api.run_self_check_coherence),
@@ -312,6 +318,10 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
         return 0
     if args.command == "semantic-bootstrap":
         payload = api.build_semantic_bootstrap(args.task_class, task=args.task, files=args.files)
+        render_payload(api, payload, as_json=args.json)
+        return 0 if payload.get("ok") else 1
+    if args.command == "current-state":
+        payload = api.build_current_state_candidate(args.from_receipt)
         render_payload(api, payload, as_json=args.json)
         return 0 if payload.get("ok") else 1
     parser.print_help()

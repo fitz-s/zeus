@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/tooling
-Phase: 2 semantic-bootstrap topology output
+Phase: 3 receipt-bound current-state checks
 
 ## Objective
 
@@ -111,6 +111,29 @@ Forbidden:
 - `docs/authority/**`
 - `docs/archives/**`
 - current per-city/source truth table changes
+
+## Phase 3 Scope
+
+Allowed:
+
+- `docs/operations/current_state.md`
+- `architecture/docs_registry.yaml`
+- `architecture/topology.yaml`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_docs_checks.py`
+- `tests/test_topology_doctor.py`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**`
+- `docs/archives/**`
+- semantic boot profile/source truth changes
 
 ## Future Phase Summary
 
