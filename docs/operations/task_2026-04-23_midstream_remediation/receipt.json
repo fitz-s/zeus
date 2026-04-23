@@ -81,6 +81,36 @@
         "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ]
+    },
+    {
+      "slice_id": "T4.0",
+      "name": "persistence_design_doc_rev2",
+      "commit": "9365b20",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_critic_code_reviewer_opus_CLEAR_on_Option_E",
+      "planning_lock": "GREEN",
+      "files_changed": [
+        "docs/operations/task_2026-04-23_midstream_remediation/T4_persistence.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ]
+    },
+    {
+      "slice_id": "T7.b",
+      "name": "ast_walk_guard_test_for_make_family_id",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_1_of_1_pass_zero_pre_state_violators",
+      "planning_lock": "GREEN",
+      "files_changed": [
+        "tests/test_no_deprecated_make_family_id_calls.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_no_deprecated_make_family_id_calls.py → 1 passed in 0.61s"
+      ],
+      "pre_state_evidence": "grep -rn '\\bmake_family_id\\b' src/ scripts/ returned 4 hits (L7 docstring, L92 FunctionDef, L114 string literal in selection_family.py + L571 comment in evaluator.py) — zero Call nodes targeting make_family_id across the entire src/ and scripts/ tree."
     }
   ],
   "slices_in_review": [
@@ -102,6 +132,7 @@
         "missed_option_E": "piggyback on existing ENTRY_ORDER_POSTED.payload_json (col 17 NOT NULL TEXT, verified); atomic with canonical append; no schema migration; no INV-07 expansion"
       },
       "rev2_recommendation": "Option E — write DecisionEvidence as nested 'decision_evidence' key inside the existing ENTRY_ORDER_POSTED payload_json. Structurally superior per Fitz C1 (category immunity).",
+      "closure_commit": "9365b20",
       "contract_version_tag": "adopted — {contract_version: 1, fields: {...}}",
       "planning_lock_required_for_T4_1": true,
       "open_questions_for_con_nyx": [
