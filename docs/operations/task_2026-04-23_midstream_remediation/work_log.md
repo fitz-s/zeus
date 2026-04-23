@@ -38,7 +38,81 @@
 | T2.a/T2.b R14 quarantine test fixture updates | closed | `c4ee26a` | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
 | T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | `979eb3b` | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
 | T1.e currency-CI audit script + registry | closed | `692a3af` | new `scripts/test_currency_audit.py` reads `architecture/test_topology.yaml::categories.midstream_guardian_panel` (nested per surrogate-critic D3 fix) + `architecture/script_manifest.yaml` registration; 15/15 panel files green on dry-run; D1 (empty-panel silent-pass) + D2 (YAML parse traceback) + D3 (sibling-vs-nested) fixes applied before commit; surrogate critic COMMENT verdict with 4 findings, 2 addressed in-slice | 2026-04-23 |
-| T5.a ExecutionPrice executor boundary | closed | pending | structural boundary guard in `_live_order` via `ExecutionPrice(price_type="ask", fee_deducted=False, currency="probability_units")` — catches NaN/±inf/negative/>1.0 before CLOB-send; 12 new tests pass; latent `decision_edge` bug fixed inline (added to `ExecutionIntent` dataclass per critic MEDIUM finding); rejection reason renamed `malformed_limit_price` per critic LOW finding; surrogate critic COMMENT verdict, all 4 findings (1 MED + 3 LOW) addressed in-slice | 2026-04-23 |
+| T5.a ExecutionPrice executor boundary | closed | `abd5bb6` | structural boundary guard in `_live_order` via `ExecutionPrice(price_type="ask", fee_deducted=False, currency="probability_units")` — catches NaN/±inf/negative/>1.0 before CLOB-send; 12 new tests pass; latent `decision_edge` bug fixed inline (added to `ExecutionIntent` dataclass per critic MEDIUM finding); rejection reason renamed `malformed_limit_price` per critic LOW finding; surrogate critic COMMENT verdict, all 4 findings (1 MED + 3 LOW) addressed in-slice | 2026-04-23 |
+| T4.1a DecisionEvidence JSON persistence primitive | closed | pending | `to_json` / `from_json` added to `DecisionEvidence` class body (not module-level workaround — surrogate critic HIGH finding: frozen dataclasses DO accept body methods); `contract_version=1` envelope; strict `type(v) is int` guard prevents `True == 1` collision; malformed-JSON/missing-keys/unknown-fields route to `UnknownContractVersionError`; `__post_init__` ValueErrors propagate unwrapped so callers distinguish schema drift from invalid data; 18 new tests pass (round-trip + version guard + malformed + boolean-True guard + __post_init__ propagation); surrogate critic REQUEST CHANGES, all 3 blocking findings addressed in-slice before commit | 2026-04-23 |
+
+## T4.1a — execution notes (2026-04-23)
+
+Narrower split of plan T4.1 (full entry-wiring). T4.1a lands the
+persistence PRIMITIVE per T4.0 Option E; T4.1b (follow-up, larger)
+will wire it into the evaluator → lifecycle_events → position_events
+entry-event emission path.
+
+### Implementation
+
+- `src/contracts/decision_evidence.py`:
+  - Add `DECISION_EVIDENCE_CONTRACT_VERSION = 1` module constant.
+  - Add `UnknownContractVersionError(ValueError)` class.
+  - Add `to_json(self) -> str` inside the class body (not module-level
+    monkeypatch — my first-draft workaround was based on the false
+    premise that frozen dataclasses block body methods; surrogate
+    critic HIGH finding corrected). Emits canonical payload
+    `{"contract_version": 1, "fields": {...}}` via
+    `json.dumps(..., sort_keys=True)` for byte-stable idempotency.
+  - Add `from_json(cls, payload) -> DecisionEvidence` classmethod.
+    Strict `type(version) is int and version == 1` guard prevents
+    `True == 1` collision. Malformed JSON → plain `ValueError`.
+    Missing keys / non-object payload / unknown fields → `UnknownContractVersionError`.
+    `__post_init__` `ValueError`s propagate unwrapped so callers
+    can distinguish schema drift (UnknownContractVersionError) from
+    invalid-data (bare ValueError).
+- NEW `tests/test_decision_evidence_persistence.py` with 18 tests
+  across 5 classes: shape (3), round-trip (2), version-drift (5 —
+  including the critical `True == 1` collision guard), malformed
+  (6), `__post_init__` propagation (2).
+
+### Three critic findings addressed inline
+
+Surrogate `code-reviewer@opus` verdict: REQUEST CHANGES. Findings:
+
+- **HIGH — method-attachment pattern based on false premise**: first
+  draft attached `to_json` / `from_json` at module level via
+  `DecisionEvidence.to_json = _to_json` monkeypatch. Critic noted
+  `frozen=True` blocks only instance mutation, not class body
+  methods. Fixed: moved methods into class body, deleted false
+  comment + `# type: ignore` shields.
+- **MEDIUM — version-drift coverage gaps**: critic called out
+  `True == 1` collision (no strict-type guard), missing null version
+  test, missing `__post_init__` propagation test. Fixed: strict
+  `type(version) is int` guard in `from_json`; added 4 tests
+  (null version, boolean-True version, sample_size=0 propagates bare
+  ValueError, confidence_level=1.5 propagates bare ValueError).
+- **LOW — asdict future risk**: `asdict(self)` recursively flattens
+  nested dataclasses. Safe today (all fields JSON-native primitives)
+  but brittle if a future contract bump adds Enum / nested record.
+  Documented the constraint in `to_json` docstring.
+
+Non-blocking finding deferred: Literal runtime enforcement
+(`evidence_type="banana"` constructs) is pre-existing and out of
+T4.1a scope; flagged for future slice.
+
+### Regression evidence
+
+- `pytest -q tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py`
+  → `33 passed in 0.09s` (18 new + 15 pre-existing D4 symmetry).
+- No existing caller affected: `to_json`/`from_json` are additive
+  methods on a frozen dataclass; existing instances continue to work
+  unchanged.
+
+### Follow-up: T4.1b
+
+Outstanding: wire `DecisionEvidence.to_json` into entry-path event
+emission so `ENTRY_ORDER_POSTED.payload_json` carries a
+`decision_evidence` nested key. Requires changes to
+`src/engine/evaluator.py` (construct evidence at entry), the
+`EdgeDecision → event` chain, and `src/state/lifecycle_events.py`
+(or equivalent emission helper). Larger slice, ~3-4h, needs its own
+critic review. Flagged for next wave.
 
 ## T5.a — execution notes (2026-04-23)
 

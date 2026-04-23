@@ -398,7 +398,7 @@
     {
       "slice_id": "T5.a",
       "name": "execution_price_typed_boundary_at_live_order",
-      "commit": "pending",
+      "commit": "abd5bb6",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_COMMENT_MED_plus_3_LOW_all_addressed_inline",
       "planning_lock": "GREEN (src/execution + src/contracts + tests, all under planning-lock and all green)",
@@ -421,6 +421,31 @@
         "git stash verification: pre-T5.a run of tests/test_runtime_guards.py = 15 failed / 104 passed (identical to post-T5.a) \u2192 zero delta from T5.a",
         "planning-lock GREEN for src/execution/executor.py + src/contracts/execution_intent.py + tests/test_executor_typed_boundary.py"
       ]
+    },
+    {
+      "slice_id": "T4.1a",
+      "name": "decision_evidence_json_persistence_primitive",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_REQUEST_CHANGES_all_3_blocking_findings_addressed_inline",
+      "planning_lock": "GREEN (src/contracts + tests)",
+      "files_changed": [
+        "src/contracts/decision_evidence.py (to_json + from_json + UnknownContractVersionError + version constant)",
+        "tests/test_decision_evidence_persistence.py (new, 18 tests)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "scope_narrowed_from_T4_1": "T4.1 full scope (evaluator + lifecycle_events + payload wiring, ~4h) split into T4.1a (primitive, surgical) and T4.1b (full entry-path wiring, ~3-4h, follow-up slice). T4.1a is the persistence primitive per T4.0 Option E; T4.1b wires it into the entry event emission path.",
+      "critic_findings_integrated_inline": {
+        "HIGH_method_attachment_false_premise": "first draft used module-level _to_json + post-body DecisionEvidence.to_json = _to_json monkeypatch; comment asserted frozen dataclasses couldn't accept body methods (WRONG \u2014 frozen blocks instance mutation only). Fixed: moved to_json and from_json into class body, deleted false comment and type:ignore shields.",
+        "MEDIUM_version_coverage_gaps": "missing null-version test, missing boolean-True-version guard (True == 1 in Python!), missing __post_init__ ValueError propagation test. Fixed: added strict type(version) is int guard in from_json; added 4 tests (null version, boolean-True collision, sample_size=0 propagates, confidence_level=1.5 propagates).",
+        "LOW_asdict_future_risk": "asdict recursion is safe for current JSON-native primitives but brittle if future fields add Enum or nested dataclass. Addressed: docstring constraint note in to_json.",
+        "LOW_literal_enforcement_deferred": "evidence_type='banana' constructs today (no runtime Literal check). Pre-existing, out of T4.1a scope. Flagged for future slice."
+      },
+      "acceptance_commands_run": [
+        "pytest -q tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py \u2192 33 passed in 0.09s (18 new T4.1a + 15 pre-existing D4 symmetry)"
+      ],
+      "followup_slice_T4_1b": "wire decision_evidence.to_json() into ENTRY_ORDER_POSTED.payload_json via evaluator + lifecycle_events emission path; construct DecisionEvidence(evidence_type='entry', statistical_method='bootstrap_ci_bh_fdr', sample_size=5000, confidence_level=0.10, fdr_corrected=True, consecutive_confirmations=1) at EdgeDecision creation sites; serialize as nested 'decision_evidence' key in position_events.payload_json. Heavy slice, separate planning-lock and critic review required."
     }
   ],
   "slices_in_review": [

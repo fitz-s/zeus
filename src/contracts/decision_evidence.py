@@ -14,8 +14,14 @@ See: docs/zeus_FINAL_spec.md §P9.3 D4
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+import json
+from dataclasses import asdict, dataclass
+from typing import Any, Literal
+
+# T4.1a 2026-04-23 — persistence-format version. Bump on any change to
+# the DecisionEvidence field set or field semantics so legacy rows are
+# rejected by from_json rather than silently coerced.
+DECISION_EVIDENCE_CONTRACT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,84 @@ class DecisionEvidence:
             raise ValueError(
                 "DecisionEvidence.statistical_method must not be empty"
             )
+
+    def to_json(self) -> str:
+        """Serialize to a JSON string wrapped with contract_version.
+
+        T4.1a 2026-04-23 (D4 persistence primitive per T4.0 Option E):
+        produces the canonical payload shape
+        ``{"contract_version": 1, "fields": {...}}`` for storage inside a
+        ``position_events.payload_json`` ``decision_evidence`` key. The
+        wrapper lets ``from_json`` reject legacy or future-versioned rows
+        via ``UnknownContractVersionError`` rather than silently coercing.
+
+        Constraint: every field on this class must remain JSON-native
+        (str / int / float / bool). If a future contract_version bump
+        adds a nested dataclass or Enum field, this method must pair
+        with a custom encoder and the version constant must increment.
+        """
+        return json.dumps(
+            {
+                "contract_version": DECISION_EVIDENCE_CONTRACT_VERSION,
+                "fields": asdict(self),
+            },
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_json(cls, payload: str) -> "DecisionEvidence":
+        """Deserialize a JSON string produced by ``to_json``.
+
+        T4.1a 2026-04-23: validates the ``contract_version`` envelope
+        first (strict int equality — rejects ``True`` via
+        ``type(version) is int`` guard to avoid the Python
+        ``True == 1`` collision), then delegates field validation to
+        the dataclass ``__post_init__``. Raises
+        ``UnknownContractVersionError`` on version mismatch, missing
+        envelope keys, or unknown/missing fields. Raises ``ValueError``
+        on malformed JSON or invalid field values (the latter bubbles
+        up from ``__post_init__`` unchanged so callers can distinguish
+        schema drift from data validation).
+        """
+        try:
+            blob = json.loads(payload)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"DecisionEvidence.from_json: malformed JSON: {exc}"
+            ) from exc
+        if not isinstance(blob, dict):
+            raise UnknownContractVersionError(
+                f"DecisionEvidence.from_json: payload must be a JSON "
+                f"object, got {type(blob).__name__}"
+            )
+        version = blob.get("contract_version")
+        # Guard against True == 1 collision: require exact int type.
+        if type(version) is not int or version != DECISION_EVIDENCE_CONTRACT_VERSION:
+            raise UnknownContractVersionError(
+                f"DecisionEvidence.from_json: contract_version="
+                f"{version!r} not supported (this runtime expects int "
+                f"{DECISION_EVIDENCE_CONTRACT_VERSION}). A schema "
+                "migration slice must land before older/newer payloads "
+                "can be parsed."
+            )
+        fields = blob.get("fields")
+        if not isinstance(fields, dict):
+            raise UnknownContractVersionError(
+                f"DecisionEvidence.from_json: 'fields' key missing or "
+                f"not an object, got {type(fields).__name__}"
+            )
+        try:
+            return cls(**fields)
+        except TypeError as exc:
+            # Unknown field key or missing required field — treat as
+            # schema drift rather than silent coercion. __post_init__
+            # ValueErrors are deliberately NOT caught here; they
+            # propagate unchanged as invalid-data signals.
+            raise UnknownContractVersionError(
+                f"DecisionEvidence.from_json: field set mismatch "
+                f"against contract_version="
+                f"{DECISION_EVIDENCE_CONTRACT_VERSION}: {exc}"
+            ) from exc
 
     def assert_symmetric_with(self, entry_evidence: "DecisionEvidence") -> None:
         """Raise EvidenceAsymmetryError if this exit evidence is weaker than
@@ -125,4 +209,11 @@ class EvidenceAsymmetryError(Exception):
     """Raised when exit evidence is statistically weaker than entry evidence.
     This is the D4 runtime contract violation — the system would admit edges
     cautiously but exit aggressively, killing true edges before maturation.
+    """
+
+
+class UnknownContractVersionError(ValueError):
+    """Raised when DecisionEvidence.from_json receives a payload with an
+    unknown or missing contract_version. T4.1a 2026-04-23: prevents silent
+    schema drift when the DecisionEvidence field set evolves.
     """
