@@ -12,6 +12,29 @@ from typing import Any
 
 
 CURRENT_FACT_MAX_STALENESS_DAYS = 14
+MODULE_BOOK_REQUIRED_SECTIONS = [
+    "## 1. Module purpose",
+    "## 6. Read/write surfaces and canonical truth",
+    "## 9. Source files and their roles",
+    "## 10. Relevant tests",
+    "## 17. Planning-lock triggers",
+    "## 20. Verification commands",
+    "## 24. Rehydration judgement",
+]
+MODULE_MANIFEST_REQUIRED_FIELDS = [
+    "path",
+    "scoped_agents",
+    "module_book",
+    "priority",
+    "zone",
+    "authority_role",
+    "high_risk_files",
+    "law_dependencies",
+    "current_fact_dependencies",
+    "required_tests",
+    "graph_appendix_status",
+    "archive_extraction_status",
+]
 
 
 def build_impact(api: Any, files: list[str]) -> dict[str, Any]:
@@ -114,6 +137,165 @@ def run_context_packs(api: Any) -> Any:
             if api._metadata_missing(lore_policy.get(field)):
                 issues.append(api._issue("context_pack_profile_lore_policy_missing", path, f"missing lore_policy.{field}"))
     return api.StrictResult(ok=not issues, issues=issues)
+
+
+def module_manifest_entries(api: Any) -> dict[str, dict[str, Any]]:
+    return {
+        str(name): entry
+        for name, entry in (api.load_module_manifest().get("modules") or {}).items()
+        if isinstance(entry, dict)
+    }
+
+
+def module_book_registered(api: Any, path: str) -> bool:
+    entries = api.load_docs_registry().get("entries") or []
+    return any(str(entry.get("path") or "") == path for entry in entries)
+
+
+def module_entry_matches_file(path: str, entry: dict[str, Any]) -> bool:
+    for key in ("path", "scoped_agents", "module_book"):
+        target = str(entry.get(key) or "")
+        if not target:
+            continue
+        if path == target or path.startswith(target.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def module_context_for_files(api: Any, files: list[str]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    for module_name, entry in sorted(module_manifest_entries(api).items()):
+        if not any(module_entry_matches_file(path, entry) for path in files):
+            continue
+        contexts.append(
+            {
+                "module": module_name,
+                "path": entry.get("path"),
+                "scoped_agents": entry.get("scoped_agents"),
+                "module_book": entry.get("module_book"),
+                "high_risk_files": entry.get("high_risk_files", []),
+                "required_tests": entry.get("required_tests", []),
+                "current_fact_dependencies": entry.get("current_fact_dependencies", []),
+                "law_dependencies": entry.get("law_dependencies", []),
+                "graph_appendix_status": entry.get("graph_appendix_status"),
+                "archive_extraction_status": entry.get("archive_extraction_status"),
+            }
+        )
+    return contexts
+
+
+def run_module_manifest(api: Any) -> Any:
+    if not api.MODULE_MANIFEST_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "module_manifest_missing",
+                    "architecture/module_manifest.yaml",
+                    "module manifest is missing",
+                )
+            ],
+        )
+    issues: list[Any] = []
+    entries = module_manifest_entries(api)
+    if not entries:
+        issues.append(
+            api._warning(
+                "module_manifest_empty",
+                "architecture/module_manifest.yaml",
+                "module manifest has no module entries",
+            )
+        )
+    for module_name, entry in sorted(entries.items()):
+        path = f"architecture/module_manifest.yaml:{module_name}"
+        for field in MODULE_MANIFEST_REQUIRED_FIELDS:
+            if api._metadata_missing(entry.get(field)):
+                issues.append(api._warning("module_manifest_required_field_missing", path, f"missing {field}"))
+        for key in ("path", "scoped_agents", "module_book"):
+            target = str(entry.get(key) or "")
+            if target and not (api.ROOT / target).exists():
+                issues.append(api._warning("module_manifest_path_missing", path, f"{key} target missing: {target}"))
+        for target in entry.get("high_risk_files") or []:
+            if not (api.ROOT / str(target)).exists():
+                issues.append(api._warning("module_manifest_path_missing", path, f"high_risk_file missing: {target}"))
+        for target in entry.get("required_tests") or []:
+            if not (api.ROOT / str(target)).exists():
+                issues.append(api._warning("module_manifest_test_missing", path, f"required_test missing: {target}"))
+        book = str(entry.get("module_book") or "")
+        if book and not module_book_registered(api, book):
+            issues.append(
+                api._warning(
+                    "module_manifest_docs_registry_mismatch",
+                    path,
+                    f"module book {book} is not explicitly classified in docs registry",
+                )
+            )
+    return api.StrictResult(ok=True, issues=issues)
+
+
+def run_module_books(api: Any) -> Any:
+    if not api.MODULE_MANIFEST_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "module_manifest_missing",
+                    "architecture/module_manifest.yaml",
+                    "module manifest is missing",
+                )
+            ],
+        )
+    issues: list[Any] = []
+    entries = module_manifest_entries(api)
+    books_by_path = {str(entry.get("module_book")): (module_name, entry) for module_name, entry in entries.items()}
+    for book_path, (module_name, entry) in sorted(books_by_path.items()):
+        path = api.ROOT / book_path
+        scoped = api.ROOT / str(entry.get("scoped_agents") or "")
+        if not path.exists():
+            issues.append(api._warning("module_book_missing", book_path, f"module book missing for {module_name}"))
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for heading in MODULE_BOOK_REQUIRED_SECTIONS:
+            if heading not in text:
+                issues.append(
+                    api._warning(
+                        "module_book_missing_section",
+                        book_path,
+                        f"module book missing required section heading {heading!r}",
+                    )
+                )
+        if scoped.exists():
+            scoped_text = scoped.read_text(encoding="utf-8", errors="ignore")
+            if book_path not in scoped_text:
+                issues.append(
+                    api._warning(
+                        "module_book_scoped_agents_mismatch",
+                        str(entry.get("scoped_agents")),
+                        f"scoped AGENTS does not point to module book {book_path}",
+                    )
+                )
+        else:
+            issues.append(
+                api._warning(
+                    "module_book_scoped_agents_missing",
+                    str(entry.get("scoped_agents") or book_path),
+                    f"scoped AGENTS missing for module {module_name}",
+                )
+            )
+    for rel in sorted(
+        path.relative_to(api.ROOT).as_posix()
+        for path in (api.ROOT / "docs" / "reference" / "modules").glob("*.md")
+        if path.name != "AGENTS.md"
+    ):
+        if rel not in books_by_path:
+            issues.append(
+                api._warning(
+                    "module_book_unregistered",
+                    rel,
+                    "module book exists on disk but has no module manifest entry",
+                )
+            )
+    return api.StrictResult(ok=True, issues=issues)
 
 
 def task_boot_profiles(api: Any) -> dict[str, dict[str, Any]]:
@@ -392,6 +574,8 @@ def route_health_for_context_pack(api: Any, files: list[str]) -> dict[str, Any]:
 def repo_health_for_context_pack(api: Any) -> dict[str, Any]:
     checks = {
         "context_packs": api.run_context_packs(),
+        "module_books": api.run_module_books(),
+        "module_manifest": api.run_module_manifest(),
         "context_budget": api.run_context_budget(),
         "core_claims": api.run_core_claims(),
         "core_maps": api.run_core_maps(),
@@ -721,6 +905,7 @@ def build_debug_context_pack(api: Any, task: str, files: list[str]) -> dict[str,
     gaps = context_pack_coverage_gaps(impact, target_files)
     risks = context_pack_downstream_risks(impact)
     route_health = route_health_for_context_pack(api, target_files)
+    modules = module_context_for_files(api, target_files)
     payload = {
         "pack_type": "debug",
         "authority_status": profile.get("authority_status", "generated_debug_packet_not_authority"),
@@ -730,6 +915,7 @@ def build_debug_context_pack(api: Any, task: str, files: list[str]) -> dict[str,
         "suspected_boundaries": debug_suspected_boundaries(impact, claims, gaps),
         "contract_surfaces": context_pack_contract_surfaces(impact, claims),
         "proof_claims_touched": claims,
+        "module_context": modules,
         "red_green_checks": debug_red_green_checks(files=target_files, impact=impact, claims=claims),
         "coverage_gaps": gaps,
         "downstream_risks": risks,
@@ -780,6 +966,7 @@ def build_package_review_context_pack(api: Any, task: str, files: list[str]) -> 
     gaps = context_pack_coverage_gaps(impact, changed_files)
     risks = context_pack_downstream_risks(impact)
     route_health = route_health_for_context_pack(api, changed_files)
+    modules = module_context_for_files(api, changed_files)
     payload = {
         "pack_type": "package_review",
         "authority_status": profile.get("authority_status", "generated_review_packet_not_authority"),
@@ -787,6 +974,7 @@ def build_package_review_context_pack(api: Any, task: str, files: list[str]) -> 
         "changed_files": changed_files,
         "zones_touched": impact.get("aggregate", {}).get("zones_touched", []),
         "contract_surfaces": context_pack_contract_surfaces(impact, claims),
+        "module_context": modules,
         "proof_claims_touched": claims,
         "cross_slice_questions": context_pack_questions(profile, impact, claims, gaps),
         "coverage_gaps": gaps,

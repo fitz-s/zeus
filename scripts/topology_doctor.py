@@ -49,6 +49,7 @@ REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml
 CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
 DOCS_REGISTRY_PATH = ROOT / "architecture" / "docs_registry.yaml"
+MODULE_MANIFEST_PATH = ROOT / "architecture" / "module_manifest.yaml"
 CODE_REVIEW_GRAPH_DB_PATH = ROOT / ".code-review-graph" / "graph.db"
 SKIP_PATTERN = re.compile(r"pytest\.mark\.skip|pytest\.skip\(")
 DANGEROUS_REVERSE_ANTIBODY_PATTERNS = (
@@ -176,6 +177,10 @@ def load_map_maintenance() -> dict[str, Any]:
 
 def load_docs_registry() -> dict[str, Any]:
     return _load_yaml(DOCS_REGISTRY_PATH)
+
+
+def load_module_manifest() -> dict[str, Any]:
+    return _load_yaml(MODULE_MANIFEST_PATH)
 
 
 def _git_ls_files() -> list[str]:
@@ -788,6 +793,14 @@ def _context_pack_profiles() -> dict[str, dict[str, Any]]:
 
 def run_context_packs() -> StrictResult:
     return _context_pack_checks().run_context_packs(sys.modules[__name__])
+
+
+def run_module_books() -> StrictResult:
+    return _context_pack_checks().run_module_books(sys.modules[__name__])
+
+
+def run_module_manifest() -> StrictResult:
+    return _context_pack_checks().run_module_manifest(sys.modules[__name__])
 
 
 def _artifact_checks():

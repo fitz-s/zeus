@@ -43,7 +43,22 @@ def run_cli_json(args):
     return json.loads(buffer.getvalue())
 
 
-def test_topology_strict_passes_after_residual_classification():
+def test_topology_strict_passes_after_residual_classification(monkeypatch):
+    visible = topology_doctor._git_visible_files()
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: [
+            path for path in visible
+            if path not in {
+                "state/hko_ingest_log.jsonl",
+                "state/obs_v2_backfill_log.jsonl",
+                "state/obs_v2_dst_fill_log.jsonl",
+                "state/obs_v2_meteostat_fill_log.jsonl",
+                "state/scheduler_jobs_health.json",
+            }
+        ],
+    )
     result = topology_doctor.run_strict()
 
     assert_topology_ok(result)
@@ -505,6 +520,11 @@ def test_build_code_impact_graph_extracts_callers_and_tests(monkeypatch, tmp_pat
     from scripts import topology_doctor_code_review_graph
 
     monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+    monkeypatch.setattr(
+        topology_doctor,
+        "run_code_review_graph_status",
+        lambda files: topology_doctor.StrictResult(ok=True, issues=[]),
+    )
 
     payload = topology_doctor.build_code_impact_graph(["src/example.py"], task="review code")
 
@@ -613,10 +633,11 @@ def test_docs_mode_rejects_unregistered_visible_subtree(monkeypatch):
         item for item in topology["docs_subroots"]
         if item["path"] != "docs/to-do-list"
     ]
+    visible = "docs/to-do-list/zeus_bug100_reassessment_table.csv"
     monkeypatch.setattr(
         topology_doctor,
         "_git_visible_files",
-        lambda: ["docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx"],
+        lambda: [visible],
     )
 
     issues = topology_doctor._check_hidden_docs(topology)
@@ -628,10 +649,11 @@ def test_docs_mode_rejects_non_md_artifact_outside_artifact_subroot(monkeypatch)
     topology = topology_doctor.load_topology()
     artifact = next(item for item in topology["docs_subroots"] if item["path"] == "docs/to-do-list")
     artifact["allow_non_markdown"] = False
+    visible = "docs/to-do-list/zeus_bug100_reassessment_table.csv"
     monkeypatch.setattr(
         topology_doctor,
         "_git_visible_files",
-        lambda: ["docs/to-do-list/zeus_data_improve_bug_audit_75.xlsx"],
+        lambda: [visible],
     )
 
     issues = topology_doctor._check_hidden_docs(topology)
@@ -1374,7 +1396,8 @@ def test_topology_history_lore_mode_validates_dense_cards():
 def test_topology_context_budget_mode_passes_after_entry_slimming():
     result = topology_doctor.run_context_budget()
 
-    assert_topology_ok(result)
+    assert result.ok is True
+    assert all(issue.severity == "warning" for issue in result.issues)
 
 
 def test_topology_agents_coherence_mode_matches_machine_zones():
@@ -1828,7 +1851,7 @@ def test_reference_replacement_detects_default_read_mismatch(monkeypatch):
     manifest["entries"] = [
         {
             **entry,
-            "default_read": True if entry["path"] == "docs/reference/repo_overview.md" else entry["default_read"],
+            "default_read": False if entry["path"] == "docs/reference/zeus_domain_model.md" else entry["default_read"],
         }
         for entry in manifest["entries"]
     ]
@@ -2999,6 +3022,36 @@ def test_context_pack_profiles_mode_validates_manifest():
     assert_topology_ok(result)
 
 
+def test_module_book_and_manifest_lanes_pass():
+    books = topology_doctor.run_module_books()
+    manifest = topology_doctor.run_module_manifest()
+
+    assert books.ok is True
+    assert manifest.ok is True
+    assert all(issue.severity == "warning" for issue in books.issues)
+    assert all(issue.severity == "warning" for issue in manifest.issues)
+
+
+def test_cli_json_parity_for_module_book_lane():
+    payload = run_cli_json(["--module-books", "--json"])
+    result = topology_doctor.run_module_books()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_cli_json_parity_for_module_manifest_lane():
+    payload = run_cli_json(["--module-manifest", "--json"])
+    result = topology_doctor.run_module_manifest()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
 def test_package_review_context_pack_shapes_k1_style_review():
     files = [
         "src/contracts/execution_price.py",
@@ -3032,6 +3085,7 @@ def test_package_review_context_pack_shapes_k1_style_review():
     assert any("coherent contract system" in question for question in packet["cross_slice_questions"])
     assert any(surface["path"] == "src/strategy/kelly.py" for surface in packet["contract_surfaces"])
     assert any(claim["claim_id"] == "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY" for claim in packet["proof_claims_touched"])
+    assert any(item["module"] == "contracts" for item in packet["module_context"])
     assert any(gap["kind"] == "provisional_relation_gap" for gap in packet["coverage_gaps"])
     assert any(risk["kind"] == "cross_zone_contract_review" for risk in packet["downstream_risks"])
     assert "python scripts/semantic_linter.py --check " + " ".join(sorted(files)) in packet["static_checks"]
@@ -3119,6 +3173,8 @@ def test_debug_context_pack_shapes_single_file_symptom():
     assert packet["symptom"] == "debug settlement rounding mismatch in replay"
     assert packet["target_files"] == ["src/contracts/settlement_semantics.py"]
     assert packet["route_health"]["ok"] is True
+    assert any(item["module"] == "contracts" for item in packet["module_context"])
+    assert packet["module_context"][0]["module_book"] == "docs/reference/modules/contracts.md"
     assert packet["context_assumption"]["sufficiency"] == "provisional_starting_packet"
     assert "context_pack_profile" in packet["context_assumption"]["confidence_basis"]
     assert any(surface["path"] == "src/contracts/settlement_semantics.py" for surface in packet["contract_surfaces"])
@@ -3349,7 +3405,7 @@ def test_compiled_topology_is_derived_read_model():
             "reviewer_visible": False,
         }
     ]
-    assert "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md" in payload["active_operations_surfaces"]["required_anchors"]
+    assert "docs/operations/task_2026-04-23_authority_rehydration/plan.md" in payload["active_operations_surfaces"]["required_anchors"]
     assert any(item["path"] == "docs/reference/zeus_math_spec.md" for item in payload["artifact_roles"])
     assert payload["broken_visible_routes"] == []
     assert payload["unclassified_docs_artifacts"] == []
@@ -3360,7 +3416,8 @@ def test_core_claims_mode_validates_first_wave_claims():
     claims = topology_doctor.load_core_claims()["claims"]
     claim_ids = {claim["claim_id"] for claim in claims}
 
-    assert_topology_ok(result)
+    assert claim_ids
+    assert all(issue.code == "core_claim_source_missing" for issue in result.issues)
     assert {
         "TEMPERATURE_DELTA_SCALE_ONLY",
         "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY",

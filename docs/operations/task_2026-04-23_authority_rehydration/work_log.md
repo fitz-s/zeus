@@ -192,3 +192,40 @@ Verification:
 Next:
 
 - land P3 topology-doctor and context-pack support for the module layer
+
+## P3 Topology And Context-Pack Support
+
+Changed files:
+
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_context_pack.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/work_log.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
+
+Summary:
+
+- added warning-first `module-books` and `module-manifest` topology-doctor lanes
+- taught context packs to attach matched module-book/module-manifest summaries
+- extended repo-health reporting so context packs include module-layer health
+- added CLI and test coverage for the new module-aware tooling surfaces
+
+Verification:
+
+- `pytest -q tests/test_topology_doctor.py` -> 210 passed, 1 external deprecation warning
+- `python scripts/topology_doctor.py --module-books --json` -> ok with advisory warning: root `AGENTS.md` still serves as the code-review-graph launcher without a direct book pointer
+- `python scripts/topology_doctor.py --module-manifest --json` -> ok with advisory warnings for modules whose current-fact/test lists are intentionally empty
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json` -> ok with advisory Code Review Graph staleness warnings
+- `python -m py_compile scripts/topology_doctor*.py` -> ok
+- `git diff --check -- <P3 files>` -> ok
+
+Next:
+
+- land P4 archive and graph extraction closeout

@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/reference/manifest
-Phase: P2 remaining module books and manifest enrichment
+Phase: P3 topology and context-pack support
 
 ## Objective
 
@@ -138,6 +138,32 @@ Forbidden:
   files and no longer points at removed `wu_daily_collector.py`
 - `architecture/test_topology.yaml` and `architecture/script_manifest.yaml`
   carry high-risk module-routing metadata for the sharpest test/script families
+
+## P3 Scope
+
+Allowed:
+
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_context_pack.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/**`
+
+Forbidden:
+
+- runtime/source behavior
+- DB files
+- `.code-review-graph/graph.db`
+- archive bodies
+
+## P3 Acceptance
+
+- topology_doctor exposes module-book and module-manifest lanes
+- context packs surface matched module books, high-risk files, required tests,
+  current-fact dependencies, and graph appendix hints
+- new checks are warning-first rather than blocking by default
+- topology_doctor tests cover the new lanes and context-pack payload fields
 
 ## Verification
 
