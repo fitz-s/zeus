@@ -577,6 +577,104 @@ Critic meta-observations (workstream-level): diagnostic trajectory is healthy (P
 - 2026-04-23T18:19:00Z — Added first_principles.md §8 rule 12 for NH-G-future (Gamma pagination tail hazard → use slug-based direct fetch or loop-until-empty).
 - 2026-04-23T18:20:00Z — P-G formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C + P-G all complete. Gate to **P-B (schema migration)** opens. P-B adds INV-14 identity columns + provenance_json + CHECK + trigger — this is the K0 schema change that unblocks P-F (hard quarantine) and P-E (DELETE+INSERT reconstruction).
 
+---
+
+## P-B: Schema Migration — started 2026-04-23T18:30:00Z; PRE-REVIEW requested 2026-04-23T18:45:00Z
+
+### Pre-packet evidence gathering
+
+- Read `src/state/db.py:158-169` canonical CREATE TABLE settlements (9 base columns); lines 748-819 show the established `try: ALTER TABLE ADD COLUMN; except sqlite3.OperationalError: pass` idempotent migration pattern.
+- Read `architecture/source_rationale.yaml:25-28`: settlement_write owner=harvester, rounding_law=settlement_semantics, db_gate=src/state/db.py.
+- Grep src/: only `harvester.py:549,560` WRITE to settlements; `monitor_refresh.py:472` READ. No other writers — additive ADD COLUMN is strictly backward-compatible.
+- `sqlite_master` query: ZERO triggers on settlements; existing triggers on other tables (`trg_position_events_no_update`, `control_overrides_history_no_delete`) use `BEFORE ... RAISE(ABORT)` pattern — I'll follow it.
+- SQLite version check: `sqlite_version()=3.43.2`, python sqlite3=3.51.2; both support CHECK constraints on ALTER TABLE ADD COLUMN (≥ 3.35) and `json_extract` (json1 bundled).
+- Midstream coordination: `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md` T6.1/T6.2 only READ settlements for P&L regression; ADD COLUMN is backward-compatible.
+
+### P-B Scope (5 ALTER + 1 TRIGGER + 1 UPDATE)
+
+5 ALTER TABLE ADD COLUMN (all nullable, permissive CHECKs):
+- `temperature_metric TEXT CHECK (IS NULL OR IN ('high','low'))`
+- `physical_quantity TEXT`
+- `observation_field TEXT CHECK (IS NULL OR IN ('high_temp','low_temp'))`
+- `data_version TEXT`
+- `provenance_json TEXT`
+
+1 CREATE TRIGGER `settlements_authority_monotonic` (BEFORE UPDATE OF authority):
+- VERIFIED → UNVERIFIED: ABORT
+- QUARANTINED → VERIFIED without `provenance_json LIKE '%reactivated_by%'`: ABORT
+- All other transitions: allow
+
+1 UPDATE backfill: `UPDATE settlements SET provenance_json = ? WHERE provenance_json IS NULL` (expect changes=1556). JSON content records bulk-writer provenance per P-A verdict.
+
+### Execution path (direct sqlite3 CLI; independent of app startup)
+
+1. Pre-flight + snapshot (cp + md5 verify → `state/zeus-world.db.pre-pb_2026-04-23`)
+2. Baseline pytest (test_schema_v2_gate_a + test_canonical_position_current_schema_alignment)
+3. DDL: 5 ALTER + 1 TRIGGER via sqlite3
+4. Backfill: Python wrapper with assertion-guarded ROLLBACK (same pattern as P-G)
+5. Trigger validation: 4 UPDATE cases on scratch row
+6. Post-migration pytest: 0 regression
+7. Add same DDL block to `src/state/db.py` for future fresh-init idempotency
+
+### Pre-review status (2026-04-23)
+
+**APPROVE_WITH_CONDITIONS** — critic-opus endorsed architecture; 2 blocking findings (C1 LIKE→json_extract, C2 document reactivation contract) + 1 recommended non-blocking (R1 provenance_json enrichment) + non-blocking R2/R3/NH-B1/NH-B2. Trigger logic walked through all 10 transition pairs; all correct. DDL syntax pre-verified.
+
+### Execution (2026-04-23T18:21–18:22Z)
+
+Applied both blocking conditions + R1:
+- **C1**: replaced `LIKE '%reactivated_by%'` with `json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL` in plan / SQL / Python runner / src/state/db.py.
+- **C2**: documented reactivation contract in pb_schema_plan.md §1.3 (`{"reactivated_by": "<packet>", "decision_doc": "...", "reactivated_at": "..."}`).
+- **R1**: added `writer_logic_inferred` + `inferred_source_json_confidence` to PROVENANCE_JSON (9 fields total; ~441 bytes/row × 1556 = ~685 KB total).
+
+First-run failure: Python-style adjacent string literal concatenation in the trigger RAISE message produced SQL syntax error (RAISE takes exactly one string argument). Fixed to single-string message. 5 ALTERs had already succeeded (partial state); re-run was idempotent. Also fixed snapshot hash check asymmetry (on re-run, verify snap == recorded_hash instead of snap == main).
+
+Execution timeline (second run, successful):
+```
+18:22:19Z  pre-flight (re-run); snapshot integrity verified (md5 827b370d... matches recorded hash)
+18:22:21Z  ALTERs all "already_exists" (idempotent from first partial run)
+18:22:21Z  TRIGGER: settlements_authority_monotonic created
+18:22:21Z  UPDATE changes()=1556; 0 NULL post-backfill
+18:22:21Z  TRIGGER VALIDATION 4/4 PASS
+           V→U ABORT ✓ | V→Q SUCCESS ✓ | Q→V no marker ABORT ✓ | Q→V with marker SUCCESS ✓
+18:22:21Z  post_count=1556, post_null=0 ✓
+```
+
+Post-migration pytest on test_schema_v2_gate_a.py + test_canonical_position_current_schema_alignment.py: 9 passed + 7 subtests (identical to baseline; 0 regression).
+
+`src/state/db.py` updated (+40 lines after L822) with the same 5 ALTERs + CREATE TRIGGER block for future fresh-init idempotency. Import verified clean: `from src.state import db; db.get_world_connection()` succeeds. Settlements now has 18 columns (13 + 5).
+
+Deliverables:
+- `evidence/pb_schema_plan.md` (353 lines, MD5 `872871d62dcebfd00b12d036efb174d4`)
+- `evidence/pb_execution_log.md` (164 lines, MD5 `2b3c14661ca6602d16828702e1238673`)
+- `evidence/scripts/pb_apply_schema_migration.sql` (31 lines, MD5 `5358181357802c72d17e8101ddd51093`)
+- `evidence/scripts/pb_run_migration.py` (345 lines, MD5 `35950882692f9781b7300bf92c171a06`)
+- `src/state/db.py` (+40 lines)
+- Snapshot: `state/zeus-world.db.pre-pb_2026-04-23` + md5 sidecar
+
+### Closure request → critic-opus (post-execution)
+
+- 2026-04-23T18:30:00Z — SendMessage with MD5s + 5 reproducibility commands + R3-## status updates + NH-B3/NH-B4 new findings
+
+### Critic-opus final verdict (2026-04-23)
+
+**APPROVE** with ZERO findings. Every claim independently reproduced exactly (5 of 5 verifications). Trigger DDL verbatim-matches the recommended C1 patch. Bonus **false-positive probe** (critic's 5th test): inserted scratch row with `provenance_json={"rca_note":"not_reactivated_by_any_packet"}` — under original LIKE this would FALSE-POSITIVE match; under deployed `json_extract($.reactivated_by) IS NULL` it correctly ABORTs. **Empirically proves C1 was load-bearing.**
+
+R3-## decisions endorsed:
+- R3-01: CLOSED-BY-P-B (data_version axis concrete)
+- R3-06: CLOSED-BY-P-B (temperature_metric + observation_field implement dual-track separation)
+- R3-18: CLOSED-BY-P-B (trigger specified, deployed, 4+1 case validated)
+- R3-15: PARTIALLY-CLOSED-BY-P-B (provenance_json vehicle ready; full at P-E)
+- R3-07, R3-10, R3-19: remain PENDING (correct scope-exclusion)
+
+NH-B3 + NH-B4 endorsed for first_principles.md §8. Critic-opus notes "healthy critic-executor feedback dynamics — bottle up the pattern before fatigue; continue rigor for P-F and P-E (the first 'new writes' packets)".
+
+### Closure action
+
+- 2026-04-23T18:35:00Z — Applied App-C updates (R3-01, R3-06, R3-18 → CLOSED-BY-P-B; R3-15 → PARTIALLY-CLOSED-BY-P-B).
+- 2026-04-23T18:36:00Z — Added §8 rule 13 (NH-B3 SQL RAISE single-string) + rule 14 (NH-B4 snapshot hash asymmetry) to first_principles.md.
+- 2026-04-23T18:38:00Z — P-B formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C + P-G + P-B all complete. Gate to **P-F (hard quarantine)** opens. P-F uses new `provenance_json` column + `settlements_authority_monotonic` trigger to explicitly QUARANTINE the ~30 hard-quarantine rows (HK WU 2, Taipei NOAA 12, Tel Aviv WU 13) plus any additional rows flagged by P-C disposition table that P-F decides belong to QUARANTINE track rather than P-E reconstruction.
+
 ### Handoff notes for post-compact resumption of P-C
 
 **Current workstream state** (every fact verifiable via files on disk):

@@ -384,6 +384,8 @@ Only AFTER these 10 criteria are met is the workstream considered complete. Trai
 10. **Do not UPDATE the corrupted 1,562 rows in P-E**. They are 100% bulk-batch; UPDATE perpetuates broken provenance under new column values. DELETE then INSERT fresh from observation+contract.
 11. **Do not use code-review-graph output as semantic authority.** Graph tells WHERE to look and WHAT the blast radius is; it does NOT tell what settles, what is source-correct, or what is currently valid (fatal_misreads.yaml `code_review_graph_answers_where_not_what_settles`).
 12. **Do not trust Gamma API pagination tail silently.** `NH-G-future` (critic-opus P-G post-review): direct paginated fetches (`offset=0..N` @ `limit=100`) may silently miss events beyond offset ~1900, even though they ARE tagged correctly (observed empirically in P-G: paginated scan missed 4 of 5 LOW-temp 2026-04-15 events; direct slug queries returned all 5). For DR-33 implementation or any future Gamma-backed settlement detection, prefer slug-based direct fetch OR loop-until-empty-with-smaller-page-size. Paginated fetch is a `convenience, not an authority`; verify every "empty tail" claim with at least one slug probe for a known-expected market.
+13. **SQL `RAISE(...)` takes exactly one string argument; never rely on Python adjacent-string-literal concatenation inside triple-quoted SQL heredocs.** `NH-B3` (P-B first-run failure): the multiline SQL `SELECT RAISE(ABORT, 'msg line 1; ' 'msg line 2');` is valid Python (adjacent literals concatenate) but two separate argument tokens in SQL — SQLite rejects it with `near "'...'" : syntax error`. Use a single quoted string, or SQL `||` concatenation: `SELECT RAISE(ABORT, 'msg line 1; ' || 'msg line 2');`. This pitfall appears only when DDL is executed via `sqlite3` CLI OR via `conn.executescript()`; single-statement `conn.execute()` that parses the full string also trips it. Standardize on single-string messages for RAISE.
+14. **Schema-migration snapshot integrity check must be asymmetric between first-run and re-run.** `NH-B4` (P-B first-run recovery): on first run, the pre-migration snapshot must match the main DB (`md5(main) == md5(snapshot)`). On re-run after any partial mutation, main has diverged by design — the check becomes `md5(snapshot) == recorded_hash_file`. Record the snapshot hash atomically with the `cp` and verify `snap == recorded` on re-run to detect snapshot corruption without false-failing on legitimate re-run recovery.
 
 ---
 
@@ -448,12 +450,12 @@ Every round-3 review finding with its anti-pattern classification and target pac
 
 | TODO ID | Source reviewer | Anti-pattern | Target packet | Status |
 |---|---|---|---|---|
-| R3-01 | architect P0-1 | AP-5 (axis mirage) | P-B schema | PENDING |
+| R3-01 | architect P0-1 | AP-5 (axis mirage) | P-B schema | **CLOSED-BY-P-B** (2026-04-23; critic-opus POST-EXECUTION APPROVE; `data_version` column added as concrete axis; P-E populates on re-insert) |
 | R3-02 | architect P0-2 + critic | AP-8, AP-9 (savepoint collision + self-contradiction) | P-H atomicity | PENDING |
 | R3-03 | architect P0-8 | AP-1, AP-2 (ghost writer, auth stamp without integrity) | **P-A Bulk Writer RCA** | **CLOSED-BY-P-A** (2026-04-23; critic-opus APPROVE; evidence/bulk_writer_rca_final.md) |
 | R3-04 | architect P0-3, critic P1-4 | AP-8 (savepoint atomicity loss) | P-H atomicity | PENDING |
 | R3-05 | architect P0-4, critic P1-7 | AP-6 (caller-count confusion) | P-H atomicity (P-A did NOT close per critic-opus: "AST-level caller evidence is P-H territory") | PENDING |
-| R3-06 | architect P0-5 | cross-packet coordination (dual-track) | P-B schema | PENDING |
+| R3-06 | architect P0-5 | cross-packet coordination (dual-track) | P-B schema | **CLOSED-BY-P-B** (2026-04-23; critic-opus APPROVE; `temperature_metric` + `observation_field` columns implement dual-track separation; P-E writes preserve HIGH/LOW identity) |
 | R3-07 | architect P0-6, P0-7 | AP-16 (zone laundering) | P-B schema / separate K0 schema_packet | PENDING |
 | R3-08 | architect P0-9, critic P0-1 | AP-10 (vacuous AC) | P-H atomicity | PENDING |
 | R3-09 | critic P0-2 | AP-11 (reinstated removed architecture) | P-D harvester probe | **CLOSED-BY-P-D** (2026-04-23; AP-11 review-gate concern resolved: P-D §5.3+§8 proves semantic distinction between removed pre-resolution price fallback and proposed post-UMA-resolution oracle-vote read; critic-opus verified `_build_pm_truth.py:137-139` uses the same pattern WITHOUT gate, so fix is stricter than existing production. DR-33 code implementation is a separate downstream implementation task — not blocking this review closure.) |
@@ -462,10 +464,10 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-12 | critic P0-5, scientist D3 | AP-14 (type-incompatible fabrication) | P-E / P-G DST handling | PENDING |
 | R3-13 | critic P0-6, scientist D1 | AP-12, AP-13 (partition fails to sum, missing category) | P-E reconstruction (full partition SQL) | PENDING |
 | R3-14 | architect P1-1, critic P1-6 | AP-15 (deferred verification) | P-E / P-F (EXPECTED_UNIT_FOR_CITY single-source) | PENDING |
-| R3-15 | architect P1-2, scientist D6 | AP-15 + INV-FP-3/INV-06 | P-B schema (decision_time_snapshot_id format + training_cutoff policy) | PENDING |
+| R3-15 | architect P1-2, scientist D6 | AP-15 + INV-FP-3/INV-06 | P-B schema → P-E | **PARTIALLY-CLOSED-BY-P-B** (2026-04-23; `provenance_json` is the vehicle; P-E writers embed `decision_time_snapshot_id`; full closure at P-E) |
 | R3-16 | architect P1-3, critic P1-5 | AP-15 (statistical claims weak) | P-C WU audit | **CLOSED-BY-P-C** (2026-04-23; critic-opus APPROVE; operational-equivalence 97.78% over 1,444 WU rows; fatal_misread `wu_website_daily_summary_not_wu_api_hourly_max` stays active as invariant anchor per NH-C5) |
 | R3-17 | architect P1-4, critic P1-2 | cross-packet coordination (gate_f_data_backfill step 8) | P-F hard quarantine (re-check first) | PENDING |
-| R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | PENDING |
+| R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | **CLOSED-BY-P-B** (2026-04-23; `settlements_authority_monotonic` trigger specified, deployed, 4+1 case validated including critic-opus false-positive probe that proved `json_extract` robustness over `LIKE`) |
 | R3-19 | architect P1-7 | AP-15 (NC-13 enforcement deferred) | P-B schema / P-E | PENDING |
 | R3-20 | critic P1-1 | AP-4 (source role collapse — Shape B per §3) | P-C WU audit → P-G reframe → P-E | **ADDRESSED-BY-P-C-REFRAMED-BY-P-G-CLOSES-IN-P-E** (2026-04-23; P-G SQL proof of disjoint date-ranges per source_type for HK/Taipei/Tel Aviv shows these are source-handoff history, NOT mislabels; relabel retired; P-E decides backfill-or-QUARANTINE per row; critic-opus APPROVE on the reframe) |
 | R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** | **RESOLVED-BY-P-G** (2026-04-23; critic-opus POST-EXECUTION APPROVE; Gamma probe confirmed 5 "duplicates" are HIGH/LOW metric-identity collisions, NOT JSON duplicates; DELETE 5 wrong-metric rows; P-E re-inserts HIGH-market winners using JSON EARLY entries 1513/1520/1517/1530/1532) |
@@ -478,6 +480,7 @@ Every round-3 review finding with its anti-pattern classification and target pac
 - P-D: R3-09, R3-23 (closed), R3-21 (routed to P-G)
 - P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; reframed in P-G; closes at P-E)
 - P-G: R3-21 (RESOLVED-BY-P-G), R3-20 (REFRAMED; closes at P-E)
+- P-B: R3-01 (CLOSED-BY-P-B), R3-06 (CLOSED-BY-P-B), R3-18 (CLOSED-BY-P-B), R3-15 (PARTIALLY-CLOSED; full at P-E)
 - P-G: R3-22, R3-23 (partial)
 - P-B: R3-01, R3-06, R3-07, R3-10, R3-15, R3-18, R3-19
 - P-F: R3-14, R3-17
