@@ -1,5 +1,5 @@
 {
-  "task": "guidance kernel phase 4 graph protocol hardening",
+  "task": "guidance kernel semantic boot closeout",
   "packet": "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
   "route_source": "ralplan",
   "route_evidence": [
@@ -11,41 +11,17 @@
     "AGENTS.md",
     "workspace_map.md",
     "architecture/AGENTS.md",
-    "architecture/script_manifest.yaml",
-    "architecture/test_topology.yaml",
     "architecture/change_receipt_schema.yaml",
     "architecture/topology.yaml",
     "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
-    "AGENTS.md",
-    "workspace_map.md",
-    "architecture/AGENTS.md",
-    "architecture/code_review_graph_protocol.yaml",
-    "architecture/topology_schema.yaml",
-    "scripts/topology_doctor.py",
-    "scripts/topology_doctor_cli.py",
-    "scripts/topology_doctor_core_map.py",
-    "scripts/topology_doctor_policy_checks.py",
-    "scripts/topology_doctor_registry_checks.py",
-    "tests/test_topology_doctor.py",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
     "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md",
     "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
   ],
   "changed_files": [
-    "AGENTS.md",
-    "workspace_map.md",
-    "architecture/AGENTS.md",
-    "architecture/code_review_graph_protocol.yaml",
-    "architecture/topology_schema.yaml",
-    "scripts/topology_doctor.py",
-    "scripts/topology_doctor_cli.py",
-    "scripts/topology_doctor_core_map.py",
-    "scripts/topology_doctor_policy_checks.py",
-    "scripts/topology_doctor_registry_checks.py",
-    "tests/test_topology_doctor.py",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
     "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md",
@@ -57,19 +33,24 @@
     ".code-review-graph/graph.db",
     "docs/authority/**",
     "docs/archives/**",
-    "current per-city/source truth table changes"
+    "architecture/** except this packet closeout plan/worklog/receipt already listed"
   ],
   "tests_evidence": [
+    "python scripts/topology_doctor.py --task-boot-profiles --json",
+    "python scripts/topology_doctor.py --fatal-misreads --json",
+    "python scripts/topology_doctor.py --city-truth-contract --json",
     "python scripts/topology_doctor.py --code-review-graph-protocol --json",
-    "python scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task \"graph review\" --files scripts/topology_doctor.py --json",
+    "python scripts/topology_doctor.py --current-state-receipt-bound --json",
+    "python scripts/topology_doctor.py semantic-bootstrap --task-class source_routing --task \"audit Hong Kong source routing\" --files src/data/tier_resolver.py --json",
+    "python scripts/topology_doctor.py context-pack --pack-type debug --task \"debug settlement rounding mismatch\" --files src/contracts/settlement_semantics.py --json",
     "python scripts/topology_doctor.py --docs --json",
     "python scripts/topology_doctor.py --context-budget --json",
-    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <phase files> --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <phase files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <phase files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <phase files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <phase files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
-    "python -m pytest -q tests/test_topology_doctor.py -k 'code_review_graph_protocol or semantic_bootstrap or graph_review'",
-    "git diff --check -- <phase files>"
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
+    "python -m pytest -q tests/test_topology_doctor.py -k \"semantic_bootstrap or context_pack or task_boot_profiles or fatal_misreads or city_truth_contract or code_review_graph_protocol or current_state_receipt or current_state_candidate or core_claims\"",
+    "git diff --check -- <closeout files>"
   ]
 }

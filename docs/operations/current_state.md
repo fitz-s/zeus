@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
-- Status: Phase 4 graph protocol hardening pre-close review complete
+- Status: Guidance kernel semantic boot package closeout and post-close review complete
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -25,6 +25,7 @@ Role: single live control pointer for the repo.
 - Guidance kernel Phase 1 commit: `e3e8178`
 - Guidance kernel Phase 2 commit: `ec22a02`
 - Guidance kernel Phase 3 commit: `24b501a`
+- Guidance kernel Phase 4 commit: `f887e9b`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -38,11 +39,10 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Phase 4 hardens the Code Review Graph usage protocol as derived Stage 2
-  context after semantic boot.
+- Guidance kernel package is closed.
 - Do not modify runtime source, DB/state files, graph DB, archive bodies,
-  authority-law docs, current per-city/source truth tables, or receipt-bound
-  current-state mechanics in Phase 4.
+  authority-law docs, current per-city/source truth tables, or semantic boot
+  manifests without a new packet.
 
 ## Current fact companions
 
@@ -71,6 +71,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Commit Phase 4 graph protocol hardening.
-- After post-close review, open Phase 5 package closeout.
+- Guidance kernel semantic boot package is complete.
+- Preserve unrelated dirty work and local archive inputs.
 - Preserve unrelated dirty work and local archive inputs

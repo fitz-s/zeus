@@ -335,3 +335,59 @@ Pre-close review:
 Next:
 
 - commit Phase 4, then run post-close review before package closeout
+
+## Phase 5 Closeout
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- marked the guidance-kernel semantic boot package closed in `current_state.md`
+- recorded Phase 4 commit evidence
+- kept runtime/source/state/graph/authority docs outside closeout scope
+
+Verification:
+
+- `python scripts/topology_doctor.py --task-boot-profiles --json` -> ok
+- `python scripts/topology_doctor.py --fatal-misreads --json` -> ok
+- `python scripts/topology_doctor.py --city-truth-contract --json` -> ok
+- `python scripts/topology_doctor.py --code-review-graph-protocol --json` -> ok
+- `python scripts/topology_doctor.py --current-state-receipt-bound --json` -> ok
+- `python scripts/topology_doctor.py semantic-bootstrap --task-class source_routing --task "audit Hong Kong source routing" --files src/data/tier_resolver.py --json` -> ok, with expected derived graph metadata mismatch warning
+- `python scripts/topology_doctor.py context-pack --pack-type debug --task "debug settlement rounding mismatch" --files src/contracts/settlement_semantics.py --json` -> ok, includes `semantic_bootstrap.task_class=settlement_semantics`
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k "semantic_bootstrap or context_pack or task_boot_profiles or fatal_misreads or city_truth_contract or code_review_graph_protocol or current_state_receipt or current_state_candidate or core_claims"` -> 37 passed
+- `git diff --check -- <closeout files>` -> ok
+- `git diff -- docs/authority src architecture scripts tests AGENTS.md workspace_map.md` -> empty
+
+Pre-close review:
+
+- Critic: pass. Closeout only updates current-state and packet evidence; all
+  implementation phases are already committed and verified.
+- Verifier: pass. Core boot manifests, semantic-bootstrap output,
+  city-truth schema, graph protocol, and receipt-bound current-state checks all
+  pass their topology_doctor gates.
+
+Post-close review:
+
+- Critic: pass. Package objectives are complete: question-first semantic boot,
+  fatal misread antibodies, city/source schema boundary, semantic-bootstrap
+  output, receipt-bound current_state, and graph Stage 2 protocol.
+- Verifier: pass. No closeout diff exists in `src/**`, `docs/authority/**`,
+  `architecture/**`, `scripts/**`, `tests/**`, root `AGENTS.md`, or
+  `workspace_map.md`; runtime state and graph DB remain unrelated dirty work.
+
+Next:
+
+- package closed

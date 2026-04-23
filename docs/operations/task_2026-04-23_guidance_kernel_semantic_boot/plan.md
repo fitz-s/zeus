@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/tooling
-Phase: 4 graph protocol hardening
+Phase: 5 closeout
 
 ## Objective
 
@@ -161,6 +161,22 @@ Forbidden:
 - `docs/authority/**`
 - `docs/archives/**`
 - current per-city/source truth table changes
+
+## Phase 5 Scope
+
+Allowed:
+
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**`
+- `docs/archives/**`
+- architecture/script/test/root guidance changes
 
 ## Future Phase Summary
 
