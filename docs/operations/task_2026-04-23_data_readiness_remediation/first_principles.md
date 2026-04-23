@@ -455,7 +455,7 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-20 | critic P1-1 | AP-4 (source role collapse) | P-C WU audit (Tel Aviv decoupling) / P-E | PENDING |
 | R3-21 | scientist D4 | AP-15 (market identity lost) | P-D harvester probe (multi-market Gamma check) | PENDING |
 | R3-22 | scientist D5 | AP-1 (obs_v2 corrupt rows) | P-G pre-existing corrections | PENDING |
-| R3-23 | scientist D7 | AP-1 (Denver orphan) | P-G / P-D (Gamma probe for Denver) | PENDING |
+| R3-23 | scientist D7 | AP-1 (Denver orphan) | P-D extension §9.1 (Gamma probe: 250-event scan, 0 Denver matches → synthetic orphan) → P-G DELETE | **CLOSED-BY-P-D** (2026-04-23; Denver not in Gamma; P-G to DELETE in execution phase) |
 | R3-24 | architect cumulative | meta: candidate 8th and 9th fatal_misreads | Separate guidance_kernel packet (out of v6 scope) | NOTED |
 
 **Packet coverage summary**:

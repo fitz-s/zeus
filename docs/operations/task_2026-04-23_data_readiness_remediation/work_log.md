@@ -203,17 +203,154 @@ Fatal misreads all preserved (no collapse).
 
 ---
 
-## P-D: Harvester Gamma Probe — 2026-04-23
+## P-D: Harvester Gamma Probe — started 2026-04-23T16:45:00Z; closure requested 2026-04-23T17:15:00Z
 
 ### Pre-packet (Q1-Q10 answers)
 
-[to be written on P-D start]
+**Context & scope**: read-only probe of live Polymarket Gamma API on closed weather markets. Goal: determine whether `src/execution/harvester.py::_find_winning_bin` (L486-503) write-path is structurally viable (i.e., does Gamma actually populate `winningOutcome='yes'` for closed markets?). Result shapes later decisions about harvester fix (DR-33) and fallback signals (R3-09 outcomePrices issue).
+
+**Q1 (invariant enforced/preserved)**:
+- **INV-FP-1** (provenance chain): we want to prove the Gamma API response shape is a real provenance anchor, not a hoped-for field
+- **INV-FP-7** (source role boundaries): we're probing the settlement-related market-metadata stream, which is a distinct source role from settlement-daily-observation source (WU/HKO/NOAA)
+- No architectural invariants violated by a read probe.
+
+**Q2 (fatal_misread not collapsed)**:
+- `code_review_graph_answers_where_not_what_settles` — graph is irrelevant here; probe uses actual HTTP API, not graph inference
+- `api_returns_data_not_settlement_correct_source` — even if Gamma returns data, we're NOT treating it as settlement-source; we're checking whether the FIELDS exist to let harvester write settlement rows from it. Separate question from settlement-source validity.
+
+**Q3 (single-source-of-truth for numbers/names)**:
+- API URL: `https://gamma-api.polymarket.com` (per existing `scripts/_build_pm_truth.py:13`)
+- Tag ID for daily-temperature: `103040` (per `scripts/_build_pm_truth.py` constant)
+- Sample size: probe ~50 known-settled events (same as prior scientist round-2 suggestion + critic round-2 methodology)
+- All claims cite actual HTTP response payload excerpts
+
+**Q4 (first-failure policy)**:
+- Gamma API down / rate-limited → retry with backoff; if persistent, document timestamp + retry count + tombstone the lane pending reconnect
+- Response shape unexpected (e.g., no `winningOutcome` field anywhere) → that IS the finding; document shape + recommend fallback signal (non-price, per R3-09)
+- Gamma returns OUR data but with different schema than existing `_build_pm_truth.py` assumes → flag as R3-XX schema-drift issue
+
+**Q5 (commit boundary)**:
+- N/A. Read-only probe; no DB writes; no file writes to tracked paths (only to `evidence/`).
+
+**Q6 (verification)**:
+- critic-opus independently re-runs the probe against same endpoint
+- Every claim about response shape cites actual JSON keys + sample values
+- Per-field population rate claimed = verifiable by field-count over N samples
+
+**Q7 (new hazards introduced)**:
+- Risk: Gamma API rate-limits our probe and affects other workflows (scrape jobs)
+  - Mitigation: probe <50 requests over ~2 minutes; within normal API usage bounds
+- Risk: probe's `curl` calls leak credentials or proxy settings
+  - Mitigation: use same env-strip pattern as existing `scripts/_build_pm_truth.py` (strips HTTP_PROXY/HTTPS_PROXY per existing code)
+
+**Q8 (closure requirement)**:
+- Deliverable: `evidence/harvester_gamma_probe.md` documenting:
+  - Probe methodology (URL, params, sample size, env handling)
+  - Response shape findings (which fields present, which NULL, % populated)
+  - `winningOutcome` field population rate across samples
+  - Alternative signals enumerated (`outcomePrices`, `resolvedBy`, `closedTime`, `series` metadata) with per-field availability
+  - Verdict: harvester L486-503 viable / needs-fallback / needs-rewrite
+  - Explicit note: **do NOT revive `outcomePrices >= 0.95` price fallback** per R3-09 (removed by documented decision in `src/execution/harvester.py:490-491`)
+- critic-opus APPROVE if: probe evidence is reproducible; shape findings cite actual JSON; fallback recommendation does not revive deleted price-fallback; scope respects R3-09
+
+**Q9 (decision being reversed)**:
+- **POTENTIAL reversal**: v6 DR-43 proposed reviving `outcomePrices 1.0` fallback. This packet confirms/rejects that. Per harvester.py:490-491 documented rationale, price signals are NOT settlement authority.
+- P-D will NOT revive price fallback. If probe shows `winningOutcome` unreliable, we look at non-price signals (resolvedBy, closedTime, series). If ALL non-price signals also unreliable, P-D concludes with "harvester write path structurally non-viable; requires separate packet on Gamma API evolution or alternative source".
+
+**Q10 (rollback boundary)**:
+- No state changes. Only evidence doc + work_log entry. `git checkout -- .` fully reverses.
+
+### Execution log
+
+- 2026-04-23T16:50:00Z — Initial 50-event probe: `winningOutcome` absent in 412/412 markets (100%). Harvester L486-503 path confirmed structurally unreachable.
+- 2026-04-23T16:55:00Z — Detailed sample probe (3 events, 3 markets each): `outcomePrices=["0","1"]` and `["1","0"]` patterns observed with `umaResolutionStatus='resolved'` and 100%-populated `resolvedBy`, `closedTime`. Dallas 2025-12-30 showed the winning bin: "between 52-53°F" market has `outcomePrices=["1","0"]`.
+- 2026-04-23T17:00:00Z — Systematic tally: 142 markets with `umaResolutionStatus='resolved'` (122 NO_won + 20 YES_won). Distribution consistent with Polymarket binary question resolution.
+- 2026-04-23T17:05:00Z — Drafted minimal fix for `_find_winning_bin` (§6.1 of evidence doc). Gated by `umaResolutionStatus='resolved'`, reads `outcomePrices[0]=='1'` as UMA-oracle-output. Documented as NOT reviving R3-09 deleted pattern (pre-resolution price fallback); post-resolution reading is oracle-vote extraction.
+- 2026-04-23T17:10:00Z — Extended probe (R3-23 closure): scanned 250 closed events; 0 Denver matches; Denver 2026-04-15 confirmed as synthetic orphan from pm_settlements_full.json speculative entries. P-G DELETE disposition recommended.
+- 2026-04-23T17:15:00Z — Wrote `evidence/harvester_gamma_probe.md` (11 sections), updated App-C R3-09 partial-close + R3-23 CLOSED-BY-P-D.
+
+### Self-verify
+
+- AC-P-D-1: 50 events fetched from live Gamma → ✓
+- AC-P-D-2: `winningOutcome` absent in 412/412 markets (100%) → ✓ headline finding stands
+- AC-P-D-3: `umaResolutionStatus='resolved'` detected as authoritative gate → ✓ (142 resolved markets)
+- AC-P-D-4: `outcomePrices=["1","0"]` correlates with YES-won question text → ✓ (Dallas 52-53°F sample)
+- AC-P-D-5: proposed fix does NOT revive R3-09 deleted pattern → ✓ (§5.3 + §8 explicit distinction)
+- AC-P-D-6: no DB mutations → ✓ (only evidence doc + work_log + App-C status update)
+- AC-P-D-7: R3-23 Denver orphan closed with 250-event scan → ✓ (0 matches)
+
+### Closure request → critic-opus
+
+[to be sent next]
+
+### critic-opus verdict
+
+[pending]
+
+### Closure action
+
+[pending verdict]
 
 ---
 
-## P-C: WU Product Identity Audit — 2026-04-23
+## P-C: WU Product Identity Audit — deferred pending P-D closure
 
 ### Pre-packet (Q1-Q10 answers)
 
-[to be written on P-C start]
+**Context & scope**: audit whether `observations.wu_icao_history` (WU private API v1 hourly-aggregate, per `src/data/wu_hourly_client.py:7`) matches the WU-website-daily-summary product that Polymarket resolution references. Fatal-misread `wu_website_daily_summary_not_wu_api_hourly_max` directly applies. Goal: per-city go/no-go decision informing P-E reconstruction scope.
+
+**Q1 (invariant enforced/preserved)**:
+- **INV-FP-7** (source role boundaries): the core question this audit answers
+- **INV-FP-1** (provenance chain): result drives provenance reasoning for re-derived rows (WU-native confident vs pending-audit)
+
+**Q2 (fatal_misread not collapsed)**:
+- `wu_website_daily_summary_not_wu_api_hourly_max` — THIS packet exists to test this antibody empirically
+- `api_returns_data_not_settlement_correct_source` — preserved; even if API returns data, that doesn't make it settlement-correct; audit determines correctness
+- `airport_station_not_city_settlement_station` — preserved; audit covers per-city station verification implicitly
+
+**Q3 (single-source-of-truth for numbers/names)**:
+- WU ICAO stations per city: `config/cities.json::<city>.wu_station`
+- Cities needing audit: 47 WU-settled cities per `docs/operations/current_source_validity.md` (2026-04-21 audit)
+- Statistical tolerances: per critic-opus R2 P1-5: ≥10 samples/month per city, ≥60 samples/city total, bounds ±<1°F delta and ≥95% exact-integer-match
+- All counts via SQL against observations / city_truth_contract / settlements_pm_bin
+
+**Q4 (first-failure policy)**:
+- WU website archive pages unreachable for a city → document with retry timestamps; if persistent for specific city, QUARANTINE that city's audit with reason `WU_WEBSITE_ARCHIVE_UNAVAILABLE`
+- WU website structure changed (scrape fails) → document schema drift; recommend separate packet
+- Per-city match rate <95% → that city's rows go to UNVERIFIED in P-E, not VERIFIED; log to per-city decision table
+
+**Q5 (commit boundary)**:
+- N/A. Read-only audit; no DB writes.
+
+**Q6 (verification)**:
+- critic-opus re-runs sample audit on ≥2 randomly-chosen cities to confirm methodology
+- Per-city match rate cites actual (wu_icao_history.high_temp, wu_website_scrape.daily_max) tuple comparisons
+- Binomial CI reported per city
+
+**Q7 (new hazards introduced)**:
+- Risk: WU website rate-limits → extended probe time → could delay P-C by hours
+  - Mitigation: ~60-100 requests/city × 47 cities = 2820-4700 total; batch by city with 1s sleep; estimate 2 hours audit time
+- Risk: WU website returns stale/cached data not matching our probe window
+  - Mitigation: compare obs.fetched_at to website archive date; flag if mismatch
+
+**Q8 (closure requirement)**:
+- Deliverable: `evidence/wu_product_identity_audit.md` with:
+  - Methodology (URL pattern, sample selection, comparison rule)
+  - Per-city match rate + CI
+  - List of cities <95% match (quarantine candidates for P-E)
+  - List of cities ≥95% match (VERIFIED candidates for P-E)
+  - Explicit handling of DST-day obs (known quarantined in DB)
+- critic-opus APPROVE if: methodology statistically sound; per-city decisions reproducible; no WU city silently greenlit without evidence
+
+**Q9 (decision being reversed)**:
+- N/A — this is a NEW empirical audit; no prior architectural decision is being reversed.
+- BUT: result may reverse v6 DR-44's assumption that "95% threshold alone suffices". If audit shows ANY city with systematic bias, we need tighter threshold or per-city station re-mapping.
+
+**Q10 (rollback boundary)**:
+- No state changes. Only evidence doc + work_log entry.
+- Forward-compatible: per-city decisions in evidence doc are inputs to P-E; P-E consumes the document without modifying it.
+
+### Execution log
+
+[to be populated during audit]
 
