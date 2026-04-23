@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
-- Status: P3 current-fact hardening pre-close review complete
+- Status: Authority Kernel Gamechanger package closeout and post-close review complete
 
 ## Required evidence
 
@@ -21,9 +21,9 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P3 hardens current-fact surfaces and closes the authority-kernel package.
+- Authority Kernel Gamechanger package is closed.
 - Do not modify runtime source, DB/state files, graph DB, current city/source
-  truth, archive bodies, or authority history content in P3.
+  truth, archive bodies, or authority kernel files without a new packet.
 
 ## Current fact companions
 
@@ -51,9 +51,9 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-22_docs_truth_refresh/`
 - `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
 - `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/`
+- `docs/operations/task_2026-04-23_data_readiness_remediation/`
 
 ## Next action
 
-- Commit P3 current-fact hardening.
-- After commit, run post-close review and record package closeout.
+- Authority Kernel Gamechanger package is complete.
 - Preserve unrelated dirty work and local archive inputs.
