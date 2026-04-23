@@ -5,10 +5,10 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Docs Truth Refresh / Stale-Authority Purge (2026-04-22 package)
-- Active package source: `zeus_docs_truth_refresh_reconstruction_package_2026-04-22`
-- Active execution packet: `docs/operations/task_2026-04-22_docs_truth_refresh/plan.md`
-- Status: Docs truth refresh package post-closeout review complete
+- Mainline task: Guidance Kernel / Semantic Boot Refactor
+- Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- Status: Phase -1 packet activation and current-state alignment in progress
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -17,25 +17,25 @@ Role: single live control pointer for the repo.
 - P2 follow-up review: `proceed_to_p3`
 - Docs truth refresh P3 commit: `55eb285`
 - P3 follow-up review: `proceed_to_closeout`
+- Docs truth refresh closeout commit: `36d2f64`
+- Docs truth refresh post-closeout review: complete
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
 ## Required evidence
 
-- `docs/operations/current_data_state.md`
-- `docs/operations/current_source_validity.md`
-- `docs/operations/task_2026-04-21_gate_f_data_backfill/step1_schema_audit.md`
-- `docs/operations/task_2026-04-21_gate_f_data_backfill/step1b_source_validity.md`
-- `docs/operations/task_2026-04-22_docs_truth_refresh/plan.md`
-- `docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md`
-- `docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json`
+- `.omx/context/guidance-kernel-semantic-boot-20260423T005005Z.md`
+- `.omx/plans/guidance-kernel-semantic-boot-ralplan-2026-04-23.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
 
 ## Freeze point
 
-- Do not widen this package into runtime source, DB mutation, graph DB changes,
-  archive-body ingestion, or authority-law rewrites.
-- P2 owns freshness-aware registry schema and retirement of
-  `architecture/reference_replacement.yaml`; P0 only performs path/class cleanup.
+- Phase -1 only activates the packet and current-state routing.
+- Do not implement semantic boot manifests, city truth contracts, topology
+  semantic-bootstrap, graph protocol changes, runtime source, DB mutation, graph
+  DB changes, archive-body ingestion, or authority-law rewrites in Phase -1.
 
 ## Current fact companions
 
@@ -59,11 +59,11 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-20_workspace_authority_reconstruction/`
 - `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/`
 - `docs/operations/task_2026-04-21_gate_f_data_backfill/`
+- `docs/operations/task_2026-04-22_docs_truth_refresh/`
 - `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
 
 ## Next action
 
-- Later registry retirement/deletion or generated current-fact tooling requires a
-  separate packet.
-- Keep later registry retirement/deletion work in a separate packet
+- Finish Phase -1 validation and review.
+- If Phase -1 review passes, open Phase 0 semantic boot kernel skeleton.
 - Preserve unrelated dirty work and local archive inputs
