@@ -58,6 +58,7 @@ categories:
     - tests/test_structural_linter.py
     - tests/test_supervisor_contracts.py
     - tests/test_backfill_scripts_match_live_config.py
+    - tests/test_diurnal_curves_empty_hk_handled.py
     - tests/test_hk_rejects_vhhh_source.py
     - tests/test_hourly_clients_parse.py
     - tests/test_obs_v2_writer.py
