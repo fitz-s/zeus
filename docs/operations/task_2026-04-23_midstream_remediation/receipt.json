@@ -282,6 +282,33 @@
       "plan_premise_correction_four": "Plan T7.a said 'remove pytest.skip at tests/test_dual_track_law_stubs.py:67'. Verified: L67 is a comment; L70 is a skip inside `test_no_high_low_mix_in_platt_or_bins` (a different test, NC-12 territory for T1.d). `test_fdr_family_key_is_canonical` is at L189 and has NO skip decorators.",
       "verification_evidence": "pytest -q tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical → 1 passed in 0.03s. Test body covers: hypothesis vs edge family ID scope separation (L213), determinism within scope (L216-217), metric discrimination HIGH != LOW (L220-223). All INV-22 canonicality properties enforced.",
       "residual_flagged": "The pytest.skip at tests/test_dual_track_law_stubs.py:70 inside test_no_high_low_mix_in_platt_or_bins is NC-12 / INV-16 Phase-7 enforcement — belongs to T1.d audit, not T7.a."
+    },
+    {
+      "slice_id": "T2.a+T2.b",
+      "name": "R14_quarantine_test_fixture_updates",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_CLEAR_plus_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/** only)",
+      "files_changed": [
+        "tests/test_calibration_bins_canonical.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "direction_of_fix": "tests were stale vs source law; peak_window_max_v1 is quarantined per src/contracts/ensemble_snapshot_provenance.py:87,102; canonical replacements are tigge_mx2t6_local_calendar_day_max_v1 + tigge_mn2t6_local_calendar_day_min_v1 per CANONICAL_DATA_VERSIONS frozenset L68-71",
+      "changes": [
+        "test_R14_quarantine_allows_replacement_tag: iterate sorted(CANONICAL_DATA_VERSIONS) instead of hardcoded tuple",
+        "test_R14_filter_allowed_partitions_rows: updated expected partitioning from allowed=[1,4] / quarantined=[2,3] to allowed=[4] / quarantined=[1,2,3] (id 1 is now quarantined)"
+      ],
+      "acceptance_commands_run": [
+        "pytest -q tests/test_calibration_bins_canonical.py::test_R14_quarantine_allows_replacement_tag tests/test_calibration_bins_canonical.py::test_R14_filter_allowed_partitions_rows → 2 passed in 0.77s",
+        "pytest -q tests/test_calibration_bins_canonical.py → 40 passed in 1.44s (zero regression)"
+      ],
+      "surrogate_critic_findings": {
+        "verdict": "CLEAR APPROVE",
+        "direction_verified_via": "independent grep + 2 corroborating test suites (tests/test_phase4_parity_gate.py + tests/test_phase4_rebuild.py) both assert peak_window quarantined",
+        "flagged_out_of_scope_followup_MEDIUM": "scripts/rebuild_calibration_pairs_canonical.py:103-104 has stale comment contradicting current quarantine semantics ('peak_window_max_v1 is intentionally NOT quarantined — it is the replacement target'). Documentation antibody gap, not test blocker. File as separate slice."
+      }
     }
   ],
   "slices_in_review": [

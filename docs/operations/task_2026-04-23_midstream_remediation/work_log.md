@@ -34,6 +34,76 @@
 | T3.2b canonical schema alignment antibody | closed | `566a48f` | plan AST-walk premise vacuous (no dict builders in projection.py); pivoted to 3 structural-alignment tests; 3/3 pass; surrogate critic CLEAR with regex hardening polish adopted | 2026-04-23 |
 | T3.2 canonical_projection fixture patch | closed | `566a48f` | one-line category fix bundled in same commit as T3.2b per slice-pairing rationale | 2026-04-23 |
 | T7.a test_fdr_family_key_is_canonical activation | closed | N/A (no code change) | **slice already done pre-session**: test at L189 is unskipped and passing 1/1; plan's "skip at L67" citation was wrong (L70 is a different test, `test_no_high_low_mix_in_platt_or_bins`, NC-12 territory for T1.d); test body already covers INV-22 scope separation, determinism, metric discrimination | 2026-04-23 |
+| T2.d/e/f SelectionFamilySubstrate fixes | **PARTIAL — deferred** | none (reverted) | Plan fix (replace `monkeypatch.setattr(evaluator_module, "Day0Signal", ...)` with `monkeypatch.setattr("src.signal.day0_router.Day0Router.route", ...)`) is directionally correct BUT insufficient: tests still fail on upstream DT#7 boundary-day gate at `evaluator.py:777` (`boundary_ambiguous_refuses_signal(v2_snapshot_meta)`) — new code path added after test fixture was written. Fixing requires either (a) populating v2 ensemble_snapshots with `boundary_ambiguous=0` row in test setup, or (b) additional monkeypatch on `_read_v2_snapshot_metadata`. Reverted my local fix to avoid committing half-work. Flagged as a new slice T2.d.1 (v2 snapshot fixture setup) for follow-up. | 2026-04-23 |
+| T2.a/T2.b R14 quarantine test fixture updates | closed | pending | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
+
+## T2.a/T2.b — execution notes (2026-04-23)
+
+Both tests in `tests/test_calibration_bins_canonical.py` (plan cited
+as T2.a and T2.b separately, but they share fixture assumptions and
+fix together as a pair):
+
+- `test_R14_quarantine_allows_replacement_tag` (L758)
+- `test_R14_filter_allowed_partitions_rows` (L776)
+
+### Direction: tests were stale, code is current
+
+Authority source `src/contracts/ensemble_snapshot_provenance.py:26-28,
+82-103, 118-147` declares:
+- `tigge_mx2t6_local_peak_window_max_v1` is EXPLICITLY quarantined
+  (exact match + prefix match)
+- Canonical dual-track replacements are
+  `tigge_mx2t6_local_calendar_day_max_v1` (HIGH_LOCALDAY_MAX) and
+  `tigge_mn2t6_local_calendar_day_min_v1` (LOW_LOCALDAY_MIN), both
+  in `CANONICAL_DATA_VERSIONS` frozenset at L68-71
+- `assert_data_version_allowed` has two-stage check: (1) quarantine
+  block at L131-140, (2) positive allowlist at L141-147
+
+Previous fixture expected `peak_window_max_v1` to be "allowed
+replacement" — directly contradicted by both quarantine entries. The
+other fixture items (`"day_window_max_v1"`, openmeteo, empty, None)
+all fail the stage-2 positive allowlist. Whole assertion path was
+broken.
+
+### Changes
+
+- `test_R14_quarantine_allows_replacement_tag`: now iterates
+  `sorted(CANONICAL_DATA_VERSIONS)` (the authoritative frozenset),
+  asserts each passes both stages. Docstring documents authority
+  source.
+- `test_R14_filter_allowed_partitions_rows`: updated expected
+  partitioning. Old: `allowed=[1, 4], quarantined=[2, 3]`. New:
+  `allowed=[4], quarantined=[1, 2, 3]`. Docstring explains id 4
+  (openmeteo) passes `is_quarantined` (no prefix/exact match) but
+  would still fail `assert_data_version_allowed` stage-2; `filter_allowed`
+  is reader-side, only checks quarantine.
+
+### Regression evidence
+
+- Narrow: `pytest -q tests/test_calibration_bins_canonical.py::test_R14_quarantine_allows_replacement_tag tests/test_calibration_bins_canonical.py::test_R14_filter_allowed_partitions_rows` → `2 passed in 0.77s`.
+- File: `pytest -q tests/test_calibration_bins_canonical.py` → `40 passed in 1.44s`. Zero regression.
+
+### Surrogate critic (code-reviewer@opus)
+
+Verdict: CLEAR, APPROVE.
+- DIRECTION_CORRECT: yes — independently grep-verified source
+  quarantine + corroborated by `tests/test_phase4_parity_gate.py:26-66`
+  and `tests/test_phase4_rebuild.py:266-281`.
+- MISSED_SITES: none in tests/ or src/ that reference the old "allowed"
+  assumption.
+- COVERAGE_LOSS: acceptable / arguably improved (old test was exercising
+  code paths that SHOULD fail stage-2 allowlist).
+- CITATION_STALENESS: none (L87, L102, L26-28, L141 all fresh).
+
+### Flagged follow-up (out-of-T2.a scope)
+
+Critic flagged stale comment at
+`scripts/rebuild_calibration_pairs_canonical.py:103-104`:
+> "The future `tigge_mx2t6_local_peak_window_max_v1` data_version is
+> intentionally NOT quarantined — it is the replacement target."
+
+This contradicts current contract. Not a test blocker but a
+documentation-antibody gap. Flagged as a MEDIUM follow-up slice.
 
 ## T7.a — verification notes (2026-04-23)
 

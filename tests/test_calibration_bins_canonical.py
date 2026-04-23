@@ -756,24 +756,40 @@ def test_R14_quarantine_rejects_prefix_families():
 
 
 def test_R14_quarantine_allows_replacement_tag():
-    """The mx2t6 replacement data_version must pass the guard."""
+    """The canonical dual-track replacement data_versions must pass the guard.
+
+    T2.a 2026-04-23: the earlier fixture listed
+    `tigge_mx2t6_local_peak_window_max_v1` as an allowed replacement, but
+    per `src/contracts/ensemble_snapshot_provenance.py:87,102` that
+    peak-window tag is now explicitly quarantined (superseded by
+    `tigge_mx2t6_local_calendar_day_max_v1` canonical-day semantics). The
+    positive allowlist at L141 also rejects anything outside
+    CANONICAL_DATA_VERSIONS, so the only versions that pass the full
+    `assert_data_version_allowed` two-stage check are the canonical
+    dual-track high/low versions.
+    """
     from src.contracts.ensemble_snapshot_provenance import (
+        CANONICAL_DATA_VERSIONS,
         assert_data_version_allowed,
         is_quarantined,
     )
-    allowed = (
-        "tigge_mx2t6_local_peak_window_max_v1",
-        "tigge_mx2t6_local_day_window_max_v1",
-        "openmeteo_ens_ecmwf_ifs025_daily_max_v1",
-        "",
-        None,
+    assert len(CANONICAL_DATA_VERSIONS) >= 2, (
+        "Expected at least the high and low track canonical data_versions"
     )
-    for dv in allowed:
+    for dv in sorted(CANONICAL_DATA_VERSIONS):
         assert not is_quarantined(dv), dv
         assert_data_version_allowed(dv)  # must not raise
 
 
 def test_R14_filter_allowed_partitions_rows():
+    """T2.a 2026-04-23: peak_window_max_v1 (id 1) is now quarantined
+    per src/contracts/ensemble_snapshot_provenance.py:87,102
+    (peak-window semantics superseded by local-calendar-day). id 4
+    (openmeteo_ens_v1) has no matching quarantine prefix or exact tag,
+    so is_quarantined returns False and filter_allowed routes it to the
+    allowed bucket (filter_allowed checks quarantine only, not the
+    positive allowlist at assert_data_version_allowed's stage 2).
+    """
     from src.contracts.ensemble_snapshot_provenance import filter_allowed
     rows = [
         {"id": 1, "data_version": "tigge_mx2t6_local_peak_window_max_v1"},
@@ -782,8 +798,8 @@ def test_R14_filter_allowed_partitions_rows():
         {"id": 4, "data_version": "openmeteo_ens_v1"},
     ]
     allowed, quarantined = filter_allowed(rows)
-    assert [r["id"] for r in allowed] == [1, 4]
-    assert [r["id"] for r in quarantined] == [2, 3]
+    assert [r["id"] for r in allowed] == [4]
+    assert [r["id"] for r in quarantined] == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
