@@ -15,13 +15,16 @@ archives."
 
 | Directory | Purpose | Notes |
 |-----------|---------|-------|
-| `authority/` | Current architecture and delivery law | Present-tense authority docs |
+| `authority/` | Durable architecture and delivery law only | No packet docs, ADRs, or historical governance evidence |
 | `reference/` | Canonical durable references only | Concepts and orientation, not authority by themselves |
 | `operations/` | Live control pointer, current fact surfaces, active packets, package inputs, gap register | Current work routing |
 | `runbooks/` | Operator runbooks | Runtime support |
 | `reports/` | Generated diagnostic reports | Evidence only |
 | `to-do-list/` | Active checklist workbooks and audit queues | Never authority |
 | `artifacts/` | Active evidence artifacts and inventories | Never authority |
+
+Historical governance files demoted from authority live under
+`reports/authority_history/` as evidence only.
 
 ## Active top-level docs
 

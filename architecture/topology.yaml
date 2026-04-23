@@ -450,7 +450,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md
+    - docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
