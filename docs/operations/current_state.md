@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
-- Status: P0 scaffold complete; P1 first-wave module books next
+- Status: P1 first-wave module books complete; P2 remaining module books and manifest enrichment next
 
 ## Required evidence
 
@@ -20,6 +20,8 @@ Role: single live control pointer for the repo.
 ## Freeze point
 
 - P0 scaffold landed routing and manifest skeleton only.
+- P1 added dense reference books and scoped routers for `state`, `engine`, and
+  `data`.
 - Do not modify runtime source, DB/state files, graph DB, current city/source
   truth, archive bodies, or the authority kernel unless a later packet phase
   explicitly authorizes that scope.
@@ -55,6 +57,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Land P1 first-wave dense module books and scoped router upgrades for
-  `state`, `engine`, and `data`.
+- Land P2 remaining module books plus manifest enrichment for the rest of the
+  module layer.
 - Preserve unrelated dirty work and local archive inputs.

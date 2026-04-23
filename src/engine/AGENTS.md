@@ -1,45 +1,61 @@
-# src/engine AGENTS — Zone K3 (Math/Data) + K2 (Execution coordination)
+# src/engine AGENTS
 
-## WHY this zone matters
+Engine is Zeus's orchestration layer. It coordinates the live cycle from data
+load through evaluation, monitoring, and replay, but it must not redefine
+truth, lifecycle law, or source semantics by sequencing shortcuts.
 
-Engine is the **orchestration layer** — it coordinates the full trading cycle from data fetch through signal generation, calibration, strategy, and execution. The cycle runner is where all the pieces connect.
+## Read this before editing
 
-Critical invariant: **engine may coordinate work, but may not redefine truth**. The lifecycle manager (K0) is the sole state authority. Engine calls into it — never around it.
+- Module book: `docs/reference/modules/engine.md`
+- Machine registry: `architecture/module_manifest.yaml`
+- Runtime law: `docs/authority/zeus_current_architecture.md`,
+  `architecture/invariants.yaml`, `architecture/task_boot_profiles.yaml`
 
-## Key files
+## Top hazards
 
-| File | What it does | Danger level |
-|------|-------------|--------------|
-| `cycle_runner.py` | Full trading cycle orchestration — fetch→signal→strategy→execute | CRITICAL — coordinates everything |
-| `evaluator.py` | Signal → strategy → sizing pipeline for each candidate | CRITICAL — core decision logic |
-| `cycle_runtime.py` | Heavy runtime helpers extracted from cycle_runner (keeps orchestrator clean) | HIGH |
-| `lifecycle_events.py` | Lifecycle event recording — settlement, phase transitions | HIGH — state mutations |
-| `monitor_refresh.py` | Position monitoring — stale detection, exit signal refresh | HIGH |
-| `replay.py` | Decision replay/backtest engine — legacy audit/counterfactual/walk-forward plus diagnostic `wu_settlement_sweep` and `trade_history_audit` lanes | MEDIUM |
-| `time_context.py` | Lead-time helpers — timezone-aware target date calculations | MEDIUM |
-| `discovery_mode.py` | Discovery mode enum (opening_hunt, update_reaction, day0_capture) | LOW |
-| `process_lock.py` | Process-level lock to prevent double-daemon launches (fcntl.flock) | LOW |
+- engine sequencing can collapse exit, settlement, and monitoring into one
+  wrong truth plane
+- Day0/monitor paths are source-sensitive and must respect current source facts
+- replay and live may diverge in I/O, not in semantic law
+- orchestration shortcuts can bypass lifecycle, riskguard, or execution rules
 
-## Domain rules
+## Canonical truth surfaces
 
-- Exit is not local close — engine must emit `EXIT_INTENT`, not directly close positions (INV-01)
-- Settlement is not exit — these are separate lifecycle events (INV-02)
-- No direct lifecycle terminalization from orchestration
-- No ad hoc phase reassignment — only `LifecyclePhase` enum values (INV-08)
-- No silent write-path bypass around canonical truth evolution
-- Backtest output is diagnostic only. `wu_settlement_sweep` scores from WU `settlement_value` plus typed `Bin`; `trade_history_audit` uses canonical `position_id` trade subjects and only reports WU-vs-trade divergence.
+- `cycle_runner.py`
+- `evaluator.py`
+- `monitor_refresh.py`
+- `replay.py`
+- `lifecycle_events.py`
 
-## Common mistakes
+## High-risk files
 
-- Letting monitor/executor code act as the lifecycle law → should call lifecycle_manager
-- Depending on deprecated portfolio authority as if it were final-state canonical
-- Patching around missing kernel work by inventing new local state
-- Performing "local close" on exit decisions instead of expressing exit intent → INV-01 violation
-- Skipping chain reconciliation before trading in live mode → truth divergence
-- Treating WU settlement coverage as strategy/PnL replay coverage. Strategy replay also needs forecast references, vector-compatible snapshots, and parseable typed bins.
+| File | Role |
+|------|------|
+| `cycle_runner.py` | top orchestration hub |
+| `evaluator.py` | decision synthesis and gating |
+| `cycle_runtime.py` | runtime sequencing helpers |
+| `lifecycle_events.py` | lifecycle event bridging |
+| `monitor_refresh.py` | monitor and Day0 refresh logic |
+| `replay.py` | replay parity and diagnostic path |
+| `time_context.py` | date/lead-time semantics |
 
-## Oracle Penalty Gate (evaluator.py)
+## Required tests
 
-`evaluator.py` checks `OracleStatus` before sizing. Blacklisted cities skip.
-Caution cities get Kelly multiplied by `(1 - error_rate)`.
-`round_fn` from `SettlementSemantics.for_city(city)` is threaded to Day0Signal and MarketAnalysis.
+- `tests/test_day0_exit_gate.py`
+- `tests/test_day0_runtime_observation_context.py`
+- `tests/test_day0_window.py`
+- `tests/test_cross_module_invariants.py`
+- `tests/test_cross_module_relationships.py`
+- `tests/test_bug100_k1_k2_structural.py`
+
+## Do not assume
+
+- engine is safe because it is "just orchestration"
+- current monitor data can stand in for settlement truth
+- replay can drift from live semantics as long as interfaces still fit
+- lifecycle law can be patched locally inside engine
+
+## Planning lock
+
+Any change to cycle sequencing, monitor/Day0 flow, replay parity, or
+cross-module actuation order requires a packet and planning-lock evidence.

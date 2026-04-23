@@ -18,8 +18,11 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 
 ## File registry
 
-P0 scaffolds this router first. Module books are added phase-by-phase and must
-be registered here as they land.
+| File | Purpose |
+|------|---------|
+| `state.md` | Dense module book for canonical runtime truth, lifecycle legality, and projection discipline |
+| `engine.md` | Dense module book for runtime orchestration, evaluator flow, replay parity, and monitor sequencing |
+| `data.md` | Dense module book for source-role routing, ingest discipline, and data-version boundaries |
 
 ## Rules
 

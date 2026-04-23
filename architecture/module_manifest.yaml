@@ -24,11 +24,33 @@ modules:
     priority: p1_first_wave
     zone: source
     authority_role: canonical_runtime_truth
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/state/db.py
+      - src/state/portfolio.py
+      - src/state/lifecycle_manager.py
+      - src/state/chain_reconciliation.py
+      - src/state/ledger.py
+      - src/state/projection.py
+    public_entry_files:
+      - src/state/db.py
+      - src/state/portfolio.py
+      - src/state/lifecycle_manager.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_current_delivery.md
+      - architecture/invariants.yaml
+    current_fact_dependencies:
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_db.py
+      - tests/test_dt1_commit_ordering.py
+      - tests/test_dt1_savepoint_integration.py
+      - tests/test_dt4_chain_three_state.py
+      - tests/test_b070_control_overrides_history_v2.py
+      - tests/test_chronicle_dedup.py
+      - tests/test_cross_module_invariants.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   engine:
     path: src/engine
     scoped_agents: src/engine/AGENTS.md
@@ -36,11 +58,31 @@ modules:
     priority: p1_first_wave
     zone: source
     authority_role: orchestration_runtime
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/engine/cycle_runner.py
+      - src/engine/evaluator.py
+      - src/engine/monitor_refresh.py
+      - src/engine/replay.py
+      - src/engine/lifecycle_events.py
+    public_entry_files:
+      - src/engine/cycle_runner.py
+      - src/engine/evaluator.py
+      - src/engine/monitor_refresh.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+      - architecture/task_boot_profiles.yaml
+    current_fact_dependencies:
+      - docs/operations/current_source_validity.md
+    required_tests:
+      - tests/test_day0_exit_gate.py
+      - tests/test_day0_runtime_observation_context.py
+      - tests/test_day0_window.py
+      - tests/test_cross_module_invariants.py
+      - tests/test_cross_module_relationships.py
+      - tests/test_bug100_k1_k2_structural.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   data:
     path: src/data
     scoped_agents: src/data/AGENTS.md
@@ -48,11 +90,39 @@ modules:
     priority: p1_first_wave
     zone: source
     authority_role: external_data_ingest
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/data/daily_obs_append.py
+      - src/data/observation_client.py
+      - src/data/hourly_instants_append.py
+      - src/data/observation_instants_v2_writer.py
+      - src/data/tier_resolver.py
+      - src/data/forecasts_append.py
+      - src/data/market_scanner.py
+    public_entry_files:
+      - src/data/daily_obs_append.py
+      - src/data/observation_client.py
+      - src/data/forecasts_append.py
+      - src/data/market_scanner.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/city_truth_contract.yaml
+      - config/cities.json
+    current_fact_dependencies:
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_audit_city_data_readiness.py
+      - tests/test_cities_config_authoritative.py
+      - tests/test_ensemble_client.py
+      - tests/test_backfill_openmeteo_previous_runs.py
+      - tests/test_etl_forecasts_v2_from_legacy.py
+      - tests/test_backfill_scripts_match_live_config.py
+      - tests/test_tier_resolver.py
+      - tests/test_obs_v2_writer.py
+      - tests/test_hk_rejects_vhhh_source.py
+      - tests/test_hourly_clients_parse.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md

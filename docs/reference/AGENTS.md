@@ -17,6 +17,8 @@ machine manifests, tests, and executable source.
 - `zeus_math_spec.md` when math fact/spec context matters
 - `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
   book route
+- `modules/state.md`, `modules/engine.md`, and `modules/data.md` for the first
+  landed high-risk module books
 
 Current data/source facts live under operations current-fact surfaces, not in
 this directory. Dated analytical/support snapshots live under the reports
@@ -42,6 +44,9 @@ current-fact surfaces, tests, or executable source.
 | `zeus_failure_modes_reference.md` | Durable failure-mode and mitigation reference |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
 | `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
+| `modules/state.md` | Dense state truth / lifecycle / projection module book |
+| `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
+| `modules/data.md` | Dense source-routing / ingest / data-versioning module book |
 
 ## Rules
 

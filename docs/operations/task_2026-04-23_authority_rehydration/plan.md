@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/reference/manifest
-Phase: P0 scaffold
+Phase: P1 first-wave module books
 
 ## Objective
 
@@ -67,6 +67,44 @@ Forbidden:
 - docs routing recognizes `docs/reference/modules/` as dense reference
 - module books remain reference/cognition, not authority
 - topology doctor gaps are recorded as follow-up, not silently ignored
+
+## P1 Scope
+
+Allowed:
+
+- `docs/reference/modules/state.md`
+- `docs/reference/modules/engine.md`
+- `docs/reference/modules/data.md`
+- `docs/reference/modules/AGENTS.md`
+- `src/state/AGENTS.md`
+- `src/engine/AGENTS.md`
+- `src/data/AGENTS.md`
+- `architecture/module_manifest.yaml`
+- `architecture/docs_registry.yaml`
+- `docs/reference/AGENTS.md`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/reference/zeus_data_and_replay_reference.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/**`
+- companion routing updates required by map maintenance
+
+Forbidden:
+
+- `src/**/*.py`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**` core-law rewrites
+- archives
+
+## P1 Acceptance
+
+- dense module books exist for `state`, `engine`, and `data`
+- `src/state/AGENTS.md`, `src/engine/AGENTS.md`, and `src/data/AGENTS.md`
+  become medium-density launchers with module-book pointers
+- `architecture/module_manifest.yaml` is enriched for the three first-wave
+  entries
+- docs registry classifies the three books explicitly
+- system references link to the new books without promoting them to law
 
 ## Verification
 

@@ -103,6 +103,12 @@ Use this file to answer:
 - why replay promotion is hard
 - how dual-track identity interacts with data truth
 
+For deeper module-specific detail, route to:
+
+- `docs/reference/modules/data.md`
+- `docs/reference/modules/state.md`
+- `docs/reference/modules/engine.md`
+
 ## What This File Is Not
 
 - not a data inventory snapshot

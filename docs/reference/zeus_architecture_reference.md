@@ -90,6 +90,13 @@ states are not safety mechanisms.
 Use `architecture/zones.yaml` and `architecture/source_rationale.yaml` for
 file-level ownership. This reference is descriptive only.
 
+First-wave dense module books now exist for the three highest-risk runtime
+surfaces:
+
+- `docs/reference/modules/state.md`
+- `docs/reference/modules/engine.md`
+- `docs/reference/modules/data.md`
+
 ## Derived Context Engines
 
 `topology_doctor` is the repo-native routing and governance checker. Use it for
@@ -160,5 +167,7 @@ Where to go next:
 
 - Current law: `docs/authority/zeus_current_architecture.md`
 - Dual-track law: `docs/authority/zeus_current_architecture.md`
+- State / engine / data deep dive: `docs/reference/modules/state.md`,
+  `docs/reference/modules/engine.md`, `docs/reference/modules/data.md`
 - File ownership: `architecture/source_rationale.yaml`
 - Workspace routing: `architecture/docs_registry.yaml`, `workspace_map.md`

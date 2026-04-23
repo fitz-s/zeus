@@ -38,7 +38,7 @@ Default navigation command:
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
 | `docs/authority/` | Durable architecture and delivery law only | `docs/authority/AGENTS.md` |
 | `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and module references | `docs/reference/AGENTS.md` |
-| `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` |
+| `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
 | `docs/operations/` | Live control pointer, active packets, package inputs, gap register | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/reports/` | Generated diagnostic reports | `docs/reports/AGENTS.md` |
