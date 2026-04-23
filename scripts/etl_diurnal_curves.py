@@ -1,8 +1,24 @@
+# Created: (pre-rule legacy)
+# Last reused/audited: 2026-04-23
+# Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 2 +
+#                  docs/operations/task_2026-04-21_gate_f_data_backfill/step4_phase2_cutover.md
 """ETL: Aggregate DST-safe intraday observations -> diurnal_curves/diurnal_peak_prob.
 
-Primary source is Zeus-owned `observation_instants`, not legacy blind local_hour
-fields. Ambiguous DST fallback hours are excluded from statistical tables rather
-than forced into a normal local-hour bucket. Multi-source hourly observations are
+Source: `observation_instants_current` VIEW (Phase 2 atomic cutover indirection
+over `observation_instants_v2`). Pre-Phase-2 flip the VIEW returns 0 rows,
+which this script treats as a fail-closed condition. Post-flip the VIEW returns
+the active `data_version` corpus (currently `v1.wu-native`, station-native).
+
+Temperature source: `COALESCE(temp_current, running_max)`. Legacy
+`observation_instants` populated `temp_current` (single hourly snapshot);
+`observation_instants_v2` populates `running_max`/`running_min` per hour
+(extremum-preserving aggregation that captures intra-hour SPECI peaks). Using
+COALESCE keeps this script correct across both shapes and aligns the diurnal
+sample with settlement semantics (daily high is the running max of hourly
+maxima).
+
+Ambiguous DST fallback hours are excluded from statistical tables rather than
+forced into a normal local-hour bucket. Multi-source hourly observations are
 collapsed to one canonical city/date/hour sample before seasonal aggregation.
 """
 
@@ -40,26 +56,36 @@ def run_etl() -> dict:
     zeus.execute("DELETE FROM diurnal_curves")
     zeus.execute("DELETE FROM diurnal_peak_prob")
 
-    instant_count = zeus.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0]
+    instant_count = zeus.execute(
+        "SELECT COUNT(*) FROM observation_instants_current"
+    ).fetchone()[0]
     if instant_count == 0:
-        print("ERROR: observation_instants is empty. Populate via backfill_hourly_openmeteo.py first.")
+        print(
+            "ERROR: observation_instants_current is empty. "
+            "Check zeus_meta.observation_data_version (Phase 2 cutover) and "
+            "observation_instants_v2 population."
+        )
         zeus.close()
-        return {"stored": 0, "error": "no observation_instants"}
+        return {"stored": 0, "error": "no observation_instants_current"}
 
     rows = zeus.execute(
         """
         SELECT city, target_date, source, local_timestamp, utc_timestamp,
-               temp_current, running_max
-        FROM observation_instants
-        WHERE temp_current IS NOT NULL
+               COALESCE(temp_current, running_max) AS temp_current,
+               running_max
+        FROM observation_instants_current
+        WHERE COALESCE(temp_current, running_max) IS NOT NULL
           AND is_missing_local_hour = 0
           AND is_ambiguous_local_hour = 0
         ORDER BY city, target_date, source, utc_timestamp
         """
     ).fetchall()
 
-    print(f"Source: {instant_count:,} observation_instants")
-    print(f"Using {len(rows):,} non-missing, non-ambiguous observation_instants for diurnal aggregation")
+    print(f"Source: {instant_count:,} observation_instants_current")
+    print(
+        f"Using {len(rows):,} non-missing, non-ambiguous "
+        f"observation_instants_current rows for diurnal aggregation"
+    )
 
     canonical_day_hour = defaultdict(list)
     for row in rows:
