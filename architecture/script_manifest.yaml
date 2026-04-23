@@ -299,6 +299,7 @@ scripts:
   build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
   capture_replay_artifact.py: {class: shadow_artifact_writer}
   check_advisory_gates.py: {class: enforcement}
+  compare_diurnal_v1_v2.py: {class: diagnostic}
   check_daemon_heartbeat.py: {class: runtime_support}
   check_kernel_manifests.py: {class: enforcement}
   check_module_boundaries.py: {class: enforcement}

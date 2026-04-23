@@ -143,6 +143,18 @@ def get_peak_hour_context(
         ).fetchall()
 
         if not season_rows or len(season_rows) < 12:
+            # Fail-closed fallback. AC11 (tests/test_diurnal_curves_empty_hk_handled.py)
+            # pins this behavior for Hong Kong where diurnal_curves is empty
+            # by design (plan v3 Option A: accumulator-forward-only, no
+            # historical). Plan v3 S3 Recovery mentioned a "fleet-average
+            # diurnal shape" fallback; Phase 3 closeout (step7) explicitly
+            # rejected that in favor of this fail-closed path because (1) the
+            # fleet spans temperate + tropical + Southern-hemisphere climates
+            # whose diurnal shapes do not transfer to HK, and (2) plan v3
+            # Option A's whole premise is "do not fabricate HK data". A future
+            # packet may revisit with a geographic-peer-average (Guangzhou /
+            # Shenzhen / Singapore) if HK trading needs a diurnal prior before
+            # the hko_hourly_accumulator builds native history.
             conn.close()
             return None, 0.0, "insufficient_diurnal_data_rows"
 

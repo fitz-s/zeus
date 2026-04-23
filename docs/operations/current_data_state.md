@@ -58,12 +58,17 @@ Atomic cutover state (as of this refresh, post-flip):
   `scripts/etl_hourly_observations.py` now read from `observation_instants_current`
   (the VIEW), making the atomic flip propagate to derived tables on every
   ETL run.
-- Derived tables post-rebuild from v2:
+- Derived tables post-rebuild from v2 (step5 PW6 + step6 tail + step7 Phase 3):
   - `diurnal_curves`: 4,800 rows × 50 cities (HK has 0 rows — plan v3 Option A
-    accepted gap; signal layer AC11 fallback active)
-  - `hourly_observations`: 1,812,401 rows × 50 cities (94 of 1.8M dropped:
-    91 DST-ambiguous + 3 temperature-range rejected)
-  - `diurnal_peak_prob`: 14,400 rows (50 × 12 months × 24 hours)
+    accepted gap; signal layer AC11 fallback active; fleet-average fallback
+    rejected per step7 decision, fail-closed retained)
+  - `hourly_observations`: 1,813,564 rows × 50 cities
+  - `diurnal_peak_prob`: 14,400 rows (50 × 12 months × 24 hours, dense)
+- Phase 3 shape-delta (v1 legacy vs v2 station-native, from
+  `scripts/compare_diurnal_v1_v2.py`): fleet median |Δavg_temp|=0.82°F,
+  mean=1.10°F; 36/47 cities (76.6%) fall in plan v3 predicted 0.5–2°F
+  band; 4 above-band cities (Atlanta/Austin/Helsinki/NYC) show the largest
+  signal-quality gains from station-native vs openmeteo grid-snap.
 - Legacy `observation_instants` table (867,489 `openmeteo_archive_hourly` rows)
   remains present in read-only compat mode; plan v3 Phase 4 DROP follows +30d
   post-flip.
