@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.config import get_mode
+from src.contracts.decision_evidence import DecisionEvidence
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
@@ -273,7 +274,21 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     )
 
 
-def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | None, deps) -> bool:
+def _dual_write_canonical_entry_if_available(
+    conn,
+    pos,
+    *,
+    decision_id: str | None,
+    deps,
+    decision_evidence: DecisionEvidence | None = None,
+) -> bool:
+    # T4.1b 2026-04-23 (D4 Option E): `decision_evidence` threads through
+    # to `build_entry_canonical_write` so the ENTRY_ORDER_POSTED payload
+    # carries the `decision_evidence_envelope` sidecar for T4.2-Phase1
+    # exit-side read-back via `json_extract(payload_json,
+    # '$.decision_evidence_envelope')`. Remains None on paths that do not
+    # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
+    # the payload simply omits the key, preserving pre-slice wire format.
     if conn is None:
         return False
 
@@ -285,6 +300,7 @@ def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | No
             pos,
             decision_id=decision_id,
             source_module="src.engine.cycle_runtime",
+            decision_evidence=decision_evidence,
         )
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:
@@ -1133,6 +1149,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             pos,
                             decision_id=d.decision_id,
                             deps=deps,
+                            decision_evidence=getattr(d, "decision_evidence", None),
                         )
                         portfolio_dirty = True
                         if result.status == "filled":
