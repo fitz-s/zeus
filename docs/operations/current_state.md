@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
-- Status: P0 authority decontamination and packet activation in progress
+- Status: P1 core authority rewrite in progress
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -27,6 +27,7 @@ Role: single live control pointer for the repo.
 - Guidance kernel Phase 3 commit: `24b501a`
 - Guidance kernel Phase 4 commit: `f887e9b`
 - Guidance kernel closeout commit: `65bd122`
+- Authority kernel P0 commit: `dc68379`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -40,10 +41,9 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- P0 activates the packet and demotes packet-scoped `task_2026-04-15_*`
-  authority files into reports evidence.
+- P1 rewrites core authority docs only.
 - Do not modify `src/**`, `state/**`, graph DB, runtime/source/data behavior,
-  or current city/source truth in P0.
+  current city/source truth, or side-authority file locations in P1.
 
 ## Current fact companions
 
@@ -73,7 +73,7 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Finish P0 validation and review.
-- If P0 review passes, open P1 core authority rewrite.
+- Finish P1 validation and review.
+- If P1 review passes, open P2 side authority demotion/merge.
 - Preserve unrelated dirty work and local archive inputs.
 - Preserve unrelated dirty work and local archive inputs

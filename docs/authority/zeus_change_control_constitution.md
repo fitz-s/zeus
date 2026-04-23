@@ -1,8 +1,14 @@
 # Zeus Change-Control Constitution
 
-版本: 2026-04-02  
-定位: change-control authority / 长期参考文件 / 架构宪法补充件  
+版本: 2026-04-23
+Status: durable deep governance constitution
+Default-read: no
+Use when: authority rewrite, kernel boundary changes, anti-entropy governance, packet design, long-horizon safety doctrine
 适用对象: 人类负责人、Claude Code、Codex、GPT 类 coding agent、reviewer、operator
+
+This file explains why Zeus is governed this way. It is not the default
+delivery entrypoint; use `docs/authority/zeus_current_delivery.md` for current
+delivery law.
 
 ---
 

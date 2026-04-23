@@ -176,7 +176,7 @@ entries:
   direct_reference_allowed: true
   current_role: dual-track architecture law
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -212,7 +212,7 @@ entries:
   direct_reference_allowed: true
   current_role: packet discipline law
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -230,7 +230,7 @@ entries:
   direct_reference_allowed: true
   current_role: autonomy gate law
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -248,7 +248,7 @@ entries:
   direct_reference_allowed: true
   current_role: live/backtest/shadow boundary law
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -266,7 +266,7 @@ entries:
   direct_reference_allowed: true
   current_role: OpenClaw/Venus delivery boundary law
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -284,7 +284,7 @@ entries:
   direct_reference_allowed: true
   current_role: data rebuild ADR
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false
@@ -302,7 +302,7 @@ entries:
   direct_reference_allowed: true
   current_role: K4 fix-pack ADR
   canonical_replaced_by: []
-  next_action: keep
+  next_action: demote_after_extraction
   lifecycle_state: durable
   coverage_scope: exact
   parent_coverage_allowed: false

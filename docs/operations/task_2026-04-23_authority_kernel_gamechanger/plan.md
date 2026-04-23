@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/authority
-Phase: P0 authority decontamination and packet activation
+Phase: P1 core authority rewrite
 
 ## Objective
 
@@ -51,6 +51,37 @@ Forbidden:
 - runtime/data/source implementation
 - current city/source re-audit
 - side authority demotion beyond the three `task_2026-04-15_*` files in P0
+
+## P1 Scope
+
+Allowed:
+
+- `docs/authority/zeus_current_architecture.md`
+- `docs/authority/zeus_current_delivery.md`
+- `docs/authority/zeus_change_control_constitution.md`
+- `architecture/docs_registry.yaml` side-authority next_action markers only
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- runtime/data/source implementation
+- current city/source re-audit
+- side authority file moves
+
+## P1 Acceptance
+
+- `zeus_current_architecture.md` is the runtime semantic kernel.
+- `zeus_current_delivery.md` is the single delivery/change-control entrypoint.
+- `zeus_change_control_constitution.md` is clearly deep, non-default
+  governance.
+- Core authority includes load-bearing dual-track, boundary, packet, autonomy,
+  demotion/promotion, and current-fact rules needed before P2 demotion.
+- `docs_registry.yaml` marks side authority files as sunset-pending via
+  `next_action: demote_after_extraction` without moving them in P1.
 
 ## P0 Acceptance
 
