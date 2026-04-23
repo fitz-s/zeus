@@ -12,6 +12,8 @@ Keep the tracked docs surface thin and truthful:
 - active tracked docs live in declared subroots
 - `docs/reference/` is canonical-only; stale support docs must move to reports
   or operations current-fact surfaces
+- `docs/authority/` is durable law only; packet docs, ADRs, and historical
+  governance evidence must not remain there
 - visible historical protocol lives in `archive_registry.md`
 - raw archive bodies stay outside the default read path
 
@@ -46,5 +48,8 @@ body or bundle.
   routers or raw archive bodies.
 - Do not put current facts, dated audits, or stale support material in
   `docs/reference/`.
+- Do not put packet-scoped docs, ADRs, rollback notes, or one-off governance
+  doctrine in `docs/authority/`; route them to operations evidence, reports, or
+  archive interfaces.
 - Generated reports are evidence only and must not become authority by
   placement.

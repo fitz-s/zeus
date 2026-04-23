@@ -36,7 +36,7 @@ Default navigation command:
 | `src/` | Runtime source code | `src/AGENTS.md`, then package `AGENTS.md` |
 | `tests/` | Regression and law gates | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
-| `docs/authority/` | Current architecture and delivery law | `docs/authority/AGENTS.md` |
+| `docs/authority/` | Durable architecture and delivery law only | `docs/authority/AGENTS.md` |
 | `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and math references | `docs/reference/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets, package inputs, gap register | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
@@ -79,6 +79,10 @@ Prefer these over prose when they exist:
 - `docs/reports/**` as if placement made them law
 - `.omx/context/**` and `.omc/**` runtime scratch
 - long reference docs unless the digest or packet routes you there
+
+Packet docs, ADRs, fix-pack notes, rollback doctrine, and date-scoped boundary
+notes must not remain in `docs/authority/`. If still useful, keep them as
+operations packet evidence, reports evidence, or archive-indexed history.
 
 ## Maintenance rule
 

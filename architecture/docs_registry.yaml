@@ -314,60 +314,64 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: code_and_manifest
-- path: docs/authority/task_2026-04-15_data_math_boundary_integration_note.md
-  doc_class: authority
+- path: docs/reports/authority_history/task_2026-04-15_data_math_boundary_integration_note.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: packet-scoped data/math boundary note
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
+  current_role: demoted packet-scoped data/math boundary evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_architecture.md
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/task_2026-04-15_data_math_delivery_constitution.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/task_2026-04-15_data_math_delivery_constitution.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: packet-scoped data/math delivery constitution
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
+  current_role: demoted packet-scoped data/math delivery evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: packet-scoped data/math rollback doctrine
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
+  current_role: demoted packet-scoped data/math rollback evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/operations/current_state.md
   doc_class: operations
   default_read: true

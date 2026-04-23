@@ -10,7 +10,7 @@ Run the Zeus data-math packet without confusing live authority, backtest evidenc
 2. `docs/authority/zeus_current_delivery.md`
 3. `docs/authority/zeus_current_architecture.md`
 4. `docs/operations/current_state.md`
-5. `docs/authority/task_2026-04-15_data_math_delivery_constitution.md`
+5. `docs/reports/authority_history/task_2026-04-15_data_math_delivery_constitution.md` (historical packet evidence)
 6. nearest scoped `AGENTS.md`
 7. targeted files and targeted tests
 
