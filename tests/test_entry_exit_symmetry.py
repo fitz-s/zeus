@@ -213,3 +213,112 @@ class TestExitCannotUseWeakerEvidenceThanEntry:
         exit2 = _exit_evidence()
         with pytest.raises(ValueError, match="entry"):
             exit1.assert_symmetric_with(exit2)
+
+
+# ---------------------------------------------------------------------------
+# T4.3 2026-04-23 — Static AST-walk call-site presence antibodies
+#
+# Closes the D4 immunity loop at grep/CI time. T4.3b's runtime-mock test
+# (tests/test_decision_evidence_runtime_invocation.py) would flag a
+# silent refactor AFTER the fact by failing on an accept-path fixture;
+# T4.3 flags it BEFORE anyone runs evaluator fixtures, as soon as the
+# AST no longer contains the contract call sites.
+#
+# Plan-premise correction #11: fix plan T4.3 row cited
+# "assert_symmetric_or_stronger" as the required literal. The actual
+# method on DecisionEvidence is assert_symmetric_with (verified at
+# src/contracts/decision_evidence.py:156). Tests use the correct name.
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionEvidenceStaticCallSitePresence:
+    """AST-walk presence tests — D4 contract call sites must survive
+    refactors. Antibody against silent removal or rerouting of the
+    T4.1b entry-path construction and T4.2-Phase1 exit-audit wiring."""
+
+    @staticmethod
+    def _source_tree(path: str):
+        import ast
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[1]
+        return ast.parse((repo_root / path).read_text(), filename=path)
+
+    @staticmethod
+    def _decision_evidence_calls_with_type(tree, *, evidence_type: str) -> list[int]:
+        """Return line numbers of every DecisionEvidence(...) Call node
+        whose `evidence_type` keyword is the literal constant requested.
+        Matches both `DecisionEvidence(...)` and
+        `decision_evidence.DecisionEvidence(...)` by resolving the final
+        callable name."""
+        import ast
+        hits: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = None
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if func_name != "DecisionEvidence":
+                continue
+            for kw in node.keywords:
+                if kw.arg != "evidence_type":
+                    continue
+                if isinstance(kw.value, ast.Constant) and kw.value.value == evidence_type:
+                    hits.append(node.lineno)
+                    break
+        return hits
+
+    def test_evaluator_accept_path_constructs_entry_evidence(self):
+        """src/engine/evaluator.py must construct
+        DecisionEvidence(evidence_type="entry", ...) somewhere (the
+        T4.1b accept-path wiring at L1700+). If this fails, a refactor
+        silently removed or relocated the construction — T4.1b /
+        T4.2-Phase1 read path will begin returning None entry evidence
+        in production."""
+        tree = self._source_tree("src/engine/evaluator.py")
+        hits = self._decision_evidence_calls_with_type(tree, evidence_type="entry")
+        assert hits, (
+            "src/engine/evaluator.py must contain "
+            'DecisionEvidence(evidence_type="entry", ...) — T4.1b accept '
+            "path. Check evaluator.py accept site around the "
+            "should_trade=True EdgeDecision construction."
+        )
+
+    def test_cycle_runtime_constructs_exit_evidence_for_audit(self):
+        """src/engine/cycle_runtime.py must construct
+        DecisionEvidence(evidence_type="exit", ...) for the
+        T4.2-Phase1 symmetry audit. Absence means the exit-side weak-
+        burden fabrication was silently dropped and the D4 audit trail
+        is no longer being generated."""
+        tree = self._source_tree("src/engine/cycle_runtime.py")
+        hits = self._decision_evidence_calls_with_type(tree, evidence_type="exit")
+        assert hits, (
+            "src/engine/cycle_runtime.py must contain "
+            'DecisionEvidence(evidence_type="exit", ...) — T4.2-Phase1 '
+            "audit-only wrapper around pos.evaluate_exit."
+        )
+
+    def test_cycle_runtime_invokes_assert_symmetric_with(self):
+        """src/engine/cycle_runtime.py must invoke
+        `<exit_evidence>.assert_symmetric_with(entry_evidence)` at
+        least once — the T4.2-Phase1 symmetry gate. Phase2 will flip
+        the surrounding try/except; if this call is removed, Phase2's
+        hard-fail path will never reach the assertion."""
+        import ast
+        tree = self._source_tree("src/engine/cycle_runtime.py")
+        hits: list[int] = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "assert_symmetric_with"
+            ):
+                hits.append(node.lineno)
+        assert hits, (
+            "src/engine/cycle_runtime.py must invoke "
+            "exit_evidence.assert_symmetric_with(entry_evidence) — "
+            "the T4.2-Phase1 D4 audit gate that Phase2 will escalate "
+            "to hard-fail."
+        )

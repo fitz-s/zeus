@@ -544,7 +544,7 @@
     {
       "slice_id": "T4.3b",
       "name": "decision_evidence_runtime_invocation_antibody",
-      "commit": "pending",
+      "commit": "abd04ad",
       "date": "2026-04-23",
       "critic_status": "self_verified_test_only_1_file_no_src_change_surrogate_skipped_given_minimal_scope_con_nyx_dispatched",
       "planning_lock": "GREEN (tests/* only)",
@@ -575,6 +575,44 @@
         ".venv/bin/python -m pytest -q tests/test_decision_evidence_runtime_invocation.py -> 1 passed in 1.18s",
         ".venv/bin/python -m pytest -q tests/test_decision_evidence_runtime_invocation.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py tests/test_exit_evidence_audit.py -> 57 passed in 1.19s",
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_decision_evidence_runtime_invocation.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
+      ]
+    },
+    {
+      "slice_id": "T4.3",
+      "name": "decision_evidence_ast_walk_call_site_presence_antibody",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_ast_pattern_tests_1_file_modification_test_only_surrogate_skipped_given_narrow_scope_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/* only)",
+      "files_changed": [
+        "tests/test_entry_exit_symmetry.py (append TestDecisionEvidenceStaticCallSitePresence class with 3 tests; zero source change)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_eleven": "Fix plan T4.3 row cited `assert_symmetric_or_stronger` as the required literal. Grep-verified: the method on DecisionEvidence is `assert_symmetric_with` (src/contracts/decision_evidence.py:156). T4.3 tests use the correct method name. Minor typo in plan — no semantic disagreement about what the test must guard.",
+      "ast_antibody_coverage": {
+        "evaluator_entry_evidence_construction": "AST walk for Call(func=Name|Attribute('DecisionEvidence')) with keyword evidence_type=Constant('entry') in src/engine/evaluator.py — guards T4.1b accept-path wiring at the L1700+ site",
+        "cycle_runtime_exit_evidence_construction": "AST walk for same pattern with evidence_type='exit' in src/engine/cycle_runtime.py — guards T4.2-Phase1 audit-path weak-burden fabrication",
+        "cycle_runtime_assert_symmetric_with_call": "AST walk for Call(func=Attribute(attr='assert_symmetric_with')) in src/engine/cycle_runtime.py — guards T4.2-Phase1 symmetry gate that T4.2-Phase2 will escalate to hard-fail"
+      },
+      "helper_method_shared_across_tests": "_decision_evidence_calls_with_type matches both `DecisionEvidence(...)` (Name) and `decision_evidence.DecisionEvidence(...)` (Attribute) func forms — survives future import-form refactors that change how DecisionEvidence is referenced",
+      "paired_antibodies_in_t4_family": [
+        "T4.1a primitive round-trip: tests/test_decision_evidence_persistence.py (18 tests)",
+        "T4.1b entry-path static emission: tests/test_decision_evidence_entry_emission.py (12 tests)",
+        "T4.2-Phase1 exit-side load + audit: tests/test_exit_evidence_audit.py (11 tests)",
+        "T4.3b runtime invocation: tests/test_decision_evidence_runtime_invocation.py (1 test)",
+        "T4.3 static AST presence: tests/test_entry_exit_symmetry.py::TestDecisionEvidenceStaticCallSitePresence (3 new tests, this slice)"
+      ],
+      "t4_family_immunity_status": "CLOSED at 5-layer depth — primitive / write-path / read-path + audit / runtime antibody / static antibody. Remaining T4 work is behavioral (Phase2 escalation after 7-day FP-rate window) and observation-grade extension (Phase3 DAY0_OBSERVATION_REVERSAL variant), both deferred per plan staging.",
+      "regression_delta_direction_L28": {
+        "narrow_T4_slab_post_T4_3": "pytest tests/test_entry_exit_symmetry.py tests/test_decision_evidence_runtime_invocation.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_exit_evidence_audit.py -> 60 passed in 1.23s (3 new + 57 pre-T4.3)",
+        "delta_from_source_change": "N/A — test-only addition in a pre-existing guardian-panel test file",
+        "new_test_count": 3
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_entry_exit_symmetry.py -> 18 passed in 0.11s",
+        ".venv/bin/python -m pytest -q tests/test_entry_exit_symmetry.py tests/test_decision_evidence_runtime_invocation.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_exit_evidence_audit.py -> 60 passed in 1.23s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_entry_exit_symmetry.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
       ]
     }
   ],
