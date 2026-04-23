@@ -1,0 +1,87 @@
+{
+  "task": "midstream remediation — test-currency + active-failure + D3/D4 + D6 antibody wave",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+  "authority_source_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/to-do-list/zeus_midstream_trust_upgrade_checklist_2026-04-23.md",
+    "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/plan.md"
+  ],
+  "executor": "team-lead",
+  "critic": "con-nyx (Opus architect, durable team member in zeus-live-readiness-debate team)",
+  "co_tenant_upstream_agent": "docs/operations/task_2026-04-23_data_readiness_remediation/",
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/authority/zeus_current_architecture.md",
+    "docs/authority/zeus_current_delivery.md",
+    "architecture/invariants.yaml",
+    "architecture/fatal_misreads.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "/Users/leofitz/CLAUDE.md (file-header provenance rule)"
+  ],
+  "allowed_files_W0": [
+    "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "docs/operations/current_state.md"
+  ],
+  "allowed_files_W1": [
+    "docs/operations/task_2026-04-23_midstream_remediation/**",
+    "tests/test_dual_track_law_stubs.py",
+    "tests/test_cross_module_invariants.py",
+    "tests/test_architecture_contracts.py",
+    "tests/test_live_safety_invariants.py",
+    "tests/test_provenance_enforcement.py",
+    "tests/test_kelly_cascade_bounds.py",
+    "tests/test_kelly_live_safety_cap.py",
+    "tests/test_execution_price.py",
+    "tests/test_ensemble_signal.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_alpha_target_coherence.py",
+    "tests/test_fdr.py",
+    "tests/test_entry_exit_symmetry.py",
+    "tests/test_day0_exit_gate.py",
+    "tests/test_platt.py",
+    "tests/test_phase10e_closeout.py",
+    "tests/test_day0_runtime_observation_context.py",
+    "tests/test_runtime_guards.py",
+    "tests/test_no_deprecated_make_family_id_calls.py",
+    "config/provenance_registry.yaml",
+    "src/state/ledger.py"
+  ],
+  "forbidden_files": [
+    "src/** (except src/state/ledger.py scoped by T3.3)",
+    "state/**",
+    ".code-review-graph/graph.db",
+    "docs/authority/** broad rewrites",
+    "architecture/**",
+    "other packet files"
+  ],
+  "slices_planned": {
+    "W0": ["packet_open"],
+    "W1": ["T1.a", "T1.b", "T3.1", "T3.3", "T7.b", "T4.0"],
+    "W2": ["T1.d", "T1.e", "T2.a", "T2.d", "T3.2", "T3.2b", "T7.a", "T4.1", "T5.a"],
+    "W3": ["T1.c", "T1.f", "T2.b", "T2.c", "T2.e", "T2.f", "T4.2-Phase1", "T4.3", "T4.3b", "T5.b", "T5.c", "T6.3"],
+    "W4": ["T2.g", "T5.d", "T6.4", "N1.2", "T3.4-observe"],
+    "W5": ["T4.2-Phase2", "T6.1", "T6.2", "N1.1"]
+  },
+  "slices_closed": [],
+  "tests_evidence": [
+    ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json",
+    ".venv/bin/python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/work_log.md --json",
+    ".venv/bin/python scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/receipt.json --json",
+    ".venv/bin/python -m pytest -q tests/"
+  ],
+  "provenance_of_plan": {
+    "debate_date": "2026-04-23",
+    "debate_team": "zeus-live-readiness-debate",
+    "participants": [
+      "pro-vega (Opus architect, owned T1+T2+T5+T7 decomposition)",
+      "con-nyx (Opus architect, owned T3+T4+T6+N1 decomposition)"
+    ],
+    "protocol": "Phase A parallel deep-decompose → Phase B adversarial cross-review → Phase C joint merge → v2 correction",
+    "residual_disagreement_at_phaseC_close": "zero"
+  }
+}
