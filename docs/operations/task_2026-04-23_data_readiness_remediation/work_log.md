@@ -812,5 +812,125 @@ Critic meta-observations:
 
 ### Closure action
 
-[pending verdict]
+[pending verdict — superseded by P-C closure section above; this footer is the pre-compact handoff leftover]
 
+---
+
+## P-E: Reconstruction — started 2026-04-23T19:30:00Z; dry-run + execution runner both pre-reviewed; executed 2026-04-23T20:02:31Z
+
+### Scope
+
+DELETE + INSERT all 1556 current settlements rows + 5 HIGH-market 2026-04-15 re-inserts (London / NYC / Seoul / Tokyo / Shanghai from JSON EARLY indices 1513/1520/1517/1530/1532 per P-G Gamma-confirmed). Target post-P-E: **1561 rows** (1556 + 5 − 0 Denver synthetic). Every row reconstructed through canonical path: obs → SettlementSemantics → containment → authority decision. INV-14 identity fields + decision_time_snapshot_id + full provenance_json populated on every row.
+
+### Pre-review cycle 1 — dry-run (2026-04-23)
+
+**APPROVE_WITH_CONDITIONS** — critic-opus's empirical misparse probe caught a silent regex failure: `≥21°C` parsed as `(21.0, 21.0)` POINT bin through `src/data/market_scanner.py::_parse_temp_range` (regex uses `re.search` not `re.fullmatch`, so prefix chars are ignored). Text form `21°C or higher` correctly parses as `(21.0, None)` high-shoulder. Applied C1 as 1-line change; updated plan §1.5 + re-ran dry-run + all 14 relationship tests still pass; 256 shoulder labels now in text form.
+
+### Pre-review cycle 2 — execution runner (2026-04-23)
+
+**APPROVE** with 4 non-blocking R-notes. Applied: R1 (math.isfinite upgrade from NaN-only check), R2 (PE_TEST_SOURCE env toggle for live-DB relationship test mode), R4 (INV-FP-4 compliance documentation). Skipped: R3 (DB-state-authority for resumability — optional optimization).
+
+### Execution (2026-04-23T20:02:31Z)
+
+```
+20:02:31Z  WAL checkpoint + cp → state/zeus-world.db.pre-pe_2026-04-23 (md5 6244faa3...)
+20:02:31Z  plan loaded: 1561 entries across 50 cities
+20:02:31Z  50 per-city transactions committed atomically (alphabetical)
+20:02:31Z  FINAL: 1561 rows ✓ / VERIFIED=1469 / QUARANTINED=92 / INV-14 complete 1561/1561
+```
+
+Zero ROLLBACKs. Zero SQLite errors. Per-city TXN pattern: BEGIN IMMEDIATE / DELETE WHERE city=? / N INSERTs with INV-14 + isfinite asserts / post-verify / COMMIT.
+
+Relationship tests 14/14 pass in BOTH plan-mode (against pe_reconstruction_plan.json) AND live-DB mode (R2: `PE_TEST_SOURCE=db pytest`). Schema pytest 9+7 identical to baseline. 0 unicode ≥/≤ shoulder labels in live DB.
+
+Deliverables:
+- `evidence/pe_reconstruction_plan.md` (309 lines, updated with C1)
+- `evidence/pe_reconstruction_plan.json` (1561 entries)
+- `evidence/pe_execution_log.md` (173 lines, 7 sections)
+- `evidence/scripts/pe_dryrun.py` (379 lines)
+- `evidence/scripts/pe_reconstruct.py` (334 lines)
+- `evidence/pe_execution_state.json` (50 cities manifest)
+- `tests/test_pe_reconstruction_relationships.py` (358 lines, dual-mode)
+- Snapshot: `state/zeus-world.db.pre-pe_2026-04-23` (md5 `6244faa353e792133a6f610184e0a4e0`)
+
+### critic-opus final verdict (2026-04-23)
+
+**APPROVE** with ZERO findings. Every verification reproduces exactly. Relationship tests pass in both plan and live-DB modes. All 13 structural invariants checked (INV-03/06/08/14/17 + INV-FP-1/3/4/5/6/7/9/10) honored; all 7 fatal_misreads preserved; all AP-# avoided.
+
+**R3-## closures endorsed** (all 6 requested):
+- R3-11 (count unstable) → CLOSED-BY-P-E
+- R3-12 (DST AP-14) → CLOSED-BY-P-E
+- R3-13 (partition / category) → CLOSED-BY-P-E
+- R3-14 (EXPECTED_UNIT_FOR_CITY) → CLOSED-BY-P-E
+- R3-15 (decision_time_snapshot_id) → CLOSED-BY-P-E
+- R3-20 (Tel Aviv AP-4) → CLOSED-BY-P-E (full trail P-C→P-G→P-F→P-E)
+
+**Workstream §7 success criteria assessment** (critic-opus):
+9 of 10 criteria met. Criterion 8 (P-H harvester atomicity refactor) deferred: P-D proved harvester write path structurally unreachable until DR-33 lands, so atomicity guards for a non-firing code path are not load-bearing for this workstream's closure. P-H naturally belongs with future DR-33 live-harvester enablement packet. **Workstream CLOSED; critic-opus stands down.**
+
+### Closure action
+
+- 2026-04-23T20:15:00Z — Applied App-C updates (6 R3-## → CLOSED-BY-P-E; R3-19 stays PARTIAL; R3-22 partial).
+- 2026-04-23T20:16:00Z — Added first_principles.md §8 rule 15 (NH-E1 promoted to durable lesson: empirically verify round-trip of new string formats BEFORE integration).
+- 2026-04-23T20:17:00Z — Updated first_principles.md §7 criterion 7 (1561 final count with split); §7 criterion 8 (P-H deferred rationale).
+- 2026-04-23T20:20:00Z — **P-E formally closed. Workstream CLOSED at 8 of 8 packets APPROVED.**
+
+---
+
+## Workstream closure summary (2026-04-23)
+
+**Transformation achieved**:
+
+| Metric | Pre-workstream (2026-04-23 baseline) | Post-workstream (2026-04-23T20:02Z) |
+|---|---|---|
+| Row count | 1,562 | 1,561 (Denver synthetic removed) |
+| Authority distribution | 1,562 VERIFIED-by-lie (all) | 1,469 VERIFIED-earned + 92 QUARANTINED-with-reason |
+| winning_bin populated | 0 / 1,562 | 1,469 / 1,561 (canonical text format) |
+| provenance_json | missing column | 1,561 / 1,561 (writer + reconstruction_method + prior_authority + audit_ref + DTS) |
+| INV-14 identity fields | missing columns | 1,561 / 1,561 (temperature_metric, physical_quantity, observation_field, data_version) |
+| decision_time_snapshot_id | missing | 1,469 / 1,469 VERIFIED (obs.fetched_at) |
+| Schema triggers | 0 on settlements | 1 (`settlements_authority_monotonic` via `json_extract`) |
+| Writer identifiable | 0 (ghost writer) | 1,561 / 1,561 (named: `p_e_reconstruction_2026-04-23`) |
+
+**Enumerable QUARANTINED reasons** (closed 8-reason set on 92 rows):
+- `pc_audit_source_role_collapse_no_source_correct_obs_available` (27)
+- `pc_audit_shenzhen_drift_nonreproducible` (26)
+- `pe_no_source_correct_obs` (15)
+- `pc_audit_station_remap_needed_no_cwa_collector` (7)
+- `pc_audit_dst_spring_forward_bin_mismatch` (7)
+- `pc_audit_seoul_station_drift_2026-03_through_2026-04` (5)
+- `pe_obs_outside_bin` (3)
+- `pc_audit_1unit_drift` (2)
+
+**Packet approval trail (8 of 8)**:
+
+| Packet | Role | Verdict | DB mutation |
+|---|---|---|---:|
+| P-0 | Decision framework | APPROVE | 0 |
+| P-A | Ghost writer RCA | APPROVE | 0 |
+| P-D | Harvester Gamma probe | APPROVE | 0 |
+| P-C | SQL agreement audit | APPROVE | 0 |
+| P-G | Synthetic orphan + HIGH/LOW collision DELETE | APPROVE | -6 |
+| P-B | INV-14 schema + trigger + retrofit | APPROVE_WITH_CONDITIONS (C1 json_extract) → APPROVE | +5 cols + 1 trig + 1556 backfill |
+| P-F | Hard quarantine 74 rows | APPROVE → APPROVE | 74 UPDATE |
+| P-E | Reconstruction DELETE+INSERT | APPROVE_WITH_CONDITIONS (C1 shoulder format) → APPROVE → APPROVE | -1556 + 1561 |
+
+**Deferred from workstream scope** (to future DR-33 live-harvester enablement packet):
+- P-H (harvester atomicity refactor)
+- R3-02 / R3-04 / R3-05 partial / R3-08 (SAVEPOINT / AP-6 / vacuous-AC concerns)
+- R3-10 (AP-7 deprecated-API tests; test-topology owner)
+- R3-19 (NC-13 enforcement; governance owner)
+- R3-22 (obs_v2 full hygiene; obs-layer owner)
+- NH-E1 (parser `re.fullmatch` hardening)
+- NH-E2 (harvester winning_bin format unification)
+- Formal write_route registration in source_rationale.yaml for `p_e_reconstruction`
+
+**Critic-opus meta-reflection** (endorsed):
+- Review cycles: 14 (8 pre + 6 post)
+- Verdicts: 12 APPROVE + 2 APPROVE_WITH_CONDITIONS; 0 REJECT
+- Evidence-reproduction rate: **100%** across all numerical claims
+- Both conditional verdicts were empirical-probe-driven correctness upgrades (LIKE false-positive in P-B; silent regex misparse in P-E). Durable lesson captured as §8 rule 15.
+
+---
+
+**Workstream closed 2026-04-23. Critic-opus stands down. Team ready for teardown after final commit+push.**
