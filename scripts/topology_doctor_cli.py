@@ -35,6 +35,8 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
     parser.add_argument("--self-check-coherence", action="store_true", help="Check zero-context self-check alignment with root navigation")
     parser.add_argument("--runtime-modes", action="store_true", help="Check discovery/runtime mode manifest and root visibility")
+    parser.add_argument("--task-boot-profiles", action="store_true", help="Check semantic task boot profile manifest")
+    parser.add_argument("--fatal-misreads", action="store_true", help="Check fatal semantic misread manifest")
     parser.add_argument("--reference-replacement", action="store_true", help="Check reference replacement matrix")
     parser.add_argument("--core-claims", action="store_true", help="Check proof-backed core claim registry")
     parser.add_argument("--core-maps", action="store_true", help="Check core-map profile compilation")
@@ -165,6 +167,8 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("idioms", api.run_idioms),
         ("self_check_coherence", api.run_self_check_coherence),
         ("runtime_modes", api.run_runtime_modes),
+        ("task_boot_profiles", api.run_task_boot_profiles),
+        ("fatal_misreads", api.run_fatal_misreads),
         ("reference_replacement", api.run_reference_replacement),
         ("core_claims", api.run_core_claims),
         ("core_maps", api.run_core_maps),

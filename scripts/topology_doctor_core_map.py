@@ -1,4 +1,7 @@
 """Core-map and compiled-topology builder family for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-23; last_reused=2026-04-23
+# Purpose: Build core maps and compiled topology read models from manifest-backed evidence.
+# Reuse: Keep generated maps derived-only; add source manifests here when new manifest families affect boot context.
 
 from __future__ import annotations
 
@@ -22,6 +25,8 @@ COMPILED_TOPOLOGY_SOURCE_MANIFESTS = [
     "architecture/core_claims.yaml",
     "architecture/history_lore.yaml",
     "architecture/context_pack_profiles.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
     "architecture/map_maintenance.yaml",
 ]
 

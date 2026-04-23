@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/tooling
-Phase: -1 packet activation and current-state alignment
+Phase: 0 semantic boot kernel skeleton
 
 ## Objective
 
@@ -15,7 +15,7 @@ before implementing the phase plan from the approved ralplan.
 - `.omx/plans/guidance-kernel-semantic-boot-ralplan-2026-04-23.md`
 - `.omx/context/guidance-kernel-semantic-boot-20260423T005005Z.md`
 
-## Phase Scope
+## Phase -1 Scope
 
 Allowed:
 
@@ -33,6 +33,32 @@ Forbidden:
 - `docs/authority/**`
 - `docs/archives/**`
 - semantic boot manifests or topology-doctor implementation files
+
+## Phase 0 Scope
+
+Allowed:
+
+- `architecture/task_boot_profiles.yaml`
+- `architecture/fatal_misreads.yaml`
+- `architecture/topology_schema.yaml`
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/self_check/zero_context_entry.md`
+- existing `scripts/topology_doctor*.py` checker/CLI files needed to validate
+  the manifests
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**`
+- `docs/archives/**`
+- context-pack semantic-bootstrap output implementation
 
 ## Future Phase Summary
 

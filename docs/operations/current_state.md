@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Guidance Kernel / Semantic Boot Refactor
 - Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
-- Status: Phase -1 packet activation and current-state alignment in progress
+- Status: Phase 0 semantic boot kernel skeleton pre-close review complete
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -32,10 +32,11 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Phase -1 only activates the packet and current-state routing.
-- Do not implement semantic boot manifests, city truth contracts, topology
-  semantic-bootstrap, graph protocol changes, runtime source, DB mutation, graph
-  DB changes, archive-body ingestion, or authority-law rewrites in Phase -1.
+- Phase 0 installs semantic boot manifests, fatal-misread antibodies, and
+  validation/routing only.
+- Do not implement city truth contracts, topology semantic-bootstrap output,
+  runtime source, DB mutation, graph DB changes, archive-body ingestion, or
+  authority-law rewrites in Phase 0.
 
 ## Current fact companions
 
@@ -64,6 +65,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Finish Phase -1 validation and review.
-- If Phase -1 review passes, open Phase 0 semantic boot kernel skeleton.
+- Commit Phase 0 semantic boot kernel skeleton.
+- After post-close review, open Phase 1 city truth contract schema.
 - Preserve unrelated dirty work and local archive inputs

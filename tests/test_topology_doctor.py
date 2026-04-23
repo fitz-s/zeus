@@ -3125,7 +3125,7 @@ def test_compiled_topology_is_derived_read_model():
             "reviewer_visible": False,
         }
     ]
-    assert "docs/operations/task_2026-04-20_workspace_authority_reconstruction/plan.md" in payload["active_operations_surfaces"]["required_anchors"]
+    assert "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md" in payload["active_operations_surfaces"]["required_anchors"]
     assert any(item["path"] == "docs/reference/zeus_math_spec.md" for item in payload["artifact_roles"])
     assert payload["broken_visible_routes"] == []
     assert payload["unclassified_docs_artifacts"] == []
@@ -3143,6 +3143,75 @@ def test_core_claims_mode_validates_first_wave_claims():
         "ALPHA_TARGET_COMPATIBILITY",
         "VIG_BEFORE_BLEND",
     }.issubset(claim_ids)
+
+
+def test_cli_json_parity_for_task_boot_profiles_mode():
+    payload = run_cli_json(["--task-boot-profiles", "--json"])
+    result = topology_doctor.run_task_boot_profiles()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_cli_json_parity_for_fatal_misreads_mode():
+    payload = run_cli_json(["--fatal-misreads", "--json"])
+    result = topology_doctor.run_fatal_misreads()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_task_boot_profiles_mode_validates_semantic_profiles():
+    result = topology_doctor.run_task_boot_profiles()
+    manifest = topology_doctor.load_task_boot_profiles()
+    profile_ids = {profile["id"] for profile in manifest["profiles"]}
+    source_profile = next(profile for profile in manifest["profiles"] if profile["id"] == "source_routing")
+
+    assert_topology_ok(result)
+    assert set(manifest["required_task_classes"]) == profile_ids
+    assert "docs/operations/current_source_validity.md" in source_profile["current_fact_surfaces"]
+    assert "api_returns_data_not_settlement_correct_source" in source_profile["fatal_misreads"]
+    assert source_profile["graph_usage"]["authority_status"] == "derived_not_authority"
+
+
+def test_fatal_misreads_mode_validates_semantic_antibodies():
+    result = topology_doctor.run_fatal_misreads()
+    manifest = topology_doctor.load_fatal_misreads()
+    misread_ids = {item["id"] for item in manifest["misreads"]}
+
+    assert_topology_ok(result)
+    assert {
+        "api_returns_data_not_settlement_correct_source",
+        "daily_day0_hourly_forecast_sources_are_not_interchangeable",
+        "hong_kong_hko_explicit_caution_path",
+        "code_review_graph_answers_where_not_what_settles",
+    }.issubset(misread_ids)
+
+
+def test_task_boot_profiles_reject_unknown_fatal_misread(monkeypatch):
+    manifest = topology_doctor.load_task_boot_profiles()
+    manifest["profiles"][0]["fatal_misreads"].append("NO_SUCH_MISREAD")
+
+    monkeypatch.setattr(topology_doctor, "load_task_boot_profiles", lambda: manifest)
+    result = topology_doctor.run_task_boot_profiles()
+
+    assert not result.ok
+    assert any(issue.code == "task_boot_profile_unknown_fatal_misread" for issue in result.issues)
+
+
+def test_fatal_misreads_reject_missing_proof_file(monkeypatch):
+    manifest = topology_doctor.load_fatal_misreads()
+    manifest["misreads"][0]["proof_files"].append("docs/operations/not_a_real_source_surface.md")
+
+    monkeypatch.setattr(topology_doctor, "load_fatal_misreads", lambda: manifest)
+    result = topology_doctor.run_fatal_misreads()
+
+    assert not result.ok
+    assert any(issue.code == "fatal_misread_path_missing" for issue in result.issues)
 
 
 def test_core_map_probability_chain_uses_core_claims():

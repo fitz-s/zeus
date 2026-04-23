@@ -50,6 +50,8 @@ Changes here are architecture or governance changes, never “just docs.”
 | `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |
 | `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
 | `context_pack_profiles.yaml` | Task-shaped context-pack profiles for generated agent work packets |
+| `task_boot_profiles.yaml` | Question-first semantic boot profiles for source/settlement/hourly/Day0/calibration/docs/graph tasks |
+| `fatal_misreads.yaml` | Machine-readable fatal semantic shortcut antibodies |
 | `change_receipt_schema.yaml` | Machine-readable route/change receipt contract for high-risk closeout |
 | `code_idioms.yaml` | Registry for intentional non-obvious code shapes such as static-analysis hooks |
 | `core_claims.yaml` | Proof-backed semantic claims emitted by generated topology views |
