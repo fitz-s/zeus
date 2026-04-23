@@ -1,5 +1,5 @@
 {
-  "task": "midstream remediation — test-currency + active-failure + D3/D4 + D6 antibody wave",
+  "task": "midstream remediation \u2014 test-currency + active-failure + D3/D4 + D6 antibody wave",
   "packet": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
   "authority_source_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md",
   "route_source": "manual_packet",
@@ -60,12 +60,55 @@
     "other packet files"
   ],
   "slices_planned": {
-    "W0": ["packet_open"],
-    "W1": ["T1.a", "T1.b", "T3.1", "T3.3", "T7.b", "T4.0"],
-    "W2": ["T1.d", "T1.e", "T2.a", "T2.d", "T3.2", "T3.2b", "T7.a", "T4.1", "T5.a"],
-    "W3": ["T1.c", "T1.f", "T2.b", "T2.c", "T2.e", "T2.f", "T4.2-Phase1", "T4.3", "T4.3b", "T5.b", "T5.c", "T6.3"],
-    "W4": ["T2.g", "T5.d", "T6.4", "N1.2", "T3.4-observe"],
-    "W5": ["T4.2-Phase2", "T6.1", "T6.2", "N1.1"]
+    "W0": [
+      "packet_open"
+    ],
+    "W1": [
+      "T1.a",
+      "T1.b",
+      "T3.1",
+      "T3.3",
+      "T7.b",
+      "T4.0"
+    ],
+    "W2": [
+      "T1.d",
+      "T1.e",
+      "T2.a",
+      "T2.d",
+      "T3.2",
+      "T3.2b",
+      "T7.a",
+      "T4.1",
+      "T5.a"
+    ],
+    "W3": [
+      "T1.c",
+      "T1.f",
+      "T2.b",
+      "T2.c",
+      "T2.e",
+      "T2.f",
+      "T4.2-Phase1",
+      "T4.3",
+      "T4.3b",
+      "T5.b",
+      "T5.c",
+      "T6.3"
+    ],
+    "W4": [
+      "T2.g",
+      "T5.d",
+      "T6.4",
+      "N1.2",
+      "T3.4-observe"
+    ],
+    "W5": [
+      "T4.2-Phase2",
+      "T6.1",
+      "T6.2",
+      "N1.1"
+    ]
   },
   "slices_closed": [
     {
@@ -108,9 +151,9 @@
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
       "acceptance_commands_run": [
-        ".venv/bin/python -m pytest -q tests/test_no_deprecated_make_family_id_calls.py → 1 passed in 0.61s"
+        ".venv/bin/python -m pytest -q tests/test_no_deprecated_make_family_id_calls.py \u2192 1 passed in 0.61s"
       ],
-      "pre_state_evidence": "grep -rn '\\bmake_family_id\\b' src/ scripts/ returned 4 hits (L7 docstring, L92 FunctionDef, L114 string literal in selection_family.py + L571 comment in evaluator.py) — zero Call nodes targeting make_family_id across the entire src/ and scripts/ tree."
+      "pre_state_evidence": "grep -rn '\\bmake_family_id\\b' src/ scripts/ returned 4 hits (L7 docstring, L92 FunctionDef, L114 string literal in selection_family.py + L571 comment in evaluator.py) \u2014 zero Call nodes targeting make_family_id across the entire src/ and scripts/ tree."
     },
     {
       "slice_id": "T1.a",
@@ -142,10 +185,10 @@
         "line3": "# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)"
       },
       "acceptance_commands_run": [
-        ".venv/bin/python -m pytest -q <15 panel files> → 19 failed, 344 passed, 34 skipped, 1 xfailed — matches pre-T1.a baseline exactly (zero delta)",
-        "grep -l '^# Created:' on all 15 panel files → all 15 OK"
+        ".venv/bin/python -m pytest -q <15 panel files> \u2192 19 failed, 344 passed, 34 skipped, 1 xfailed \u2014 matches pre-T1.a baseline exactly (zero delta)",
+        "grep -l '^# Created:' on all 15 panel files \u2192 all 15 OK"
       ],
-      "out_of_scope_full_suite_state": "pytest -q tests/ → 144 failed, 2079 passed, 90 skipped, 1 xfailed; failures attributable to pre-existing repo state and/or concurrent upstream data-readiness agent. Not a T1.a regression."
+      "out_of_scope_full_suite_state": "pytest -q tests/ \u2192 144 failed, 2079 passed, 90 skipped, 1 xfailed; failures attributable to pre-existing repo state and/or concurrent upstream data-readiness agent. Not a T1.a regression."
     },
     {
       "slice_id": "T1.b",
@@ -159,13 +202,13 @@
         "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
-      "delta_language_per_L21": "REMOVING STALE SKIP MARKERS (not 'activating') — the 4 guarded tests already ran pre-T1.b because both skip conditions evaluated False; T1.b hardens the test against future regressions (if registry file is deleted, tests now fail loudly).",
+      "delta_language_per_L21": "REMOVING STALE SKIP MARKERS (not 'activating') \u2014 the 4 guarded tests already ran pre-T1.b because both skip conditions evaluated False; T1.b hardens the test against future regressions (if registry file is deleted, tests now fail loudly).",
       "markers_removed": "4 @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason='Registry YAML not yet created') markers removed from TestAllStrategyConstantsRegistered class",
-      "markers_kept": "4 @pytest.mark.skipif(not HAS_YAML, reason='PyYAML not installed') markers kept — legitimate environmental check for minimal Python envs without PyYAML",
+      "markers_kept": "4 @pytest.mark.skipif(not HAS_YAML, reason='PyYAML not installed') markers kept \u2014 legitimate environmental check for minimal Python envs without PyYAML",
       "acceptance_commands_run": [
-        ".venv/bin/python -m pytest -q tests/test_provenance_enforcement.py → 19 passed in 0.15s (matches pre-T1.b baseline)"
+        ".venv/bin/python -m pytest -q tests/test_provenance_enforcement.py \u2192 19 passed in 0.15s (matches pre-T1.b baseline)"
       ],
-      "registry_content_audit_summary": "config/provenance_registry.yaml present at 516 lines; kelly_mult at L26; market_fusion.TAIL_ALPHA_SCALE present; required fields declared_target/data_basis/validated_at/replacement_criteria all present per schema; 8 kelly dynamic_kelly_mult cascade entries registered (ci_width > 0.10 → 0.7 / ci_width > 0.15 → 0.5 / lead_days >= 5 → 0.6 / lead_days >= 3 → 0.8, each as threshold + multiplier)."
+      "registry_content_audit_summary": "config/provenance_registry.yaml present at 516 lines; kelly_mult at L26; market_fusion.TAIL_ALPHA_SCALE present; required fields declared_target/data_basis/validated_at/replacement_criteria all present per schema; 8 kelly dynamic_kelly_mult cascade entries registered (ci_width > 0.10 \u2192 0.7 / ci_width > 0.15 \u2192 0.5 / lead_days >= 5 \u2192 0.6 / lead_days >= 3 \u2192 0.8, each as threshold + multiplier)."
     },
     {
       "slice_id": "T3.1",
@@ -183,11 +226,11 @@
       ],
       "scope_narrowed_from_plan": "Plan said 7 callers + 2 materialize_position audits. L20 grep-gate resolved to 5 patches: test_phase10e_closeout.py:352 was a function name (not a call); test_runtime_guards.py:717 already carried env='paper'; materialize_position callers at L2010, L2057 already carried state='entered', env='paper'.",
       "patches_applied": [
-        "tests/test_day0_runtime_observation_context.py:41 — added env='paper'",
-        "tests/test_day0_runtime_observation_context.py:84 — added env='paper'",
-        "tests/test_runtime_guards.py:4877 — added env='paper' (DAY0_CAPTURE mode)",
-        "tests/test_runtime_guards.py:5027 — added env='paper' (OPENING_HUNT mode)",
-        "tests/test_architecture_contracts.py:3555 — added env='paper' (UPDATE_REACTION mode)"
+        "tests/test_day0_runtime_observation_context.py:41 \u2014 added env='paper'",
+        "tests/test_day0_runtime_observation_context.py:84 \u2014 added env='paper'",
+        "tests/test_runtime_guards.py:4877 \u2014 added env='paper' (DAY0_CAPTURE mode)",
+        "tests/test_runtime_guards.py:5027 \u2014 added env='paper' (OPENING_HUNT mode)",
+        "tests/test_architecture_contracts.py:3555 \u2014 added env='paper' (UPDATE_REACTION mode)"
       ],
       "regression_delta_on_modified_files": {
         "pre_T3_1": "28 failed / 166 passed / 22 skipped",
@@ -195,8 +238,8 @@
         "delta": "6 failures moved to passing; 0 new failures"
       },
       "acceptance_commands_run": [
-        ".venv/bin/python -m pytest -q tests/test_day0_runtime_observation_context.py → 4 passed",
-        ".venv/bin/python -m pytest -q tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db tests/test_runtime_guards.py::test_discovery_phase_records_observation_unavailable_as_no_trade tests/test_runtime_guards.py::test_discovery_phase_records_rate_limited_decision_as_availability_fact → 4 passed"
+        ".venv/bin/python -m pytest -q tests/test_day0_runtime_observation_context.py \u2192 4 passed",
+        ".venv/bin/python -m pytest -q tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_preserves_legacy_writes_on_legacy_db tests/test_architecture_contracts.py::test_execute_discovery_phase_entry_path_writes_canonical_rows_on_canonical_db tests/test_runtime_guards.py::test_discovery_phase_records_observation_unavailable_as_no_trade tests/test_runtime_guards.py::test_discovery_phase_records_rate_limited_decision_as_availability_fact \u2192 4 passed"
       ]
     },
     {
@@ -211,22 +254,22 @@
         "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
-      "factual_correction_to_plan": "Plan T3.3 premise 'bootstrap fix — add missing columns' was wrong. architecture/2026_04_02_architecture_kernel.sql CREATE TABLE already declares all 31 canonical columns (verified via sqlite3 :memory: probe). The actual defect was in the LEGACY-DB ALTER TABLE loop at src/state/ledger.py:147-149 which only added 3 token columns; other canonical columns (notably temperature_metric) stayed absent on legacy DBs, tripping assert_canonical_transaction_schema.",
+      "factual_correction_to_plan": "Plan T3.3 premise 'bootstrap fix \u2014 add missing columns' was wrong. architecture/2026_04_02_architecture_kernel.sql CREATE TABLE already declares all 31 canonical columns (verified via sqlite3 :memory: probe). The actual defect was in the LEGACY-DB ALTER TABLE loop at src/state/ledger.py:147-149 which only added 3 token columns; other canonical columns (notably temperature_metric) stayed absent on legacy DBs, tripping assert_canonical_transaction_schema.",
       "fix_summary": "Expanded ALTER TABLE loop to iterate CANONICAL_POSITION_CURRENT_COLUMNS (31 columns); each missing column added with TEXT affinity. Cached existing_columns before loop for idempotency clarity. Multi-line comment documents TEXT-affinity + runtime-guard rationale.",
       "critic_findings_integrated": {
         "surrogate_critic": "code-reviewer@opus read-only review 2026-04-23",
-        "F1_low_nonblocking": "TEXT affinity vs REAL for numeric columns on ALTER path — SQLite dynamic typing preserves values; production already has fresh CREATE schema",
+        "F1_low_nonblocking": "TEXT affinity vs REAL for numeric columns on ALTER path \u2014 SQLite dynamic typing preserves values; production already has fresh CREATE schema",
         "F2_low_nonblocking": "INV-14 CHECK constraint lost for ALTER-migrated temperature_metric; runtime guard at src/state/projection.py:50-53 + grep of only-direct-SQL-mutator (scripts/nuke_rebuild_projections.py:124, touches phase+updated_at only) confirms no violation path",
         "F3_positive": "cached-before-loop idempotency pattern is correct",
         "F4_positive": "inline comment satisfies Fitz constraint #2 (encode insight into structure)"
       },
       "acceptance_commands_run": [
-        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_adds_token_identity_columns_to_existing_position_current → passes (was failing)",
-        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_migrates_existing_token_suppression_reason_check → passes (not regressed)",
-        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/ledger.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json → {ok: true, issues: []}",
-        "sqlite3 :memory: + apply_architecture_kernel_schema → 31 canonical columns, zero missing, zero extra (confirms bootstrap itself is correct; fix is legacy-migration path only)"
+        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_adds_token_identity_columns_to_existing_position_current \u2192 passes (was failing)",
+        ".venv/bin/python -m pytest tests/test_architecture_contracts.py::test_kernel_schema_migrates_existing_token_suppression_reason_check \u2192 passes (not regressed)",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/ledger.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json \u2192 {ok: true, issues: []}",
+        "sqlite3 :memory: + apply_architecture_kernel_schema \u2192 31 canonical columns, zero missing, zero extra (confirms bootstrap itself is correct; fix is legacy-migration path only)"
       ],
-      "out_of_scope_remaining": "test_apply_architecture_kernel_schema_bootstraps_fresh_db still fails on _canonical_projection() fixture missing 'temperature_metric' — T3.2 scope, not T3.3. Orthogonal to my change."
+      "out_of_scope_remaining": "test_apply_architecture_kernel_schema_bootstraps_fresh_db still fails on _canonical_projection() fixture missing 'temperature_metric' \u2014 T3.2 scope, not T3.3. Orthogonal to my change."
     },
     {
       "slice_id": "T3.2",
@@ -240,8 +283,8 @@
         "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
-      "fix_summary": "Added '\"temperature_metric\": \"high\",' to _canonical_projection() helper at L125-157. One line. Resolves ≥5 tests via Fitz C1 category patch.",
-      "delta_on_test_architecture_contracts": "~9 failures → 1 failure (remaining _Logger.warning AttributeError unrelated to fixture drift)"
+      "fix_summary": "Added '\"temperature_metric\": \"high\",' to _canonical_projection() helper at L125-157. One line. Resolves \u22655 tests via Fitz C1 category patch.",
+      "delta_on_test_architecture_contracts": "~9 failures \u2192 1 failure (remaining _Logger.warning AttributeError unrelated to fixture drift)"
     },
     {
       "slice_id": "T3.2b",
@@ -255,17 +298,17 @@
         "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
-      "plan_premise_correction": "Plan T3.2b scope 'AST-walk src/state/projection.py builders' was vacuous — projection.py has zero dict-returning functions (verified via full read). Pivoted to 3 structural-alignment antibodies covering constant/schema drift, which is the actual drift category responsible for T3.2 failures.",
+      "plan_premise_correction": "Plan T3.2b scope 'AST-walk src/state/projection.py builders' was vacuous \u2014 projection.py has zero dict-returning functions (verified via full read). Pivoted to 3 structural-alignment antibodies covering constant/schema drift, which is the actual drift category responsible for T3.2 failures.",
       "antibody_tests": [
         "test_canonical_position_current_columns_includes_temperature_metric",
         "test_kernel_sql_position_current_declares_temperature_metric",
         "test_canonical_constants_match_kernel_sql_position_current_columns"
       ],
-      "critic_polish_adopted": "Regex tightened from r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\n\\)\\s*;' to r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\)\\s*;' — drops the \\n anchor for robustness against future migration reformatting.",
+      "critic_polish_adopted": "Regex tightened from r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\n\\)\\s*;' to r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\)\\s*;' \u2014 drops the \\n anchor for robustness against future migration reformatting.",
       "future_drift_targets_flagged_by_critic": [
-        "F1: CANONICAL_POSITION_EVENT_COLUMNS three-way drift (tests/test_architecture_contracts.py:22-41 ↔ src/state/ledger.py:22-40 ↔ architecture/2026_04_02_architecture_kernel.sql:5-68)",
-        "F2: LifecyclePhase Python enum (src/state/lifecycle_manager.py:9-32) ↔ phase CHECK constraint (architecture/2026_04_02_architecture_kernel.sql:84-94)",
-        "F3: event_type vocabulary scatter across src/state/db.py, src/riskguard/riskguard.py, tests — no central Python enum"
+        "F1: CANONICAL_POSITION_EVENT_COLUMNS three-way drift (tests/test_architecture_contracts.py:22-41 \u2194 src/state/ledger.py:22-40 \u2194 architecture/2026_04_02_architecture_kernel.sql:5-68)",
+        "F2: LifecyclePhase Python enum (src/state/lifecycle_manager.py:9-32) \u2194 phase CHECK constraint (architecture/2026_04_02_architecture_kernel.sql:84-94)",
+        "F3: event_type vocabulary scatter across src/state/db.py, src/riskguard/riskguard.py, tests \u2014 no central Python enum"
       ]
     },
     {
@@ -280,13 +323,13 @@
         "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
       ],
       "plan_premise_correction_four": "Plan T7.a said 'remove pytest.skip at tests/test_dual_track_law_stubs.py:67'. Verified: L67 is a comment; L70 is a skip inside `test_no_high_low_mix_in_platt_or_bins` (a different test, NC-12 territory for T1.d). `test_fdr_family_key_is_canonical` is at L189 and has NO skip decorators.",
-      "verification_evidence": "pytest -q tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical → 1 passed in 0.03s. Test body covers: hypothesis vs edge family ID scope separation (L213), determinism within scope (L216-217), metric discrimination HIGH != LOW (L220-223). All INV-22 canonicality properties enforced.",
-      "residual_flagged": "The pytest.skip at tests/test_dual_track_law_stubs.py:70 inside test_no_high_low_mix_in_platt_or_bins is NC-12 / INV-16 Phase-7 enforcement — belongs to T1.d audit, not T7.a."
+      "verification_evidence": "pytest -q tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical \u2192 1 passed in 0.03s. Test body covers: hypothesis vs edge family ID scope separation (L213), determinism within scope (L216-217), metric discrimination HIGH != LOW (L220-223). All INV-22 canonicality properties enforced.",
+      "residual_flagged": "The pytest.skip at tests/test_dual_track_law_stubs.py:70 inside test_no_high_low_mix_in_platt_or_bins is NC-12 / INV-16 Phase-7 enforcement \u2014 belongs to T1.d audit, not T7.a."
     },
     {
       "slice_id": "T2.a+T2.b",
       "name": "R14_quarantine_test_fixture_updates",
-      "commit": "pending",
+      "commit": "c4ee26a",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_CLEAR_plus_con_nyx_dispatched",
       "planning_lock": "GREEN (tests/** only)",
@@ -301,14 +344,30 @@
         "test_R14_filter_allowed_partitions_rows: updated expected partitioning from allowed=[1,4] / quarantined=[2,3] to allowed=[4] / quarantined=[1,2,3] (id 1 is now quarantined)"
       ],
       "acceptance_commands_run": [
-        "pytest -q tests/test_calibration_bins_canonical.py::test_R14_quarantine_allows_replacement_tag tests/test_calibration_bins_canonical.py::test_R14_filter_allowed_partitions_rows → 2 passed in 0.77s",
-        "pytest -q tests/test_calibration_bins_canonical.py → 40 passed in 1.44s (zero regression)"
+        "pytest -q tests/test_calibration_bins_canonical.py::test_R14_quarantine_allows_replacement_tag tests/test_calibration_bins_canonical.py::test_R14_filter_allowed_partitions_rows \u2192 2 passed in 0.77s",
+        "pytest -q tests/test_calibration_bins_canonical.py \u2192 40 passed in 1.44s (zero regression)"
       ],
       "surrogate_critic_findings": {
         "verdict": "CLEAR APPROVE",
         "direction_verified_via": "independent grep + 2 corroborating test suites (tests/test_phase4_parity_gate.py + tests/test_phase4_rebuild.py) both assert peak_window quarantined",
-        "flagged_out_of_scope_followup_MEDIUM": "scripts/rebuild_calibration_pairs_canonical.py:103-104 has stale comment contradicting current quarantine semantics ('peak_window_max_v1 is intentionally NOT quarantined — it is the replacement target'). Documentation antibody gap, not test blocker. File as separate slice."
+        "flagged_out_of_scope_followup_MEDIUM": "scripts/rebuild_calibration_pairs_canonical.py:103-104 has stale comment contradicting current quarantine semantics ('peak_window_max_v1 is intentionally NOT quarantined \u2014 it is the replacement target'). Documentation antibody gap, not test blocker. File as separate slice."
       }
+    },
+    {
+      "slice_id": "T1.d",
+      "name": "phase_n_skip_audit_test_dual_track_law_stubs",
+      "commit": "pending_doc_only",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_audit_only",
+      "planning_lock": "N/A (no code edits, doc-only audit)",
+      "files_changed": [
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "grep_evidence": "grep -n 'pytest.skip\\|pytest.mark.skip' tests/test_dual_track_law_stubs.py returned exactly ONE hit at L70 inside test_no_high_low_mix_in_platt_or_bins (NC-12 / INV-16)",
+      "classification_single_stub": "KEEP_LEGITIMATE \u2014 INV-16 partial enforcement coded at src/engine/evaluator.py:922-944 (Day0 LOW causality gate) but NC-12 full multi-surface enforcement (Platt + calibration pairs + bin lookup + settlement identity) awaits Phase-7 v2 substrate rebuild; v2 tables currently empty per midstream trust verdict, so no mixed-row dataset exists to test against today",
+      "other_11_tests_status": "all active with Phase-9B/9C/10E activation markers; no other skip/xfail found",
+      "memory_L21_note": "neither 'activate' nor 'extend' applies \u2014 enforcement target dataset does not exist today; verdict is 'document and defer'"
     }
   ],
   "slices_in_review": [
@@ -329,12 +388,12 @@
         "F3_HIGH": "Atomicity claim between trade_decisions INSERT and position_events append is wrong; cycle_runtime.py:1115-1140 explicitly documents the split (SAVEPOINT sp_candidate_* for trade_decisions, with conn: sub-transaction for append_many_and_project). Torn-state window exists today for adjacent columns.",
         "missed_option_E": "piggyback on existing ENTRY_ORDER_POSTED.payload_json (col 17 NOT NULL TEXT, verified); atomic with canonical append; no schema migration; no INV-07 expansion"
       },
-      "rev2_recommendation": "Option E — write DecisionEvidence as nested 'decision_evidence' key inside the existing ENTRY_ORDER_POSTED payload_json. Structurally superior per Fitz C1 (category immunity).",
+      "rev2_recommendation": "Option E \u2014 write DecisionEvidence as nested 'decision_evidence' key inside the existing ENTRY_ORDER_POSTED payload_json. Structurally superior per Fitz C1 (category immunity).",
       "closure_commit": "9365b20",
-      "contract_version_tag": "adopted — {contract_version: 1, fields: {...}}",
+      "contract_version_tag": "adopted \u2014 {contract_version: 1, fields: {...}}",
       "planning_lock_required_for_T4_1": true,
       "open_questions_for_con_nyx": [
-        "idempotency when ENTRY_ORDER_POSTED is retried — key on decision_id?",
+        "idempotency when ENTRY_ORDER_POSTED is retried \u2014 key on decision_id?",
         "helper location: decision_chain.py vs new decision_evidence_persistence.py?",
         "does query_position_events accept runtime_trade_id or position_id?"
       ]
@@ -353,7 +412,10 @@
       "pro-vega (Opus architect, owned T1+T2+T5+T7 decomposition)",
       "con-nyx (Opus architect, owned T3+T4+T6+N1 decomposition)"
     ],
-    "protocol": "Phase A parallel deep-decompose → Phase B adversarial cross-review → Phase C joint merge → v2 correction",
+    "protocol": "Phase A parallel deep-decompose \u2192 Phase B adversarial cross-review \u2192 Phase C joint merge \u2192 v2 correction",
     "residual_disagreement_at_phaseC_close": "zero"
-  }
+  },
+  "changed_files": [
+    "docs/operations/current_state.md"
+  ]
 }

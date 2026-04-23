@@ -35,7 +35,64 @@
 | T3.2 canonical_projection fixture patch | closed | `566a48f` | one-line category fix bundled in same commit as T3.2b per slice-pairing rationale | 2026-04-23 |
 | T7.a test_fdr_family_key_is_canonical activation | closed | N/A (no code change) | **slice already done pre-session**: test at L189 is unskipped and passing 1/1; plan's "skip at L67" citation was wrong (L70 is a different test, `test_no_high_low_mix_in_platt_or_bins`, NC-12 territory for T1.d); test body already covers INV-22 scope separation, determinism, metric discrimination | 2026-04-23 |
 | T2.d/e/f SelectionFamilySubstrate fixes | **PARTIAL — deferred** | none (reverted) | Plan fix (replace `monkeypatch.setattr(evaluator_module, "Day0Signal", ...)` with `monkeypatch.setattr("src.signal.day0_router.Day0Router.route", ...)`) is directionally correct BUT insufficient: tests still fail on upstream DT#7 boundary-day gate at `evaluator.py:777` (`boundary_ambiguous_refuses_signal(v2_snapshot_meta)`) — new code path added after test fixture was written. Fixing requires either (a) populating v2 ensemble_snapshots with `boundary_ambiguous=0` row in test setup, or (b) additional monkeypatch on `_read_v2_snapshot_metadata`. Reverted my local fix to avoid committing half-work. Flagged as a new slice T2.d.1 (v2 snapshot fixture setup) for follow-up. | 2026-04-23 |
-| T2.a/T2.b R14 quarantine test fixture updates | closed | pending | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
+| T2.a/T2.b R14 quarantine test fixture updates | closed | `c4ee26a` | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
+| T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | pending | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
+
+## T1.d — audit notes (2026-04-23)
+
+Scope per plan: audit `tests/test_dual_track_law_stubs.py` Phase-N skip
+stubs; "Remove activatable; document residuals".
+
+### Grep results
+
+One `pytest.skip` call in the entire file, at `L70` inside
+`test_no_high_low_mix_in_platt_or_bins` (function at L68-70).
+All other 11 test functions in the file are active:
+
+| Line | Test | Status |
+|---|---|---|
+| L17 | `test_no_daily_low_on_legacy_table` (NC-11 / INV-14) | active |
+| L68 | `test_no_high_low_mix_in_platt_or_bins` (NC-12 / INV-16) | **SKIP** (L70) |
+| L74 | `test_json_export_after_db_commit` (NC-13 / INV-17) | active |
+| L128 | `test_kelly_input_carries_distributional_info` (NC-14 / INV-21 / DT#5) | active (STRICT Phase 10E) |
+| L189 | `test_fdr_family_key_is_canonical` (NC-15 / INV-22) | active (T7.a closed this slot) |
+| L227 | `test_red_triggers_active_position_sweep` (INV-19 / DT#2) | active (ACTIVATED Phase 9B) |
+| L304 | `test_red_force_exit_marker_drives_evaluate_exit_to_exit` (DT#2) | active |
+| L376 | `test_red_force_exit_marker_does_not_override_day0_evaluation` (DT#2) | active |
+| L431 | `test_day0_without_red_marker_runs_day0_logic_normally` (DT#2 Phase 9C) | active |
+| L477 | `test_boundary_ambiguous_refuses_signal_contract` (DT#7) | active (NEW Phase 9B) |
+| L518 | `test_chain_reconciliation_three_state_machine` (INV-18) | active |
+| L578 | `test_load_portfolio_degrades_gracefully_on_authority_loss` (INV-20) | active |
+
+### Classification of the L70 stub
+
+**KEEP_LEGITIMATE.**
+
+- INV-16 partial enforcement IS coded in production:
+  `src/engine/evaluator.py:922-944` rejects LOW Day0 slots with
+  `causality_status` outside `_LOW_ALLOWED_CAUSALITY` (raises
+  `"INV-16"`-tagged error). `src/data/observation_client.py:35`
+  documents `causality_status` as the INV-16 enforcement mechanism.
+- But NC-12 as worded is **multi-surface**: "No mixing of high and
+  low rows in Platt model, calibration pair set, bin lookup, or
+  settlement identity". INV-16 only covers the Day0 causality aspect.
+  Other surfaces (Platt refit input, calibration pair writer, bin
+  lookup dispatcher, settlement rebuild identity) are partially coded
+  at most.
+- V2 substrate (ensemble_snapshots_v2 + calibration_pairs_v2 +
+  platt_models_v2) is **empty** per the midstream trust verdict
+  substrate audit. There is no mixed-row dataset to test against
+  today.
+- The skip message "pending: enforced in Phase 7 rebuild" aligns with
+  the plan's W5-substrate-deferred classification for related
+  slices — Phase 7 is the rebuild packet that populates v2 and
+  exercises the multi-surface enforcement end-to-end.
+
+Verdict per memory rule L21 language: neither "activate" nor "extend"
+applies — the enforcement-target dataset does not exist today.
+**Document and defer.**
+
+### No code changes; slice closes with this work_log + receipt entry.
 
 ## T2.a/T2.b — execution notes (2026-04-23)
 
