@@ -37,7 +37,84 @@
 | T2.d/e/f SelectionFamilySubstrate fixes | **PARTIAL — deferred** | none (reverted) | Plan fix (replace `monkeypatch.setattr(evaluator_module, "Day0Signal", ...)` with `monkeypatch.setattr("src.signal.day0_router.Day0Router.route", ...)`) is directionally correct BUT insufficient: tests still fail on upstream DT#7 boundary-day gate at `evaluator.py:777` (`boundary_ambiguous_refuses_signal(v2_snapshot_meta)`) — new code path added after test fixture was written. Fixing requires either (a) populating v2 ensemble_snapshots with `boundary_ambiguous=0` row in test setup, or (b) additional monkeypatch on `_read_v2_snapshot_metadata`. Reverted my local fix to avoid committing half-work. Flagged as a new slice T2.d.1 (v2 snapshot fixture setup) for follow-up. | 2026-04-23 |
 | T2.a/T2.b R14 quarantine test fixture updates | closed | `c4ee26a` | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
 | T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | `979eb3b` | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
-| T1.e currency-CI audit script + registry | closed | pending | new `scripts/test_currency_audit.py` reads `architecture/test_topology.yaml::categories.midstream_guardian_panel` (nested per surrogate-critic D3 fix) + `architecture/script_manifest.yaml` registration; 15/15 panel files green on dry-run; D1 (empty-panel silent-pass) + D2 (YAML parse traceback) + D3 (sibling-vs-nested) fixes applied before commit; surrogate critic COMMENT verdict with 4 findings, 2 addressed in-slice | 2026-04-23 |
+| T1.e currency-CI audit script + registry | closed | `692a3af` | new `scripts/test_currency_audit.py` reads `architecture/test_topology.yaml::categories.midstream_guardian_panel` (nested per surrogate-critic D3 fix) + `architecture/script_manifest.yaml` registration; 15/15 panel files green on dry-run; D1 (empty-panel silent-pass) + D2 (YAML parse traceback) + D3 (sibling-vs-nested) fixes applied before commit; surrogate critic COMMENT verdict with 4 findings, 2 addressed in-slice | 2026-04-23 |
+| T5.a ExecutionPrice executor boundary | closed | pending | structural boundary guard in `_live_order` via `ExecutionPrice(price_type="ask", fee_deducted=False, currency="probability_units")` — catches NaN/±inf/negative/>1.0 before CLOB-send; 12 new tests pass; latent `decision_edge` bug fixed inline (added to `ExecutionIntent` dataclass per critic MEDIUM finding); rejection reason renamed `malformed_limit_price` per critic LOW finding; surrogate critic COMMENT verdict, all 4 findings (1 MED + 3 LOW) addressed in-slice | 2026-04-23 |
+
+## T5.a — execution notes (2026-04-23)
+
+Fix-plan scope said "refactor `place_buy_order` / `place_sell_order` —
+real entrypoints at `:191+`". **Seventh plan-premise correction in
+this packet**: grep-verified only `place_sell_order` exists at L191
+(legacy exit wrapper); `place_buy_order` does NOT exist. Real entry
+path is `create_execution_intent → execute_intent → _live_order` at
+L135/339. T5.a targets `_live_order` as the final CLOB-contact seam.
+
+### Implementation
+
+1. **Import** `ExecutionPrice, ExecutionPriceContractError` in
+   `src/execution/executor.py`.
+2. **`_live_order` (L339)**: before calling `client.place_limit_order`,
+   construct `ExecutionPrice(value=intent.limit_price, price_type="ask",
+   fee_deducted=False, currency="probability_units")`. On ValueError
+   / ExecutionPriceContractError, return `OrderResult(status="rejected",
+   reason="malformed_limit_price: ...", order_role="entry")` before
+   any CLOB contact.
+3. **NEW `tests/test_executor_typed_boundary.py`** — 12 tests:
+   - 6 reject: NaN, +inf, -inf, negative, 1.5 (>1.0), 2.0
+   - 6 accept: 0.0, 0.01, 0.5, 0.75, 0.99, 1.0 (parametrized)
+
+### Three critic findings integrated inline (one-slice closure)
+
+Surrogate `code-reviewer@opus` COMMENT verdict with 1 MEDIUM + 3 LOW:
+
+- **MEDIUM — latent `decision_edge` bug**: `executor.py:136` passed
+  `decision_edge=edge.edge` to `ExecutionIntent(...)` and `:428` read
+  `intent.decision_edge`, but the dataclass had no such field. Dormant
+  because live entries are paused, but the T5.a accept-path tests
+  were passing for the WRONG reason (constructor succeeded → hit
+  `AttributeError` on `intent.decision_edge` → swallowed by broad
+  except → rejection reason ≠ "malformed_limit_price" → assertion
+  passed). Fixed inline: added `decision_edge: float = 0.0` to
+  `ExecutionIntent` at `src/contracts/execution_intent.py:23`. Test
+  fixture updated to pass explicit `decision_edge=0.05`. Tests now
+  pass for the RIGHT reason.
+- **LOW — semantic white lie**: original `price_type="fee_adjusted",
+  fee_deducted=True` construction lied about fee state (executor
+  doesn't know upstream fee-accounting). Fixed: `price_type="ask",
+  fee_deducted=False` — same finite/nonneg/≤1 guards fire (those are
+  `__post_init__` invariants independent of the semantic fields).
+- **LOW — misleading reason**: rejection reason was
+  `execution_price_contract_violation`, which could mislead readers
+  into expecting a Kelly-semantic failure. Renamed to
+  `malformed_limit_price` to accurately reflect the narrow structural
+  guard.
+- **LOW (deferred)** — exit path (`execute_exit_order:269`) has
+  unguarded NaN propagation through `max/min` clamp. Out of T5.a
+  entry-path scope; flagged for T5.b or equivalent follow-up slice.
+
+### Regression evidence
+
+- `pytest -q tests/test_executor_typed_boundary.py tests/test_execution_price.py`
+  → `36 passed, 1 xfailed in 4.60s` (1 xfail pre-existing).
+- Broader: `pytest -q tests/test_executor.py tests/test_executor_typed_boundary.py tests/test_execution_price.py tests/test_runtime_guards.py`
+  → `15 failed, 148 passed, 1 skipped, 1 xfailed`. All 15 failures
+  confirmed pre-existing via `git stash` + rerun (same 15 failures
+  without T5.a changes). **Zero delta from T5.a.** Failures are in
+  `test_runtime_guards.py` ensemble-snapshot / position-materialization
+  territory, unrelated to executor boundary.
+- Planning-lock GREEN for `src/execution/executor.py` +
+  `src/contracts/execution_intent.py` + test file.
+
+### Scope expansion acknowledged
+
+T5.a initially scoped to "import + boundary assertion + new test
+(~4h)". Surrogate critic found that the narrow interpretation would
+have shipped tests passing for the wrong reason (decision_edge
+AttributeError masquerade). The MEDIUM fix required extending scope
+to the `ExecutionIntent` dataclass — a cross-module contract change
+— but the fix is additive (one field, default=0.0, preserves every
+existing caller). Cross-module risk bounded; the planning-lock check
+re-ran with all three files and reported GREEN.
 
 ## T1.e — execution notes (2026-04-23)
 
