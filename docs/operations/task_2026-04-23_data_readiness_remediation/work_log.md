@@ -393,6 +393,89 @@ This answers P-E's per-city go/no-go question directly. Operational equivalence 
 
 - 2026-04-23T17:45:00Z — WU website scraping reconnaissance: 3 test URLs fetched via curl; all returned ~260KB JS SPA shells with 0 temperature data. Scope pivot logged above.
 - 2026-04-23T17:50:00Z — Team-lead context is approaching diminishing-returns zone. Operator directive: pause P-C execution; /compact session before running the audit. State handoff summary written below.
+- 2026-04-23T17:55:00Z — Session compacted. Team-lead resumed; re-read AGENTS.md + task_boot_profiles.yaml + fatal_misreads.yaml + first_principles.md + work_log.md per P-C handoff recipe.
+- 2026-04-23T18:00:00Z — Schema verify: `settlements` has `settlement_source_type`, `unit`, `pm_bin_lo/hi`; `observations` UNIQUE on (city, target_date, source) with `high_temp`, `unit`. Per-source-type baseline counts confirmed SQL=1459 WU + 67 NOAA + 29 HKO + 7 CWA = 1562.
+- 2026-04-23T18:02:00Z — Mixed-source-type SQL check: Hong Kong (HKO 29 + WU 2), Taipei (CWA 7 + NOAA 12 + WU 11), Tel Aviv (NOAA 23 + WU 13). Bucketing key must be (city, source_type), not city alone.
+- 2026-04-23T18:05:00Z — Wrote `evidence/scripts/pc_agreement_audit.py` (308 lines, stdlib-only). Rounding functions inlined exactly matching `src/contracts/settlement_semantics.py:69` (wmo_half_up) and `:79` (oracle_truncate).
+- 2026-04-23T18:08:00Z — Fixed REPO_ROOT path (parents[5] not [4]) and city-bucket bug (bucket by (city, source_type)); re-ran audit.
+- 2026-04-23T18:10:00Z — Audit output: `evidence/pc_agreement_audit.json` (MD5 `1787daa41969d7f3163ae01817aff683`, 1693 lines). Per-source-type partition sum: 1459+67+29+7=1562 ✓.
+- 2026-04-23T18:12:00Z — Result summary:
+  - Global: 1513 audited / 1481 match / 32 mismatch / 42 no_obs / 7 station_remap = 1562 ✓
+  - WU: 1444 audited, 32 mismatch, max_delta=28 (Chicago 2026-03-08)
+  - HKO: 14/14 match with oracle_truncate (reproduces `settlement_semantics.py:167-173` empirical claim)
+  - NOAA: 55/55 match; 12 NO_OBS rows are Taipei NOAA (wu_icao_history obs exists, ogimet doesn't)
+  - CWA: 0/0 (all 7 STATION_REMAP_NEEDED per scientist R3-D2)
+  - Unit mismatches: 0 (every audited row has obs.unit == settlement.unit)
+- 2026-04-23T18:14:00Z — Mismatch pattern analysis:
+  - 2026-03-08 DST-spring-forward cluster: 7 US F-city rows, obs consistently 4–28 °F below bin-low (scientist R3-D3 hypothesis matches)
+  - 2026-04-15 mass mismatch: 6 C-cities + NYC F, matches scientist R3-D4 JSON duplicate finding (London/NYC/Seoul/Tokyo/Shanghai in pm_settlement_truth.json)
+  - Shenzhen ±1°C bidirectional drift: 10 rows, rules out fixed-offset station swap; operational-equivalence fails
+  - Seoul ±1°C drift: 5 rows + 1 R3-D4 row = 6 total
+  - Small single-row QUARANTINE buckets: 11 buckets with 1–2 bad rows each, all on 2026-03-08 or 2026-04-15
+- 2026-04-23T18:16:00Z — AP-4 evidence via NO_OBS bucket routing:
+  - Hong Kong WU/2 rows: obs only in `hko_daily_api` (not wu_icao_history) → label ↔ collector mismatch
+  - Taipei NOAA/12 rows: obs only in `wu_icao_history` (not ogimet_metar_*) → label ↔ collector mismatch
+  - Tel Aviv WU/13 rows: obs only in `ogimet_metar_llbg` (R3-20 territory exactly)
+  All 3 buckets are empirical instances of fatal_misread AP-4 / source_role_collapse; routed to P-G for relabel pass.
+- 2026-04-23T18:20:00Z — Wrote `evidence/settlement_observation_agreement_audit.md` (325 lines, MD5 `1fc765395f3fd887224660bf5a0f35e5`). 10 sections: pivot rationale, methodology, headline, patterns, AP-4 NO_OBS, per-bucket dispositions, R3-## disposition, NH-C1..C5, scope discipline, self-verify.
+
+### Self-verify
+
+- AC-P-C-1 (partition sum): 1513+42+7=1562 ✓
+- AC-P-C-2 (per-source-type baseline match): WU=1459, NOAA=67, HKO=29, CWA=7 via JSON per_source_type; matches SQL baseline ✓
+- AC-P-C-3 (HKO 14/14 reproduces `settlement_semantics.py` claim): ✓
+- AC-P-C-4 (no DB mutations): `git status state/zeus-world.db` shows only WAL-mode changes (pre-existing) ✓
+- AC-P-C-5 (all 32 mismatches enumerated): evidence §4 tables + `all_mismatches` in JSON ✓
+- AC-P-C-6 (54 buckets cover every (city, source_type) pair): 37 VERIFIED + 13 QUARANTINE + 3 NO_OBS + 1 STATION_REMAP = 54 ✓
+- AC-P-C-7 (script reproducible): single-file Python, stdlib-only, no network ✓
+
+### Closure request → critic-opus
+
+- 2026-04-23T18:25:00Z — Deliverables:
+  - `docs/operations/task_2026-04-23_data_readiness_remediation/evidence/settlement_observation_agreement_audit.md` (325 lines, MD5 1fc76539…)
+  - `docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pc_agreement_audit.json` (1693 lines, MD5 1787daa4…)
+  - `docs/operations/task_2026-04-23_data_readiness_remediation/evidence/scripts/pc_agreement_audit.py` (308 lines, MD5 03d2a454…, stdlib-only, reproducible by critic)
+- Evidence:
+  - All SQL counts reproducible via `sqlite3 state/zeus-world.db` direct queries
+  - 32 mismatches enumerated with (city, target_date, obs, rounded, bin, delta) — all independently reproducible
+  - HKO 14/14 confirms empirical claim in `settlement_semantics.py:167-173`
+  - 3 NO_OBS buckets are empirical AP-4 instances routed to P-G
+- DB mutations: ZERO
+- R3-## items addressed:
+  - R3-16 (WU audit statistical claim): CLOSED-BY-P-C request (97.78% WU-bucket-correct match rate; 37/39 WU buckets VERIFIED)
+  - R3-20 (Tel Aviv source role decoupling): ADDRESSED-BY-P-C, CLOSURE-BY-P-G (empirical evidence for relabel; P-G executes)
+  - R3-22 (obs_v2 corrupt rows): not in scope (continues to P-G)
+- Open questions for critic-opus:
+  1. Does R3-16 close at P-C on operational-equivalence evidence, or does it require the structural WU-API ↔ WU-website product-identity proof that scraping couldn't deliver?
+  2. Is the 3-bucket NO_OBS AP-4 evidence sufficient for P-G to relabel without additional audit, or should P-C re-run post-relabel before P-E?
+  3. Any mismatch-row that should be handled differently than the 11 "quarantine-specific-rows-only, remaining-bucket-verifiable" dispositions in §6.2?
+
+### critic-opus verdict (2026-04-23)
+
+**APPROVE** — 3 MINOR findings (F1-F3) + 3 new non-blocking hazards (NH-C6 Shenzhen root-cause, NH-C7 KL canary, NH-C8 P-G structural check) + 1 new prerequisite gate (re-run P-C audit on 27 P-G-relabeled rows before P-E) + 1 caveat (Shenzhen whole-bucket QUARANTINE explicit; enumerate provenance_json reasons).
+
+Reproducibility: critic independently ran `pc_agreement_audit.py` end-to-end; every headline number matches ±0 (1562 total, 1513 audited, 1481 match, 32 mismatch, 42 no_obs, 7 station_remap, max_delta=28 Chicago 2026-03-08, HKO 14/14). Script logic verified against `settlement_semantics.py:69` (wmo_half_up) + `:79` (oracle_truncate). MD5 hashes confirmed.
+
+Invariants checked: INV-03 / INV-06 / INV-08 / INV-09 / INV-14 (correctly deferred to P-B) / INV-17 / INV-FP-1 / INV-FP-2 (F1 note for low-track future) / INV-FP-5 / INV-FP-6 / INV-FP-7 (strengthened by fail-closed routing) / INV-FP-9 / INV-FP-10. All pass or correctly deferred.
+
+Fatal misreads: 7/7 preserved; AP-4 empirically EXPOSED by §5 NO_OBS routing (not re-introduced); `wu_website_daily_summary_not_wu_api_hourly_max` correctly kept active as invariant anchor per NH-C5.
+
+AP scan: AP-12 partition sum correct; AP-13 no missing categories; AP-15 no deferred verification; AP-17 no graph-as-truth.
+
+Answers to 3 open questions:
+1. R3-16 → **CLOSED-BY-P-C** on operational-equivalence (population-count evidence satisfies AP-15 statistical-claim requirement)
+2. 27-row **P-C re-audit REQUIRED** between P-G relabel and P-E start (new §11 gate added)
+3. Per-row QUARANTINE strategy **ACCEPTED**; Shenzhen caveat → whole-bucket QUARANTINE; enumerable provenance_json reasons added (§6.4)
+
+### Closure action
+
+- 2026-04-23T19:00:00Z — Applied F1 (§2.6 metric-identity scope), F2 (§2.5 UNIQUE constraint documentation), F3 (JSON line count corrected to 1768 in this log; MD5 is canonical)
+- 2026-04-23T19:02:00Z — Added NH-C6 / NH-C7 / NH-C8 to §8 non-blocking hazards
+- 2026-04-23T19:03:00Z — Added §11 (post-P-G prerequisite gate for P-E) + §12 (critic-opus closure audit trail)
+- 2026-04-23T19:04:00Z — Updated §6.2 Shenzhen row to "whole-bucket QUARANTINE — all 26 rows"
+- 2026-04-23T19:05:00Z — Added §6.4 enumerable provenance_json reason set (7 reason_id values, 79 total rows)
+- 2026-04-23T19:06:00Z — Updated App-C: R3-16 → CLOSED-BY-P-C; R3-20 → ADDRESSED-BY-P-C-TO-BE-CLOSED-BY-P-G
+- 2026-04-23T19:10:00Z — P-C formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C all complete → **gate to P-G opens** (pre-existing corrections: Denver DELETE + 2026-04-15 R3-D4 duplicates + AP-4 3-bucket relabel + obs_v2 Cape Town).
 
 ### Handoff notes for post-compact resumption of P-C
 

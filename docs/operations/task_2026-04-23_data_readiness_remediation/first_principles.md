@@ -448,11 +448,11 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-13 | critic P0-6, scientist D1 | AP-12, AP-13 (partition fails to sum, missing category) | P-E reconstruction (full partition SQL) | PENDING |
 | R3-14 | architect P1-1, critic P1-6 | AP-15 (deferred verification) | P-E / P-F (EXPECTED_UNIT_FOR_CITY single-source) | PENDING |
 | R3-15 | architect P1-2, scientist D6 | AP-15 + INV-FP-3/INV-06 | P-B schema (decision_time_snapshot_id format + training_cutoff policy) | PENDING |
-| R3-16 | architect P1-3, critic P1-5 | AP-15 (statistical claims weak) | P-C WU audit | PENDING |
+| R3-16 | architect P1-3, critic P1-5 | AP-15 (statistical claims weak) | P-C WU audit | **CLOSED-BY-P-C** (2026-04-23; critic-opus APPROVE; operational-equivalence 97.78% over 1,444 WU rows; fatal_misread `wu_website_daily_summary_not_wu_api_hourly_max` stays active as invariant anchor per NH-C5) |
 | R3-17 | architect P1-4, critic P1-2 | cross-packet coordination (gate_f_data_backfill step 8) | P-F hard quarantine (re-check first) | PENDING |
 | R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | PENDING |
 | R3-19 | architect P1-7 | AP-15 (NC-13 enforcement deferred) | P-B schema / P-E | PENDING |
-| R3-20 | critic P1-1 | AP-4 (source role collapse) | P-C WU audit (Tel Aviv decoupling) / P-E | PENDING |
+| R3-20 | critic P1-1 | AP-4 (source role collapse) | P-C WU audit (Tel Aviv decoupling) / P-E | **ADDRESSED-BY-P-C-TO-BE-CLOSED-BY-P-G** (2026-04-23; critic-opus APPROVE; Tel Aviv WU-labeled 13 rows empirically show obs only in ogimet_metar_llbg; relabel executes in P-G, post-relabel P-C re-audit per §11 closes loop) |
 | R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** (per critic-opus P-D closure: reconciliation scope, not signal scope; optional 5-event Gamma probe add-on in P-G) | PENDING |
 | R3-22 | scientist D5 | AP-1 (obs_v2 corrupt rows) | P-G pre-existing corrections | PENDING |
 | R3-23 | scientist D7 | AP-1 (Denver orphan) | P-D extension §9.1 (Gamma probe: 250-event scan, 0 Denver matches → synthetic orphan) → P-G DELETE | **CLOSED-BY-P-D** (2026-04-23; Denver not in Gamma; P-G to DELETE in execution phase) |
@@ -461,7 +461,7 @@ Every round-3 review finding with its anti-pattern classification and target pac
 **Packet coverage summary**:
 - P-A: R3-03, R3-05 (partial)
 - P-D: R3-09, R3-21, R3-23 (partial)
-- P-C: R3-16, R3-20
+- P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; closes at P-G)
 - P-G: R3-22, R3-23 (partial)
 - P-B: R3-01, R3-06, R3-07, R3-10, R3-15, R3-18, R3-19
 - P-F: R3-14, R3-17
