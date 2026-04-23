@@ -24,7 +24,8 @@
 | Slice | Status | Commit | Critic | Date |
 |---|---|---|---|---|
 | W0 packet open | closed | `ec78c2f` | skipped (doc-only, planning-lock GREEN) | 2026-04-23 |
-| T4.0 persistence design rev2 | draft complete | pending | surrogate critic CLEAR (Option E); con-nyx informed | 2026-04-23 |
+| T4.0 persistence design rev2 | closed | `9365b20` | surrogate critic CLEAR (Option E); con-nyx informed | 2026-04-23 |
+| T7.b AST-walk guard | closed | pending | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
 
 ## T4.0 — PROPOSAL notes (2026-04-23, rev2)
 
