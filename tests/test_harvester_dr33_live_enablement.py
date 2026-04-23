@@ -27,6 +27,7 @@ from src.data.market_scanner import _parse_temp_range
 from src.execution.harvester import (
     _canonical_bin_label,
     _find_winning_bin,
+    _lookup_settlement_obs,
     _write_settlement_truth,
 )
 
@@ -137,7 +138,13 @@ def test_T4b_canonical_label_roundtrip_via_parse_temp_range():
 
 @pytest.fixture
 def scratch_db(tmp_path):
-    """Isolated SQLite DB with the full settlements schema (post-P-B)."""
+    """Isolated SQLite DB with the full settlements schema (post-P-B) + trigger.
+
+    Per test-engineer Phase 2 P0 finding: the real DB carries the
+    settlements_authority_monotonic trigger; tests MUST include it so
+    trigger-blocked writes surface as IntegrityError in test rather than
+    silently pass on an incomplete schema simulation.
+    """
     db_path = tmp_path / "test.db"
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.executescript("""
@@ -160,6 +167,29 @@ def scratch_db(tmp_path):
         provenance_json TEXT,
         UNIQUE(city, target_date)
     );
+
+    CREATE TABLE observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        city TEXT NOT NULL,
+        target_date TEXT NOT NULL,
+        source TEXT NOT NULL,
+        high_temp REAL,
+        low_temp REAL,
+        unit TEXT,
+        fetched_at TEXT,
+        UNIQUE(city, target_date, source)
+    );
+
+    -- Matches production trigger from src/state/db.py (P-B migration)
+    CREATE TRIGGER IF NOT EXISTS settlements_authority_monotonic
+    BEFORE UPDATE OF authority ON settlements
+    WHEN (OLD.authority = 'VERIFIED' AND NEW.authority = 'UNVERIFIED')
+      OR (OLD.authority = 'QUARANTINED' AND NEW.authority = 'VERIFIED'
+          AND (NEW.provenance_json IS NULL
+               OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL))
+    BEGIN
+        SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED missing provenance_json.reactivated_by');
+    END;
     """)
     yield conn
     conn.close()
@@ -307,3 +337,189 @@ def test_T9_canonical_labels_never_contain_unicode_shoulders():
             f"T9 regression: unicode shoulder in {label}"
         )
         assert "or below" in label or "or higher" in label
+
+
+# ---- Phase 2 verification gap-fills ----
+
+def test_T10_lookup_obs_wu_branch(scratch_db):
+    """_lookup_settlement_obs: wu_icao city finds wu_icao_history row."""
+    scratch_db.execute(
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("London", "2026-04-15", "wu_icao_history", 17.3, "C", "2026-04-15T12:00:00Z"),
+    )
+    row = _lookup_settlement_obs(scratch_db, _mock_city("London", unit="C", st="wu_icao"), "2026-04-15")
+    assert row is not None
+    assert row["source"] == "wu_icao_history"
+    assert row["high_temp"] == 17.3
+
+
+def test_T10b_lookup_obs_noaa_branch(scratch_db):
+    """_lookup_settlement_obs: noaa city finds ogimet_metar_* row."""
+    scratch_db.execute(
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("Moscow", "2026-04-15", "ogimet_metar_uuww", -5.0, "C", "2026-04-15T12:00:00Z"),
+    )
+    row = _lookup_settlement_obs(scratch_db, _mock_city("Moscow", unit="C", st="noaa"), "2026-04-15")
+    assert row is not None
+    assert row["source"] == "ogimet_metar_uuww"
+
+
+def test_T10c_lookup_obs_hko_branch(scratch_db):
+    """_lookup_settlement_obs: hko city finds hko_daily_api row."""
+    scratch_db.execute(
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("Hong Kong", "2026-04-15", "hko_daily_api", 28.5, "C", "2026-04-15T12:00:00Z"),
+    )
+    row = _lookup_settlement_obs(scratch_db, _mock_city("Hong Kong", unit="C", st="hko"), "2026-04-15")
+    assert row is not None
+    assert row["source"] == "hko_daily_api"
+
+
+def test_T10d_lookup_obs_cwa_returns_none(scratch_db):
+    """_lookup_settlement_obs: cwa_station has no accepted proxy; always returns None."""
+    # Even with an ogimet row present, cwa_station routing refuses cross-family obs.
+    scratch_db.execute(
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("Taipei", "2026-04-15", "ogimet_metar_rctp", 25.0, "C", "2026-04-15T12:00:00Z"),
+    )
+    row = _lookup_settlement_obs(scratch_db, _mock_city("Taipei", unit="C", st="cwa_station"), "2026-04-15")
+    assert row is None
+
+
+def test_T10e_lookup_obs_cross_family_rejected(scratch_db):
+    """_lookup_settlement_obs: wu-labeled city with only ogimet obs → None (no cross-family fallback)."""
+    scratch_db.execute(
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("Tel Aviv", "2026-03-15", "ogimet_metar_llbg", 20.0, "C", "2026-03-15T12:00:00Z"),
+    )
+    row = _lookup_settlement_obs(scratch_db, _mock_city("Tel Aviv", unit="C", st="wu_icao"), "2026-03-15")
+    assert row is None  # no wu_icao_history row present; ogimet is wrong family
+
+
+def test_T11_upsert_idempotency(scratch_db):
+    """Calling _write_settlement_truth twice on same (city, target_date) → second call wins (INSERT OR REPLACE)."""
+    city = _mock_city()
+    _write_settlement_truth(
+        scratch_db, city, "2026-04-15",
+        pm_bin_lo=17.0, pm_bin_hi=17.0,
+        obs_row={"id": 1, "source": "wu_icao_history", "high_temp": 17.3,
+                 "unit": "C", "fetched_at": "2026-04-15T12:00:00Z"},
+    )
+    scratch_db.commit()
+    count_1 = scratch_db.execute("SELECT COUNT(*) FROM settlements WHERE city=? AND target_date=?",
+                                  ("London", "2026-04-15")).fetchone()[0]
+    # Second call with different obs (fresher fetched_at) must overwrite, not duplicate.
+    _write_settlement_truth(
+        scratch_db, city, "2026-04-15",
+        pm_bin_lo=17.0, pm_bin_hi=17.0,
+        obs_row={"id": 2, "source": "wu_icao_history", "high_temp": 17.3,
+                 "unit": "C", "fetched_at": "2026-04-15T18:00:00Z"},
+    )
+    scratch_db.commit()
+    count_2 = scratch_db.execute("SELECT COUNT(*) FROM settlements WHERE city=? AND target_date=?",
+                                  ("London", "2026-04-15")).fetchone()[0]
+    assert count_1 == 1 and count_2 == 1  # upsert, not duplicate
+    # Second write should have the later fetched_at
+    prov_str = scratch_db.execute(
+        "SELECT provenance_json FROM settlements WHERE city=? AND target_date=?",
+        ("London", "2026-04-15"),
+    ).fetchone()[0]
+    prov = json.loads(prov_str)
+    assert prov["decision_time_snapshot_id"] == "2026-04-15T18:00:00Z"
+
+
+def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
+    """Flag-ON integration: mocked Gamma event + obs_row → `_write_settlement_truth` actually called.
+
+    This is the integration test test-engineer flagged as a P0 gap: would have
+    caught the winning_label NameError that code-reviewer found in Phase 2
+    (since the NameError fires INSIDE the per-event try/except and is swallowed
+    by `except Exception as e`, the observable signal is that _write_settlement_truth
+    IS reached but downstream harvest_settlement/_settle_positions receive the
+    undefined symbol — a call-count assertion surfaces the regression).
+    """
+    from src.execution import harvester as hv
+
+    # Mock a Gamma event with a resolved YES-won market on a point bin
+    event = _event_with_market(
+        "resolved", ["Yes", "No"], ["1", "0"],
+        question="Will the highest temperature in London be 17°C on April 15?",
+    )
+    event["title"] = "Highest temperature in London on April 15?"
+    event["slug"] = "highest-temperature-in-london-on-april-15-2026"
+
+    london = _mock_city("London", unit="C", st="wu_icao")
+
+    # Track call counts on the functions the P0 NameError would prevent reaching
+    write_calls = []
+    harvest_calls = []
+    settle_calls = []
+
+    def _fake_write(*a, **kw):
+        write_calls.append((a, kw))
+        return {"authority": "VERIFIED", "settlement_value": 17.0, "winning_bin": "17°C", "reason": None}
+
+    def _fake_harvest(*a, **kw):
+        harvest_calls.append((a, kw))
+        return 0
+
+    def _fake_settle(*a, **kw):
+        settle_calls.append((a, kw))
+        return 0
+
+    monkeypatch.setattr(hv, "_match_city", lambda title, slug: london)
+    monkeypatch.setattr(hv, "_extract_target_date", lambda ev: "2026-04-15")
+    monkeypatch.setattr(hv, "_fetch_settled_events", lambda: [event])
+    # Give run_harvester real connections so obs lookup can be mocked out
+    dummy_db_path = tmp_path / "dummy.db"
+    dummy_conn = sqlite3.connect(dummy_db_path, isolation_level=None)
+    monkeypatch.setattr(hv, "get_trade_connection", lambda: dummy_conn)
+    monkeypatch.setattr(hv, "get_world_connection", lambda: dummy_conn)
+    # Return a valid obs_row so _write_settlement_truth is reached
+    monkeypatch.setattr(hv, "_lookup_settlement_obs",
+        lambda conn, city, td: {"id": 1, "source": "wu_icao_history",
+                                "high_temp": 17.3, "unit": "C",
+                                "fetched_at": "2026-04-15T12:00:00Z"})
+    monkeypatch.setattr(hv, "_preflight_harvester_stage2_db_shape",
+                        lambda trade, shared: {"stage2_status": "not_run_no_settled_events"})
+    monkeypatch.setattr(hv, "load_portfolio", lambda: None)
+    monkeypatch.setattr(hv, "_write_settlement_truth", _fake_write)
+    monkeypatch.setattr(hv, "harvest_settlement", _fake_harvest)
+    monkeypatch.setattr(hv, "_snapshot_contexts_for_market",
+                        lambda *a, **kw: ([], []))
+    monkeypatch.setattr(hv, "_settle_positions", _fake_settle)
+    monkeypatch.setattr(hv, "query_legacy_settlement_records", lambda *a, **kw: [])
+    monkeypatch.setattr(hv, "store_settlement_records", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "get_tracker", lambda: None)
+    monkeypatch.setattr(hv, "save_tracker", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "1")
+
+    try:
+        result = hv.run_harvester()
+    finally:
+        dummy_conn.close()
+
+    # The P0 NameError would cause _write_settlement_truth to be reached but
+    # harvest_settlement + _settle_positions to fail inside except Exception.
+    # All three must be reached for the full pipeline to work end-to-end.
+    assert len(write_calls) == 1, f"_write_settlement_truth not called (got {len(write_calls)})"
+    # _settle_positions is called OUTSIDE the stage2_ready branch at harvester.py:443
+    # so it MUST be reached even with stage2_ready=False. If winning_label
+    # NameError fires in the per-event try, the except-handler swallows it
+    # and _settle_positions is skipped — this assertion catches that P0.
+    assert len(settle_calls) == 1, (
+        f"_settle_positions not reached ({len(settle_calls)}); "
+        "likely winning_label NameError regression"
+    )
+    # harvest_settlement is inside `if stage2_ready:` branch; stage2 mocked False
+    # in this test, so it should NOT be called. Separate test can exercise stage2=True.
+    assert len(harvest_calls) == 0, (
+        f"harvest_settlement unexpectedly called ({len(harvest_calls)}) with stage2_ready=False"
+    )
+    assert result.get("disabled_by_flag") is not True

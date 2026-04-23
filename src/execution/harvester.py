@@ -361,6 +361,21 @@ def run_harvester() -> dict:
                 # No UMA-resolved YES-won market for this event; skip silently.
                 continue
 
+            # Derive the canonical text-form winning_bin label that downstream
+            # learning + position-settlement pipelines (harvest_settlement,
+            # _settle_positions) expect as `winning_label`. Without this the
+            # broad except-handler below would silently swallow a NameError
+            # under flag-ON and the learning pipeline would 100% no-op
+            # (code-reviewer P0 finding, Phase 2 verification 2026-04-23).
+            winning_label = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+            if winning_label is None:
+                logger.warning(
+                    "harvester_live: both pm_bin_lo and pm_bin_hi are None after _find_winning_bin; "
+                    "skipping %s %s (degenerate bin; should be unreachable)",
+                    city.name, target_date,
+                )
+                continue
+
             # Look up source-family-correct obs for SettlementSemantics gate.
             obs_row = _lookup_settlement_obs(shared_conn, city, target_date)
             if obs_row is None:
