@@ -67,6 +67,58 @@ Post-close review:
 
 - pending
 
+## P3 Current-Fact Hardening
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_source_validity.md`
+- `docs/operations/AGENTS.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
+
+Summary:
+
+- compressed `current_state.md` into a receipt-bound live pointer
+- compressed `current_data_state.md` into a summary-only, expiry-bound current
+  data posture surface
+- compressed `current_source_validity.md` into a summary-only, expiry-bound
+  source-validity surface
+- added explicit current-fact contract language to `docs/operations/AGENTS.md`
+- preserved existing audited conclusions without adding new data/source truth
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --current-state-receipt-bound --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P3 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok with non-blocking stale graph warning
+- `wc -l docs/operations/current_state.md docs/operations/current_data_state.md docs/operations/current_source_validity.md` -> 59, 54, 50
+- `git diff --check -- <P3 files>` -> ok
+
+Pre-close review:
+
+- Critic: initial BLOCK when reviewing full dirty worktree and noted the
+  receipt listed `architecture/docs_registry.yaml` without a P3 diff. Resolution:
+  P3 receipt now lists only actual P3 current-fact/packet files; unrelated
+  graph/state/artifact dirty files remain unstaged and out of packet scope.
+- Verifier: PASS. Confirmed docs/current-state/context-budget/closeout checks
+  pass; current-fact files are under budget and have required headers.
+
+Post-close review:
+
+- pending
+
+Next:
+
+- commit P3 current-fact hardening, then run post-close review
+
 ## P2 Side Authority Demotion/Merge
 
 Changed files:
