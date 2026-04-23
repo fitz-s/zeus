@@ -450,7 +450,7 @@
     {
       "slice_id": "T4.1b",
       "name": "decision_evidence_entry_event_emission_wiring",
-      "commit": "pending",
+      "commit": "1d541a3",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_REQUEST_CHANGES_all_6_findings_addressed_pre_code_con_nyx_deferred_per_operator",
       "planning_lock": "GREEN on 5 files (src/engine/evaluator.py + src/engine/cycle_runtime.py + src/engine/lifecycle_events.py + src/execution/exit_lifecycle.py + tests/test_decision_evidence_entry_emission.py)",
@@ -491,6 +491,54 @@
         ".venv/bin/python -m pytest -q tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 45 passed in 0.10s",
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/engine/evaluator.py src/engine/cycle_runtime.py src/engine/lifecycle_events.py src/execution/exit_lifecycle.py tests/test_decision_evidence_entry_emission.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}",
         "git stash verification: pre-T4.1b source + same 17-file regression = 24 failed / 476 passed (identical to post-T4.1b's 24 failed / 488 passed minus the 12 new-test passes) -> ZERO delta"
+      ]
+    },
+    {
+      "slice_id": "T4.2-Phase1",
+      "name": "exit_side_decision_evidence_audit_only_symmetry_check",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_APPROVE_3_LOW_2_polish_addressed_inline_con_nyx_dispatched",
+      "planning_lock": "GREEN on 3 files (src/state/decision_chain.py + src/engine/cycle_runtime.py + tests/test_exit_evidence_audit.py)",
+      "files_changed": [
+        "src/state/decision_chain.py (add load_entry_evidence(conn, runtime_trade_id) helper; read ENTRY_ORDER_POSTED event payload -> parse decision_evidence_envelope string -> DecisionEvidence.from_json)",
+        "src/engine/cycle_runtime.py (module-level _D4_ASYMMETRIC_EXIT_TRIGGERS frozenset + EvidenceAsymmetryError import + audit block injected after pos.exit_trigger assignment / before build_exit_intent call)",
+        "tests/test_exit_evidence_audit.py (new, 11 tests in 3 classes; raw INSERT helpers for corruption/future-version cases since position_events has append-only trigger)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_nine": "Fix plan T4.2-Phase1 row cited src/execution/exit_triggers.py:49,158,218 for audit-only wrapper injection. Grep-verified: evaluate_exit_triggers has ZERO production callers in src/ (5 test-only callers in tests/). Production exit decision path is Position.evaluate_exit at src/state/portfolio.py:296 invoked from src/engine/cycle_runtime.py:619. All D4-relevant triggers (EDGE_REVERSAL, BUY_NO_EDGE_EXIT, BUY_NO_NEAR_EXIT) are constructed inside Position._buy_yes_exit / _buy_no_exit methods and returned through ExitDecision. Audit injection moved to cycle_runtime.py where conn is in scope. Surrogate independently grep-verified this correction.",
+      "design_decisions_final": {
+        "audit_layer": "cycle_runtime.py (Position is pure domain object, must not own conn; cycle_runtime is the orchestration seam where decision meets DB)",
+        "persistence_mechanism": "structured logger.warning with JSON-in-message (Phase1 rate metric sufficient; DB-backed table deferred to Phase2 when audit flips to blocking)",
+        "confidence_level_1.0_placeholder": "satisfies __post_init__ (0,1] bound; semantic no-alpha expressed by fdr_corrected=False companion field; documented inline; contract extension to Optional[float] deferred to Phase2/3",
+        "trigger_exclusions": "force-majeure (RED_FORCE_EXIT/SETTLEMENT_IMMINENT/WHALE_TOXICITY/MODEL_DIVERGENCE_PANIC/FLASH_CRASH_PANIC/VIG_EXTREME) + DAY0_OBSERVATION_REVERSAL (single-cycle observation-authority, template shape mismatch — surrogate-confirmed correct exclusion)",
+        "idempotency": "monitor_refresh does not reprocess same position in one cycle; Phase1 accepts possible double-count; dedupe to Phase2",
+        "helper_location_decision_chain_vs_lifecycle_events": "decision_chain.py acceptable for Phase1 (already owns stored-artifact reads); surrogate suggested lifecycle_events.py may be cleaner for Phase2 co-location; reversible"
+      },
+      "surrogate_critic_findings_addressed_inline": {
+        "LOW_1_log_key_uniformity": "ADDRESSED — exit_evidence_audit_skipped path now emits same '<key> + json.dumps({...}, sort_keys=True)' shape as asymmetry path so Phase2 rate aggregator has one parse path",
+        "LOW_2_skip_counter": "ADDRESSED — outer exception handler now increments summary['exit_evidence_audit_skipped'] so Phase2 FP-rate denominator distinguishes 'detected asymmetry' from 'silently failed to audit'",
+        "LOW_3_envelope_size_cap": "informational only; no action (envelopes are ~200 chars each, well under any log aggregator message cap)"
+      },
+      "surrogate_critic_category_immunity_score": "0.6/1.0 — PARTIAL on trajectory per Phase1 discipline. Phase1 measures category (weak-exit-on-strong-entry) via observation+signal+antibody tests; Phase2 will close category (cannot construct). Full immunity would require ExitDecision constructor/type-level enforcement rejecting should_exit=True without symmetric DecisionEvidence pairing. Out of Phase1 scope per plan's explicit Phase1->Phase2->Phase3 staging.",
+      "regression_delta_direction_L28": {
+        "narrow_T4_slab": "pytest tests/test_exit_evidence_audit.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 56 passed in 0.13s (11 new + 12 T4.1b + 18 T4.1a + 15 symmetry)",
+        "broad_6_file_pre_T4_2_Phase1_baseline_via_git_stash": "2 failed / 127 passed / 25 skipped",
+        "broad_7_file_post_T4_2_Phase1": "2 failed / 138 passed / 25 skipped",
+        "delta": "ZERO new failures; +11 passes (all from new test file)",
+        "preexisting_failures_excluded_from_scope": [
+          "test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent (T3.2 work_log: _Logger mock lacks .warning)",
+          "test_structural_linter_gate (T3.4 upstream-blocked by co-tenant raw local-hour leakage at src/data/observation_instants_v2_writer.py:122,288)"
+        ]
+      },
+      "read_side_ready_for_phase2": "T4.1b wrote the envelope on ENTRY_ORDER_POSTED; T4.2-Phase1 reads it via load_entry_evidence + constructs exit_evidence + calls assert_symmetric_with. Phase2 will swap the try/except to hard-fail weak exits once audit_log_false_positive_rate <= 0.05 measured over 7 days. All read-side plumbing now in production.",
+      "co_tenant_interleave": "HEAD advanced to b6ec55c (co-tenant P-E + settlement workstream: 1561 settlements reconstructed with full provenance) between T4.1b commit and T4.2-Phase1 dispatch; my changes rebased cleanly on top; zero conflict.",
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_exit_evidence_audit.py -> 11 passed in 0.09s",
+        ".venv/bin/python -m pytest -q tests/test_exit_evidence_audit.py tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 56 passed in 0.13s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/decision_chain.py src/engine/cycle_runtime.py tests/test_exit_evidence_audit.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}",
+        "git stash verification: pre-T4.2-Phase1 source + 6-file regression = 2 failed / 127 passed (identical to post delta-subtract of 11 new-test passes) -> ZERO delta"
       ]
     }
   ],
