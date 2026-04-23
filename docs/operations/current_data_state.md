@@ -1,8 +1,8 @@
 # Current Data State
 
 Status: active current-fact surface
-Last audited: 2026-04-21
-Authority basis: Gate F Step 1 schema audit plus current architecture/data-rebuild law
+Last audited: 2026-04-23
+Authority basis: Gate F Step 1 schema audit + step 3 fleet closeout + step 4 Phase 2 plan; architecture/data-rebuild law
 Authority status: not authority law; this is present-tense routing for current data facts
 
 ## Purpose
@@ -28,25 +28,52 @@ live math ready.
 
 ### v2 tables
 
-The v2 schema exists, but the audited posture is still structurally empty:
+As of 2026-04-23 the `observation_instants_v2` surface is populated; other v2
+tables remain structurally present but unpopulated pending their own Phase
+plans:
 
-- `observation_instants_v2`: 0 rows
+- `observation_instants_v2`: **1,812,495 rows** across 50 cities
+  (`data_version='v1.wu-native'`, 2024-01-01 → 2026-04-21)
+  - Source breakdown: `wu_icao_history` 931,677 (47 cities primary) +
+    `meteostat_bulk_*` 815,585 (46 cities extremum supplement) +
+    `ogimet_metar_*` 65,233 (3 primary + DST/gap supplement) +
+    `hko_hourly_accumulator` 0 (accepted accumulator-forward gap)
+  - Audit posture (scripts/audit_observation_instants_v2.py): 0 tier
+    violations, 0 source-tier mismatches, 0 UNVERIFIED rows, 0 openmeteo
+    rows, 233 confirmed upstream gaps allowlisted
 - `historical_forecasts_v2`: 0 rows
 - `calibration_pairs_v2`: 0 rows
 - `platt_models_v2`: 0 rows
 - `ensemble_snapshots_v2`: 0 rows
 - `settlements_v2`: 0 rows
 
+Atomic cutover state (as of this refresh):
+
+- `zeus_meta.observation_data_version`: `'v0'` — Phase 2 flip scheduled under
+  Gate F step 4 packet, not yet executed at this refresh boundary.
+- `observation_instants_current` VIEW: returns 0 rows pre-flip (no data_version
+  matches `'v0'`); flipping the meta key to `'v1.wu-native'` instantly exposes
+  the 1.8M-row corpus through the VIEW.
+- Legacy `observation_instants` table (867,489 `openmeteo_archive_hourly` rows)
+  remains present and is the active data path read by
+  `scripts/etl_diurnal_curves.py` / `scripts/etl_hourly_observations.py` until
+  step 4 PW2 migrates those readers to the VIEW. Plan v3 Phase 4 DROP follows
+  +30d post-flip.
+
 Interpretation:
 
-- v2 is structurally prepared
-- v2 is not yet the populated current data path
+- v2 observation-instants is backfilled, audited, and atomically ready to flip.
+- v2 is not yet the runtime data path; legacy table is still read by ETL until
+  step 4 PW5 lands.
+- Other v2 tables remain structurally prepared but unpopulated.
 
 ### Legacy tables still carrying data
 
 - `observations`: populated for 51 cities
-- `observation_instants`: populated for 46 cities
-- five cities are missing from the legacy hourly surface
+- `observation_instants`: populated for 46 cities with 867,489 rows (all
+  `source='openmeteo_archive_hourly'` — legacy Tier 4, superseded by v2 when
+  the Phase 2 flip lands); five cities remain missing from this legacy hourly
+  surface, which is one of the structural drivers of the v2 migration
 - detailed counts and city lists come from Gate F Step 1; update this file only
   from fresh packet evidence
 
