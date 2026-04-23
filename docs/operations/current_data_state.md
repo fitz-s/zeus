@@ -58,11 +58,13 @@ Atomic cutover state (as of this refresh, post-flip):
   `scripts/etl_hourly_observations.py` now read from `observation_instants_current`
   (the VIEW), making the atomic flip propagate to derived tables on every
   ETL run.
-- Derived tables post-rebuild from v2 (step5 PW6 + step6 tail + step7 Phase 3):
-  - `diurnal_curves`: 4,800 rows × 50 cities (HK has 0 rows — plan v3 Option A
-    accepted gap; signal layer AC11 fallback active; fleet-average fallback
-    rejected per step7 decision, fail-closed retained)
-  - `hourly_observations`: 1,813,564 rows × 50 cities
+- Derived tables post-rebuild from v2 (step5 PW6 + step6 tail + step7 Phase 3
+  + step8 HK projection):
+  - `diurnal_curves`: 4,800 rows × 50 cities (HK still has 0 rows — 4 v2
+    accumulator rows < 5-sample ETL threshold; signal layer AC11 fallback
+    remains active; fleet-average fallback rejected per step7)
+  - `hourly_observations`: 1,813,568 rows × 51 cities (HK now present
+    post step 8 projection)
   - `diurnal_peak_prob`: 14,400 rows (50 × 12 months × 24 hours, dense)
 - Phase 3 shape-delta (v1 legacy vs v2 station-native, from
   `scripts/compare_diurnal_v1_v2.py`): fleet median |Δavg_temp|=0.82°F,

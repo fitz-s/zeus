@@ -300,6 +300,7 @@ scripts:
   capture_replay_artifact.py: {class: shadow_artifact_writer}
   check_advisory_gates.py: {class: enforcement}
   compare_diurnal_v1_v2.py: {class: diagnostic}
+  hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
   check_daemon_heartbeat.py: {class: runtime_support}
   check_kernel_manifests.py: {class: enforcement}
   check_module_boundaries.py: {class: enforcement}
