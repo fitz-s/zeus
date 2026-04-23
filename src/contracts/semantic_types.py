@@ -170,7 +170,14 @@ def compute_native_limit_price(
     prob_value, direction = _unwrap_native_value(held_prob, "held_prob")
     price_value, _ = _unwrap_native_value(native_price, "native_price", direction)
     limit_price = min(prob_value, price_value) - limit_offset
-    return max(0.01, min(0.99, limit_price))
+    # T5.b 2026-04-23: replace bare 0.01/0.99 magic with typed contract
+    # reference. POLYMARKET_WEATHER_TICK = TickSize(0.01,
+    # "probability_units"); clamp_to_valid_range() is lenient on NaN
+    # (propagates), matching pre-T5.b behavior — the T5.a ExecutionPrice
+    # boundary at _live_order rejects malformed limit_price before CLOB
+    # contact, so NaN does not leak to the venue.
+    from src.contracts.tick_size import POLYMARKET_WEATHER_TICK
+    return POLYMARKET_WEATHER_TICK.clamp_to_valid_range(limit_price)
 
 
 def compute_forward_edge(

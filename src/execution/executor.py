@@ -228,7 +228,14 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
 
     current_price = intent.current_price
     best_bid = intent.best_bid
-    base_price = current_price - 0.01
+    # T5.b 2026-04-23: replace bare 0.01 magic with TickSize typed
+    # contract. TickSize.for_market resolves per-token tick size (all
+    # Polymarket weather markets currently share $0.01, but the
+    # classmethod is the single truth surface for future per-market
+    # differentiation).
+    from src.contracts.tick_size import TickSize
+    tick = TickSize.for_market(token_id=intent.token_id)
+    base_price = current_price - tick.value
     limit_price = base_price
 
     if best_bid is not None and best_bid < base_price:
@@ -236,7 +243,22 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
         if current_price > 0 and slippage / current_price <= 0.03:
             limit_price = best_bid
 
-    limit_price = max(0.01, min(0.99, limit_price))
+    # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
+    # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`
+    # clamp let NaN propagate into CLOB contact. Reject explicitly
+    # here so non-finite prices never reach place_limit_order. Use
+    # the same `malformed_limit_price` rejection reason convention as
+    # T5.a's entry-path ExecutionPrice boundary guard for symmetry.
+    if not math.isfinite(limit_price):
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=f"malformed_limit_price: non-finite value {limit_price!r}",
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
+    limit_price = tick.clamp_to_valid_range(limit_price)
 
     shares = math.floor(intent.shares * 100 + 1e-9) / 100.0
     if shares <= 0:
