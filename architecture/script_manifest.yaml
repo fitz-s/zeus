@@ -413,6 +413,7 @@ scripts:
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
   semantic_linter.py: {class: enforcement}
+  snapshot_checksum.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/snapshot_checksum.py --verify-all", reason: "SHA-256 rollback snapshot integrity tool; replaces MD5 (collision-broken) on the data-readiness rollback chain (pre-pg/pb/pf/pe_2026-04-23 snapshots). Streaming 4 MiB chunks so multi-GB DB files do not blow memory. Existing .md5 sidecars preserved for audit continuity. Follow-up to data-readiness workstream closure (docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md)."}
   test_currency_audit.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/test_currency_audit.py", reason: "T1.e midstream guardian panel dated-header audit; reads architecture/test_topology.yaml::midstream_guardian_panel and validates each listed file carries Created/Last reused audited/Authority basis markers per ~/CLAUDE.md file-header provenance rule"}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}

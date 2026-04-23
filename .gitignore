@@ -26,9 +26,10 @@ state/*.db
 state/*.bak
 state/*.db.aborted-*
 state/*.db.pre-rebuild-*
-# Packet rollback snapshots (binary, >1 GB; .md5 sidecars are committed for audit trail).
+# Packet rollback snapshots (binary, >1 GB; .md5 + .sha256 sidecars are committed for audit trail).
 state/zeus-world.db.pre-p*-*
 !state/zeus-world.db.pre-p*-*.md5
+!state/zeus-world.db.pre-p*-*.sha256
 
 # Backfill / rebuild scratch logs (transient nohup + tee output).
 # Topology doctor walks state/ directly; active run logs are still

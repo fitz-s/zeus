@@ -732,6 +732,60 @@
         ".venv/bin/python -m pytest -q tests/test_realized_fill.py tests/test_neg_risk_passthrough.py tests/test_tick_size.py -> 59 passed in 0.47s",
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/contracts/slippage_bps.py src/contracts/realized_fill.py tests/test_realized_fill.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
       ]
+    },
+    {
+      "slice_id": "S2.3",
+      "name": "data_readiness_tail_sha256_rollback_snapshot_sidecars",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_three_antibody_probes_pass_critic_opus_dispatched_surrogate_pending",
+      "planning_lock": "GREEN on 4-file core (scripts/snapshot_checksum.py + architecture/script_manifest.yaml + .gitignore + state/*.sha256) using midstream plan.md as plan-evidence",
+      "authority_basis_doc": "docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md",
+      "authority_basis_section": "closure banner item 5 (SHA-256 for rollback snapshot hashes; MD5 is collision-broken)",
+      "files_changed": [
+        "scripts/snapshot_checksum.py (NEW — enforcement class, 4 MiB chunked streaming sha256)",
+        "architecture/script_manifest.yaml (register new enforcement entry)",
+        ".gitignore (extend negation rule at line 32 to include .sha256 sidecars alongside .md5)",
+        "state/zeus-world.db.pre-pg_2026-04-23.sha256 (NEW gitignored-negated; digest 150c2e74984f382f...)",
+        "state/zeus-world.db.pre-pb_2026-04-23.sha256 (NEW gitignored-negated; digest adf546d3e27ae828...)",
+        "state/zeus-world.db.pre-pf_2026-04-23.sha256 (NEW gitignored-negated; digest ee0459537b6665a5...)",
+        "state/zeus-world.db.pre-pe_2026-04-23.sha256 (NEW gitignored-negated; digest 3e91410d6f3cc9c8...)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "design_decisions": {
+        "streaming_hash_required": "snapshots are ~1.8 GB each; existing sha256 helpers (scripts/_tigge_common.py:145-146 and scripts/topology_doctor_code_review_graph.py:137-138) use path.read_bytes() blob-load which is unsafe at that size. NEW script uses 4 MiB chunked reads via iter(lambda: f.read(CHUNK_BYTES), b'')",
+        "md5_preserved_not_removed": "existing .md5 sidecars intentionally kept for audit continuity. SHA-256 becomes the integrity source of truth going forward. MD5 retained because any external consumer that still parses .md5 format does not break.",
+        "sidecar_format": "standard sha256sum(1) format: <64-hex-lowercase>  <basename><LF> (two spaces between digest and basename, matches md5sum-style parsers for interop)",
+        "script_class_enforcement": "canonical command is --verify-all which returns exit 0 on clean chain, exit 1 on any mismatch (audit/CI hook ready)",
+        "packet_routing_decision": "Initially opened new packet docs/operations/task_2026-04-23_data_readiness_hardening_tail/ for clean scope separation. Map-maintenance precommit flagged 6 required companion updates (docs/AGENTS.md, docs/README.md, architecture/topology.yaml, architecture/docs_registry.yaml, docs/operations/AGENTS.md, docs/operations/current_state.md); 5 of 6 are co-tenant-dirty. Honoring via isolate-and-restore = high scope-bleed risk per memory rule. PIVOTED to recording S2.3 in midstream packet as data-readiness-tail sibling; planning-lock still GREEN with midstream plan.md as plan-evidence; abandoned packet directory deleted cleanly."
+      },
+      "antibody_probes_self_verified": {
+        "probe_1_shape": "wrote 16 uppercase A's into digest position -> 'sidecar digest wrong shape' -> exit 1. Fails-early before touching DB.",
+        "probe_2_hash_mismatch": "wrote deadbeefcafebabe... valid-shape wrong-value into digest position -> reached streaming hash step -> 'HASH MISMATCH: <basename> expected deadbeef... got 3e91410d...' -> exit 1. Integrity payload check exercised.",
+        "probe_3_ok_round_trip": "restored original -> --verify-all --json -> {ok: true, count: 4}. Clean state confirmed.",
+        "probe_4_oserror_handling": "scratch file + chmod 000 on target -> 'read error on broken.db: [Errno 13] Permission denied: ...' -> exit 1 (no traceback, clean exit). Added after surrogate-critic MEDIUM finding (G7)."
+      },
+      "surrogate_critic_findings_integrated": {
+        "verdict": "APPROVE_WITH_CONDITIONS (code-reviewer@opus surrogate, read-only, 2026-04-23)",
+        "MEDIUM_G7_oserror_crash_fixed_inline": "verify_sidecar wrapped compute_sha256 call in try/except OSError returning (False, 'read error on <basename>: <exc>'). Prevents --verify-all batch from aborting mid-scan if any single snapshot has permission-denied, broken-symlink, or mid-read disk-error. 3 LOC addition in scripts/snapshot_checksum.py. Re-verified clean on 4-file chain AND new probe_4 confirms graceful error path.",
+        "LOW_G1_streaming_correctness": "approved (sentinel form iter(lambda: f.read(CHUNK_BYTES), b'') terminates at EOF with no off-by-one)",
+        "LOW_G2_format_interop": "approved (two-space sha256sum(1) text-mode form parsed by GNU coreutils)",
+        "LOW_G3_citation_freshness": "approved (scripts/_tigge_common.py:145-146 and scripts/topology_doctor_code_review_graph.py:137-138 are fresh)",
+        "LOW_G4_audit_chain_scan": "approved (no parser assumes .md5 exclusivity; all other .md5/.sha256 hits are unrelated content-hash callsites)",
+        "LOW_G5_manifest_shape": "approved (new entry uses richer form matching test_currency_audit.py)",
+        "LOW_G6_gitignore_negation_order": "approved (line 30 ignore, lines 31-32 negate in rule-order)",
+        "LOW_G7_symlink_loop": "covered by same OSError wrap — no separate finding"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python scripts/snapshot_checksum.py --compute state/zeus-world.db.pre-pg_2026-04-23 -> wrote sidecar (150c2e74984f382f...) in 1.01s",
+        ".venv/bin/python scripts/snapshot_checksum.py --compute state/zeus-world.db.pre-pb_2026-04-23 -> wrote sidecar (adf546d3e27ae828...) in 0.95s",
+        ".venv/bin/python scripts/snapshot_checksum.py --compute state/zeus-world.db.pre-pf_2026-04-23 -> wrote sidecar (ee0459537b6665a5...) in 1.00s",
+        ".venv/bin/python scripts/snapshot_checksum.py --compute state/zeus-world.db.pre-pe_2026-04-23 -> wrote sidecar (3e91410d6f3cc9c8...) in 0.94s",
+        ".venv/bin/python scripts/snapshot_checksum.py --verify-all --json -> {ok:true, count:4, all 4 results OK}",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files scripts/snapshot_checksum.py architecture/script_manifest.yaml .gitignore state/zeus-world.db.pre-pe_2026-04-23.sha256 --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok:true, issues:[]}"
+      ],
+      "category_immunity_fitz_k_lt_n_score": "LOW-severity category (crypto hash upgrade). Score 0.7/1.0: makes MD5-collision-based sidecar tampering structurally impossible going forward (attacker would need SHA-256 preimage). Remaining 0.3: does not prevent a malicious actor from overwriting BOTH the snapshot AND the sidecar atomically (addressed by immutable storage, not by this tool). The real K<<N value is precedent: establishes the crypto pattern for any future packet's rollback chain."
     }
   ],
   "slices_in_review": [
