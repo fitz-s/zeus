@@ -10,6 +10,8 @@ Spec §8.1: Hourly cycle:
 
 import json
 import logging
+import math
+import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,7 +24,8 @@ from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair, add_calibration_pair_v2
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 from src.config import City, cities_by_name, get_mode
-from src.contracts.settlement_semantics import round_wmo_half_up_value
+from src.contracts.settlement_semantics import SettlementSemantics, round_wmo_half_up_value
+from src.contracts.exceptions import SettlementPrecisionError
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
@@ -260,11 +263,55 @@ def _dual_write_canonical_settlement_if_available(
     return True
 
 
+def _lookup_settlement_obs(conn, city: City, target_date: str) -> Optional[dict]:
+    """Look up source-family-correct observation for the harvester write path.
+
+    Routes per city.settlement_source_type (P-C routing rules, DR-33 plan §3.3):
+      - wu_icao   → observations.source='wu_icao_history'
+      - noaa      → observations.source LIKE 'ogimet_metar_%'
+      - hko       → observations.source='hko_daily_api'
+      - cwa_station → no accepted proxy (returns None; row will quarantine)
+    """
+    st = city.settlement_source_type
+    rows = conn.execute(
+        """SELECT id, source, high_temp, unit, fetched_at
+           FROM observations
+           WHERE city = ? AND target_date = ? AND high_temp IS NOT NULL""",
+        (city.name, target_date),
+    ).fetchall()
+    for r in rows:
+        _id, src, high_temp, unit, fetched_at = r
+        if st == "wu_icao" and src == "wu_icao_history":
+            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
+        if st == "noaa" and isinstance(src, str) and src.startswith("ogimet_metar_"):
+            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
+        if st == "hko" and src == "hko_daily_api":
+            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
+    return None
+
+
 def run_harvester() -> dict:
     """Run one harvester cycle. Polls for settled markets.
 
     Returns: harvester counts plus stage2_status / stage2 preflight details.
+
+    Feature flag: ``ZEUS_HARVESTER_LIVE_ENABLED`` must equal ``"1"`` for the
+    cycle to actually fetch Gamma + write settlements. Default OFF (DR-33-A
+    staged rollout per plan.md §3.1). OFF state short-circuits BEFORE any
+    data-plane call; no DB connection is acquired, no HTTP request is made.
     """
+    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
+        logger.info(
+            "harvester_live disabled by ZEUS_HARVESTER_LIVE_ENABLED flag (DR-33-A default-OFF); "
+            "cycle skipped; no data-plane calls"
+        )
+        return {
+            "status": "disabled_by_feature_flag",
+            "disabled_by_flag": True,
+            "settled_events": 0,
+            "positions_settled": 0,
+            "total_pairs": 0,
+        }
     # Split connections: trade DB for position/settlement events, shared DB for
     # ensemble snapshots and calibration pairs.
     trade_conn = get_trade_connection()
@@ -309,14 +356,28 @@ def run_harvester() -> dict:
             if target_date is None:
                 continue
 
-            winning_label, winning_range = _find_winning_bin(event)
-            if winning_label is None:
+            pm_bin_lo, pm_bin_hi = _find_winning_bin(event)
+            if pm_bin_lo is None and pm_bin_hi is None:
+                # No UMA-resolved YES-won market for this event; skip silently.
                 continue
 
-            # Write settlement truth to settlements table (ground truth from PM)
+            # Look up source-family-correct obs for SettlementSemantics gate.
+            obs_row = _lookup_settlement_obs(shared_conn, city, target_date)
+            if obs_row is None:
+                # No obs yet; don't write a quarantine row — retry next cycle when obs lands.
+                # (Alternative: write QUARANTINED with harvester_live_no_obs; skip for DR-33-A
+                # to avoid polluting the table with transient no-obs rows during obs-collector lag.)
+                logger.debug(
+                    "harvester_live: skipping %s %s — no source-correct obs yet",
+                    city.name, target_date,
+                )
+                continue
+
+            # Canonical-authority write: SettlementSemantics gate + INV-14 + provenance_json.
             _write_settlement_truth(
-                shared_conn, city, target_date, winning_label,
+                shared_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
+                obs_row=obs_row,
             )
 
             # Extract all bin labels and use decision-time snapshots for calibration
@@ -483,35 +544,92 @@ def _fetch_settled_events() -> list[dict]:
     return events
 
 
-def _find_winning_bin(event: dict) -> tuple[Optional[str], Optional[str]]:
-    """Determine which bin won from a settled event.
+def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
+    """Determine which bin won from a UMA-resolved settled event.
 
-    Returns: (winning_label, winning_range) or (None, None)
-    Authority: market["winningOutcome"] == "Yes" only.
-    Price-based fallback (outcomePrices >= 0.95) has been removed —
-    price signals are not settlement authority.
+    Returns: (pm_bin_lo, pm_bin_hi) of the YES-won market, or (None, None).
+
+    Gate (P-D §6.1 + §5.3 non-reversal attestation against R3-09):
+      - ``umaResolutionStatus == 'resolved'`` (terminal UMA DVM state)
+      - ``outcomes == ['Yes', 'No']`` (unexpected order → fail closed)
+      - ``outcomePrices[0] == '1'`` (YES-won per UMA's binary vote encoding)
+
+    This is NOT the removed ``outcomePrices >= 0.95`` pre-resolution price
+    fallback (R3-09). The removed pattern read prices as a live-trading
+    signal on UN-resolved markets. This reads ONLY resolved markets where
+    outcomePrices is the UMA oracle vote result encoded as
+    ``("1","0")`` = YES-won or ``("0","1")`` = NO-won.
+
+    See:
+      - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
+      - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+
+    Precedent: existing production code at ``scripts/_build_pm_truth.py:137-139``
+    already uses the same ``outcomePrices[0] == "1"`` pattern WITHOUT the
+    umaResolutionStatus gate. This function is STRICTER than that precedent.
     """
     for market in event.get("markets", []):
-        winning = market.get("winningOutcome", "").lower()
-
-        if winning == "yes":
+        if market.get("umaResolutionStatus") != "resolved":
+            continue
+        op_raw = market.get("outcomePrices")
+        if not op_raw:
+            continue
+        try:
+            prices = json.loads(op_raw) if isinstance(op_raw, str) else op_raw
+        except (ValueError, TypeError):
+            continue
+        if not (isinstance(prices, list) and len(prices) == 2):
+            continue
+        outcomes_raw = market.get("outcomes")
+        try:
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+        except (ValueError, TypeError):
+            continue
+        # Fail-closed: outcomes order must be ['Yes', 'No'] exactly.
+        if not (isinstance(outcomes, list) and len(outcomes) == 2
+                and str(outcomes[0]).lower() == "yes"):
+            continue
+        # YES won iff prices[0] == '1' (UMA binary vote encoding on RESOLVED markets)
+        if str(prices[0]) == "1":
             label = market.get("question") or market.get("groupItemTitle", "")
             low, high = _parse_temp_range(label)
-            range_str = _format_range(low, high)
-            return label, range_str
-
+            return low, high
     return None, None
 
 
-def _format_range(low: Optional[float], high: Optional[float]) -> str:
-    """Format parsed range as settlement-style string."""
-    if low is None and high is not None:
-        return f"-999-{int(high)}"
-    elif high is None and low is not None:
-        return f"{int(low)}-999"
-    elif low is not None and high is not None:
-        return f"{int(low)}-{int(high)}"
-    return "unknown"
+# DR-33-A (2026-04-23): The pre-P-D `_format_range` function was removed; it
+# produced sentinel-encoded strings (`-999-15` / `75-999`) that lost shoulder
+# semantics and that P-E / DR-33 replaced with the canonical text form
+# (`15°C or below` / `75°F or higher`). `_canonical_bin_label` below is the
+# sole replacement. No remaining callers of `_format_range` exist — verified
+# via `grep -rn "_format_range" src/ tests/ scripts/` returns zero matches.
+
+
+def _canonical_bin_label(lo: Optional[float], hi: Optional[float], unit: str) -> Optional[str]:
+    """Canonical winning_bin label matching P-E reconstruction convention.
+
+    Shoulder cases use English text form (not unicode ≥/≤) because
+    ``src/data/market_scanner.py::_parse_temp_range`` uses ``re.search``
+    and would silently misparse ``'≥21°C'`` as the POINT bin ``(21.0, 21.0)``.
+    Critic-opus C1 (P-E pre-review 2026-04-23) proved this empirically.
+    """
+    if lo is None and hi is None:
+        return None
+    if lo is not None and hi is not None:
+        if lo == hi:
+            return f"{int(lo)}°{unit}"
+        return f"{int(lo)}-{int(hi)}°{unit}"
+    if lo is None and hi is not None:
+        return f"{int(hi)}°{unit} or below"
+    return f"{int(lo)}°{unit} or higher"
+
+
+_HARVESTER_LIVE_DATA_VERSION = {
+    "wu_icao": "wu_icao_history_v1",
+    "hko": "hko_daily_api_v1",
+    "noaa": "ogimet_metar_v1",
+    "cwa_station": "cwa_no_collector_v0",
+}
 
 
 def _extract_all_bin_labels(event: dict) -> list[str]:
@@ -529,47 +647,127 @@ def _write_settlement_truth(
     conn,
     city: City,
     target_date: str,
-    winning_bin: str,
+    pm_bin_lo: Optional[float],
+    pm_bin_hi: Optional[float],
     *,
     event_slug: str = "",
-) -> None:
-    """Write PM settlement truth (winning_bin) to settlements table.
+    obs_row: Optional[dict] = None,
+) -> dict:
+    """Write canonical-authority settlement truth to settlements table.
 
-    Uses UPDATE then INSERT fallback to upsert. The settlement_source and
-    settlement_source_type come from city config (WU/HKO/NOAA/CWA),
-    not from PM — PM is the bin authority, the weather station is the
-    temperature authority.
+    Gate (DR-33-A / P-E canonical pattern):
+      1. Look up source-family-correct obs (caller's responsibility; passed via obs_row)
+      2. Apply SettlementSemantics.for_city(city).assert_settlement_value(obs.high_temp)
+      3. Containment check: rounded value ∈ [pm_bin_lo, pm_bin_hi]?
+         - Yes → authority='VERIFIED', settlement_value=rounded, winning_bin=canonical label
+         - No → authority='QUARANTINED' with enumerable reason
+      4. Populate all 4 INV-14 identity fields + provenance_json with decision_time_snapshot_id
+
+    Does NOT call conn.commit() — caller owns the transaction boundary (P-H
+    atomicity consideration; MEMORY L30 with-conn/savepoint collision).
+
+    Returns a dict with {authority, settlement_value, winning_bin, reason}
+    for caller to log / aggregate.
     """
-    settled_at = datetime.now(timezone.utc).isoformat()
     _SOURCE_TYPE_MAP = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
     db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
+    data_version = _HARVESTER_LIVE_DATA_VERSION.get(
+        city.settlement_source_type, "unknown_v0"
+    )
+    settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    authority = "QUARANTINED"
+    settlement_value: Optional[float] = None
+    winning_bin: Optional[str] = None
+    reason: Optional[str] = None
+    rounding_rule: str = "wmo_half_up"
+
+    if obs_row is None or obs_row.get("high_temp") is None:
+        reason = "harvester_live_no_obs"
+    else:
+        try:
+            sem = SettlementSemantics.for_city(city)
+            rounding_rule = sem.rounding_rule
+            rounded = sem.assert_settlement_value(
+                float(obs_row["high_temp"]),
+                context=f"harvester_live/{city.name}/{target_date}",
+            )
+        except SettlementPrecisionError:
+            reason = "harvester_live_settlement_precision_error"
+            rounded = None
+
+        if rounded is not None and math.isfinite(rounded):
+            # Containment check (point/range/shoulder-aware)
+            contained = False
+            if pm_bin_lo is not None and pm_bin_hi is not None:
+                contained = pm_bin_lo <= rounded <= pm_bin_hi
+            elif pm_bin_lo is None and pm_bin_hi is not None:
+                contained = rounded <= pm_bin_hi
+            elif pm_bin_hi is None and pm_bin_lo is not None:
+                contained = rounded >= pm_bin_lo
+            if contained:
+                authority = "VERIFIED"
+                settlement_value = rounded
+                winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+                reason = None
+            else:
+                # Quarantined — preserve rounded as evidence
+                settlement_value = rounded
+                reason = "harvester_live_obs_outside_bin"
+
+    provenance = {
+        "writer": "harvester_live_dr33",
+        "writer_script": "src/execution/harvester.py",
+        "source_family": db_source_type,
+        "obs_source": obs_row.get("source") if obs_row else None,
+        "obs_id": obs_row.get("id") if obs_row else None,
+        "decision_time_snapshot_id": obs_row.get("fetched_at") if obs_row else None,
+        "rounding_rule": rounding_rule,
+        "reconstruction_method": "harvester_live_uma_vote",
+        "event_slug": event_slug or None,
+        "reconstructed_at": settled_at,
+        "audit_ref": "docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md",
+    }
+    if reason is not None:
+        provenance["quarantine_reason"] = reason
+
+    # INSERT OR REPLACE matches P-E's canonical DELETE+INSERT idempotency;
+    # UNIQUE(city, target_date) means this is an upsert.
     try:
         conn.execute(
             """
-            UPDATE settlements
-            SET winning_bin = ?,
-                settled_at = COALESCE(settled_at, ?),
-                market_slug = COALESCE(market_slug, ?)
-            WHERE city = ? AND target_date = ?
+            INSERT OR REPLACE INTO settlements (
+                city, target_date, market_slug, winning_bin, settlement_value,
+                settlement_source, settled_at, authority,
+                pm_bin_lo, pm_bin_hi, unit, settlement_source_type,
+                temperature_metric, physical_quantity, observation_field,
+                data_version, provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (winning_bin, settled_at, event_slug or None, city.name, target_date),
+            (
+                city.name, target_date, event_slug or None, winning_bin, settlement_value,
+                city.settlement_source, settled_at, authority,
+                pm_bin_lo, pm_bin_hi, city.settlement_unit, db_source_type,
+                "high", "daily_maximum_air_temperature", "high_temp",
+                data_version, json.dumps(provenance, sort_keys=True, default=str),
+            ),
         )
-        if conn.execute("SELECT changes()").fetchone()[0] == 0:
-            conn.execute(
-                """
-                INSERT INTO settlements (city, target_date, winning_bin, settled_at,
-                                        market_slug, settlement_source,
-                                        settlement_source_type, authority)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED')
-                """,
-                (city.name, target_date, winning_bin, settled_at,
-                 event_slug or None, city.settlement_source,
-                 db_source_type),
-            )
-        conn.commit()
-        logger.info("Settlement truth written: %s %s → %s", city.name, target_date, winning_bin)
-    except Exception as e:
-        logger.warning("Failed to write settlement truth for %s %s: %s", city.name, target_date, e)
+        logger.info(
+            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s",
+            city.name, target_date, authority, settlement_value, winning_bin, reason,
+        )
+    except Exception as exc:
+        logger.warning(
+            "harvester_live write failed for %s %s: %s", city.name, target_date, exc,
+        )
+        raise
+
+    return {
+        "authority": authority,
+        "settlement_value": settlement_value,
+        "winning_bin": winning_bin,
+        "reason": reason,
+    }
 
 
 def _extract_target_date(event: dict) -> Optional[str]:

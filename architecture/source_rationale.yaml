@@ -26,6 +26,19 @@ write_routes:
     owner: src/execution/harvester.py
     rounding_law: src/contracts/settlement_semantics.py
     db_gate: src/state/db.py
+    # DR-33-A (2026-04-23): harvester live-enablement code-only phase.
+    # Feature-flagged via ZEUS_HARVESTER_LIVE_ENABLED (default OFF).
+    # Canonical-authority write path (INV-14 identity + provenance_json +
+    # SettlementSemantics.assert_settlement_value gate) parallels P-E
+    # reconstruction pattern. Writer signature: harvester_live_dr33.
+    # P-E alternate writer signature (one-off reconstruction): p_e_reconstruction_2026-04-23.
+    # See:
+    # - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
+    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pe_reconstruction_plan.md
+    dr33_live_enablement: docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+    feature_flag: ZEUS_HARVESTER_LIVE_ENABLED
+    live_enabled_default: false
   backtest_diagnostic_write:
     owner: src/engine/replay.py
     db: state/zeus_backtest.db

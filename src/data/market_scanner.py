@@ -639,8 +639,26 @@ def _parse_temp_range(question: str) -> tuple[Optional[float], Optional[float]]:
     if m:
         return float(m.group(1)), None
 
-    # "X°C" single degree
+    # "X°C" single degree (end-of-string anchored — matches canonical labels
+    # like "17°C" produced by _canonical_bin_label).
     m = re.search(r"(-?\d+\.?\d*)\s*°[Cc]$", q)
+    if m:
+        val = float(m.group(1))
+        return val, val
+
+    # "X°F" single degree (end-of-string anchored) — parallel to °C case
+    # for P-E / DR-33 canonical Fahrenheit point-bin labels.
+    m = re.search(r"(-?\d+\.?\d*)\s*°[Ff]$", q)
+    if m:
+        val = float(m.group(1))
+        return val, val
+
+    # DR-33 / P-D §6.1 Gamma question point-bin form: "... be 17°C on April 15?"
+    # — matches X°C/X°F followed by " on " date/etc. Explicitly NOT matching
+    # "or higher/lower/below/above/more" fragments (handled by earlier branches
+    # which run first). The " on " word-boundary anchor prevents matches on
+    # intra-word occurrences.
+    m = re.search(r"(-?\d+\.?\d*)\s*°[CcFf]\s+on\b", q)
     if m:
         val = float(m.group(1))
         return val, val

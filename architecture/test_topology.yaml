@@ -152,6 +152,7 @@ categories:
     - tests/test_dt1_commit_ordering.py
     - tests/test_dt1_savepoint_integration.py
     - tests/test_dt4_chain_three_state.py
+    - tests/test_harvester_dr33_live_enablement.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py
