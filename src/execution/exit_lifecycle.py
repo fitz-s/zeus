@@ -174,6 +174,15 @@ def _dual_write_canonical_economic_close_if_available(
         # the legacy table.  Create an entry-phase snapshot so
         # build_entry_canonical_write produces the standard three-event
         # sequence (OPEN_INTENT / ORDER_POSTED / ORDER_FILLED → active).
+        #
+        # T4.1b 2026-04-23 (D4 Option E): these legacy positions have no
+        # captured `DecisionEvidence` (the decision frame predates the
+        # T4.1b accept-path wiring). Emit the `decision_evidence_reason`
+        # sentinel "backfill_legacy_position" into the ENTRY_ORDER_POSTED
+        # payload so T4.2-Phase1 exit-side audit can distinguish
+        # missing-because-legacy from missing-because-bug. Without this
+        # sentinel, audit_log_false_positive_rate would flag every legacy
+        # position's exit as an asymmetry violation during Phase1 rollout.
         entry_snapshot = copy.copy(position)
         entry_snapshot.state = "entered"
         entry_snapshot.exit_state = ""
@@ -181,6 +190,7 @@ def _dual_write_canonical_economic_close_if_available(
             entry_events, _ = build_entry_canonical_write(
                 entry_snapshot,
                 source_module="src.execution.exit_lifecycle:backfill",
+                decision_evidence_reason="backfill_legacy_position",
             )
         except Exception as exc:
             logger.debug(

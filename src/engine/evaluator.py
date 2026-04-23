@@ -61,6 +61,7 @@ from src.strategy.selection_family import (
 from src.types.metric_identity import MetricIdentity
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
+from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.strategy.market_analysis import MarketAnalysis
@@ -128,6 +129,13 @@ class EdgeDecision:
     settlement_semantics_json: Optional[str] = None
     epistemic_context_json: Optional[str] = None
     edge_context_json: Optional[str] = None
+
+    # T4.1b 2026-04-23 (D4 Option E persistence wiring): entry-path
+    # `DecisionEvidence` captured at the accept site flows here so the
+    # canonical ENTRY_ORDER_POSTED event payload can carry a
+    # `decision_evidence_envelope` sidecar. None on rejection paths and
+    # test fixtures — the sidecar key is omitted in that case.
+    decision_evidence: Optional[DecisionEvidence] = None
 
 
 
@@ -1697,6 +1705,25 @@ def evaluate_candidate(
             n_edges_after_fdr=len(filtered),
         )
 
+        # T4.1b 2026-04-23 (D4 Option E): capture entry-side DecisionEvidence
+        # here — the single `should_trade=True` EdgeDecision accept site in
+        # this file. `sample_size` sources from the shared bootstrap-count
+        # helper (src.config.edge_n_bootstrap) so the evidence reflects the
+        # exact count used for the family FDR scan. `confidence_level` sources
+        # from DEFAULT_FDR_ALPHA (src.strategy.fdr_filter:19, backed by
+        # settings["edge"]["fdr_alpha"]) so any α tuning in config propagates
+        # here without code edits. `consecutive_confirmations=1` = 1 robust
+        # confirmation (CI_lower > 0 across n_bootstrap draws) per the D4
+        # contract docstring; exit-side `consecutive_confirmations>=1` is the
+        # symmetry floor enforced by `assert_symmetric_with`.
+        entry_evidence = DecisionEvidence(
+            evidence_type="entry",
+            statistical_method="bootstrap_ci_bh_fdr",
+            sample_size=edge_n_bootstrap(),
+            confidence_level=DEFAULT_FDR_ALPHA,
+            fdr_corrected=True,
+            consecutive_confirmations=1,
+        )
         decisions.append(EdgeDecision(
             should_trade=True,
             edge=edge,
@@ -1723,6 +1750,7 @@ def evaluate_candidate(
                 "forecast_context": forecast_context,
             }),
             edge_context_json=_serialize_json(edge_ctx),
+            decision_evidence=entry_evidence,
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

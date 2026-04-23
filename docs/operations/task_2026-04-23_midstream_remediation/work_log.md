@@ -39,7 +39,8 @@
 | T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | `979eb3b` | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
 | T1.e currency-CI audit script + registry | closed | `692a3af` | new `scripts/test_currency_audit.py` reads `architecture/test_topology.yaml::categories.midstream_guardian_panel` (nested per surrogate-critic D3 fix) + `architecture/script_manifest.yaml` registration; 15/15 panel files green on dry-run; D1 (empty-panel silent-pass) + D2 (YAML parse traceback) + D3 (sibling-vs-nested) fixes applied before commit; surrogate critic COMMENT verdict with 4 findings, 2 addressed in-slice | 2026-04-23 |
 | T5.a ExecutionPrice executor boundary | closed | `abd5bb6` | structural boundary guard in `_live_order` via `ExecutionPrice(price_type="ask", fee_deducted=False, currency="probability_units")` — catches NaN/±inf/negative/>1.0 before CLOB-send; 12 new tests pass; latent `decision_edge` bug fixed inline (added to `ExecutionIntent` dataclass per critic MEDIUM finding); rejection reason renamed `malformed_limit_price` per critic LOW finding; surrogate critic COMMENT verdict, all 4 findings (1 MED + 3 LOW) addressed in-slice | 2026-04-23 |
-| T4.1a DecisionEvidence JSON persistence primitive | closed | pending | `to_json` / `from_json` added to `DecisionEvidence` class body (not module-level workaround — surrogate critic HIGH finding: frozen dataclasses DO accept body methods); `contract_version=1` envelope; strict `type(v) is int` guard prevents `True == 1` collision; malformed-JSON/missing-keys/unknown-fields route to `UnknownContractVersionError`; `__post_init__` ValueErrors propagate unwrapped so callers distinguish schema drift from invalid data; 18 new tests pass (round-trip + version guard + malformed + boolean-True guard + __post_init__ propagation); surrogate critic REQUEST CHANGES, all 3 blocking findings addressed in-slice before commit | 2026-04-23 |
+| T4.1a DecisionEvidence JSON persistence primitive | closed | `547bcdd` | `to_json` / `from_json` added to `DecisionEvidence` class body (not module-level workaround — surrogate critic HIGH finding: frozen dataclasses DO accept body methods); `contract_version=1` envelope; strict `type(v) is int` guard prevents `True == 1` collision; malformed-JSON/missing-keys/unknown-fields route to `UnknownContractVersionError`; `__post_init__` ValueErrors propagate unwrapped so callers distinguish schema drift from invalid data; 18 new tests pass (round-trip + version guard + malformed + boolean-True guard + __post_init__ propagation); surrogate critic REQUEST CHANGES, all 3 blocking findings addressed in-slice before commit | 2026-04-23 |
+| T4.1b DecisionEvidence entry-event emission wiring | closed | pending | 4 src files + 1 new test file; evaluator accept path (L1700-1726 — plan-premise correction #8: plan cited L753/778/… rejection paths) constructs `DecisionEvidence(evidence_type="entry", statistical_method="bootstrap_ci_bh_fdr", sample_size=edge_n_bootstrap(), confidence_level=DEFAULT_FDR_ALPHA, fdr_corrected=True, consecutive_confirmations=1)` and plumbs through `EdgeDecision.decision_evidence` → `_dual_write_canonical_entry_if_available` → `build_entry_canonical_write` → `_entry_event` → `_entry_event_payload` as **`decision_evidence_envelope` string key** (verbatim `to_json()` output — Q2 flipped from nested dict on surrogate HIGH finding); legacy-backfill path at `src/execution/exit_lifecycle.py:181` emits `decision_evidence_reason="backfill_legacy_position"` sentinel so T4.2-Phase1 exit-side audit distinguishes missing-because-legacy from missing-because-bug (surrogate HIGH finding missed by design doc); `ENTRY_ORDER_POSTED` only (Q1), `decision_id` idempotency (Q3); 12 new tests pass; pre-T4.1b source baseline = 24F/476P on 17-file set; post-T4.1b = 24F/488P on 18-file set (delta = ZERO new failures, +12 passes from new test); planning-lock GREEN on 5 files; surrogate code-reviewer@opus pre-code design review REQUEST_CHANGES with 6 findings (all 6 addressed inline incl. backfill sidecar scope addition); con-nyx deferred to next session per operator directive | 2026-04-23 |
 
 ## T4.1a — execution notes (2026-04-23)
 
@@ -113,6 +114,178 @@ emission so `ENTRY_ORDER_POSTED.payload_json` carries a
 `EdgeDecision → event` chain, and `src/state/lifecycle_events.py`
 (or equivalent emission helper). Larger slice, ~3-4h, needs its own
 critic review. Flagged for next wave.
+
+## T4.1b — execution notes (2026-04-23)
+
+### Plan-premise correction #8
+
+Fix-plan T4.1 row cited `src/engine/evaluator.py:724, 1307` as entry
+call sites. T4.0 design doc rev2 cited `evaluator.py:753/778/803/815/
+832/842/866/882/901/912` as `EdgeDecision` construction sites.
+Grep-verified 2026-04-23:
+
+- L724 / L1307 are NOT `EdgeDecision(...)` constructions (L724 pre-decision
+  signal building; L1307 is `entry_validations.append("bootstrap_ci")`).
+- All 10 sites L753/778/803/815/832/842/866/882/901/912 are
+  `EdgeDecision(False, ...)` — **rejection paths**.
+- The actual accept path is `evaluator.py:1700-1726`
+  `decisions.append(EdgeDecision(should_trade=True, edge=edge, ...))`.
+  It is the ONLY `should_trade=True` site in the file.
+
+### Implementation (4 src + 1 test)
+
+1. **`src/contracts/decision_evidence.py`**: no change (T4.1a primitive
+   already provides `to_json` + `from_json` + `contract_version=1`).
+2. **`src/engine/lifecycle_events.py`**:
+   - Import `DecisionEvidence`.
+   - `_entry_event_payload(position, *, phase_after, decision_evidence=None,
+     decision_evidence_reason=None)` — when `decision_evidence` is not None,
+     add key `"decision_evidence_envelope": decision_evidence.to_json()`
+     (verbatim string — surrogate HIGH finding flipped Q2 from nested dict);
+     when `decision_evidence_reason` is not None, add key
+     `"decision_evidence_reason": <str>`.
+   - `_entry_event(...)` and `build_entry_canonical_write(...)` threaded
+     through; both keys apply to `ENTRY_ORDER_POSTED` only (Q1 = T4.0
+     design doc rule; `POSITION_OPEN_INTENT` precedes the statistical
+     decision fully materializing; `ENTRY_ORDER_FILLED` arrives after the
+     decision frame has released).
+3. **`src/engine/cycle_runtime.py`**:
+   - Import `DecisionEvidence`.
+   - `_dual_write_canonical_entry_if_available(..., decision_evidence=None)`
+     signature extension; threads to `build_entry_canonical_write`.
+   - Accept-path call site at `L1131-1136` passes
+     `decision_evidence=getattr(d, "decision_evidence", None)`.
+4. **`src/engine/evaluator.py`**:
+   - Import `DecisionEvidence`.
+   - `EdgeDecision` dataclass at `L97-130` grows trailing optional field
+     `decision_evidence: Optional[DecisionEvidence] = None` (positional-
+     stability preserved per surrogate LOW finding; all 30+ callers use
+     kw args).
+   - Accept site at `L1700+` constructs evidence from
+     `edge_n_bootstrap()` (sample_size) + `DEFAULT_FDR_ALPHA`
+     (confidence_level) — both pre-existing imports (`L25`, `L52`).
+     Surrogate had suggested adding a `fdr_alpha()` helper to config;
+     independent grep found the central source already at
+     `src/strategy/fdr_filter.py:19` as `DEFAULT_FDR_ALPHA = float(
+     settings["edge"]["fdr_alpha"])`. No new helper needed.
+5. **`src/execution/exit_lifecycle.py`**: backfill-path
+   `build_entry_canonical_write(entry_snapshot,
+   source_module="src.execution.exit_lifecycle:backfill",
+   decision_evidence_reason="backfill_legacy_position")` — surrogate HIGH
+   finding: without this sentinel T4.2-Phase1 audit would flag every
+   legacy position's exit as asymmetry. Scope-addition: 4 files → 5.
+6. **`tests/test_decision_evidence_entry_emission.py`** (new, 12 tests):
+   - TestEntryEventPayloadEnvelope: 4 (accept posts envelope; intent/
+     filled don't; rejection no key)
+   - TestRoundTripRehydration: 2 (envelope rehydrates; SQL `json_extract`
+     pattern returns string directly for T4.2-Phase1 readiness)
+   - TestIdempotency: 1 (same decision_id + evidence → byte-identical
+     payload across runs)
+   - TestBackfillReasonSentinel: 2 (sentinel on ENTRY_ORDER_POSTED only,
+     no leak to siblings)
+   - TestFillOnlyBuilderScopeBoundary: 1 (fill_tracker path never emits
+     either key)
+   - TestPayloadBackwardCompatibility: 1 (default call pins pre-slice key
+     set frozenset byte-exact)
+   - TestEntryEventPayloadUnitAccess: 1 (both keys simultaneously)
+   - 3-line provenance header per CLAUDE.md rule.
+
+### Six surrogate critic findings (all integrated inline before commit)
+
+Surrogate `code-reviewer@opus` pre-code design review verdict:
+REQUEST_CHANGES.
+
+- **HIGH Q2 payload format**: original nested-dict proposal required
+  `json.dumps(..., sort_keys=True)` re-wrap to verify envelope on read.
+  Flipped to string value storage: payload key is
+  `decision_evidence_envelope: str` (verbatim `to_json()` output);
+  read-side uses
+  `DecisionEvidence.from_json(json_extract(payload_json,
+  '$.decision_evidence_envelope'))` directly. Eliminates double-
+  serialization invariant.
+- **HIGH backfill path missed**: `src/execution/exit_lifecycle.py:181`
+  also calls `build_entry_canonical_write`. Without sentinel, T4.2-Phase1
+  audit would false-positive on every legacy-position exit. Added
+  `decision_evidence_reason="backfill_legacy_position"` sentinel;
+  scope grew from 4 files to 5.
+- **MEDIUM α source**: `confidence_level=0.10` was hardcoded in
+  proposal; surrogate suggested adding `fdr_alpha()` helper to config.
+  Independent grep revealed central source already exists as
+  `DEFAULT_FDR_ALPHA` at `src/strategy/fdr_filter.py:19`. Used
+  existing constant instead of creating parallel one.
+- **MEDIUM `consecutive_confirmations=1` semantics**: added inline
+  comment at construction site documenting "1 robust confirmation =
+  CI_lower > 0 across n_bootstrap=edge_n_bootstrap() draws" to prevent
+  future readers from mis-interpreting as "1 bootstrap iteration".
+- **LOW positional stability**: new `decision_evidence` field placed at
+  END of `EdgeDecision` dataclass field list (after
+  `edge_context_json`). All 30+ call sites use kw args so positional
+  order is not strictly required, but trailing-placement is free
+  insurance.
+- **LOW scope-boundary test**: included explicit
+  `TestFillOnlyBuilderScopeBoundary` — pins that fill_tracker path's
+  `build_entry_fill_only_canonical_write` emits neither envelope nor
+  reason (Q1 boundary enforcement).
+
+### Regression evidence (L28 delta-direction, not absolute count)
+
+- **Narrow scope (3 T4 files)**: `pytest -q
+  tests/test_decision_evidence_entry_emission.py
+  tests/test_decision_evidence_persistence.py
+  tests/test_entry_exit_symmetry.py` → 45 passed in 0.10s (12 new + 18
+  T4.1a + 15 entry_exit_symmetry).
+- **Broad 17-file regression on pre-T4.1b source (git stash verify)**:
+  24 failed / 476 passed / 34 skipped / 1 xfailed.
+- **Broad 18-file regression post-T4.1b (+new test file)**: 24 failed /
+  488 passed / 34 skipped / 1 xfailed. **Delta: ZERO new failures; +12
+  passes (all from the new test file).**
+- The 24 pre-existing failures are all known out-of-T4.1b-scope:
+  `test_cycle_runtime_entry_dual_write_helper_skips_*` (T3.2-logged
+  `_Logger.warning` harness gap); `test_structural_linter_gate` (T3.4
+  upstream-blocked); `test_fdr::TestSelectionFamilySubstrate::*` (T2.d/
+  e/f deferred DT7 boundary gate); `test_runtime_guards::*` (pre-T3.1
+  materialize_position signature baseline).
+
+### Planning-lock
+
+`topology_doctor --planning-lock --changed-files
+src/engine/evaluator.py src/engine/cycle_runtime.py
+src/engine/lifecycle_events.py src/execution/exit_lifecycle.py
+tests/test_decision_evidence_entry_emission.py --plan-evidence
+docs/operations/task_2026-04-23_midstream_remediation/plan.md --json`
+→ `{"ok": true, "issues": []}` (GREEN across 5 files including
+exit_lifecycle.py scope addition).
+
+### con-nyx deferred
+
+Per operator directive this session: "con-nyx 就是 critic，下次再发给他
+吧，全部接受". Team config at `~/.claude/teams/zeus-live-readiness-debate/
+config.json` persists; con-nyx teammate `isActive: false`. Next session's
+first-10-min resume should dispatch this slice's design + commit to
+con-nyx for durable-context record.
+
+### Category immunity (Fitz K<<N)
+
+Surrogate scored 6/10 — partial. Category "entry path without
+DecisionEvidence still constructible" remains (any future
+`EdgeDecision(should_trade=True, ...)` that forgets `decision_evidence=`
+silently emits ENTRY_ORDER_POSTED with no envelope). Full immunity
+requires `EdgeDecision.for_accept(...)` factory or `__post_init__`
+guard that raises when `should_trade=True` + `decision_evidence is
+None`. **Out of T4.1b scope** (would require rewriting 30+ call sites)
+— flagged for T4.1c or future immune-system slice.
+
+### T4.2-Phase1 readiness
+
+Round-trip read-side pattern demonstrated in
+`TestRoundTripRehydration.test_read_side_pattern_simulates_json_extract`:
+`json.loads(payload_json)["decision_evidence_envelope"]` returns the
+envelope JSON string verbatim (not a re-serialized dict) — ready for
+`DecisionEvidence.from_json(...)` directly. Exit-side T4.2-Phase1 will
+use the SQL analog `json_extract(payload_json,
+'$.decision_evidence_envelope')` with zero re-wrapping step. Legacy
+positions emit `decision_evidence_reason` sentinel instead; exit-side
+audit distinguishes and does not false-positive.
 
 ## T5.a — execution notes (2026-04-23)
 

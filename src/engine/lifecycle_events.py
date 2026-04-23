@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.contracts.decision_evidence import DecisionEvidence
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     fold_lifecycle_phase,
@@ -100,25 +101,41 @@ def build_position_current_projection(position: Any) -> dict:
     }
 
 
-def _entry_event_payload(position: Any, *, phase_after: str) -> str:
-    return json.dumps(
-        {
-            "city": getattr(position, "city", ""),
-            "target_date": getattr(position, "target_date", ""),
-            "bin_label": getattr(position, "bin_label", ""),
-            "direction": getattr(position, "direction", ""),
-            "unit": getattr(position, "unit", "F"),
-            "size_usd": getattr(position, "size_usd", 0.0),
-            "shares": getattr(position, "shares", 0.0),
-            "entry_price": getattr(position, "entry_price", 0.0),
-            "order_status": getattr(position, "order_status", ""),
-            "chain_state": getattr(position, "chain_state", ""),
-            "entry_method": getattr(position, "entry_method", ""),
-            "phase_after": phase_after,
-        },
-        default=str,
-        sort_keys=True,
-    )
+def _entry_event_payload(
+    position: Any,
+    *,
+    phase_after: str,
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
+) -> str:
+    # T4.1b 2026-04-23 (D4 Option E): attach DecisionEvidence envelope or
+    # a reason sentinel onto ENTRY_ORDER_POSTED payloads. The two keys are
+    # mutually exclusive semantic variants — `decision_evidence_envelope`
+    # is the verbatim `DecisionEvidence.to_json()` output (read-side uses
+    # `json_extract(payload_json, '$.decision_evidence_envelope')` then
+    # `DecisionEvidence.from_json(...)`); `decision_evidence_reason`
+    # records a known-missing-evidence context (e.g. legacy-position
+    # backfill) so T4.2-Phase1 exit-side audit can distinguish
+    # missing-because-legacy from missing-because-bug.
+    payload: dict[str, Any] = {
+        "city": getattr(position, "city", ""),
+        "target_date": getattr(position, "target_date", ""),
+        "bin_label": getattr(position, "bin_label", ""),
+        "direction": getattr(position, "direction", ""),
+        "unit": getattr(position, "unit", "F"),
+        "size_usd": getattr(position, "size_usd", 0.0),
+        "shares": getattr(position, "shares", 0.0),
+        "entry_price": getattr(position, "entry_price", 0.0),
+        "order_status": getattr(position, "order_status", ""),
+        "chain_state": getattr(position, "chain_state", ""),
+        "entry_method": getattr(position, "entry_method", ""),
+        "phase_after": phase_after,
+    }
+    if decision_evidence is not None:
+        payload["decision_evidence_envelope"] = decision_evidence.to_json()
+    if decision_evidence_reason is not None:
+        payload["decision_evidence_reason"] = decision_evidence_reason
+    return json.dumps(payload, default=str, sort_keys=True)
 
 
 def _entry_event(
@@ -132,6 +149,8 @@ def _entry_event(
     decision_id: str | None,
     source_module: str,
     order_id: str | None,
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
 ) -> dict:
     trade_id = str(getattr(position, "trade_id"))
     slug = event_type.lower()
@@ -153,7 +172,12 @@ def _entry_event(
         "idempotency_key": f"{trade_id}:{slug}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
-        "payload_json": _entry_event_payload(position, phase_after=phase_after),
+        "payload_json": _entry_event_payload(
+            position,
+            phase_after=phase_after,
+            decision_evidence=decision_evidence,
+            decision_evidence_reason=decision_evidence_reason,
+        ),
     }
 
 
@@ -162,7 +186,18 @@ def build_entry_canonical_write(
     *,
     decision_id: str | None = None,
     source_module: str = "src.engine.lifecycle_events",
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
 ) -> tuple[list[dict], dict]:
+    # T4.1b 2026-04-23 (D4 Option E): `decision_evidence` lands as a
+    # `decision_evidence_envelope` payload sidecar on the ENTRY_ORDER_POSTED
+    # event only (the single event that represents the committed decision
+    # with full data still in frame). POSITION_OPEN_INTENT precedes the
+    # statistical decision fully materializing; ENTRY_ORDER_FILLED arrives
+    # after the decision frame has released. Callers without evidence
+    # (legacy-position backfill from src.execution.exit_lifecycle) pass
+    # `decision_evidence_reason` instead so the exit-side audit can
+    # distinguish missing-because-legacy from missing-because-bug.
     projection = build_position_current_projection(position)
     canonical_phase = projection["phase"]
     if canonical_phase not in {PENDING_ENTRY, ACTIVE, DAY0_WINDOW}:
@@ -198,6 +233,8 @@ def build_entry_canonical_write(
             decision_id=decision_id,
             source_module=source_module,
             order_id=order_id,
+            decision_evidence=decision_evidence,
+            decision_evidence_reason=decision_evidence_reason,
         ),
     ]
 

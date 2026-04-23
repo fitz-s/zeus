@@ -314,7 +314,7 @@
     {
       "slice_id": "T7.a",
       "name": "test_fdr_family_key_is_canonical_activation_verified_already_done",
-      "commit": "pending_doc_only",
+      "commit": "14bd25d",
       "date": "2026-04-23",
       "critic_status": "no_code_change_to_review",
       "planning_lock": "N/A (no source/test edits)",
@@ -425,7 +425,7 @@
     {
       "slice_id": "T4.1a",
       "name": "decision_evidence_json_persistence_primitive",
-      "commit": "pending",
+      "commit": "547bcdd",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_REQUEST_CHANGES_all_3_blocking_findings_addressed_inline",
       "planning_lock": "GREEN (src/contracts + tests)",
@@ -446,6 +446,52 @@
         "pytest -q tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py \u2192 33 passed in 0.09s (18 new T4.1a + 15 pre-existing D4 symmetry)"
       ],
       "followup_slice_T4_1b": "wire decision_evidence.to_json() into ENTRY_ORDER_POSTED.payload_json via evaluator + lifecycle_events emission path; construct DecisionEvidence(evidence_type='entry', statistical_method='bootstrap_ci_bh_fdr', sample_size=5000, confidence_level=0.10, fdr_corrected=True, consecutive_confirmations=1) at EdgeDecision creation sites; serialize as nested 'decision_evidence' key in position_events.payload_json. Heavy slice, separate planning-lock and critic review required."
+    },
+    {
+      "slice_id": "T4.1b",
+      "name": "decision_evidence_entry_event_emission_wiring",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_REQUEST_CHANGES_all_6_findings_addressed_pre_code_con_nyx_deferred_per_operator",
+      "planning_lock": "GREEN on 5 files (src/engine/evaluator.py + src/engine/cycle_runtime.py + src/engine/lifecycle_events.py + src/execution/exit_lifecycle.py + tests/test_decision_evidence_entry_emission.py)",
+      "files_changed": [
+        "src/engine/evaluator.py (EdgeDecision dataclass trailing field + accept-path DecisionEvidence construction at L1700-1726)",
+        "src/engine/cycle_runtime.py (_dual_write_canonical_entry_if_available signature + accept-path call site)",
+        "src/engine/lifecycle_events.py (_entry_event_payload + _entry_event + build_entry_canonical_write all gain decision_evidence + decision_evidence_reason params)",
+        "src/execution/exit_lifecycle.py (backfill path passes decision_evidence_reason='backfill_legacy_position')",
+        "tests/test_decision_evidence_entry_emission.py (new, 12 tests across 7 classes)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_eight": "Fix-plan T4.1 row cited evaluator.py:724,1307 as entry call sites. T4.0 design doc rev2 cited evaluator.py:753/778/803/815/832/842/866/882/901/912 as EdgeDecision construction sites. Grep-verified: L724/L1307 are NOT EdgeDecision constructions; all 10 cited sites are EdgeDecision(False, ...) rejection paths. The actual accept path is evaluator.py:1700-1726 decisions.append(EdgeDecision(should_trade=True, ...)) — the ONLY should_trade=True site in the file.",
+      "surrogate_critic_findings_integrated": {
+        "HIGH_Q2_payload_format_flip": "Original proposal: nested dict payload['decision_evidence'] = json.loads(evidence.to_json()). Surrogate flagged double-serialization invariant. Flipped to string-value storage: payload['decision_evidence_envelope'] = evidence.to_json() (verbatim). Read-side uses json_extract(payload_json, '$.decision_evidence_envelope') returning envelope string directly for DecisionEvidence.from_json.",
+        "HIGH_backfill_path_missed": "src/execution/exit_lifecycle.py:181 is a second build_entry_canonical_write caller (legacy-position economic-close backfill). Without sentinel, T4.2-Phase1 exit-side audit would false-positive on every legacy-position exit. Added decision_evidence_reason='backfill_legacy_position' sentinel; T4.1b scope expanded from 4 to 5 files.",
+        "MEDIUM_alpha_source": "Surrogate suggested adding fdr_alpha() helper to src/config.py. Independent grep found central source already exists at src/strategy/fdr_filter.py:19 DEFAULT_FDR_ALPHA = float(settings['edge']['fdr_alpha']). Used existing constant (already imported at evaluator.py:52).",
+        "MEDIUM_consecutive_confirmations_semantics": "Added inline comment at accept-path evidence construction documenting 'consecutive_confirmations=1 = 1 robust confirmation via CI_lower > 0 across n_bootstrap draws' per D4 contract docstring.",
+        "LOW_positional_stability": "New decision_evidence field placed at END of EdgeDecision dataclass field list (after edge_context_json) for positional-stability insurance.",
+        "LOW_scope_boundary_test": "Explicit TestFillOnlyBuilderScopeBoundary added pinning that build_entry_fill_only_canonical_write (fill_tracker path) emits neither envelope nor reason keys."
+      },
+      "design_decisions_final": {
+        "Q1_events_scope": "ENTRY_ORDER_POSTED only (per T4.0 design doc; decision frame is in-scope at POSTED, gone by FILLED)",
+        "Q2_payload_format": "decision_evidence_envelope as string value (verbatim to_json output, NOT nested dict — Q2 flipped on surrogate HIGH finding)",
+        "Q3_idempotency": "decision_id already carried on event (L148 of lifecycle_events.py); retry with same decision_id naturally emits same envelope"
+      },
+      "regression_delta_direction_L28": {
+        "narrow_3_file_T4_slab": "pytest tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 45 passed in 0.10s (12 new + 18 T4.1a + 15 symmetry)",
+        "broad_17_file_pre_T4_1b_baseline_via_git_stash": "24 failed / 476 passed / 34 skipped / 1 xfailed",
+        "broad_18_file_post_T4_1b": "24 failed / 488 passed / 34 skipped / 1 xfailed",
+        "delta": "ZERO new failures; +12 passes (all from new test file)"
+      },
+      "category_immunity_score_fitz_k_lt_n": "6/10 PARTIAL — makes impossible: entry evidence with wrong contract_version (envelope rejects via UnknownContractVersionError), missing field (__post_init__ ValueError), invalid values (__post_init__ ValueError). Leaves as patch-instance: entry path without evidence still constructible (any future EdgeDecision(should_trade=True, ...) that forgets decision_evidence= silently emits with no envelope). Full immunity requires EdgeDecision.for_accept(...) factory or __post_init__ guard — out of T4.1b scope; flagged T4.1c candidate.",
+      "read_side_helper_out_of_scope": "load_entry_evidence intentionally NOT included in T4.1b. Read-side trivialized by Q2 string-value choice: T4.2-Phase1 uses DecisionEvidence.from_json(json_extract(payload_json, '$.decision_evidence_envelope')) inline; extract to helper only if repeated 3+ times.",
+      "con_nyx_durable_critic_deferred": "Per operator directive: 'con-nyx 就是 critic，下次再发给他吧，全部接受'. Team config at ~/.claude/teams/zeus-live-readiness-debate/config.json persists; next session's first-10-min resume should dispatch this slice's design + commit to con-nyx for durable-context record.",
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_decision_evidence_entry_emission.py -> 12 passed in 0.10s",
+        ".venv/bin/python -m pytest -q tests/test_decision_evidence_entry_emission.py tests/test_decision_evidence_persistence.py tests/test_entry_exit_symmetry.py -> 45 passed in 0.10s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/engine/evaluator.py src/engine/cycle_runtime.py src/engine/lifecycle_events.py src/execution/exit_lifecycle.py tests/test_decision_evidence_entry_emission.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}",
+        "git stash verification: pre-T4.1b source + same 17-file regression = 24 failed / 476 passed (identical to post-T4.1b's 24 failed / 488 passed minus the 12 new-test passes) -> ZERO delta"
+      ]
     }
   ],
   "slices_in_review": [
