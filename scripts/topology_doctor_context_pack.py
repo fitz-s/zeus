@@ -5,8 +5,13 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date, datetime
 from fnmatch import fnmatch
 from typing import Any
+
+
+CURRENT_FACT_MAX_STALENESS_DAYS = 14
 
 
 def build_impact(api: Any, files: list[str]) -> dict[str, Any]:
@@ -109,6 +114,251 @@ def run_context_packs(api: Any) -> Any:
             if api._metadata_missing(lore_policy.get(field)):
                 issues.append(api._issue("context_pack_profile_lore_policy_missing", path, f"missing lore_policy.{field}"))
     return api.StrictResult(ok=not issues, issues=issues)
+
+
+def task_boot_profiles(api: Any) -> dict[str, dict[str, Any]]:
+    return {
+        str(profile.get("id")): profile
+        for profile in api.load_task_boot_profiles().get("profiles") or []
+        if profile.get("id")
+    }
+
+
+def fatal_misread_index(api: Any) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("id")): item
+        for item in api.load_fatal_misreads().get("misreads") or []
+        if item.get("id")
+    }
+
+
+def infer_task_class(api: Any, task: str, files: list[str]) -> str | None:
+    task_l = task.lower()
+    file_text = " ".join(files).lower()
+    manifest = api.load_task_boot_profiles()
+    profile_by_id = task_boot_profiles(api)
+    for profile_id in manifest.get("required_task_classes") or profile_by_id:
+        profile = profile_by_id.get(str(profile_id))
+        if not profile:
+            continue
+        terms = [str(term).lower() for term in profile.get("trigger_terms") or []]
+        if any(term and (term in task_l or term in file_text) for term in terms):
+            return str(profile_id)
+    return None
+
+
+def current_fact_audit_date(text: str) -> date | None:
+    match = re.search(r"Last audited:\s*(\d{4}-\d{2}-\d{2})", text)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def current_fact_status(api: Any, surfaces: list[str]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    today = date.today()
+    for surface in surfaces:
+        path = api.ROOT / str(surface)
+        status: dict[str, Any] = {
+            "path": str(surface),
+            "present": path.exists(),
+            "freshness_status": "unknown",
+            "last_audited": None,
+            "max_staleness_days": CURRENT_FACT_MAX_STALENESS_DAYS,
+            "warnings": [],
+        }
+        if not path.exists():
+            status["freshness_status"] = "missing"
+            status["warnings"].append(
+                {
+                    "code": "current_fact_surface_missing",
+                    "severity": "warning",
+                    "path": str(surface),
+                    "message": "required current fact surface is missing",
+                }
+            )
+            statuses.append(status)
+            continue
+        audited = current_fact_audit_date(path.read_text(encoding="utf-8", errors="ignore"))
+        if not audited:
+            status["freshness_status"] = "unknown"
+            status["warnings"].append(
+                {
+                    "code": "current_fact_surface_audit_missing",
+                    "severity": "warning",
+                    "path": str(surface),
+                    "message": "required current fact surface has no parseable Last audited date",
+                }
+            )
+        else:
+            age_days = (today - audited).days
+            status["last_audited"] = audited.isoformat()
+            status["age_days"] = age_days
+            if age_days > CURRENT_FACT_MAX_STALENESS_DAYS:
+                status["freshness_status"] = "stale"
+                status["warnings"].append(
+                    {
+                        "code": "current_fact_surface_stale",
+                        "severity": "warning",
+                        "path": str(surface),
+                        "message": f"required current fact surface is {age_days} days old",
+                    }
+                )
+            else:
+                status["freshness_status"] = "fresh"
+        statuses.append(status)
+    return statuses
+
+
+def semantic_bootstrap_graph_status(api: Any, profile: dict[str, Any], files: list[str]) -> dict[str, Any]:
+    graph_usage = dict(profile.get("graph_usage") or {})
+    status: dict[str, Any] = {
+        "stage": graph_usage.get("stage", "not_required"),
+        "authority_status": graph_usage.get("authority_status", "derived_not_authority"),
+        "use_for": graph_usage.get("use_for", []),
+        "not_for": graph_usage.get("not_for", []),
+        "availability": "not_required",
+        "warnings": [],
+    }
+    if status["stage"] != "stage_2_after_semantic_boot":
+        return status
+    result = api.run_code_review_graph_status(files)
+    status["availability"] = "available" if result.ok else "unavailable_or_stale"
+    status["issues"] = [api.asdict(issue) for issue in result.issues]
+    details = result.details or {}
+    graph_meta = details.get("graph_meta") or {}
+    status["details"] = {
+        "authority_status": details.get("authority_status"),
+        "graph_db": details.get("graph_db"),
+        "schema_version": details.get("schema_version"),
+        "graph_meta": {
+            "present": graph_meta.get("present"),
+            "tracked": graph_meta.get("tracked"),
+            "parity_status": graph_meta.get("parity_status"),
+            "mismatches": graph_meta.get("mismatches", []),
+        },
+    }
+    if not result.ok:
+        for issue in result.issues:
+            status["warnings"].append(
+                {
+                    "code": "code_review_graph_unavailable_or_stale",
+                    "severity": issue.severity,
+                    "path": issue.path,
+                    "message": issue.message,
+                }
+            )
+    if graph_meta.get("parity_status") == "mismatch":
+        status["warnings"].append(
+            {
+                "code": "code_review_graph_meta_mismatch",
+                "severity": "warning",
+                "path": str(graph_meta.get("path") or ".code-review-graph/graph_meta.json"),
+                "message": "graph metadata parity mismatch; use graph as derived context only",
+            }
+        )
+    return status
+
+
+def semantic_bootstrap_claims(api: Any) -> list[dict[str, Any]]:
+    claims: list[dict[str, Any]] = []
+    for claim in api.load_core_claims().get("claims") or []:
+        if "semantic-boot" not in (claim.get("applicable_profiles") or []):
+            continue
+        claims.append(
+            {
+                "claim_id": claim.get("claim_id"),
+                "assertion": claim.get("assertion"),
+                "proof_targets": claim.get("proof_targets", []),
+                "gates": claim.get("gates", []),
+                "confidence": "verified_claim",
+            }
+        )
+    return claims
+
+
+def build_semantic_bootstrap(
+    api: Any,
+    task_class: str,
+    *,
+    task: str = "",
+    files: list[str] | None = None,
+) -> dict[str, Any]:
+    files = files or []
+    if not api.TASK_BOOT_PROFILES_PATH.exists():
+        return {
+            "ok": False,
+            "authority_status": "generated_semantic_bootstrap_not_authority",
+            "task_class": task_class,
+            "task": task,
+            "files": files,
+            "issues": [
+                {
+                    "code": "task_boot_profiles_manifest_missing",
+                    "path": "architecture/task_boot_profiles.yaml",
+                    "message": "semantic task boot profile manifest is missing",
+                    "severity": "error",
+                }
+            ],
+        }
+    profiles = task_boot_profiles(api)
+    profile = profiles.get(task_class)
+    if not profile:
+        return {
+            "ok": False,
+            "authority_status": "generated_semantic_bootstrap_not_authority",
+            "task_class": task_class,
+            "task": task,
+            "files": files,
+            "issues": [
+                {
+                    "code": "semantic_bootstrap_unknown_task_class",
+                    "path": "architecture/task_boot_profiles.yaml",
+                    "message": f"unknown task class {task_class!r}",
+                    "severity": "error",
+                }
+            ],
+        }
+
+    facts = current_fact_status(api, [str(item) for item in profile.get("current_fact_surfaces") or []])
+    fatal_index = fatal_misread_index(api) if api.FATAL_MISREADS_PATH.exists() else {}
+    fatal_misreads = [
+        {
+            "id": misread_id,
+            "severity": fatal_index.get(str(misread_id), {}).get("severity"),
+            "false_equivalence": fatal_index.get(str(misread_id), {}).get("false_equivalence"),
+            "correction": fatal_index.get(str(misread_id), {}).get("correction"),
+            "proof_files": fatal_index.get(str(misread_id), {}).get("proof_files", []),
+        }
+        for misread_id in profile.get("fatal_misreads") or []
+    ]
+    graph = semantic_bootstrap_graph_status(api, profile, files)
+    warnings = [
+        warning
+        for status in facts
+        for warning in status.get("warnings", [])
+    ] + list(graph.get("warnings") or [])
+    return {
+        "ok": True,
+        "authority_status": "generated_semantic_bootstrap_not_authority",
+        "task_class": task_class,
+        "task": task,
+        "files": sorted(dict.fromkeys(files)),
+        "purpose": profile.get("purpose", ""),
+        "required_reads": profile.get("required_reads", []),
+        "current_fact_surfaces": facts,
+        "required_proof_questions": profile.get("required_proofs", []),
+        "fatal_misreads": fatal_misreads,
+        "forbidden_shortcuts": profile.get("forbidden_shortcuts", []),
+        "current_core_claims": semantic_bootstrap_claims(api),
+        "graph_usage": graph,
+        "verification_gates": profile.get("verification_gates", []),
+        "warnings": warnings,
+        "issues": [],
+    }
 
 
 def strict_result_summary(api: Any, result: Any) -> dict[str, Any]:
@@ -558,7 +808,49 @@ def build_package_review_context_pack(api: Any, task: str, files: list[str]) -> 
     return payload
 
 
-def build_context_pack(api: Any, pack_type: str, *, task: str, files: list[str]) -> dict[str, Any]:
+def attach_semantic_bootstrap(
+    api: Any,
+    payload: dict[str, Any],
+    *,
+    task_class: str | None,
+    task: str,
+    files: list[str],
+) -> dict[str, Any]:
+    selected_task_class = task_class or infer_task_class(api, task, files)
+    if selected_task_class:
+        payload["semantic_bootstrap"] = build_semantic_bootstrap(
+            api,
+            selected_task_class,
+            task=task,
+            files=files,
+        )
+    else:
+        payload["semantic_bootstrap"] = {
+            "ok": False,
+            "authority_status": "generated_semantic_bootstrap_not_authority",
+            "task_class": None,
+            "task": task,
+            "files": files,
+            "issues": [
+                {
+                    "code": "semantic_bootstrap_task_class_not_inferred",
+                    "path": "architecture/task_boot_profiles.yaml",
+                    "message": "task class was not inferred; pass --task-class for semantic bootstrap",
+                    "severity": "warning",
+                }
+            ],
+        }
+    return payload
+
+
+def build_context_pack(
+    api: Any,
+    pack_type: str,
+    *,
+    task: str,
+    files: list[str],
+    task_class: str | None = None,
+) -> dict[str, Any]:
     selected = pack_type
     if pack_type == "auto":
         if looks_like_package_review(api, task, files):
@@ -570,9 +862,9 @@ def build_context_pack(api: Any, pack_type: str, *, task: str, files: list[str])
     if selected == "package_review":
         payload = build_package_review_context_pack(api, task, files)
         payload["selected_by"] = {"requested": pack_type, "selected": selected}
-        return payload
+        return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     if selected == "debug":
         payload = build_debug_context_pack(api, task, files)
         payload["selected_by"] = {"requested": pack_type, "selected": selected}
-        return payload
+        return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     raise ValueError(f"unknown context pack type {pack_type!r}")

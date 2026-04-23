@@ -173,3 +173,60 @@ Pre-close review:
 Next:
 
 - commit Phase 1, then run post-close review before Phase 2
+
+## Phase 2 Semantic-Bootstrap Topology Output
+
+Changed files:
+
+- `architecture/context_pack_profiles.yaml`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_context_pack.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- added `topology_doctor.py semantic-bootstrap --task-class ...` output for
+  required reads, proof questions, fatal misreads, current fact freshness,
+  semantic core claims, graph usage, forbidden shortcuts, and verification gates
+- added context-pack `semantic_bootstrap` injection for inferred or explicit
+  task classes
+- added warning paths for missing/stale current fact surfaces and unavailable
+  or mismatched graph context
+- recorded `semantic_bootstrap` in context-pack profile output contracts
+
+Verification:
+
+- `python scripts/topology_doctor.py semantic-bootstrap --task-class source_routing --task "audit Hong Kong source routing" --files src/data/tier_resolver.py --json` -> ok, with derived graph metadata mismatch warning
+- `python scripts/topology_doctor.py context-pack --pack-type debug --task "debug settlement rounding mismatch" --files src/contracts/settlement_semantics.py --json` -> ok, includes `semantic_bootstrap.task_class=settlement_semantics`
+- `python scripts/topology_doctor.py --context-packs --json` -> ok
+- `python scripts/topology_doctor.py --task-boot-profiles --json` -> ok
+- `python scripts/topology_doctor.py --fatal-misreads --json` -> ok
+- `python scripts/topology_doctor.py --city-truth-contract --json` -> ok
+- `python scripts/topology_doctor.py --core-claims --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <Phase 2 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <Phase 2 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <Phase 2 files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <Phase 2 files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <Phase 2 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k 'semantic_bootstrap or context_pack or task_boot_profiles or fatal_misreads or city_truth_contract or core_claims'` -> 30 passed
+- `git diff --check -- <Phase 2 files>` -> ok
+
+Pre-close review:
+
+- Critic: pass. Semantic bootstrap is generated context, not authority, and
+  graph remains Stage 2 derived context after semantic proof questions.
+- Verifier: pass. Output covers required reads, current facts, proof questions,
+  fatal misreads, semantic claims, graph use, forbidden shortcuts, verification
+  gates, and capability-present/absent test cases.
+
+Next:
+
+- commit Phase 2, then run post-close review before Phase 3

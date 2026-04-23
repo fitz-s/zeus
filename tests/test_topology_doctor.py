@@ -104,6 +104,27 @@ def test_cli_json_parity_for_context_pack_command():
     )
 
 
+def test_cli_json_parity_for_semantic_bootstrap_command():
+    args = [
+        "semantic-bootstrap",
+        "--task-class",
+        "source_routing",
+        "--task",
+        "audit Hong Kong source routing",
+        "--files",
+        "src/data/tier_resolver.py",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_semantic_bootstrap(
+        "source_routing",
+        task="audit Hong Kong source routing",
+        files=["src/data/tier_resolver.py"],
+    )
+
+
 def test_cli_json_parity_for_impact_command():
     args = [
         "impact",
@@ -3085,6 +3106,102 @@ def test_context_pack_auto_rejects_ambiguous_task():
             task="inspect this area",
             files=["src/strategy/market_fusion.py"],
         )
+
+
+def test_context_pack_includes_inferred_semantic_bootstrap():
+    packet = topology_doctor.build_context_pack(
+        "debug",
+        task="debug settlement rounding mismatch in replay",
+        files=["src/contracts/settlement_semantics.py"],
+    )
+
+    assert packet["semantic_bootstrap"]["task_class"] == "settlement_semantics"
+    assert packet["semantic_bootstrap"]["authority_status"] == "generated_semantic_bootstrap_not_authority"
+    assert any(
+        item["id"] == "daily_day0_hourly_forecast_sources_are_not_interchangeable"
+        for item in packet["semantic_bootstrap"]["fatal_misreads"]
+    )
+
+
+def test_semantic_bootstrap_source_routing_shape():
+    payload = topology_doctor.build_semantic_bootstrap(
+        "source_routing",
+        task="audit Hong Kong source routing",
+        files=["src/data/tier_resolver.py"],
+    )
+
+    assert payload["ok"] is True
+    assert payload["authority_status"] == "generated_semantic_bootstrap_not_authority"
+    assert "docs/operations/current_source_validity.md" in payload["required_reads"]
+    assert any(item["path"] == "docs/operations/current_source_validity.md" for item in payload["current_fact_surfaces"])
+    assert any(item["id"] == "api_returns_data_not_settlement_correct_source" for item in payload["fatal_misreads"])
+    assert any(item["claim_id"] == "SOURCE_ROLES_NOT_INTERCHANGEABLE" for item in payload["current_core_claims"])
+    assert payload["graph_usage"]["authority_status"] == "derived_not_authority"
+
+
+def test_semantic_bootstrap_unknown_task_class_returns_issue():
+    payload = topology_doctor.build_semantic_bootstrap("nope", task="unknown")
+
+    assert payload["ok"] is False
+    assert payload["issues"][0]["code"] == "semantic_bootstrap_unknown_task_class"
+
+
+def test_semantic_bootstrap_missing_manifest_returns_issue(monkeypatch, tmp_path):
+    monkeypatch.setattr(topology_doctor, "TASK_BOOT_PROFILES_PATH", tmp_path / "missing.yaml")
+
+    payload = topology_doctor.build_semantic_bootstrap("source_routing")
+
+    assert payload["ok"] is False
+    assert payload["issues"][0]["code"] == "task_boot_profiles_manifest_missing"
+
+
+def test_semantic_bootstrap_warns_missing_current_fact_surface(monkeypatch):
+    manifest = topology_doctor.load_task_boot_profiles()
+    profile = next(item for item in manifest["profiles"] if item["id"] == "source_routing")
+    profile["current_fact_surfaces"] = ["docs/operations/not_a_real_current_fact.md"]
+    monkeypatch.setattr(topology_doctor, "load_task_boot_profiles", lambda: manifest)
+
+    payload = topology_doctor.build_semantic_bootstrap("source_routing")
+
+    assert any(warning["code"] == "current_fact_surface_missing" for warning in payload["warnings"])
+
+
+def test_semantic_bootstrap_warns_stale_current_fact_surface(monkeypatch, tmp_path):
+    fact = tmp_path / "docs" / "operations" / "old_fact.md"
+    fact.parent.mkdir(parents=True)
+    fact.write_text("# Old Fact\n\nLast audited: 2000-01-01\n", encoding="utf-8")
+    manifest = topology_doctor.load_task_boot_profiles()
+    profile = next(item for item in manifest["profiles"] if item["id"] == "docs_authority")
+    profile["current_fact_surfaces"] = ["docs/operations/old_fact.md"]
+    profile["graph_usage"]["stage"] = "not_required"
+
+    monkeypatch.setattr(topology_doctor, "ROOT", tmp_path)
+    monkeypatch.setattr(topology_doctor, "load_task_boot_profiles", lambda: manifest)
+
+    payload = topology_doctor.build_semantic_bootstrap("docs_authority")
+
+    assert any(warning["code"] == "current_fact_surface_stale" for warning in payload["warnings"])
+
+
+def test_semantic_bootstrap_warns_unavailable_graph(monkeypatch):
+    def fake_graph_status(files):
+        return topology_doctor.StrictResult(
+            ok=False,
+            issues=[
+                topology_doctor.TopologyIssue(
+                    code="code_review_graph_db_missing",
+                    path=".code-review-graph/graph.db",
+                    message="missing graph",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", fake_graph_status)
+
+    payload = topology_doctor.build_semantic_bootstrap("source_routing", files=["src/data/tier_resolver.py"])
+
+    assert payload["graph_usage"]["availability"] == "unavailable_or_stale"
+    assert any(warning["code"] == "code_review_graph_unavailable_or_stale" for warning in payload["warnings"])
 
 
 def test_core_map_probability_chain_is_proof_backed_and_bounded():

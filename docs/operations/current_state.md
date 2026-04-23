@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Guidance Kernel / Semantic Boot Refactor
 - Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
-- Status: Phase 1 city truth contract schema pre-close review complete
+- Status: Phase 2 semantic-bootstrap topology output pre-close review complete
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -21,6 +21,7 @@ Role: single live control pointer for the repo.
 - Docs truth refresh post-closeout review: complete
 - Guidance kernel Phase -1 commit: `b90c345`
 - Guidance kernel Phase 0 commit: `1d5b724`
+- Guidance kernel Phase 1 commit: `e3e8178`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -34,12 +35,10 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Phase 1 installs the stable city truth contract schema and proof-backed
-  semantic claims only.
-- Do not encode a current per-city truth table in architecture manifests, and
-  do not implement topology semantic-bootstrap output, runtime source, DB
-  mutation, graph DB changes, archive-body ingestion, or authority-law rewrites
-  in Phase 1.
+- Phase 2 implements generated semantic-bootstrap output and context-pack
+  injection only.
+- Do not modify runtime source, DB/state files, graph DB, archive bodies,
+  authority-law docs, or current per-city/source truth tables in Phase 2.
 
 ## Current fact companions
 
@@ -68,6 +67,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Commit Phase 1 city truth contract schema.
-- After post-close review, open Phase 2 semantic-bootstrap topology output.
+- Commit Phase 2 semantic-bootstrap topology output.
+- After post-close review, open Phase 3 receipt-bound current-state checks.
 - Preserve unrelated dirty work and local archive inputs

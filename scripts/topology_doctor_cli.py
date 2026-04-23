@@ -104,7 +104,14 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     context_pack.add_argument("--pack-type", default="auto", choices=["auto", "package_review", "debug"], help="Context-pack profile")
     context_pack.add_argument("--task", required=True, help="Task statement")
     context_pack.add_argument("--files", nargs="+", required=True, help="Files in the reviewed package")
+    context_pack.add_argument("--task-class", default=None, help="Optional semantic boot task class")
     context_pack.add_argument("--json", action="store_true", help="Emit JSON")
+
+    semantic_bootstrap = sub.add_parser("semantic-bootstrap", help="Emit task-class semantic bootstrap")
+    semantic_bootstrap.add_argument("--task-class", required=True, help="Semantic boot task class")
+    semantic_bootstrap.add_argument("--task", default="", help="Task statement")
+    semantic_bootstrap.add_argument("--files", nargs="*", default=[], help="Files in scope")
+    semantic_bootstrap.add_argument("--json", action="store_true", help="Emit JSON")
     return parser
 
 
@@ -297,12 +304,16 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
         return 0 if payload["ok"] else 1
     if args.command == "context-pack":
         try:
-            payload = api.build_context_pack(args.pack_type, task=args.task, files=args.files)
+            payload = api.build_context_pack(args.pack_type, task=args.task, files=args.files, task_class=args.task_class)
         except ValueError as exc:
             print(f"context-pack failed: {exc}", file=sys.stderr)
             return 1
         render_payload(api, payload, as_json=args.json)
         return 0
+    if args.command == "semantic-bootstrap":
+        payload = api.build_semantic_bootstrap(args.task_class, task=args.task, files=args.files)
+        render_payload(api, payload, as_json=args.json)
+        return 0 if payload.get("ok") else 1
     parser.print_help()
     return 2
 

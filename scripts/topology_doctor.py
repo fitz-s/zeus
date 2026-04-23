@@ -932,12 +932,31 @@ def _looks_like_debug(task: str, files: list[str]) -> bool:
     return _context_pack_checks().looks_like_debug(sys.modules[__name__], task, files)
 
 
+def _infer_task_class(task: str, files: list[str]) -> str | None:
+    return _context_pack_checks().infer_task_class(sys.modules[__name__], task, files)
+
+
+def build_semantic_bootstrap(task_class: str, *, task: str = "", files: list[str] | None = None) -> dict[str, Any]:
+    return _context_pack_checks().build_semantic_bootstrap(
+        sys.modules[__name__],
+        task_class,
+        task=task,
+        files=files or [],
+    )
+
+
 def build_package_review_context_pack(task: str, files: list[str]) -> dict[str, Any]:
     return _context_pack_checks().build_package_review_context_pack(sys.modules[__name__], task, files)
 
 
-def build_context_pack(pack_type: str, *, task: str, files: list[str]) -> dict[str, Any]:
-    return _context_pack_checks().build_context_pack(sys.modules[__name__], pack_type, task=task, files=files)
+def build_context_pack(pack_type: str, *, task: str, files: list[str], task_class: str | None = None) -> dict[str, Any]:
+    return _context_pack_checks().build_context_pack(
+        sys.modules[__name__],
+        pack_type,
+        task=task,
+        files=files,
+        task_class=task_class,
+    )
 
 
 
