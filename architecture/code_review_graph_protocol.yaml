@@ -31,6 +31,17 @@ invocation_rules:
   graph_authority_status: derived_not_authority
   explicit_changed_files_required_for_review_debug: true
   continue_when_graph_stale: true
+  freshness_probe_command: code-review-graph status --repo <repo-root>
+  manual_refresh_command: code-review-graph update --repo <repo-root>
+  official_refresh_order:
+    - code-review-graph install (platform auto-update hooks when officially supported)
+    - code-review-graph watch
+    - code-review-graph daemon start
+    - code-review-graph update --repo <repo-root>
+  forbidden_refresh_replacements:
+    - repo-local custom watcher script
+    - ad hoc cron wrapper
+    - skill mutation to force graph refresh
   fallback_when_graph_unavailable:
     - topology_doctor navigation/digest
     - architecture/source_rationale.yaml
@@ -48,3 +59,4 @@ forbidden_uses:
 verification_gates:
   - python scripts/topology_doctor.py --code-review-graph-protocol --json
   - python scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json
+  - code-review-graph status --repo <repo-root>

@@ -110,6 +110,15 @@ Use derived routing proactively, but keep authority order intact:
   Stage 1 is semantic boot; Stage 2 is graph context. For review/debug, provide
   explicit changed files and treat graph stale/unavailable states as a fallback
   trigger, not as permission to skip proof gates.
+- Prefer official upstream graph operations over repo-local inventions:
+  - freshness probe: `code-review-graph status --repo <repo-root>`
+  - one-shot refresh: `code-review-graph update --repo <repo-root>`
+  - continuous refresh: official platform auto-update from
+    `code-review-graph install`, then `code-review-graph watch`, then
+    `code-review-graph daemon start`
+- Do not add custom refresh scripts, cron wrappers, or skill mutations just to
+  keep graph freshness. Zeus should integrate official graph behavior, not
+  replace it.
 - For source, test, script, governance, or review work, run
   `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
   or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`

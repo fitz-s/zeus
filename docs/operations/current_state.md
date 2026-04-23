@@ -5,32 +5,24 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Authority Rehydration
-- Active package source: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
-- Status: Authority Rehydration packet complete through P4 archive/history extraction
+- Mainline task: Official Graph Refresh Integration
+- Active package source: `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json`
+- Status: official graph refresh path verified and official-first graph guidance integrated into AGENTS/protocol docs
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
-- `docs/operations/task_2026-04-23_authority_rehydration/work_log.md`
-- `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
+- `docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md`
+- `docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md`
+- `docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json`
 
 ## Freeze point
 
-- P0 scaffold landed routing and manifest skeleton only.
-- P1 added dense reference books and scoped routers for `state`, `engine`, and
-  `data`.
-- P2 completed the remaining module books and expanded source/test/script
-  routing manifests for the sharpest families.
-- P3 taught topology_doctor and context packs to understand module books and
-  module manifest routing.
-- P4 extracted durable archive lessons into active module references and
-  history lore without reactivating archive bodies.
-- Do not modify runtime source, DB/state files, graph DB, current city/source
-  truth, archive bodies, or the authority kernel unless a later packet phase
-  explicitly authorizes that scope.
+- Authority Rehydration is closed.
+- This packet may verify official `code-review-graph` refresh behavior and
+  update guidance/protocol docs, but it must not stage `.code-review-graph/graph.db`
+  or modify runtime/source behavior.
 
 ## Current fact companions
 
@@ -59,9 +51,10 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
 - `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/`
 - `docs/operations/task_2026-04-23_authority_kernel_gamechanger/`
+- `docs/operations/task_2026-04-23_authority_rehydration/`
 - `docs/operations/task_2026-04-23_data_readiness_remediation/`
 
 ## Next action
 
-- Authority Rehydration packet is complete.
+- Official graph refresh verification packet is complete.
 - Preserve unrelated dirty work and local archive inputs.

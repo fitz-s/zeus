@@ -92,6 +92,7 @@ Derived structural context only. Zeus's own protocol forbids graph output from d
 - If the graph knows who calls what, it knows which weather source is correct.
 - A tracked blob on GitHub is sufficient onboarding context for online-only agents.
 - Graph freshness is a semantic blocker rather than a structural-context quality issue.
+- A repo-local MCP facade automatically means official upstream auto-refresh is installed and healthy.
 
 ## 19. Do-not-change-without-checking list
 - Tracked/not-tracked policy for graph.db
@@ -101,6 +102,8 @@ Derived structural context only. Zeus's own protocol forbids graph output from d
 ## 20. Verification commands
 ```bash
 test -f .code-review-graph/graph.db
+code-review-graph status --repo <repo-root>
+code-review-graph update --repo <repo-root>
 python -m py_compile scripts/code_review_graph_mcp_readonly.py scripts/topology_doctor_code_review_graph.py scripts/topology_doctor_context_pack.py
 pytest -q tests/test_topology_doctor.py
 LOCAL_GRAPH_QUERY_REQUIRED: run local graph status/build/update checks during P3/P4
@@ -116,6 +119,15 @@ Rollback graph-policy packets with protocol/tooling changes together; never leav
 ## 23. Future expansion notes
 - Add graph-derived textual appendices to module books and context packs.
 - Add a machine-readable graph-hotspots summary generated locally and committed if it stays small and safe.
+
+## 23a. Official Operation Order
+- Prefer official upstream graph operations over repo-local refresh inventions.
+- First check freshness with `code-review-graph status --repo <repo-root>`.
+- If a one-shot refresh is needed, use `code-review-graph update --repo <repo-root>`.
+- If continuous freshness is required, prefer official platform install hooks,
+  then `code-review-graph watch`, then `code-review-graph daemon start`.
+- Zeus guidance should integrate those commands; it should not replace them
+  with custom watcher scripts or skill edits.
 
 ## 24. Rehydration judgement
 This book is the dense reference layer for code review graph. Keep its launcher surface and `architecture/module_manifest.yaml` entry aligned, and do not promote it into authority or packet status.

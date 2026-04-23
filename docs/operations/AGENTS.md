@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-23_authority_rehydration/` | Active authority rehydration packet |
+| `task_2026-04-23_graph_refresh_official_integration/` | Active official graph refresh verification / usage-integration packet |
 
 ### Packet Evidence
 
@@ -75,7 +75,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-22_docs_truth_refresh/` | packet evidence | Closed docs truth refresh / stale-reference purge packet |
 | `task_2026-04-23_guidance_kernel_semantic_boot/` | packet evidence | Closed guidance-kernel semantic boot refactor packet |
 | `task_2026-04-23_authority_kernel_gamechanger/` | packet evidence | Closed authority-kernel gamechanger packet |
-| `task_2026-04-23_authority_rehydration/` | active packet | Dense module reference / manifest rehydration packet |
+| `task_2026-04-23_authority_rehydration/` | packet evidence | Closed dense module reference / manifest rehydration packet |
+| `task_2026-04-23_graph_refresh_official_integration/` | active packet | Official-first graph refresh verification and usage-integration packet |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
