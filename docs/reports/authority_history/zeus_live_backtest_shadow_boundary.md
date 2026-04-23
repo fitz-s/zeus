@@ -1,6 +1,6 @@
 # Zeus Live / Backtest / Shadow Boundary
 
-Status: Active authority
+Status: historical report evidence; superseded by `docs/authority/zeus_current_architecture.md`
 Scope: Defines what each execution context may and may not do
 Authority basis: Operator-established tribunal precedence (Phase 1, 2026-04-11)
 

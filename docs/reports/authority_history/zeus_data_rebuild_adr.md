@@ -1,6 +1,7 @@
 # Zeus Data Rebuild — Architecture Decision Record (ADR)
 
-**File:** `docs/authority/zeus_data_rebuild_adr.md`  
+**Former file:** `docs/authority/zeus_data_rebuild_adr.md`
+**Status:** historical report evidence; superseded by `architecture/data_rebuild_topology.yaml`, `docs/operations/current_data_state.md`, and current authority
 **Phase:** K4 (Authority Reset + Fresh Rebuild)  
 **Source:** `.omc/plans/data-rebuild.md` Section 3, verbatim
 

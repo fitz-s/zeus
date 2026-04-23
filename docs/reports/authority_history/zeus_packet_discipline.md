@@ -1,6 +1,6 @@
 # Zeus Packet Discipline
 
-Status: Active governance law
+Status: historical report evidence; superseded by `docs/authority/zeus_current_delivery.md`
 Source: Extracted from root `AGENTS.md` §2 (committed version, 2026-04-09)
 Referenced by: `AGENTS.md` §7 (working discipline)
 

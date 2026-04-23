@@ -1,6 +1,6 @@
 # ADR: Zeus K4.5 Fix Pack
 
-**Status**: APPROVED  
+**Status**: historical report evidence; superseded by current authority/manifests
 **Branch**: `worktree-data-rebuild`  
 **Frozen spec**: `.omc/plans/k4.5-freeze.md`  
 **Ralplan iterations**: 4 (Critic iter-4 APPROVE)  

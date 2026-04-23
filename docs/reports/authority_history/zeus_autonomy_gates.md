@@ -1,6 +1,6 @@
 # Zeus Autonomy Gates
 
-Status: Active governance law
+Status: historical report evidence; superseded by `docs/authority/zeus_current_delivery.md`
 Supersedes: former `zeus_autonomy_gates.md` + `team_policy.md` (merged 2026-04-10)
 Referenced by: `AGENTS.md` §7 (working discipline)
 

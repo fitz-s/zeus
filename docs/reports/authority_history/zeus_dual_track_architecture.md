@@ -1,6 +1,6 @@
 # Zeus Dual-Track Architecture Law
 
-Status: Active architecture authority (created 2026-04-16)
+Status: historical report evidence; superseded by `docs/authority/zeus_current_architecture.md`
 Scope: Metric identity, dual-track world truth, World DB v2, death-trap
 remediation law, activation gates
 Supersedes on disagreement: any prose in `AGENTS.md`, deep-map, or packet plan
@@ -8,16 +8,11 @@ that still describes Zeus as a single-track daily-high system.
 
 ---
 
-## 0. Position in authority order
+## 0. Historical Position
 
-1. System / developer / user instructions
-2. Machine manifests under `architecture/**`
-3. **This file**, alongside `zeus_current_architecture.md`
-4. Root `AGENTS.md`
-5. Scoped `AGENTS.md` files
-
-When this file and `zeus_current_architecture.md` disagree, the stricter rule
-wins until a packet reconciles them.
+This file was formerly active dual-track authority. It is retained as
+historical evidence only. Current dual-track law lives in
+`docs/authority/zeus_current_architecture.md` and machine manifests/tests.
 
 ---
 

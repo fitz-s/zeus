@@ -139,6 +139,7 @@ Verification:
 - `python scripts/topology_doctor.py --planning-lock --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json` -> ok
 - `python scripts/topology_doctor.py --change-receipts --changed-files <P2 files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok
 - `python scripts/topology_doctor.py closeout --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok with advisory graph coverage warning for `scripts/check_advisory_gates.py` and known current-data line-budget warning
+- Follow-up closeout after report-history header repair -> ok with advisory graph stale/partial warnings and known current-data line-budget warning
 - `find docs/authority -maxdepth 1 -type f -print` -> only `AGENTS.md`, `zeus_current_architecture.md`, `zeus_current_delivery.md`, `zeus_change_control_constitution.md`
 - `git diff --check -- <P2 files>` -> ok
 
@@ -148,6 +149,9 @@ Pre-close review:
   staged only P2 files and re-reviewed `git diff --cached` scope. Re-review:
   PASS. Staged P2 demotes seven side-authority files, retargets active refs,
   and does not stage graph/state/artifact changes.
+- Post-close preflight Critic also flagged demoted report files whose headers
+  still self-declared active law. Resolution: updated report-history headers to
+  state historical report evidence/supersession.
 - Verifier: PASS. Confirmed docs/history-lore/current-state checks pass,
   `docs/authority/` contains only 3+1 durable files plus `AGENTS.md`, moved
   files are report evidence, and remaining old-path refs are historical,

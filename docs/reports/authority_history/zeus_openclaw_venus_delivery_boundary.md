@@ -1,4 +1,5 @@
-File: docs/authority/zeus_openclaw_venus_delivery_boundary.md
+Former file: docs/authority/zeus_openclaw_venus_delivery_boundary.md
+Status: historical report evidence; superseded by `docs/authority/zeus_current_delivery.md`
 Disposition: NEW
 Authority basis: docs/authority/zeus_current_delivery.md; docs/authority/zeus_current_architecture.md; current repo boundary surfaces (src/supervisor_api/contracts.py, src/control/control_plane.py, scripts/healthcheck.py, scripts/audit_architecture_alignment.py, scripts/venus_autonomy_gate.py).
 Supersedes / harmonizes: docs/architecture/venus_operator_architecture.md; docs/architecture/venus_zeus_audit_integration_plan.md as active boundary law.
