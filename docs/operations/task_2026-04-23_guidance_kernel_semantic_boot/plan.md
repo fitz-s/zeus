@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/tooling
-Phase: 1 city truth contract schema
+Phase: 2 semantic-bootstrap topology output
 
 ## Objective
 
@@ -88,6 +88,29 @@ Forbidden:
 - `docs/authority/**`
 - `docs/archives/**`
 - context-pack semantic-bootstrap output implementation
+
+## Phase 2 Scope
+
+Allowed:
+
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_context_pack.py`
+- existing topology_doctor checker files only if required
+- `architecture/context_pack_profiles.yaml`
+- `architecture/topology_schema.yaml`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**`
+- `docs/archives/**`
+- current per-city/source truth table changes
 
 ## Future Phase Summary
 

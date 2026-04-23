@@ -214,6 +214,13 @@ strict_issue_codes:
   - city_truth_contract_path_missing
   - city_truth_contract_invalid_example
   - city_truth_contract_current_claim_unbacked
+  - semantic_bootstrap_unknown_task_class
+  - semantic_bootstrap_task_class_not_inferred
+  - current_fact_surface_missing
+  - current_fact_surface_audit_missing
+  - current_fact_surface_stale
+  - code_review_graph_unavailable_or_stale
+  - code_review_graph_meta_mismatch
   - test_relationship_manifest_missing_path
   - test_relationship_manifest_missing
   - test_relationship_manifest_missing_symbol

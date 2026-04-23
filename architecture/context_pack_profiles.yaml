@@ -45,6 +45,7 @@ profiles:
       - route_health
       - repo_health
       - context_assumption
+      - semantic_bootstrap
     lore_policy:
       direct_evidence: "File-pattern matches include id, severity, digest, and match reason by default."
       broad_relevant: "Task-term matches include id, severity, digest, and match reason only."
@@ -85,6 +86,7 @@ profiles:
       - route_health
       - repo_health
       - context_assumption
+      - semantic_bootstrap
     lore_policy:
       direct_evidence: "File-pattern matches include id, severity, digest, and match reason by default."
       broad_relevant: "Task-term matches include id, severity, digest, and match reason only."
