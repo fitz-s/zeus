@@ -223,6 +223,13 @@ strict_issue_codes:
   - current_fact_surface_stale
   - code_review_graph_unavailable_or_stale
   - code_review_graph_meta_mismatch
+  - code_review_graph_protocol_manifest_missing
+  - code_review_graph_protocol_required_field_missing
+  - code_review_graph_protocol_stage_missing
+  - code_review_graph_protocol_stage_order
+  - code_review_graph_protocol_invalid
+  - code_review_graph_protocol_root_reference_missing
+  - code_review_graph_protocol_gate_target_missing
   - test_relationship_manifest_missing_path
   - test_relationship_manifest_missing
   - test_relationship_manifest_missing_symbol

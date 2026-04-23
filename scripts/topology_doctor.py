@@ -44,6 +44,7 @@ RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
 TASK_BOOT_PROFILES_PATH = ROOT / "architecture" / "task_boot_profiles.yaml"
 FATAL_MISREADS_PATH = ROOT / "architecture" / "fatal_misreads.yaml"
 CITY_TRUTH_CONTRACT_PATH = ROOT / "architecture" / "city_truth_contract.yaml"
+CODE_REVIEW_GRAPH_PROTOCOL_PATH = ROOT / "architecture" / "code_review_graph_protocol.yaml"
 REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml"
 CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
@@ -155,6 +156,10 @@ def load_fatal_misreads() -> dict[str, Any]:
 
 def load_city_truth_contract() -> dict[str, Any]:
     return _load_yaml(CITY_TRUTH_CONTRACT_PATH)
+
+
+def load_code_review_graph_protocol() -> dict[str, Any]:
+    return _load_yaml(CODE_REVIEW_GRAPH_PROTOCOL_PATH)
 
 
 def load_reference_replacement() -> dict[str, Any]:
@@ -562,6 +567,10 @@ def run_fatal_misreads() -> StrictResult:
 
 def run_city_truth_contract() -> StrictResult:
     return _policy_checks().run_city_truth_contract(sys.modules[__name__])
+
+
+def run_code_review_graph_protocol() -> StrictResult:
+    return _policy_checks().run_code_review_graph_protocol(sys.modules[__name__])
 
 
 

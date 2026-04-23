@@ -280,3 +280,58 @@ Pre-close review:
 Next:
 
 - commit Phase 3, then run post-close review before Phase 4
+
+## Phase 4 Graph Protocol Hardening
+
+Changed files:
+
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/code_review_graph_protocol.yaml`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_core_map.py`
+- `scripts/topology_doctor_policy_checks.py`
+- `scripts/topology_doctor_registry_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- added `code_review_graph_protocol.yaml` as a two-stage graph use contract
+- rooted graph usage in semantic boot first, graph context second
+- added topology_doctor validation that graph stays derived-only and root
+  AGENTS carries Stage 1/Stage 2 wording
+- registered the graph protocol in root/architecture/workspace routing
+
+Verification:
+
+- `python scripts/topology_doctor.py --code-review-graph-protocol --json` -> ok
+- `python scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json` -> ok
+- `python scripts/topology_doctor.py --current-state-receipt-bound --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <Phase 4 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <Phase 4 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <Phase 4 files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <Phase 4 files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <Phase 4 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k 'code_review_graph_protocol or semantic_bootstrap or graph_review'` -> 11 passed
+- `git diff --check -- <Phase 4 files>` -> ok
+
+Pre-close review:
+
+- Critic: pass. Graph protocol is machine-readable and does not promote graph
+  output above semantic boot, receipts, manifests, current facts, or tests.
+- Verifier: pass. Root AGENTS, workspace map, architecture registry, protocol
+  manifest, and topology_doctor all agree on Stage 1 semantic boot then Stage 2
+  graph context.
+
+Next:
+
+- commit Phase 4, then run post-close review before package closeout

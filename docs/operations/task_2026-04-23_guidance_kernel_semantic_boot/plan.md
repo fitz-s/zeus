@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/tooling
-Phase: 3 receipt-bound current-state checks
+Phase: 4 graph protocol hardening
 
 ## Objective
 
@@ -134,6 +134,33 @@ Forbidden:
 - `docs/authority/**`
 - `docs/archives/**`
 - semantic boot profile/source truth changes
+
+## Phase 4 Scope
+
+Allowed:
+
+- `architecture/code_review_graph_protocol.yaml`
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_core_map.py`
+- `scripts/topology_doctor_policy_checks.py`
+- `scripts/topology_doctor_registry_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- `docs/authority/**`
+- `docs/archives/**`
+- current per-city/source truth table changes
 
 ## Future Phase Summary
 

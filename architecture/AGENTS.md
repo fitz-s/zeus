@@ -53,6 +53,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `task_boot_profiles.yaml` | Question-first semantic boot profiles for source/settlement/hourly/Day0/calibration/docs/graph tasks |
 | `fatal_misreads.yaml` | Machine-readable fatal semantic shortcut antibodies |
 | `city_truth_contract.yaml` | Stable city/source/date truth contract schema and evidence taxonomy |
+| `code_review_graph_protocol.yaml` | Two-stage graph protocol: semantic boot first, graph derived context second |
 | `change_receipt_schema.yaml` | Machine-readable route/change receipt contract for high-risk closeout |
 | `code_idioms.yaml` | Registry for intentional non-obvious code shapes such as static-analysis hooks |
 | `core_claims.yaml` | Proof-backed semantic claims emitted by generated topology views |

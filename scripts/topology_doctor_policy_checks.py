@@ -718,3 +718,53 @@ def run_city_truth_contract(api: Any) -> Any:
 
     check_city_truth_current_assertions(api, contract, issues)
     return api.StrictResult(ok=not issues, issues=issues)
+
+
+def run_code_review_graph_protocol(api: Any) -> Any:
+    if not api.CODE_REVIEW_GRAPH_PROTOCOL_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "code_review_graph_protocol_manifest_missing",
+                    "architecture/code_review_graph_protocol.yaml",
+                    "Code Review Graph protocol manifest is missing",
+                )
+            ],
+        )
+    protocol = api.load_code_review_graph_protocol()
+    issues: list[Any] = []
+    path = "architecture/code_review_graph_protocol.yaml"
+    if protocol.get("metadata", {}).get("authority_status") != "derived_context_protocol_not_authority":
+        issues.append(api._issue("code_review_graph_protocol_invalid", path, "authority_status must be derived_context_protocol_not_authority"))
+    for section in protocol.get("required_sections") or []:
+        if api._metadata_missing(protocol.get(section)):
+            issues.append(api._issue("code_review_graph_protocol_required_field_missing", path, f"missing {section}"))
+    stages = protocol.get("stages") or []
+    stage_by_id = {str(stage.get("id")): stage for stage in stages if stage.get("id")}
+    semantic = stage_by_id.get("semantic_boot")
+    graph = stage_by_id.get("graph_context")
+    if not semantic or not graph:
+        issues.append(api._issue("code_review_graph_protocol_stage_missing", path, "semantic_boot and graph_context stages are required"))
+    elif int(semantic.get("order") or 0) >= int(graph.get("order") or 0):
+        issues.append(api._issue("code_review_graph_protocol_stage_order", path, "semantic_boot must precede graph_context"))
+    rules = protocol.get("invocation_rules") or {}
+    if rules.get("graph_requires_semantic_boot") is not True:
+        issues.append(api._issue("code_review_graph_protocol_invalid", path, "graph_requires_semantic_boot must be true"))
+    if rules.get("graph_authority_status") != "derived_not_authority":
+        issues.append(api._issue("code_review_graph_protocol_invalid", path, "graph_authority_status must be derived_not_authority"))
+    if rules.get("explicit_changed_files_required_for_review_debug") is not True:
+        issues.append(api._issue("code_review_graph_protocol_invalid", path, "explicit_changed_files_required_for_review_debug must be true"))
+    forbidden = set(protocol.get("forbidden_uses") or [])
+    for required in ("settlement truth", "source validity", "current fact freshness", "authority rank"):
+        if required not in forbidden:
+            issues.append(api._issue("code_review_graph_protocol_invalid", path, f"forbidden_uses missing {required!r}"))
+    root_text = (api.ROOT / "AGENTS.md").read_text(encoding="utf-8", errors="ignore")
+    if "architecture/code_review_graph_protocol.yaml" not in root_text:
+        issues.append(api._issue("code_review_graph_protocol_root_reference_missing", "AGENTS.md", "root AGENTS missing graph protocol manifest"))
+    if "Stage 1" not in root_text or "Stage 2" not in root_text:
+        issues.append(api._issue("code_review_graph_protocol_root_reference_missing", "AGENTS.md", "root AGENTS missing Stage 1/Stage 2 graph protocol wording"))
+    for gate in protocol.get("verification_gates") or []:
+        for ref in manifest_gate_refs(api, str(gate)):
+            issues.append(api._issue("code_review_graph_protocol_gate_target_missing", path, f"verification gate references missing path: {ref}"))
+    return api.StrictResult(ok=not issues, issues=issues)

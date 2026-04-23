@@ -1,0 +1,50 @@
+schema_version: 1
+metadata:
+  created: "2026-04-23"
+  owner_packet: "Guidance Kernel Semantic Boot"
+  purpose: >
+    Two-stage protocol for Code Review Graph use in Zeus. Graph output is a
+    structural context asset for impact, callers, tests, and review order; it
+    never supplies semantic truth or authority rank.
+  authority_status: derived_context_protocol_not_authority
+
+required_sections:
+  - stages
+  - invocation_rules
+  - forbidden_uses
+  - verification_gates
+
+stages:
+  - id: semantic_boot
+    order: 1
+    required: true
+    command: python scripts/topology_doctor.py semantic-bootstrap --task-class <class> --task "<task>" --files <files> --json
+    purpose: "Lock task class, current facts, fatal misreads, and required proof questions before graph use."
+  - id: graph_context
+    order: 2
+    required: false
+    command: python scripts/topology_doctor.py --code-review-graph-status --changed-files <files> --json
+    purpose: "Use graph only for file discovery, callers, impacted tests, blast radius, and review order."
+
+invocation_rules:
+  graph_requires_semantic_boot: true
+  graph_authority_status: derived_not_authority
+  explicit_changed_files_required_for_review_debug: true
+  continue_when_graph_stale: true
+  fallback_when_graph_unavailable:
+    - topology_doctor navigation/digest
+    - architecture/source_rationale.yaml
+    - scoped AGENTS.md
+    - targeted tests
+
+forbidden_uses:
+  - settlement truth
+  - source validity
+  - current fact freshness
+  - authority rank
+  - planning lock waiver
+  - receipt or manifest waiver
+
+verification_gates:
+  - python scripts/topology_doctor.py --code-review-graph-protocol --json
+  - python scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json

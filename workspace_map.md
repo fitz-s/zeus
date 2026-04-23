@@ -70,6 +70,7 @@ Prefer these over prose when they exist:
 | `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 | `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
+| `architecture/code_review_graph_protocol.yaml` | Two-stage Code Review Graph use protocol; graph remains derived context |
 
 ## Do not default-read
 

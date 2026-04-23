@@ -356,6 +356,39 @@ def test_cli_json_parity_for_code_review_graph_status(monkeypatch, tmp_path):
     }
 
 
+def test_cli_json_parity_for_code_review_graph_protocol():
+    payload = run_cli_json(["--code-review-graph-protocol", "--json"])
+    result = topology_doctor.run_code_review_graph_protocol()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_code_review_graph_protocol_validates_two_stage_order():
+    result = topology_doctor.run_code_review_graph_protocol()
+    protocol = topology_doctor.load_code_review_graph_protocol()
+
+    assert_topology_ok(result)
+    assert protocol["metadata"]["authority_status"] == "derived_context_protocol_not_authority"
+    assert [stage["id"] for stage in protocol["stages"]] == ["semantic_boot", "graph_context"]
+    assert protocol["invocation_rules"]["graph_requires_semantic_boot"] is True
+    assert protocol["invocation_rules"]["graph_authority_status"] == "derived_not_authority"
+
+
+def test_code_review_graph_protocol_rejects_graph_first(monkeypatch):
+    protocol = topology_doctor.load_code_review_graph_protocol()
+    protocol["stages"][0]["order"] = 2
+    protocol["stages"][1]["order"] = 1
+
+    monkeypatch.setattr(topology_doctor, "load_code_review_graph_protocol", lambda: protocol)
+    result = topology_doctor.run_code_review_graph_protocol()
+
+    assert not result.ok
+    assert any(issue.code == "code_review_graph_protocol_stage_order" for issue in result.issues)
+
+
 def test_code_review_graph_status_reports_path_mode_and_absent_sidecar(monkeypatch, tmp_path):
     root = tmp_path
     source = root / "scripts" / "example.py"

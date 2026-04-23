@@ -100,6 +100,10 @@ Use derived routing proactively, but keep authority order intact:
 
 - For semantic-risk tasks, run the task boot profile first, then use topology
   and graph for file discovery and blast radius.
+- Code Review Graph follows `architecture/code_review_graph_protocol.yaml`:
+  Stage 1 is semantic boot; Stage 2 is graph context. For review/debug, provide
+  explicit changed files and treat graph stale/unavailable states as a fallback
+  trigger, not as permission to skip proof gates.
 - For source, test, script, governance, or review work, run
   `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
   or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`
@@ -131,6 +135,7 @@ Derived context helps routing and review but never outranks authority:
 - `topology_doctor` digests, context packs, and core maps
 - `architecture/source_rationale.yaml`
 - `architecture/history_lore.yaml`
+- `architecture/code_review_graph_protocol.yaml`
 - `.code-review-graph/graph.db`
 
 Code Review Graph is tracked derived context, not authority. It may guide file

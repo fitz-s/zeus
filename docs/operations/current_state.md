@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
-- Status: Phase 3 receipt-bound current-state checks pre-close review complete
+- Status: Phase 4 graph protocol hardening pre-close review complete
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -24,6 +24,7 @@ Role: single live control pointer for the repo.
 - Guidance kernel Phase 0 commit: `1d5b724`
 - Guidance kernel Phase 1 commit: `e3e8178`
 - Guidance kernel Phase 2 commit: `ec22a02`
+- Guidance kernel Phase 3 commit: `24b501a`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -37,11 +38,11 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Phase 3 makes `current_state.md` receipt-bound through topology_doctor checks
-  and generated candidates.
+- Phase 4 hardens the Code Review Graph usage protocol as derived Stage 2
+  context after semantic boot.
 - Do not modify runtime source, DB/state files, graph DB, archive bodies,
-  authority-law docs, graph protocol semantics, or current per-city/source truth
-  tables in Phase 3.
+  authority-law docs, current per-city/source truth tables, or receipt-bound
+  current-state mechanics in Phase 4.
 
 ## Current fact companions
 
@@ -70,6 +71,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Commit Phase 3 receipt-bound current-state checks.
-- After post-close review, open Phase 4 graph protocol hardening.
+- Commit Phase 4 graph protocol hardening.
+- After post-close review, open Phase 5 package closeout.
 - Preserve unrelated dirty work and local archive inputs
