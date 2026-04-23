@@ -67,6 +67,8 @@ Prefer these over prose when they exist:
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
 | `architecture/change_receipt_schema.yaml` | Route-receipt contract |
 | `architecture/docs_registry.yaml` | Docs classification and default-read registry |
+| `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
+| `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 
 ## Do not default-read
 

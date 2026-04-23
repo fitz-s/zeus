@@ -1,4 +1,7 @@
 """Governance and policy checker family for topology_doctor."""
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-23; last_reused=2026-04-23
+# Purpose: Validate governance manifests, planning locks, context budgets, semantic boot profiles, and policy gates.
+# Reuse: Prefer small manifest-specific helpers here when the check is governance/tooling policy rather than source or docs topology.
 
 from __future__ import annotations
 
@@ -446,4 +449,167 @@ def run_runtime_modes(api: Any) -> Any:
             issues.append(api._issue("runtime_mode_root_reference_missing", "AGENTS.md", f"root AGENTS missing {value}"))
     if "architecture/runtime_modes.yaml" not in root_text:
         issues.append(api._issue("runtime_mode_root_reference_missing", "AGENTS.md", "root AGENTS missing runtime mode manifest"))
+    return api.StrictResult(ok=not issues, issues=issues)
+
+
+def manifest_ref_exists(api: Any, value: str) -> bool:
+    if not value or " " in value:
+        return True
+    ref = value.split(":", 1)[0]
+    if ref.startswith(("python", "pytest")):
+        return True
+    if any(char in ref for char in "*?[]"):
+        return any(api.ROOT.glob(ref))
+    if "/" not in ref and "." not in ref:
+        return True
+    return (api.ROOT / ref).exists()
+
+
+def manifest_gate_refs(api: Any, gate: str) -> list[str]:
+    return [ref for ref in gate_path_tokens(gate) if not manifest_ref_exists(api, ref)]
+
+
+def fatal_misread_ids(api: Any) -> set[str]:
+    if not api.FATAL_MISREADS_PATH.exists():
+        return set()
+    return {
+        str(item.get("id"))
+        for item in (api.load_fatal_misreads().get("misreads") or [])
+        if item.get("id")
+    }
+
+
+def task_boot_class_ids(api: Any) -> set[str]:
+    if not api.TASK_BOOT_PROFILES_PATH.exists():
+        return set()
+    return {
+        str(item.get("id"))
+        for item in (api.load_task_boot_profiles().get("profiles") or [])
+        if item.get("id")
+    }
+
+
+def run_task_boot_profiles(api: Any) -> Any:
+    if not api.TASK_BOOT_PROFILES_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "task_boot_profiles_manifest_missing",
+                    "architecture/task_boot_profiles.yaml",
+                    "semantic task boot profile manifest is missing",
+                )
+            ],
+        )
+    manifest = api.load_task_boot_profiles()
+    issues: list[Any] = []
+    required_fields = manifest.get("required_profile_fields") or []
+    required_classes = set(manifest.get("required_task_classes") or [])
+    graph_stages = set(manifest.get("allowed_graph_stages") or [])
+    fatal_ids = fatal_misread_ids(api)
+    seen: set[str] = set()
+
+    for profile in manifest.get("profiles") or []:
+        profile_id = str(profile.get("id") or "<missing>")
+        path = f"architecture/task_boot_profiles.yaml:{profile_id}"
+        if profile_id in seen:
+            issues.append(api._issue("task_boot_profile_duplicate_id", path, "duplicate task boot profile id"))
+        seen.add(profile_id)
+        if profile_id not in required_classes:
+            issues.append(api._issue("task_boot_profile_unknown_class", path, f"unknown task class {profile_id!r}"))
+        for field in required_fields:
+            if api._metadata_missing(profile.get(field)):
+                issues.append(api._issue("task_boot_profile_required_field_missing", path, f"missing {field}"))
+        for field in ("required_reads", "current_fact_surfaces"):
+            for ref in profile.get(field) or []:
+                ref = str(ref)
+                if not manifest_ref_exists(api, ref):
+                    issues.append(api._issue("task_boot_profile_path_missing", path, f"{field} references missing path: {ref}"))
+        for proof in profile.get("required_proofs") or []:
+            proof_id = str(proof.get("id") or "<missing-proof>")
+            if api._metadata_missing(proof.get("question")):
+                issues.append(api._issue("task_boot_profile_required_field_missing", path, f"proof {proof_id} missing question"))
+            evidence = proof.get("evidence") or []
+            if not evidence:
+                issues.append(api._issue("task_boot_profile_required_field_missing", path, f"proof {proof_id} missing evidence"))
+            for ref in evidence:
+                ref = str(ref)
+                if not manifest_ref_exists(api, ref):
+                    issues.append(api._issue("task_boot_profile_path_missing", path, f"proof {proof_id} references missing evidence: {ref}"))
+        for misread_id in profile.get("fatal_misreads") or []:
+            misread_id = str(misread_id)
+            if misread_id not in fatal_ids:
+                issues.append(api._issue("task_boot_profile_unknown_fatal_misread", path, f"unknown fatal misread id: {misread_id}"))
+        graph_usage = profile.get("graph_usage") or {}
+        stage = graph_usage.get("stage")
+        if stage not in graph_stages:
+            issues.append(api._issue("task_boot_profile_invalid_graph_stage", path, f"invalid graph stage {stage!r}"))
+        if graph_usage.get("authority_status") != "derived_not_authority":
+            issues.append(
+                api._issue(
+                    "task_boot_profile_invalid_graph_stage",
+                    path,
+                    "graph_usage.authority_status must be derived_not_authority",
+                )
+            )
+        for gate in profile.get("verification_gates") or []:
+            for ref in manifest_gate_refs(api, str(gate)):
+                issues.append(api._issue("task_boot_profile_path_missing", path, f"verification gate references missing path: {ref}"))
+
+    missing = sorted(required_classes - seen)
+    for profile_id in missing:
+        issues.append(
+            api._issue(
+                "task_boot_profile_missing_required_class",
+                "architecture/task_boot_profiles.yaml",
+                f"missing required task class {profile_id}",
+            )
+        )
+    return api.StrictResult(ok=not issues, issues=issues)
+
+
+def run_fatal_misreads(api: Any) -> Any:
+    if not api.FATAL_MISREADS_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "fatal_misreads_manifest_missing",
+                    "architecture/fatal_misreads.yaml",
+                    "fatal semantic misreads manifest is missing",
+                )
+            ],
+        )
+    manifest = api.load_fatal_misreads()
+    issues: list[Any] = []
+    required_fields = manifest.get("required_misread_fields") or []
+    severities = set(manifest.get("allowed_severities") or [])
+    task_classes: set[str] = set()
+    if api.TASK_BOOT_PROFILES_PATH.exists():
+        task_classes = task_boot_class_ids(api) or set((api.load_task_boot_profiles().get("required_task_classes") or []))
+    seen: set[str] = set()
+
+    for item in manifest.get("misreads") or []:
+        misread_id = str(item.get("id") or "<missing>")
+        path = f"architecture/fatal_misreads.yaml:{misread_id}"
+        if misread_id in seen:
+            issues.append(api._issue("fatal_misread_duplicate_id", path, "duplicate fatal misread id"))
+        seen.add(misread_id)
+        for field in required_fields:
+            if api._metadata_missing(item.get(field)):
+                issues.append(api._issue("fatal_misread_required_field_missing", path, f"missing {field}"))
+        severity = item.get("severity")
+        if severity not in severities:
+            issues.append(api._issue("fatal_misread_invalid_severity", path, f"invalid severity {severity!r}"))
+        for ref in item.get("proof_files") or []:
+            ref = str(ref)
+            if not manifest_ref_exists(api, ref):
+                issues.append(api._issue("fatal_misread_path_missing", path, f"proof_files references missing path: {ref}"))
+        for task_class in item.get("task_classes") or []:
+            task_class = str(task_class)
+            if task_class not in task_classes:
+                issues.append(api._issue("fatal_misread_unknown_task_class", path, f"unknown task class: {task_class}"))
+        for gate in item.get("tests") or []:
+            for ref in manifest_gate_refs(api, str(gate)):
+                issues.append(api._issue("fatal_misread_gate_target_missing", path, f"test gate references missing path: {ref}"))
     return api.StrictResult(ok=not issues, issues=issues)

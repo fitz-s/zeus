@@ -193,6 +193,21 @@ strict_issue_codes:
   - runtime_mode_path_missing
   - runtime_mode_test_missing
   - runtime_mode_root_reference_missing
+  - task_boot_profiles_manifest_missing
+  - task_boot_profile_duplicate_id
+  - task_boot_profile_required_field_missing
+  - task_boot_profile_unknown_class
+  - task_boot_profile_missing_required_class
+  - task_boot_profile_path_missing
+  - task_boot_profile_unknown_fatal_misread
+  - task_boot_profile_invalid_graph_stage
+  - fatal_misreads_manifest_missing
+  - fatal_misread_duplicate_id
+  - fatal_misread_required_field_missing
+  - fatal_misread_invalid_severity
+  - fatal_misread_path_missing
+  - fatal_misread_unknown_task_class
+  - fatal_misread_gate_target_missing
   - test_relationship_manifest_missing_path
   - test_relationship_manifest_missing
   - test_relationship_manifest_missing_symbol

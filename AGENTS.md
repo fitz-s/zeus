@@ -78,10 +78,26 @@ If the read set grows beyond the budget in `architecture/context_budget.yaml`,
 narrow with `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`.
 
+## Task-Based Semantic Boot
+
+For source, settlement, hourly observation ingest, Day0 monitoring, calibration,
+docs-authority, or graph-review work, classify the task before reading code.
+Use `architecture/task_boot_profiles.yaml` to select the task class and
+`architecture/fatal_misreads.yaml` to load the forbidden semantic shortcuts.
+
+The required proof questions in the selected profile must be answered before an
+agent treats code structure, endpoint behavior, or graph output as sufficient
+context. Current fact surfaces named by the profile, especially
+`docs/operations/current_source_validity.md` and
+`docs/operations/current_data_state.md`, are task-required reads when listed
+even though they are not default-read docs.
+
 ## Topology and graph workflow
 
 Use derived routing proactively, but keep authority order intact:
 
+- For semantic-risk tasks, run the task boot profile first, then use topology
+  and graph for file discovery and blast radius.
 - For source, test, script, governance, or review work, run
   `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
   or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`
@@ -201,6 +217,9 @@ Check:
 
 ## What To Read By Task
 
+- Semantic-risk tasks: `architecture/task_boot_profiles.yaml`,
+  `architecture/fatal_misreads.yaml`, the profile's current fact surfaces, then
+  topology/graph and code
 - Source edits: scoped `src/**/AGENTS.md`, topology navigation/digest,
   `architecture/source_rationale.yaml`, Code Review Graph status when present,
   targeted code, targeted tests

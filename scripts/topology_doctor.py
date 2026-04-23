@@ -41,6 +41,8 @@ CHANGE_RECEIPT_SCHEMA_PATH = ROOT / "architecture" / "change_receipt_schema.yaml
 CONTEXT_PACK_PROFILES_PATH = ROOT / "architecture" / "context_pack_profiles.yaml"
 CODE_IDIOMS_PATH = ROOT / "architecture" / "code_idioms.yaml"
 RUNTIME_MODES_PATH = ROOT / "architecture" / "runtime_modes.yaml"
+TASK_BOOT_PROFILES_PATH = ROOT / "architecture" / "task_boot_profiles.yaml"
+FATAL_MISREADS_PATH = ROOT / "architecture" / "fatal_misreads.yaml"
 REFERENCE_REPLACEMENT_PATH = ROOT / "architecture" / "reference_replacement.yaml"
 CORE_CLAIMS_PATH = ROOT / "architecture" / "core_claims.yaml"
 MAP_MAINTENANCE_PATH = ROOT / "architecture" / "map_maintenance.yaml"
@@ -140,6 +142,14 @@ def load_code_idioms() -> dict[str, Any]:
 
 def load_runtime_modes() -> dict[str, Any]:
     return _load_yaml(RUNTIME_MODES_PATH)
+
+
+def load_task_boot_profiles() -> dict[str, Any]:
+    return _load_yaml(TASK_BOOT_PROFILES_PATH)
+
+
+def load_fatal_misreads() -> dict[str, Any]:
+    return _load_yaml(FATAL_MISREADS_PATH)
 
 
 def load_reference_replacement() -> dict[str, Any]:
@@ -522,6 +532,14 @@ def run_self_check_coherence() -> StrictResult:
 
 def run_runtime_modes() -> StrictResult:
     return _policy_checks().run_runtime_modes(sys.modules[__name__])
+
+
+def run_task_boot_profiles() -> StrictResult:
+    return _policy_checks().run_task_boot_profiles(sys.modules[__name__])
+
+
+def run_fatal_misreads() -> StrictResult:
+    return _policy_checks().run_fatal_misreads(sys.modules[__name__])
 
 
 

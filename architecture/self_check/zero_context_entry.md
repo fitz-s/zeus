@@ -19,6 +19,15 @@ Then run:
 If navigation routes this task into K0/K1/schema/governance/control/truth, keep
 following this overlay before reading code.
 
+If the task is source routing, settlement, hourly observation ingest, Day0
+monitoring, calibration, docs authority, or graph review, also read:
+
+1. `architecture/task_boot_profiles.yaml`
+2. `architecture/fatal_misreads.yaml`
+
+Select the profile first, then answer its required proof questions before code
+or graph output is treated as sufficient context.
+
 ## Step 0 — Stop broad prompting
 
 Do not ask the agent to “implement the architecture”, “refactor Zeus”, or “finish the system”.
@@ -66,6 +75,9 @@ Before editing, the agent must answer in writing:
 - Which files are forbidden to change?
 - Is this a math change or an architecture change?
 - What evidence is required?
+- Which semantic boot profile applies?
+- Which fatal misreads must be explicitly avoided?
+- Which current fact surfaces does the profile require?
 
 ## Step 4 — Refuse unsafe starting states
 

@@ -47,3 +47,65 @@ Pre-close review:
 Next:
 
 - commit Phase -1, then run post-close review before opening Phase 0
+
+## Phase 0 Semantic Boot Kernel Skeleton
+
+Changed files:
+
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/task_boot_profiles.yaml`
+- `architecture/fatal_misreads.yaml`
+- `architecture/self_check/zero_context_entry.md`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_core_map.py`
+- `scripts/topology_doctor_policy_checks.py`
+- `scripts/topology_doctor_registry_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- added `task_boot_profiles.yaml` for question-first task classes:
+  source routing, settlement, hourly ingest, Day0, calibration, docs
+  authority, and graph review
+- added `fatal_misreads.yaml` for the high-risk semantic shortcuts that must be
+  disproven before code/graph context is trusted
+- added topology_doctor validation modes for the new manifests
+- routed root `AGENTS.md`, `workspace_map.md`, and zero-context overlay through
+  semantic boot before code or graph review
+
+Verification:
+
+- `python scripts/topology_doctor.py --task-boot-profiles --json` -> ok
+- `python scripts/topology_doctor.py --fatal-misreads --json` -> ok
+- `python scripts/topology_doctor.py --self-check-coherence --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <Phase 0 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <Phase 0 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <Phase 0 files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <Phase 0 files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <Phase 0 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k 'task_boot_profiles or fatal_misreads or compiled_topology or self_check_coherence or context_budget'` -> 15 passed
+- `git diff --check -- <Phase 0 files>` -> ok
+- `python scripts/topology_doctor.py --strict --json` -> blocked by pre-existing
+  unregistered tracked scripts/tests and unrelated untracked state artifacts,
+  not by Phase 0 semantic boot changes
+
+Pre-close review:
+
+- Critic: pass. Phase 0 installs boot manifests and validators without
+  implementing city truth contracts or semantic-bootstrap output.
+- Verifier: pass. Root and zero-context routing now force task-class semantic
+  boot before graph/code confidence, and graph remains `derived_not_authority`.
+
+Next:
+
+- commit Phase 0, then run post-close review before Phase 1
