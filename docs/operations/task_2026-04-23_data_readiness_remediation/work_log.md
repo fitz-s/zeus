@@ -477,6 +477,106 @@ Answers to 3 open questions:
 - 2026-04-23T19:06:00Z — Updated App-C: R3-16 → CLOSED-BY-P-C; R3-20 → ADDRESSED-BY-P-C-TO-BE-CLOSED-BY-P-G
 - 2026-04-23T19:10:00Z — P-C formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C all complete → **gate to P-G opens** (pre-existing corrections: Denver DELETE + 2026-04-15 R3-D4 duplicates + AP-4 3-bucket relabel + obs_v2 Cape Town).
 
+---
+
+## P-G: Pre-existing Corrections — started 2026-04-23T19:30:00Z; PRE-REVIEW requested 2026-04-23T19:45:00Z
+
+### Pre-packet evidence gathering (before Q1-Q10 finalization)
+
+First DB-mutating packet in this workstream. Treated as high-risk per first_principles.md §5 step 1; pre-review requested before any DELETE.
+
+**Structural reframes discovered during evidence gathering**:
+
+1. **5 "2026-04-15 duplicates" are HIGH/LOW metric-identity collisions, NOT JSON duplicates**. Gamma probe 2026-04-23 (paginated 0..1930 @ 100/page, tag_id=103040 closed=true) finds separate "Highest temperature in …" and "Lowest temperature in …" events for London / NYC / Seoul / Tokyo / Shanghai on 2026-04-15. HIGH winners match pm_settlement_truth.json EARLY entries (idx 1513/1520/1517/1530/1532); LOW winners match LATE entries (idx 1557/1559/1558/1560/1561). JSON has no `temperature_metric` field → bulk writer iterated both and UNIQUE(city, target_date) kept only the LAST (LOW) per pair. DB currently has LOW-market bins mislabeled as HIGH-market settlements. **INV-14 metric-identity-spine failure made concrete**. Fix: DELETE the 5 wrong-metric rows; P-E re-inserts using EARLY-set HIGH-market bins (or equivalent derivation from obs).
+
+2. **27 "AP-4 NO_OBS" rows are source-handoff history, NOT mislabels**. SQL on target-date ranges per source_type shows cleanly DISJOINT bands:
+   - Taipei CWA: Mar 16-22 (7); NOAA: Mar 23-Apr 04 (12); WU: Apr 05-15 (11)
+   - Tel Aviv WU: Mar 10-22 (13); NOAA: Mar 23-Apr 15 (23)
+   - HK WU: Mar 13-14 (2); HKO: Mar 16-Apr 15 (29; Mar 20 gap)
+   - Polymarket legitimately switched source over time. Labels are historically correct; substituting cross-family obs would be AP-4. **Retire P-C §5/§11 "relabel" prescription**. P-E decides backfill-or-QUARANTINE per row using enumerable reason `pc_audit_source_role_collapse_no_source_correct_obs_available`.
+
+### Proposed P-G minimal DB mutations (2 transactions, 6 rows)
+
+- TXN 1: `DELETE FROM settlements WHERE city='Denver' AND target_date='2026-04-15'` (1 row — P-D §9.1 synthetic orphan)
+- TXN 2: `DELETE FROM settlements WHERE target_date='2026-04-15' AND city IN ('London','NYC','Seoul','Tokyo','Shanghai')` (5 rows — LOW-market contamination)
+
+Pre-mutation snapshot: `cp state/zeus-world.db state/zeus-world.db.pre-pg_2026-04-23` after `PRAGMA wal_checkpoint(TRUNCATE)`. Each TXN is atomic with SELECT-pre-verify + SELECT changes() + SELECT COUNT=0 post-verify. Final count: 1562 → 1556.
+
+### Non-mutating P-G actions
+
+- Cape Town 2026-04-15 (±1 °C obs drift): stay; P-E QUARANTINE via `pc_audit_1unit_drift`
+- 27 AP-4 rows: stay; P-E decides per row
+- 2026-03-08 DST cluster: stay; P-E QUARANTINE via `pc_audit_dst_spring_forward_bin_mismatch`
+- Shenzhen whole-bucket (26 rows): stay; P-E QUARANTINE via `pc_audit_shenzhen_drift_nonreproducible`
+- NH-C8 structural check ran: no additional AP-4 cities beyond the 3 already known
+- Post-P-G re-run `pc_agreement_audit.py` to produce `pc_agreement_audit_postPG.json`; expect 1556 rows, 32→27 mismatches, 3 buckets (London/Shanghai/Tokyo WU/C) shift QUARANTINE→VERIFIED
+
+### Execution log
+
+- 2026-04-23T19:30:00Z — Evidence gathering: inspected `pm_settlement_truth.json` structure (1566 entries; keys `['city','date','pm_bin_hi','pm_bin_lo','pm_high','resolution_source','unit']`; no `temperature_metric` field)
+- 2026-04-23T19:32:00Z — Found 5 duplicate (city, date) pairs, all on 2026-04-15 (London/NYC/Seoul/Tokyo/Shanghai); each has EARLY entry (idx 1513-1532) + LATE entry (idx 1557-1561) with different bin values
+- 2026-04-23T19:34:00Z — Paginated Gamma probe (0..1930, 100/page, tag_id=103040 closed=true) → 1930 closed daily-temperature events; filtered endDate=2026-04-15 + 5 cities
+- 2026-04-23T19:36:00Z — Gamma YES_WON bins confirmed: HIGH markets = EARLY entries; LOW markets = LATE entries. Bulk writer loaded LATE (LOW) → DB contaminated.
+- 2026-04-23T19:38:00Z — SQL date-range check per city: Taipei / Tel Aviv / HK have cleanly disjoint date bands per source_type. Labels are historically correct.
+- 2026-04-23T19:40:00Z — Wrote `evidence/pg_corrections_plan.md` (~200 lines) with Gamma findings, JSON analysis, SQL proposal, Q1-Q10, safety protocol, post-P-G re-audit expectations.
+- 2026-04-23T19:45:00Z — Sent pre-review request to critic-opus@zeus-data-readiness with 5 independent-verification requests.
+
+### Pre-review status (2026-04-23)
+
+**APPROVE** — critic-opus independently verified all 5 verification points + issued 3 MINOR findings (F1 SQL fail-closed, F2 HK WU Gamma slug verification, F3 post-P-G P-C re-audit math) + 1 new hazard (snapshot hash verification). Both structural findings endorsed: HIGH/LOW metric-identity collision made concrete; Q9 reversal of P-C §5/§11 relabel prescription strongly endorsed. P-C "re-audit after relabel" prerequisite gate withdrawn.
+
+### Execution (2026-04-23T17:58:53Z)
+
+Applied all pre-review findings:
+- **F1**: Wrapped DELETE SQL in `evidence/scripts/pg_delete_wrongmetric_and_synthetic.py` (237 lines, MD5 `0eaa4df7b7abd828123b2e6450798700`). `BEGIN IMMEDIATE` lock, pre-verify INSIDE transaction, assertion-guarded ROLLBACK on pre-count mismatch / DELETE changes mismatch / post-verify non-zero / SQLite error (exit codes 2/3/4/5).
+- **F2**: 2 Gamma slug queries for HK WU 2026-03-13/14 — both returned real events with resolved UMA status + YES_WON low-shoulder bins matching DB exactly. HK WU rows NOT synthetic; labels historically correct; P-G does not touch them.
+- **F3**: Post-P-G `pc_agreement_audit.py` re-run: predictions verified exactly (1556/1507/1480/27/42/7/0; VERIFIED 37→40, QUARANTINE 13→10, partition 54→54).
+- **New hazard**: Snapshot hash md5 `8bece7701a1eafe57c451567c9335841` pre/post `cp` match; recorded at `state/zeus-world.db.pre-pg_2026-04-23.md5`.
+
+Execution timeline:
+```
+17:58:53Z  WAL checkpoint(TRUNCATE) + cp snapshot
+17:58:58Z  md5 verify (main == snap) + pre-count 1562
+17:58:58Z  TXN1 Denver 2026-04-15 DELETE: 1 row (id=88035, bin=[68,69]F WU)
+17:58:58Z  TXN2 LOW-metric DELETE: 5 rows (London[11,11]C id=88049; NYC[68,69]F id=88051;
+                                             Seoul[10,10]C id=88050; Shanghai[15,15]C id=88053;
+                                             Tokyo[15,15]C id=88052)
+17:58:58Z  Post-count 1556 ✓
+```
+Zero ROLLBACKs. Zero SQLite errors.
+
+Deliverables:
+- `evidence/pg_corrections_plan.md` (218 lines, MD5 `acaa1b64893c1d667a656977abfc3113`)
+- `evidence/pg_execution_log.md` (164 lines, MD5 `26b387194f7cbb49ab50423b89c748f7`) — 14 self-verify ACs all PASS
+- `evidence/pc_agreement_audit_postPG.json` (1640 lines, MD5 `19ab7239c4441a9c1bcdebbac69eb013`)
+- `evidence/scripts/pg_delete_wrongmetric_and_synthetic.py` (237 lines)
+- Snapshot: `state/zeus-world.db.pre-pg_2026-04-23` (binary, rollback path)
+
+### Closure request → critic-opus (post-execution)
+
+- 2026-04-23T18:05:00Z — SendMessage to critic-opus with MD5s + 5 reproducibility commands + R3-## status updates + AP-4 refinement language draft request
+
+### Critic-opus final verdict (2026-04-23)
+
+**APPROVE** — every claim independently reproduced exactly. Single MINOR finding F1-POST (md5 sidecar filename artifact `.db.db.` doubling from `Path.with_suffix()` semantics; rollback viable because file existed at doubled path). AP-12 partition sum verified: 40 VERIFIED + 10 QUARANTINE + 3 NO_OBS + 1 STATION_REMAP = 54 buckets, 1071+451+27+7=1556 rows. All invariants honored or strengthened. Zero fatal_misreads violated.
+
+R3-## decisions endorsed:
+- R3-21: APPROVED as RESOLVED-BY-P-G
+- R3-23: already CLOSED-BY-P-D; P-G execution; no status change
+- R3-20: APPROVED as ADDRESSED-BY-P-C-REFRAMED-BY-P-G-CLOSES-IN-P-E
+- NH-G-future: log as §8 rule/footnote, not AP-# entry (proportionality)
+- AP-4 refinement: team-lead drafts; critic reviews on closure
+
+Critic meta-observations (workstream-level): diagnostic trajectory is healthy (P-A→P-D→P-C→P-G sharpens framing each step); evidence discipline is holding (4 packets in, every numerical claim reproduces ±0; partition sums, SQL counts, Gamma probes, MD5 hashes all exact).
+
+### Closure action
+
+- 2026-04-23T18:15:00Z — Applied F1-POST: renamed `state/zeus-world.db.db.pre-pg_2026-04-23.md5` → `state/zeus-world.db.pre-pg_2026-04-23.md5`; patched `pg_delete_wrongmetric_and_synthetic.py:42-46` to use explicit `path.parent / (path.name + ".md5")` concatenation; added F1-POST section to `pg_execution_log.md`.
+- 2026-04-23T18:17:00Z — Updated App-C: R3-21 → RESOLVED-BY-P-G; R3-20 → ADDRESSED-BY-P-C-REFRAMED-BY-P-G-CLOSES-IN-P-E.
+- 2026-04-23T18:18:00Z — Added AP-4 refinement (Shape A label-error vs Shape B collector-gap) to first_principles.md §3 post AP-17, with detection rule (date-range SQL disjoint ⇒ Shape B).
+- 2026-04-23T18:19:00Z — Added first_principles.md §8 rule 12 for NH-G-future (Gamma pagination tail hazard → use slug-based direct fetch or loop-until-empty).
+- 2026-04-23T18:20:00Z — P-G formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C + P-G all complete. Gate to **P-B (schema migration)** opens. P-B adds INV-14 identity columns + provenance_json + CHECK + trigger — this is the K0 schema change that unblocks P-F (hard quarantine) and P-E (DELETE+INSERT reconstruction).
+
 ### Handoff notes for post-compact resumption of P-C
 
 **Current workstream state** (every fact verifiable via files on disk):

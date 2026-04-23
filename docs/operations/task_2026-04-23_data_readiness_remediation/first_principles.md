@@ -206,6 +206,20 @@ These are concrete failure modes observed in plans v3/v4/v5/v6. Every future pac
 | AP-16 | **Zone laundering** — inventing a new zone or relocating semantic atoms to non-K0 locations to bypass K0 packet evidence (e.g., DR-45 moving `src/contracts/bin_labels.py` → `src/shared_helpers/`) | 3 | NC-01 (no broad K0 patch without packet). Any change to `src/contracts/`, `src/types/`, `src/state/{ledger,projection,lifecycle_manager}.py` requires a K0 schema_packet with full evidence. Relocation out of K0 is itself a K0 change. |
 | AP-17 | **Graph-as-truth** — using code-review-graph output as semantic authority (what settles / what validates) rather than as blast-radius / impact context (where to inspect) | ongoing | fatal_misreads.yaml `code_review_graph_answers_where_not_what_settles`. Graph is Stage-2 derived context per `architecture/task_boot_profiles.yaml`; never substitutes for invariants / source_rationale / current_*_validity |
 
+### AP-4 refinement (P-G 2026-04-23, post-critic endorsement)
+
+AP-4 (source role collapse) has TWO distinct shapes. Diagnosis MUST distinguish before prescribing a fix:
+
+- **Shape A — label error**: the row's `settlement_source_type` doesn't match what Polymarket actually used to resolve. Relabel (after audit evidence proving the current label is wrong) is the correct fix. Hypothesis typically surfaces when obs exists in a cross-family source AND there is no authority-trail for why the label would differ from that obs family.
+- **Shape B — collector gap**: the row's `settlement_source_type` IS historically correct (Polymarket switched settlement source over time for that city; labels correctly encode that switch), but we lack source-family-correct obs for those dates. Backfill-or-QUARANTINE per row is the correct fix. **Relabeling would INTRODUCE AP-4 in reverse** (substituting cross-family obs for a correctly-labeled row).
+
+**Detection rule**: per-city SQL on target-date ranges grouped by settlement_source_type:
+- If date ranges are **cleanly disjoint** per source_type → Shape B (source-handoff history)
+- If date ranges **overlap** between labels → Shape A (muddled) or needs deeper audit
+- Example Shape B observed in P-G: Taipei (CWA Mar 16-22 / NOAA Mar 23-Apr 4 / WU Apr 5-15), Tel Aviv (WU Mar 10-22 / NOAA Mar 23-Apr 15), HK (WU Mar 13-14 / HKO Mar 16-Apr 15 with Mar 20 gap). All 3 cleanly disjoint → Shape B.
+
+**Packet test**: before prescribing "relabel", check date-range SQL. If disjoint, the label is historically correct; the problem is obs-collector coverage. Reaching for relabel to paper over a collector gap is AP-4 in reverse.
+
 ---
 
 ## Section 4 — Packet Evaluation Framework (8 questions)
@@ -369,6 +383,7 @@ Only AFTER these 10 criteria are met is the workstream considered complete. Trai
 9. **Do not invent zones or relocate K0 atoms to sidestep K0 packet evidence.** Any change to `src/contracts/`, `src/types/`, `src/state/{ledger,projection,lifecycle_manager}.py` is a K0 change requiring schema_packet + full evidence. Stateless utility helpers (time, geo) are K3 or K_utils (if that zone is formally added via a separate K0-charter-amendment packet). Semantic atoms (bin_labels, settlement_semantics) STAY in K0.
 10. **Do not UPDATE the corrupted 1,562 rows in P-E**. They are 100% bulk-batch; UPDATE perpetuates broken provenance under new column values. DELETE then INSERT fresh from observation+contract.
 11. **Do not use code-review-graph output as semantic authority.** Graph tells WHERE to look and WHAT the blast radius is; it does NOT tell what settles, what is source-correct, or what is currently valid (fatal_misreads.yaml `code_review_graph_answers_where_not_what_settles`).
+12. **Do not trust Gamma API pagination tail silently.** `NH-G-future` (critic-opus P-G post-review): direct paginated fetches (`offset=0..N` @ `limit=100`) may silently miss events beyond offset ~1900, even though they ARE tagged correctly (observed empirically in P-G: paginated scan missed 4 of 5 LOW-temp 2026-04-15 events; direct slug queries returned all 5). For DR-33 implementation or any future Gamma-backed settlement detection, prefer slug-based direct fetch OR loop-until-empty-with-smaller-page-size. Paginated fetch is a `convenience, not an authority`; verify every "empty tail" claim with at least one slug probe for a known-expected market.
 
 ---
 
@@ -452,16 +467,17 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-17 | architect P1-4, critic P1-2 | cross-packet coordination (gate_f_data_backfill step 8) | P-F hard quarantine (re-check first) | PENDING |
 | R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | PENDING |
 | R3-19 | architect P1-7 | AP-15 (NC-13 enforcement deferred) | P-B schema / P-E | PENDING |
-| R3-20 | critic P1-1 | AP-4 (source role collapse) | P-C WU audit (Tel Aviv decoupling) / P-E | **ADDRESSED-BY-P-C-TO-BE-CLOSED-BY-P-G** (2026-04-23; critic-opus APPROVE; Tel Aviv WU-labeled 13 rows empirically show obs only in ogimet_metar_llbg; relabel executes in P-G, post-relabel P-C re-audit per §11 closes loop) |
-| R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** (per critic-opus P-D closure: reconciliation scope, not signal scope; optional 5-event Gamma probe add-on in P-G) | PENDING |
+| R3-20 | critic P1-1 | AP-4 (source role collapse — Shape B per §3) | P-C WU audit → P-G reframe → P-E | **ADDRESSED-BY-P-C-REFRAMED-BY-P-G-CLOSES-IN-P-E** (2026-04-23; P-G SQL proof of disjoint date-ranges per source_type for HK/Taipei/Tel Aviv shows these are source-handoff history, NOT mislabels; relabel retired; P-E decides backfill-or-QUARANTINE per row; critic-opus APPROVE on the reframe) |
+| R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** | **RESOLVED-BY-P-G** (2026-04-23; critic-opus POST-EXECUTION APPROVE; Gamma probe confirmed 5 "duplicates" are HIGH/LOW metric-identity collisions, NOT JSON duplicates; DELETE 5 wrong-metric rows; P-E re-inserts HIGH-market winners using JSON EARLY entries 1513/1520/1517/1530/1532) |
 | R3-22 | scientist D5 | AP-1 (obs_v2 corrupt rows) | P-G pre-existing corrections | PENDING |
 | R3-23 | scientist D7 | AP-1 (Denver orphan) | P-D extension §9.1 (Gamma probe: 250-event scan, 0 Denver matches → synthetic orphan) → P-G DELETE | **CLOSED-BY-P-D** (2026-04-23; Denver not in Gamma; P-G to DELETE in execution phase) |
 | R3-24 | architect cumulative | meta: candidate 8th and 9th fatal_misreads | Separate guidance_kernel packet (out of v6 scope) | NOTED |
 
 **Packet coverage summary**:
 - P-A: R3-03, R3-05 (partial)
-- P-D: R3-09, R3-21, R3-23 (partial)
-- P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; closes at P-G)
+- P-D: R3-09, R3-23 (closed), R3-21 (routed to P-G)
+- P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; reframed in P-G; closes at P-E)
+- P-G: R3-21 (RESOLVED-BY-P-G), R3-20 (REFRAMED; closes at P-E)
 - P-G: R3-22, R3-23 (partial)
 - P-B: R3-01, R3-06, R3-07, R3-10, R3-15, R3-18, R3-19
 - P-F: R3-14, R3-17
