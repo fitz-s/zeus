@@ -3142,6 +3142,10 @@ def test_core_claims_mode_validates_first_wave_claims():
         "EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY",
         "ALPHA_TARGET_COMPATIBILITY",
         "VIG_BEFORE_BLEND",
+        "SOURCE_ROLES_NOT_INTERCHANGEABLE",
+        "HONG_KONG_CURRENT_TRUTH_REQUIRES_FRESH_AUDIT",
+        "HOURLY_EXTREMA_PRESERVATION_REQUIRED",
+        "CODE_REVIEW_GRAPH_DERIVED_NOT_SEMANTIC_AUTHORITY",
     }.issubset(claim_ids)
 
 
@@ -3158,6 +3162,16 @@ def test_cli_json_parity_for_task_boot_profiles_mode():
 def test_cli_json_parity_for_fatal_misreads_mode():
     payload = run_cli_json(["--fatal-misreads", "--json"])
     result = topology_doctor.run_fatal_misreads()
+
+    assert payload == {
+        "ok": result.ok,
+        "issues": [topology_doctor.asdict(issue) for issue in result.issues],
+    }
+
+
+def test_cli_json_parity_for_city_truth_contract_mode():
+    payload = run_cli_json(["--city-truth-contract", "--json"])
+    result = topology_doctor.run_city_truth_contract()
 
     assert payload == {
         "ok": result.ok,
@@ -3192,6 +3206,22 @@ def test_fatal_misreads_mode_validates_semantic_antibodies():
     }.issubset(misread_ids)
 
 
+def test_city_truth_contract_mode_validates_schema_not_current_truth():
+    result = topology_doctor.run_city_truth_contract()
+    contract = topology_doctor.load_city_truth_contract()
+
+    assert_topology_ok(result)
+    assert contract["metadata"]["authority_status"] == "stable_schema_not_current_city_truth"
+    assert set(contract["source_roles"]) >= {
+        "settlement_daily_source",
+        "day0_live_monitor_source",
+        "historical_hourly_source",
+        "forecast_skill_source",
+    }
+    assert "current_city_truth" not in contract
+    assert all(example["classification"] == "schema_example_not_current_truth" for example in contract["examples"])
+
+
 def test_task_boot_profiles_reject_unknown_fatal_misread(monkeypatch):
     manifest = topology_doctor.load_task_boot_profiles()
     manifest["profiles"][0]["fatal_misreads"].append("NO_SUCH_MISREAD")
@@ -3212,6 +3242,17 @@ def test_fatal_misreads_reject_missing_proof_file(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "fatal_misread_path_missing" for issue in result.issues)
+
+
+def test_city_truth_contract_rejects_unbacked_current_assertion(monkeypatch):
+    contract = topology_doctor.load_city_truth_contract()
+    contract["current_city_truth"] = [{"id": "bad_hk_claim", "city_key": "Hong Kong"}]
+
+    monkeypatch.setattr(topology_doctor, "load_city_truth_contract", lambda: contract)
+    result = topology_doctor.run_city_truth_contract()
+
+    assert not result.ok
+    assert any(issue.code == "city_truth_contract_current_claim_unbacked" for issue in result.issues)
 
 
 def test_core_map_probability_chain_uses_core_claims():

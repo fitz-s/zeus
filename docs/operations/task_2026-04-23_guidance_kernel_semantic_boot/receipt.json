@@ -1,5 +1,5 @@
 {
-  "task": "guidance kernel phase 0 semantic boot skeleton",
+  "task": "guidance kernel phase 1 city truth contract schema",
   "packet": "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md",
   "route_source": "ralplan",
   "route_evidence": [
@@ -21,6 +21,8 @@
     "AGENTS.md",
     "workspace_map.md",
     "architecture/AGENTS.md",
+    "architecture/city_truth_contract.yaml",
+    "architecture/core_claims.yaml",
     "architecture/task_boot_profiles.yaml",
     "architecture/fatal_misreads.yaml",
     "architecture/self_check/zero_context_entry.md",
@@ -40,6 +42,8 @@
     "AGENTS.md",
     "workspace_map.md",
     "architecture/AGENTS.md",
+    "architecture/city_truth_contract.yaml",
+    "architecture/core_claims.yaml",
     "architecture/task_boot_profiles.yaml",
     "architecture/fatal_misreads.yaml",
     "architecture/self_check/zero_context_entry.md",
@@ -61,9 +65,12 @@
     ".code-review-graph/graph.db",
     "docs/authority/**",
     "docs/archives/**",
+    "current per-city/source truth table in architecture/**",
     "context-pack semantic-bootstrap output implementation"
   ],
   "tests_evidence": [
+    "python scripts/topology_doctor.py --city-truth-contract --json",
+    "python scripts/topology_doctor.py --core-claims --json",
     "python scripts/topology_doctor.py --task-boot-profiles --json",
     "python scripts/topology_doctor.py --fatal-misreads --json",
     "python scripts/topology_doctor.py --self-check-coherence --json",
@@ -74,7 +81,7 @@
     "python scripts/topology_doctor.py --work-record --changed-files <phase files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json",
     "python scripts/topology_doctor.py --change-receipts --changed-files <phase files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
     "python scripts/topology_doctor.py closeout --changed-files <phase files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json",
-    "python -m pytest -q tests/test_topology_doctor.py -k 'task_boot_profiles or fatal_misreads or compiled_topology or self_check_coherence or context_budget'",
+    "python -m pytest -q tests/test_topology_doctor.py -k 'city_truth_contract or task_boot_profiles or fatal_misreads or core_claims'",
     "git diff --check -- <phase files>"
   ]
 }

@@ -109,3 +109,67 @@ Pre-close review:
 Next:
 
 - commit Phase 0, then run post-close review before Phase 1
+
+## Phase 1 City Truth Contract Schema
+
+Changed files:
+
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/city_truth_contract.yaml`
+- `architecture/core_claims.yaml`
+- `architecture/task_boot_profiles.yaml`
+- `architecture/fatal_misreads.yaml`
+- `architecture/self_check/zero_context_entry.md`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_core_map.py`
+- `scripts/topology_doctor_policy_checks.py`
+- `scripts/topology_doctor_registry_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- added `city_truth_contract.yaml` as a stable source-role schema and evidence
+  taxonomy, explicitly not a current city/source truth table
+- linked city truth schema into semantic boot profiles and fatal misread proof
+  surfaces
+- added core claims for source-role separation, Hong Kong caution, hourly
+  extrema preservation, and graph-derived-only status
+- added topology_doctor validation for the city truth contract and unbacked
+  architecture-side current assertions
+
+Verification:
+
+- `python scripts/topology_doctor.py --city-truth-contract --json` -> ok
+- `python scripts/topology_doctor.py --core-claims --json` -> ok
+- `python scripts/topology_doctor.py --task-boot-profiles --json` -> ok
+- `python scripts/topology_doctor.py --fatal-misreads --json` -> ok
+- `python scripts/topology_doctor.py --self-check-coherence --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <Phase 1 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <Phase 1 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <Phase 1 files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <Phase 1 files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <Phase 1 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k 'city_truth_contract or task_boot_profiles or fatal_misreads or core_claims'` -> 14 passed
+- `git diff --check -- <Phase 1 files>` -> ok
+
+Pre-close review:
+
+- Critic: pass. `city_truth_contract.yaml` defines schema, evidence classes,
+  caution flags, and examples only; it does not encode current per-city truth.
+- Verifier: pass. Core claims are proof-targeted, topology_doctor rejects
+  unbacked architecture-side current assertions, and current truth ownership
+  remains with operations current-fact surfaces.
+
+Next:
+
+- commit Phase 1, then run post-close review before Phase 2

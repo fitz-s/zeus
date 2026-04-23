@@ -613,3 +613,108 @@ def run_fatal_misreads(api: Any) -> Any:
             for ref in manifest_gate_refs(api, str(gate)):
                 issues.append(api._issue("fatal_misread_gate_target_missing", path, f"test gate references missing path: {ref}"))
     return api.StrictResult(ok=not issues, issues=issues)
+
+
+def city_truth_caution_ids(contract: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("id"))
+        for item in contract.get("caution_flags") or []
+        if item.get("id")
+    }
+
+
+def city_truth_evidence_refs(assertion: dict[str, Any]) -> list[str]:
+    refs = assertion.get("evidence_refs")
+    if isinstance(refs, list):
+        return [str(ref) for ref in refs]
+    return []
+
+
+def check_city_truth_current_assertions(api: Any, contract: dict[str, Any], issues: list[Any]) -> None:
+    for idx, assertion in enumerate(contract.get("current_city_truth") or []):
+        assertion_id = str(assertion.get("id") or f"current_city_truth[{idx}]")
+        path = f"architecture/city_truth_contract.yaml:{assertion_id}"
+        for field in ("freshness_class", "current_fact_surface", "invalidation_condition"):
+            if api._metadata_missing(assertion.get(field)):
+                issues.append(api._issue("city_truth_contract_current_claim_unbacked", path, f"current assertion missing {field}"))
+        refs = city_truth_evidence_refs(assertion)
+        if not refs:
+            issues.append(api._issue("city_truth_contract_current_claim_unbacked", path, "current assertion missing evidence_refs"))
+        for ref in refs + [str(assertion.get("current_fact_surface") or "")]:
+            if ref and not manifest_ref_exists(api, ref):
+                issues.append(api._issue("city_truth_contract_path_missing", path, f"current assertion references missing path: {ref}"))
+
+
+def run_city_truth_contract(api: Any) -> Any:
+    if not api.CITY_TRUTH_CONTRACT_PATH.exists():
+        return api.StrictResult(
+            ok=False,
+            issues=[
+                api._issue(
+                    "city_truth_contract_manifest_missing",
+                    "architecture/city_truth_contract.yaml",
+                    "city truth contract manifest is missing",
+                )
+            ],
+        )
+    contract = api.load_city_truth_contract()
+    issues: list[Any] = []
+    required_sections = contract.get("required_contract_sections") or []
+    for section in required_sections:
+        if api._metadata_missing(contract.get(section)):
+            issues.append(
+                api._issue(
+                    "city_truth_contract_required_field_missing",
+                    "architecture/city_truth_contract.yaml",
+                    f"missing {section}",
+                )
+            )
+
+    roles = contract.get("source_roles") or {}
+    for role in ("settlement_daily_source", "day0_live_monitor_source", "historical_hourly_source", "forecast_skill_source"):
+        path = f"architecture/city_truth_contract.yaml:{role}"
+        if role not in roles:
+            issues.append(api._issue("city_truth_contract_role_missing", path, f"missing source role {role}"))
+            continue
+        role_spec = roles.get(role) or {}
+        if api._metadata_missing(role_spec.get("description")):
+            issues.append(api._issue("city_truth_contract_required_field_missing", path, "missing description"))
+        if api._metadata_missing(role_spec.get("required_fields")):
+            issues.append(api._issue("city_truth_contract_required_field_missing", path, "missing required_fields"))
+
+    truth_boundary = contract.get("truth_boundary") or {}
+    for field in ("current_truth_owner", "current_data_owner", "runtime_config_source"):
+        ref = str(truth_boundary.get(field) or "")
+        if not ref:
+            issues.append(api._issue("city_truth_contract_required_field_missing", "architecture/city_truth_contract.yaml:truth_boundary", f"missing {field}"))
+        elif not manifest_ref_exists(api, ref):
+            issues.append(api._issue("city_truth_contract_path_missing", "architecture/city_truth_contract.yaml:truth_boundary", f"{field} references missing path: {ref}"))
+
+    caution_ids = city_truth_caution_ids(contract)
+    if not caution_ids:
+        issues.append(api._issue("city_truth_contract_required_field_missing", "architecture/city_truth_contract.yaml:caution_flags", "missing caution flags"))
+
+    for idx, evidence_class in enumerate(contract.get("evidence_classes") or []):
+        class_id = str(evidence_class.get("id") or f"evidence_classes[{idx}]")
+        path = f"architecture/city_truth_contract.yaml:{class_id}"
+        for field in ("description", "accepted_locations"):
+            if api._metadata_missing(evidence_class.get(field)):
+                issues.append(api._issue("city_truth_contract_required_field_missing", path, f"missing {field}"))
+
+    for example in contract.get("examples") or []:
+        example_id = str(example.get("id") or "<missing-example>")
+        path = f"architecture/city_truth_contract.yaml:{example_id}"
+        if example.get("classification") != "schema_example_not_current_truth":
+            issues.append(api._issue("city_truth_contract_invalid_example", path, "examples must be marked schema_example_not_current_truth"))
+        for flag in example.get("caution_flags") or []:
+            if str(flag) not in caution_ids:
+                issues.append(api._issue("city_truth_contract_invalid_example", path, f"unknown caution flag: {flag}"))
+        refs = city_truth_evidence_refs(example)
+        if not refs:
+            issues.append(api._issue("city_truth_contract_invalid_example", path, "example missing evidence_refs"))
+        for ref in refs:
+            if not manifest_ref_exists(api, ref):
+                issues.append(api._issue("city_truth_contract_path_missing", path, f"example references missing path: {ref}"))
+
+    check_city_truth_current_assertions(api, contract, issues)
+    return api.StrictResult(ok=not issues, issues=issues)

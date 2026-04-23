@@ -50,6 +50,7 @@ profiles:
       - docs/operations/known_gaps.md
       - config/cities.json
       - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
       - architecture/fatal_misreads.yaml
     current_fact_surfaces:
       - docs/operations/current_source_validity.md
@@ -60,6 +61,7 @@ profiles:
         evidence:
           - docs/operations/current_source_validity.md
           - config/cities.json
+          - architecture/city_truth_contract.yaml
       - id: source_family_not_endpoint_health
         question: "Does the chosen source prove settlement correctness, not just HTTP availability?"
         evidence:
@@ -97,6 +99,7 @@ profiles:
       - docs/operations/current_source_validity.md
       - docs/operations/known_gaps.md
       - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
       - architecture/core_claims.yaml
       - architecture/fatal_misreads.yaml
     current_fact_surfaces:
@@ -107,6 +110,7 @@ profiles:
         evidence:
           - docs/reference/zeus_domain_model.md
           - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
           - architecture/core_claims.yaml
       - id: dual_track_separation
         question: "Does this high/low family preserve separate physical quantity and calibration identity?"
@@ -142,6 +146,7 @@ profiles:
       - docs/operations/current_source_validity.md
       - docs/operations/known_gaps.md
       - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
       - architecture/fatal_misreads.yaml
     current_fact_surfaces:
       - docs/operations/current_data_state.md
@@ -152,6 +157,7 @@ profiles:
         evidence:
           - docs/operations/current_data_state.md
           - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
           - architecture/source_rationale.yaml
       - id: writer_provenance_gate
         question: "Does the write path stamp non-default authority, data_version, and provenance?"
@@ -187,6 +193,7 @@ profiles:
       - docs/operations/current_source_validity.md
       - docs/operations/current_data_state.md
       - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
       - architecture/fatal_misreads.yaml
     current_fact_surfaces:
       - docs/operations/current_source_validity.md
@@ -197,6 +204,7 @@ profiles:
         evidence:
           - docs/operations/current_source_validity.md
           - docs/operations/current_data_state.md
+          - architecture/city_truth_contract.yaml
       - id: high_low_day0_causality
         question: "Does the task preserve high uses observed max floor and low uses observed min ceiling?"
         evidence:
@@ -233,6 +241,7 @@ profiles:
       - docs/operations/current_data_state.md
       - docs/operations/current_source_validity.md
       - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
       - architecture/core_claims.yaml
       - architecture/fatal_misreads.yaml
     current_fact_surfaces:
@@ -244,6 +253,7 @@ profiles:
         evidence:
           - docs/operations/current_data_state.md
           - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
       - id: strategy_key_and_dual_track
         question: "Does the change preserve strategy_key and HIGH/LOW calibration separation?"
         evidence:

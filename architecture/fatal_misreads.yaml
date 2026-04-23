@@ -70,6 +70,7 @@ misreads:
       - docs/reference/zeus_domain_model.md
       - docs/operations/current_source_validity.md
       - docs/operations/current_data_state.md
+      - architecture/city_truth_contract.yaml
       - architecture/source_rationale.yaml
     invalidation_condition: >
       Only a source-contract packet with city/date evidence may collapse two

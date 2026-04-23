@@ -208,6 +208,12 @@ strict_issue_codes:
   - fatal_misread_path_missing
   - fatal_misread_unknown_task_class
   - fatal_misread_gate_target_missing
+  - city_truth_contract_manifest_missing
+  - city_truth_contract_required_field_missing
+  - city_truth_contract_role_missing
+  - city_truth_contract_path_missing
+  - city_truth_contract_invalid_example
+  - city_truth_contract_current_claim_unbacked
   - test_relationship_manifest_missing_path
   - test_relationship_manifest_missing
   - test_relationship_manifest_missing_symbol

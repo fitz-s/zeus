@@ -1,0 +1,141 @@
+schema_version: 1
+metadata:
+  created: "2026-04-23"
+  owner_packet: "Guidance Kernel Semantic Boot"
+  purpose: >
+    Stable schema and evidence contract for reasoning about city/source/date
+    truth. This file defines the fields and proof classes that a city truth
+    assertion must carry; it is not the current city/source truth table.
+  authority_status: stable_schema_not_current_city_truth
+
+required_contract_sections:
+  - truth_boundary
+  - source_roles
+  - contract_fields
+  - evidence_classes
+  - caution_flags
+  - forbidden_inferences
+
+truth_boundary:
+  current_truth_owner: docs/operations/current_source_validity.md
+  current_data_owner: docs/operations/current_data_state.md
+  runtime_config_source: config/cities.json
+  architecture_manifest_rule: >
+    Architecture manifests may define source-role schema, evidence classes,
+    and examples. They must not become the current per-city/source routing
+    table unless each current assertion is evidence-backed and freshness-classed.
+  volatile_assertion_policy:
+    allowed_only_with:
+      - freshness_class
+      - evidence_refs
+      - current_fact_surface
+      - invalidation_condition
+    preferred_location: docs/operations/current_source_validity.md
+
+source_roles:
+  settlement_daily_source:
+    description: "Provider/product/station used to resolve daily settlement."
+    required_fields: [source_family, station_or_product, unit, date_ranges, evidence_refs]
+  day0_live_monitor_source:
+    description: "Provider/product used for live same-day observed-so-far monitoring."
+    required_fields: [source_family, station_or_product, freshness_rule, evidence_refs]
+  historical_hourly_source:
+    description: "Provider/product used for hourly historical observation rows."
+    required_fields: [source_family, station_or_product, extrema_rule, date_ranges, evidence_refs]
+  forecast_skill_source:
+    description: "Forecast/observation pairing used for forecast skill and calibration training."
+    required_fields: [forecast_family, observation_family, date_ranges, evidence_refs]
+
+contract_fields:
+  city_key:
+    required: true
+    description: "Canonical Zeus city key or configured city name."
+  settlement_daily_source:
+    required: true
+    role: settlement_daily_source
+  day0_live_monitor_source:
+    required: true
+    role: day0_live_monitor_source
+  historical_hourly_source:
+    required: true
+    role: historical_hourly_source
+  forecast_skill_source:
+    required: true
+    role: forecast_skill_source
+  rounding_mode:
+    required: true
+    allowed_values: [wmo_half_up, oracle_truncate, floor_containment, source_specific]
+  unit:
+    required: true
+    allowed_values: [F, C]
+  date_ranges:
+    required: true
+    description: "Inclusive/exclusive ranges where the assertion is valid."
+  caution_flags:
+    required: true
+    description: "Any known non-default or re-audit-required source semantics."
+  evidence_refs:
+    required: true
+    description: "Files or packet evidence proving the assertion."
+
+evidence_classes:
+  - id: market_description
+    description: "Current market description or resolution text for the city/date."
+    accepted_locations: [docs/operations, docs/reports, docs/artifacts, raw]
+  - id: current_source_validity
+    description: "Current audited provider/source status."
+    accepted_locations: [docs/operations/current_source_validity.md]
+  - id: current_data_state
+    description: "Current audited row coverage/freshness posture."
+    accepted_locations: [docs/operations/current_data_state.md]
+  - id: runtime_config
+    description: "Runtime city config, station, unit, and source-family seed."
+    accepted_locations: [config/cities.json]
+  - id: executable_contract
+    description: "Typed source, settlement, writer, or calibration contract in source code."
+    accepted_locations: [src, tests]
+  - id: packet_receipt
+    description: "Receipt-backed packet evidence for dated audits or migrations."
+    accepted_locations: [docs/operations]
+
+caution_flags:
+  - id: hong_kong_explicit_caution
+    description: "Hong Kong/HKO current truth must route through fresh audit evidence."
+  - id: source_changed_by_date
+    description: "Source family or station varies by date range."
+  - id: website_api_product_divergence
+    description: "Website daily summary and API hourly product may differ."
+  - id: airport_station_not_settlement_station
+    description: "Nearby airport or ICAO station is not proof of city settlement station."
+  - id: freshness_audit_required
+    description: "Current fact surface staleness or provider drift requires re-audit."
+
+forbidden_inferences:
+  - "Do not infer settlement_daily_source from station code alone."
+  - "Do not infer day0_live_monitor_source from settlement_daily_source unless evidence explicitly binds them."
+  - "Do not infer historical_hourly_source from forecast_skill_source."
+  - "Do not use config/cities.json comments as sufficient current truth."
+  - "Do not use Code Review Graph output as source/date semantic proof."
+
+examples:
+  - id: hong_kong_hko_caution_example
+    classification: schema_example_not_current_truth
+    city_label: Hong Kong
+    caution_flags: [hong_kong_explicit_caution, freshness_audit_required]
+    evidence_refs:
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - config/cities.json
+    note: >
+      This example demonstrates the caution contract shape. Consult current
+      source-validity evidence before making any present-tense Hong Kong claim.
+  - id: ogimet_noaa_proxy_example
+    classification: schema_example_not_current_truth
+    city_label: Istanbul/Moscow/Tel Aviv class
+    caution_flags: [source_changed_by_date]
+    evidence_refs:
+      - docs/operations/current_source_validity.md
+      - architecture/source_rationale.yaml
+    note: >
+      This example demonstrates proxy/source-family evidence; it is not a
+      substitute for a dated city/source audit.

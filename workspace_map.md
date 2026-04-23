@@ -69,6 +69,7 @@ Prefer these over prose when they exist:
 | `architecture/docs_registry.yaml` | Docs classification and default-read registry |
 | `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
+| `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
 
 ## Do not default-read
 

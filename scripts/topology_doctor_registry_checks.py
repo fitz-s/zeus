@@ -346,6 +346,7 @@ def run_strict(api: Any) -> Any:
     issues.extend(api._check_wmo_gate())
     issues.extend(api.run_task_boot_profiles().issues)
     issues.extend(api.run_fatal_misreads().issues)
+    issues.extend(api.run_city_truth_contract().issues)
     return api.StrictResult(ok=not issues, issues=issues)
 
 

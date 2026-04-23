@@ -91,6 +91,8 @@ context. Current fact surfaces named by the profile, especially
 `docs/operations/current_source_validity.md` and
 `docs/operations/current_data_state.md`, are task-required reads when listed
 even though they are not default-read docs.
+`architecture/city_truth_contract.yaml` defines the stable source-role schema;
+it is not a current per-city truth table.
 
 ## Topology and graph workflow
 

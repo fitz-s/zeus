@@ -8,7 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: Guidance Kernel / Semantic Boot Refactor
 - Active package source: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
-- Status: Phase 0 semantic boot kernel skeleton pre-close review complete
+- Status: Phase 1 city truth contract schema pre-close review complete
 - Docs truth refresh P0 commit: `80c0051`
 - P0 follow-up review: `proceed_to_p1`
 - Docs truth refresh P1 commit: `d742083`
@@ -19,6 +19,8 @@ Role: single live control pointer for the repo.
 - P3 follow-up review: `proceed_to_closeout`
 - Docs truth refresh closeout commit: `36d2f64`
 - Docs truth refresh post-closeout review: complete
+- Guidance kernel Phase -1 commit: `b90c345`
+- Guidance kernel Phase 0 commit: `1d5b724`
 - Prior docs reclassification package closed at `169b014`; post-closeout review
   recorded at `6f51a8c`.
 
@@ -32,11 +34,12 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Phase 0 installs semantic boot manifests, fatal-misread antibodies, and
-  validation/routing only.
-- Do not implement city truth contracts, topology semantic-bootstrap output,
-  runtime source, DB mutation, graph DB changes, archive-body ingestion, or
-  authority-law rewrites in Phase 0.
+- Phase 1 installs the stable city truth contract schema and proof-backed
+  semantic claims only.
+- Do not encode a current per-city truth table in architecture manifests, and
+  do not implement topology semantic-bootstrap output, runtime source, DB
+  mutation, graph DB changes, archive-body ingestion, or authority-law rewrites
+  in Phase 1.
 
 ## Current fact companions
 
@@ -65,6 +68,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Commit Phase 0 semantic boot kernel skeleton.
-- After post-close review, open Phase 1 city truth contract schema.
+- Commit Phase 1 city truth contract schema.
+- After post-close review, open Phase 2 semantic-bootstrap topology output.
 - Preserve unrelated dirty work and local archive inputs

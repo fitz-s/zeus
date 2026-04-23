@@ -24,6 +24,8 @@ monitoring, calibration, docs authority, or graph review, also read:
 
 1. `architecture/task_boot_profiles.yaml`
 2. `architecture/fatal_misreads.yaml`
+3. `architecture/city_truth_contract.yaml` when the profile involves city,
+   source, date, settlement, hourly, Day0, or calibration truth
 
 Select the profile first, then answer its required proof questions before code
 or graph output is treated as sufficient context.

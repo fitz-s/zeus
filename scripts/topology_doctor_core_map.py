@@ -27,6 +27,7 @@ COMPILED_TOPOLOGY_SOURCE_MANIFESTS = [
     "architecture/context_pack_profiles.yaml",
     "architecture/task_boot_profiles.yaml",
     "architecture/fatal_misreads.yaml",
+    "architecture/city_truth_contract.yaml",
     "architecture/map_maintenance.yaml",
 ]
 
