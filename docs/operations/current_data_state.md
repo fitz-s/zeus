@@ -47,25 +47,35 @@ plans:
 - `ensemble_snapshots_v2`: 0 rows
 - `settlements_v2`: 0 rows
 
-Atomic cutover state (as of this refresh):
+Atomic cutover state (as of this refresh, post-flip):
 
-- `zeus_meta.observation_data_version`: `'v0'` — Phase 2 flip scheduled under
-  Gate F step 4 packet, not yet executed at this refresh boundary.
-- `observation_instants_current` VIEW: returns 0 rows pre-flip (no data_version
-  matches `'v0'`); flipping the meta key to `'v1.wu-native'` instantly exposes
-  the 1.8M-row corpus through the VIEW.
+- `zeus_meta.observation_data_version`: `'v1.wu-native'` — Phase 2 atomic flip
+  landed 2026-04-23 under Gate F step 5 evidence.
+- `observation_instants_current` VIEW: returns the 1,812,495-row v1.wu-native
+  corpus (50 cities). Rollback command: `UPDATE zeus_meta SET value='v0'` —
+  single statement, <1s.
+- ETL scripts `scripts/etl_diurnal_curves.py` and
+  `scripts/etl_hourly_observations.py` now read from `observation_instants_current`
+  (the VIEW), making the atomic flip propagate to derived tables on every
+  ETL run.
+- Derived tables post-rebuild from v2:
+  - `diurnal_curves`: 4,800 rows × 50 cities (HK has 0 rows — plan v3 Option A
+    accepted gap; signal layer AC11 fallback active)
+  - `hourly_observations`: 1,812,401 rows × 50 cities (94 of 1.8M dropped:
+    91 DST-ambiguous + 3 temperature-range rejected)
+  - `diurnal_peak_prob`: 14,400 rows (50 × 12 months × 24 hours)
 - Legacy `observation_instants` table (867,489 `openmeteo_archive_hourly` rows)
-  remains present and is the active data path read by
-  `scripts/etl_diurnal_curves.py` / `scripts/etl_hourly_observations.py` until
-  step 4 PW2 migrates those readers to the VIEW. Plan v3 Phase 4 DROP follows
-  +30d post-flip.
+  remains present in read-only compat mode; plan v3 Phase 4 DROP follows +30d
+  post-flip.
 
 Interpretation:
 
-- v2 observation-instants is backfilled, audited, and atomically ready to flip.
-- v2 is not yet the runtime data path; legacy table is still read by ETL until
-  step 4 PW5 lands.
-- Other v2 tables remain structurally prepared but unpopulated.
+- v2 observation-instants is the current runtime data path via the VIEW.
+- Signal layer (`src/signal/diurnal.py`) reads `diurnal_curves` and
+  `diurnal_peak_prob` which are now both v2-sourced.
+- Other v2 tables (`historical_forecasts_v2`, `calibration_pairs_v2`,
+  `platt_models_v2`, `ensemble_snapshots_v2`, `settlements_v2`) remain
+  structurally prepared but unpopulated — separate migration packets needed.
 
 ### Legacy tables still carrying data
 
