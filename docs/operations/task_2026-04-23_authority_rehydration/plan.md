@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/reference/manifest
-Phase: P1 first-wave module books
+Phase: P2 remaining module books and manifest enrichment
 
 ## Objective
 
@@ -105,6 +105,39 @@ Forbidden:
   entries
 - docs registry classifies the three books explicitly
 - system references link to the new books without promoting them to law
+
+## P2 Scope
+
+Allowed:
+
+- remaining `docs/reference/modules/*.md`
+- remaining scoped `AGENTS.md` launchers
+- `architecture/module_manifest.yaml`
+- `architecture/source_rationale.yaml`
+- `architecture/test_topology.yaml`
+- `architecture/script_manifest.yaml`
+- selected routing/reference surfaces needed by map maintenance and book links
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/**`
+
+Forbidden:
+
+- runtime/source behavior files under `src/**/*.py`
+- `state/**`
+- `.code-review-graph/graph.db`
+- archive bodies
+- broad core-law rewrites
+
+## P2 Acceptance
+
+- remaining module books exist under `docs/reference/modules/`
+- remaining launcher surfaces point to their module books
+- `architecture/module_manifest.yaml` carries meaningful routing fields for all
+  modules
+- `architecture/source_rationale.yaml` covers previously unregistered sharp
+  files and no longer points at removed `wu_daily_collector.py`
+- `architecture/test_topology.yaml` and `architecture/script_manifest.yaml`
+  carry high-risk module-routing metadata for the sharpest test/script families
 
 ## Verification
 

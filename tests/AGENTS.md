@@ -4,6 +4,8 @@ Tests defend Zeus kernel law, runtime safety, and delivery guarantees. This
 file is the human route into the test suite; the machine-readable test map is
 `architecture/test_topology.yaml`.
 
+Module book: `docs/reference/modules/tests.md`
+
 ## Machine Registry
 
 Use `architecture/test_topology.yaml` for:

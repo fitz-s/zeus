@@ -1,5 +1,8 @@
 # src/types AGENTS
 
+Module book: `docs/reference/modules/types.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 Zone: K0_frozen_kernel — cross-cutting unit safety
 
 ## What this code does (and WHY)

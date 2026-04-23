@@ -70,12 +70,24 @@ categories:
     - tests/test_wallet_source.py
     - tests/test_phase10a_hygiene.py
     - tests/test_phase10b_dt_seam_cleanup.py
+    - tests/test_b066_quarantine_sentinel_ids.py
+    - tests/test_b070_control_overrides_history_v2.py
+    - tests/test_metric_identity_spine.py
+    - tests/test_phase3_source_registry_single_truth.py
+    - tests/test_phase4_parity_gate.py
+    - tests/test_phase5a_truth_authority.py
+    - tests/test_phase5c_replay_metric_identity.py
+    - tests/test_phase6_causality_status.py
+    - tests/test_phase7a_metric_cutover.py
+    - tests/test_schema_v2_gate_a.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
+    - tests/test_b063_rescue_events_v2.py
     - tests/test_backfill_openmeteo_previous_runs.py
     - tests/test_bootstrap_symmetry.py
+    - tests/test_bug100_k1_k2_structural.py
     - tests/test_calibration_manager.py
     - tests/test_calibration_unification.py
     - tests/test_chronicle_dedup.py
@@ -90,17 +102,17 @@ categories:
     - tests/test_drift.py
     - tests/test_ensemble_client.py
     - tests/test_entry_exit_symmetry.py
-    - tests/test_etl_market_price_history.py
-    - tests/test_etl_recalibrate_chain.py
+    - tests/test_etl_forecasts_v2_from_legacy.py
     - tests/test_executor.py
     - tests/test_exit_authority.py
+    - tests/test_fdr_family_scope.py
     - tests/test_force_exit_review.py
     - tests/test_healthcheck.py
     - tests/test_kelly.py
     - tests/test_market_analysis.py
+    - tests/test_market_scanner_provenance.py
     - tests/test_model_agreement.py
     - tests/test_observation_contract.py
-    - tests/test_observation_instants_etl.py
     - tests/test_platt.py
     - tests/test_k3_5_fix_pack.py
     - tests/test_k3_slice_p.py
@@ -113,6 +125,23 @@ categories:
     - tests/test_p1_save_order.py
     - tests/test_p9_model_agreement_alpha.py
     - tests/test_p14_phantom_persistence.py
+    - tests/test_phase10c_dt_seam_followup.py
+    - tests/test_phase10d_closeout.py
+    - tests/test_phase10e_closeout.py
+    - tests/test_phase3_observation_closure.py
+    - tests/test_phase4_5_extractor.py
+    - tests/test_phase4_6_cities_drift.py
+    - tests/test_phase4_foundation.py
+    - tests/test_phase4_ingest.py
+    - tests/test_phase4_platt_v2.py
+    - tests/test_phase4_rebuild.py
+    - tests/test_phase5_fixpack.py
+    - tests/test_phase5_gate_d_low_purity.py
+    - tests/test_phase5b_low_historical_lane.py
+    - tests/test_phase6_day0_split.py
+    - tests/test_phase8_shadow_code.py
+    - tests/test_phase9c_gate_f_prep.py
+    - tests/test_proxy_health.py
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
@@ -120,6 +149,9 @@ categories:
     - tests/test_tracker_integrity.py
     - tests/test_shadow_boundary.py
     - tests/test_wu_scheduler.py
+    - tests/test_dt1_commit_ordering.py
+    - tests/test_dt1_savepoint_integration.py
+    - tests/test_dt4_chain_three_state.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py
@@ -234,7 +266,7 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Bias/calibration cross-module invariants are skipped only when runtime data/config makes them inapplicable.
-    skip_count: 4
+    skip_count: 6
     reason_patterns:
       - "bias_correction_enabled = false"
       - "No calibration pairs in database"
@@ -312,7 +344,7 @@ high_sensitivity_skips:
     owner: dual-track-program
     packet: Phase 0b
     reason: Dual-track metric spine/death-trap law stubs are intentionally skipped until their phase-specific enforcement lands.
-    skip_count: 9
+    skip_count: 2
     reason_patterns:
       - "pending: enforced"
     sunset: Replace each skip with its real assertion in the named dual-track phase.
@@ -361,6 +393,15 @@ high_sensitivity_skips:
     reason_patterns:
       - "K1: strategy_tracker migrated to no-op"
     sunset: Archive in tracker cleanup packet after replacement evidence.
+  tests/test_phase5c_replay_metric_identity.py:
+    owner: dual-track-program
+    packet: Phase 5C
+    reason: Replay metric-identity tests remain partially skipped until the full 5C implementation lands across replay reference routing.
+    skip_count: 2
+    reason_patterns:
+      - "Ensure DB has forecast rows"
+      - "No ref returned — ensure DB has forecast rows."
+    sunset: Remove skips once Phase 5C replay metric-identity implementation is fully landed.
 
 reverse_antibody_status:
   active: []
@@ -381,3 +422,73 @@ relationship_test_manifests:
       - tests/test_cross_module_relationships.py
       - tests/test_entry_exit_symmetry.py
       - tests/test_runtime_guards.py
+
+test_metadata:
+  tests/test_cross_module_invariants.py:
+    modules: [state, engine, execution, strategy, riskguard]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+    notes: >
+      Cross-module invariant gate for truth ownership, lifecycle, and behavioral
+      boundaries. Failure means the architecture or the plan is wrong.
+  tests/test_cross_module_relationships.py:
+    modules: [state, engine, execution, data, strategy]
+    category: relationship_protection
+    blocks_commit: true
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Protects output/input expectations across module seams and should be read
+      before changing orchestration or truth-routing behavior.
+  tests/test_day0_runtime_observation_context.py:
+    modules: [engine, signal, data, execution]
+    category: relationship_protection
+    blocks_commit: true
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/operations/current_source_validity.md
+    notes: >
+      Proves that runtime Day0 observation context stays on the intended truth
+      plane rather than silently collapsing to a convenient feed.
+  tests/test_tier_resolver.py:
+    modules: [data]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/operations/current_source_validity.md
+      - architecture/city_truth_contract.yaml
+    notes: >
+      Antibody for source-tier routing mistakes and wrong city/provider family
+      assumptions in observation_instants_v2.
+  tests/test_obs_v2_writer.py:
+    modules: [data]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    notes: >
+      Protects v2 writer antibodies around authority fields, provenance, and
+      per-city source routing.
+  tests/test_hk_rejects_vhhh_source.py:
+    modules: [data]
+    category: antibody_impossibility
+    blocks_commit: true
+    law_dependencies:
+      - docs/operations/current_source_validity.md
+    notes: >
+      Category-impossibility test for the Hong Kong HKO vs VHHH station/source
+      boundary.
+  tests/test_backfill_scripts_match_live_config.py:
+    modules: [data, scripts]
+    category: migration_compatibility
+    blocks_commit: true
+    law_dependencies:
+      - architecture/script_manifest.yaml
+      - config/cities.json
+    notes: >
+      Keeps current backfill/write scripts aligned with the live routing/config
+      contract so P2 module books can trust the named script surfaces.

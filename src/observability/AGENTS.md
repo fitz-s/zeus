@@ -1,5 +1,8 @@
 # src/observability AGENTS
 
+Module book: `docs/reference/modules/observability.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 Zone: K2_runtime — derived operator read model
 
 ## What this code does (and WHY)

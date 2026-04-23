@@ -1,5 +1,8 @@
 # src/calibration AGENTS — Zone K3 (Math/Data)
 
+Module book: `docs/reference/modules/calibration.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 Raw ensemble probabilities are systematically biased — overconfident at long lead times, underconfident near settlement. Platt calibration corrects this bias using a three-parameter logistic: `P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)`.

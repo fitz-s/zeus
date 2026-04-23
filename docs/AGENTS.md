@@ -2,6 +2,8 @@
 
 Documentation root for the tracked docs mesh.
 
+Module book: `docs/reference/modules/docs_system.md`
+
 This directory is a router, not a co-equal authority plane to source code or
 machine manifests. Use it to find the right live docs surface quickly.
 

@@ -1,5 +1,8 @@
 # src/execution AGENTS — Zone K2 (Execution)
 
+Module book: `docs/reference/modules/execution.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 Execution translates sized trading decisions into actual orders on Polymarket's CLOB. This is the live-money boundary — every dollar of P&L flows through this layer.

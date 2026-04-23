@@ -1,5 +1,8 @@
 # src/contracts AGENTS — Zone K0 (Kernel)
 
+Module book: `docs/reference/modules/contracts.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 Contracts define the **typed semantic boundaries** that prevent cross-layer meaning collapse. When a float crosses from signal→strategy or strategy→execution, these contracts enforce that it carries provenance: what it represents, how confident we are, and whether fees have been deducted.

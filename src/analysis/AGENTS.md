@@ -1,5 +1,8 @@
 # src/analysis AGENTS
 
+Module book: `docs/reference/modules/analysis.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 Zone: K4 — Extension (analysis utilities)
 
 ## What this code does (and WHY)

@@ -9,7 +9,7 @@ Role: single live control pointer for the repo.
 - Active package source: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
-- Status: P1 first-wave module books complete; P2 remaining module books and manifest enrichment next
+- Status: P2 module-book completion and manifest enrichment complete; P3 topology/context-pack support next
 
 ## Required evidence
 
@@ -22,6 +22,8 @@ Role: single live control pointer for the repo.
 - P0 scaffold landed routing and manifest skeleton only.
 - P1 added dense reference books and scoped routers for `state`, `engine`, and
   `data`.
+- P2 completed the remaining module books and expanded source/test/script
+  routing manifests for the sharpest families.
 - Do not modify runtime source, DB/state files, graph DB, current city/source
   truth, archive bodies, or the authority kernel unless a later packet phase
   explicitly authorizes that scope.
@@ -57,6 +59,6 @@ Visible non-default packet evidence:
 
 ## Next action
 
-- Land P2 remaining module books plus manifest enrichment for the rest of the
-  module layer.
+- Land P3 topology-doctor and context-pack support for the rehydrated module
+  layer.
 - Preserve unrelated dirty work and local archive inputs.

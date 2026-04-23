@@ -1,5 +1,8 @@
 # src/riskguard AGENTS — Zone K1 (Protective)
 
+Module book: `docs/reference/modules/riskguard.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 RiskGuard is the **protective spine** — the fast, threshold-based reflex layer that halts trading before damage accumulates. Risk must change behavior (INV-05): if a risk level doesn't alter evaluator/sizing/execution outcomes, it's theater.

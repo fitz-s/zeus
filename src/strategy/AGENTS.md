@@ -1,5 +1,8 @@
 # src/strategy AGENTS — Zone K3 (Math/Data)
 
+Module book: `docs/reference/modules/strategy.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 Strategy converts calibrated probabilities into trading decisions: edge computation, statistical filtering, and position sizing. Three critical subsystems work together:

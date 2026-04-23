@@ -1,5 +1,8 @@
 # src/supervisor_api AGENTS
 
+Module book: `docs/reference/modules/supervisor_api.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 Zone: K2 — Execution (supervisor contracts)
 
 ## What this code does (and WHY)

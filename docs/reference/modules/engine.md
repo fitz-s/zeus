@@ -137,6 +137,4 @@ Rollback engine packets atomically. If a sequencing change required accompanying
 - Create explicit engine-to-riskguard and engine-to-execution contract sections in module manifest.
 
 ## 24. Rehydration judgement
-This book is the dense reference layer for engine. Keep `src/engine/AGENTS.md`
-as the launcher, keep `architecture/module_manifest.yaml` as the machine
-registry, and do not let orchestration notes become a second authority center.
+This book is the dense reference layer for engine. Keep its launcher surface and `architecture/module_manifest.yaml` entry aligned, and do not promote it into authority or packet status.

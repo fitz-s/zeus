@@ -146,7 +146,4 @@ Rollback data packets with write-contract, source-tag, and test updates together
 - Expose graph-derived hub/bridge info for data writers and their test coverage.
 
 ## 24. Rehydration judgement
-This book is the dense reference layer for data. Keep `src/data/AGENTS.md` as
-the launcher, keep `architecture/module_manifest.yaml` as the machine registry,
-and do not let current source facts or provider availability drift into
-durable-reference law.
+This book is the dense reference layer for data. Keep its launcher surface and `architecture/module_manifest.yaml` entry aligned, and do not promote it into authority or packet status.

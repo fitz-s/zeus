@@ -1,5 +1,8 @@
 # src/signal AGENTS — Zone K3 (Math/Data)
 
+Module book: `docs/reference/modules/signal.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 ## WHY this zone matters
 
 Signal is where Zeus converts 51 raw ensemble members into tradeable probability vectors. The critical insight: WU settles on integers, so probability mass concentrates at bin boundaries. Simple member-counting ignores measurement uncertainty — Zeus's Monte Carlo simulates the full chain: `atmosphere → NWP member → ASOS sensor noise (σ ≈ 0.2–0.5°F) → METAR rounding → WU integer display`.

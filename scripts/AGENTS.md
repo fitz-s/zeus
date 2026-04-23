@@ -8,6 +8,8 @@ Why this file exists now: scripts can overreach DB truth or persist one-off prob
 Scripts are enforcement, audit, runtime support, ETL, repair, or operator tools.
 The machine registry is `architecture/script_manifest.yaml`.
 
+Module book: `docs/reference/modules/scripts.md`
+
 ## Machine Registry
 
 Use `architecture/script_manifest.yaml` for:

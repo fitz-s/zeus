@@ -49,6 +49,7 @@ file_naming:
         automation_analysis.py: established automation diagnostic report
         baseline_experiment.py: established diagnostic baseline report
         cleanup_ghost_positions.py: established repair command name
+        compare_diurnal_v1_v2.py: established diagnostic comparison helper for diurnal migration parity
         data_completeness_audit.py: legacy word-order exception; keep until renamed
         deep_heartbeat.py: established runtime heartbeat helper
         deprecate_legacy_state_files.py: established repair command name
@@ -57,12 +58,15 @@ file_naming:
         code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor
         equity_curve.py: established diagnostic report command
         force_lifecycle.py: established repair command name; dangerous and packet-gated
+        fill_obs_v2_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
+        fill_obs_v2_meteostat.py: established obs_v2 bulk fill helper; fill_ prefix kept for explicit source-specific repair semantics
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher
         investigate_ecmwf_bias.py: established diagnostic report name
         live_smoke_test.py: established runtime smoke entrypoint
         nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
         onboard_cities.py: established ETL/operator onboarding entrypoint
+        hko_ingest_tick.py: established HKO accumulator tick helper retained under runtime/ops naming
         oracle_snapshot_listener.py: oracle snapshot runtime listener retained under cron/operator naming
         parse_change_log.py: established utility entrypoint
         post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper

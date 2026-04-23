@@ -1,5 +1,8 @@
 # src/control AGENTS
 
+Module book: `docs/reference/modules/control.md`
+Machine registry: `architecture/module_manifest.yaml`
+
 Zone: K1 — Protective (control plane)
 
 ## What this code does (and WHY)

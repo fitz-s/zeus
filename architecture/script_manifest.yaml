@@ -261,7 +261,14 @@ scripts:
   audit_architecture_alignment.py: {class: diagnostic}
   audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
   audit_divergence_counterfactual.py: {class: diagnostic}
-  audit_observation_instants_v2.py: {class: diagnostic_report_writer, write_targets: [stdout], required_helpers: [src.data.tier_resolver], read_from: [observation_instants_v2], notes: "Read-only Phase 0 Gate 0→1 auditor; returns 0 iff tier_violations + source_tier_mismatches + openmeteo_rows + authority_unverified_rows all 0 AND every non-HK city has >=min_expected rows for the given data_version."}
+  audit_observation_instants_v2.py:
+    class: diagnostic_report_writer
+    module_owner: data
+    write_targets: [stdout, temp]
+    required_helpers: [src.data.tier_resolver]
+    read_from: [observation_instants_v2]
+    required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hk_rejects_vhhh_source.py]
+    notes: "Read-only Phase 0 Gate 0→1 auditor; returns 0 iff tier_violations + source_tier_mismatches + openmeteo_rows + authority_unverified_rows all 0 AND every non-HK city has >=min_expected rows for the given data_version."
   audit_divergence_exit_counterfactual.py: {class: diagnostic}
   audit_divergence_hindsight.py: {class: diagnostic}
   audit_divergence_postchange.py: {class: diagnostic}
@@ -278,7 +285,17 @@ scripts:
   backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_hko_daily.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
   backfill_hourly_openmeteo.py: {class: etl_writer}
-  backfill_obs_v2.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client], external_inputs: [WU historical.json, Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_backfill_log.jsonl]}
+  backfill_obs_v2.py:
+    class: etl_writer
+    module_owner: data
+    packet: docs/operations/task_2026-04-21_gate_f_data_backfill
+    required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client]
+    external_inputs: [WU historical.json, Ogimet METAR]
+    target_db: state/zeus-world.db
+    write_targets: [observation_instants_v2]
+    observability: [state/obs_v2_backfill_log.jsonl]
+    required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hourly_clients_parse.py]
+    do_not_use_when: "current_source_validity or current_data_state is stale for obs_v2 routing work"
   fill_obs_v2_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
   fill_obs_v2_meteostat.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.meteostat_bulk_client], external_inputs: [Meteostat bulk CSV], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_meteostat_fill_log.jsonl], notes: "Bulk parallel fill for 45 WU cities via Meteostat's static CDN CSV archives. No rate limit; covers 2024 through ~weeks-behind-real-time. Replaces 12-hour Ogimet serial fill with <2-minute parallel downloads."}
   backfill_ogimet_metar.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics], external_inputs: [Ogimet METAR/SYNOP], target_db: state/zeus-world.db}
@@ -290,7 +307,14 @@ scripts:
   backfill_recent_exits_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_semantic_snapshots.py: {class: etl_writer, write_targets: [state/zeus_trades.db, state/zeus-world.db], target_db: state}
   backfill_solar_openmeteo.py: {class: etl_writer}
-  backfill_tigge_snapshot_p_raw.py: {class: etl_writer}
+  backfill_tigge_snapshot_p_raw.py:
+    class: etl_writer
+    module_owner: scripts
+    required_tests: [tests/test_tigge_snapshot_p_raw_backfill.py, tests/test_replay_time_provenance.py]
+  etl_forecasts_v2_from_legacy.py:
+    class: etl_writer
+    module_owner: data
+    required_tests: [tests/test_etl_forecasts_v2_from_legacy.py]
   backfill_tigge_snapshot_p_raw_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware p_raw backfill; safety gates mirror rebuild_v2 (--dry-run default, --no-dry-run + --force required)."}
   backfill_trade_decision_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_truth_metadata.py: {class: etl_writer}
@@ -301,7 +325,10 @@ scripts:
   check_advisory_gates.py: {class: enforcement}
   compare_diurnal_v1_v2.py: {class: diagnostic}
   hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
-  check_daemon_heartbeat.py: {class: runtime_support}
+  check_daemon_heartbeat.py:
+    class: runtime_support
+    module_owner: scripts
+    required_tests: [tests/test_healthcheck.py, tests/test_runtime_guards.py]
   check_kernel_manifests.py: {class: enforcement}
   check_module_boundaries.py: {class: enforcement}
   check_work_packets.py: {class: enforcement}
@@ -317,9 +344,6 @@ scripts:
   etl_forecast_skill_from_forecasts.py: {class: etl_writer}
   etl_historical_forecasts.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_hourly_observations.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
-  etl_ladder_backfill.py: {class: etl_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, apply_flag: implicit, target_db: state/zeus-world.db, archive_reason: legacy ladder ETL pending archive, unguarded_write_rationale: "Legacy ladder ETL can mutate forecast_skill/model_bias if source DB exists; manifest marks it dangerous pending archive."}
-  etl_market_price_history.py: {class: etl_writer}
-  etl_observation_instants.py: {class: etl_writer}
   etl_solar_times.py: {class: etl_writer, external_inputs: [external_absolute_path]}
   etl_temp_persistence.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_tigge_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, canonical_command: DO_NOT_RUN, reason: legacy unaudited TIGGE direct calibration path superseded by canonical rebuild pipeline}
@@ -359,7 +383,14 @@ scripts:
   live_smoke_test.py: {class: runtime_support}
   migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
   migrate_cluster_to_city.py: {class: repair, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing migration mutates calibration tables without an apply flag; manifest marks it dangerous pending hardening."}
-  migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: packet_ephemeral, status: active, delete_policy: archive_or_delete_in_cleanup_packet, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
+  migrate_b070_control_overrides_to_history.py:
+    class: repair
+    module_owner: control
+    dangerous_if_run: true
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    required_tests: [tests/test_b070_control_overrides_history_v2.py]
+  migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
   migrate_to_isolated_dbs.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
   nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--mode", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
@@ -367,7 +398,12 @@ scripts:
   post_sequential_fillback.sh: {class: runtime_support, canonical_command: "bash scripts/post_sequential_fillback.sh <sequential_wrapper_pid>"}
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
   rebuild_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy simplified-p_raw rebuild retired}
-  rebuild_calibration_pairs_canonical.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db"}
+  rebuild_calibration_pairs_canonical.py:
+    class: repair
+    module_owner: calibration
+    apply_flag: "--no-dry-run"
+    target_db: "--db"
+    required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
   rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
@@ -396,7 +432,10 @@ scripts:
   topology_doctor_script_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for script-manifest checker family}
   topology_doctor_source_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for source-rationale/scoped-AGENTS checker family}
   topology_doctor_test_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for test-topology checker family}
-  topology_doctor.py: {class: enforcement}
+  topology_doctor.py:
+    class: enforcement
+    module_owner: topology_system
+    required_tests: [tests/test_topology_doctor.py, tests/test_structural_linter.py]
   validate_assumptions.py: {class: enforcement}
   validate_dynamic_alpha.py: {class: diagnostic}
   venus_autonomy_gate.py: {class: runtime_support}

@@ -9,6 +9,8 @@ Current-phase or long-lived: Long-lived.
 
 This directory contains machine-checkable and constitutional authority surfaces.
 
+Module book: `docs/reference/modules/topology_system.md`
+
 ## Treat this zone as high sensitivity
 Changes here are architecture or governance changes, never “just docs.”
 

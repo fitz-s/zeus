@@ -139,6 +139,4 @@ Rollback as one state packet. Revert schema/migration/projection changes togethe
 - Add graph-derived affected-reader summaries to state context packs.
 
 ## 24. Rehydration judgement
-This book is the dense reference layer for state. Keep `src/state/AGENTS.md` as
-the launcher, keep `architecture/module_manifest.yaml` as the machine registry,
-and do not let either one drift into a second authority center.
+This book is the dense reference layer for state. Keep its launcher surface and `architecture/module_manifest.yaml` entry aligned, and do not promote it into authority or packet status.

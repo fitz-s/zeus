@@ -130,11 +130,27 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: live_execution
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/execution/executor.py
+      - src/execution/exit_triggers.py
+      - src/execution/exit_lifecycle.py
+      - src/execution/harvester.py
+    public_entry_files:
+      - src/execution/executor.py
+      - src/execution/exit_triggers.py
+      - src/execution/harvester.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+    current_fact_dependencies:
+      - docs/operations/current_source_validity.md
+    required_tests:
+      - tests/test_executor.py
+      - tests/test_exit_authority.py
+      - tests/test_entry_exit_symmetry.py
+      - tests/test_live_safety_invariants.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   signal:
     path: src/signal
     scoped_agents: src/signal/AGENTS.md
@@ -142,11 +158,30 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: signal_generation
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/signal/ensemble_signal.py
+      - src/signal/day0_signal.py
+      - src/signal/day0_window.py
+      - src/signal/diurnal.py
+      - src/signal/day0_router.py
+    public_entry_files:
+      - src/signal/ensemble_signal.py
+      - src/signal/day0_signal.py
+      - src/signal/day0_router.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - src/contracts/settlement_semantics.py
+    current_fact_dependencies:
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_ensemble_signal.py
+      - tests/test_day0_window.py
+      - tests/test_day0_exit_gate.py
+      - tests/test_day0_runtime_observation_context.py
+      - tests/test_diurnal.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   calibration:
     path: src/calibration
     scoped_agents: src/calibration/AGENTS.md
@@ -154,11 +189,27 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: calibration_runtime
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/calibration/platt.py
+      - src/calibration/manager.py
+      - src/calibration/store.py
+      - src/calibration/effective_sample_size.py
+    public_entry_files:
+      - src/calibration/platt.py
+      - src/calibration/manager.py
+      - src/calibration/store.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - src/contracts/calibration_bins.py
+    current_fact_dependencies:
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_platt.py
+      - tests/test_calibration_manager.py
+      - tests/test_calibration_bins_canonical.py
+      - tests/test_calibration_unification.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   strategy:
     path: src/strategy
     scoped_agents: src/strategy/AGENTS.md
@@ -166,11 +217,28 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: strategy_identity
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/strategy/market_analysis.py
+      - src/strategy/fdr_filter.py
+      - src/strategy/kelly.py
+      - src/strategy/market_fusion.py
+      - src/strategy/selection_family.py
+    public_entry_files:
+      - src/strategy/market_analysis.py
+      - src/strategy/fdr_filter.py
+      - src/strategy/kelly.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+    current_fact_dependencies:
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_market_analysis.py
+      - tests/test_fdr.py
+      - tests/test_kelly.py
+      - tests/test_kelly_cascade_bounds.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   riskguard:
     path: src/riskguard
     scoped_agents: src/riskguard/AGENTS.md
@@ -178,11 +246,23 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: risk_control
-    law_dependencies: []
+    high_risk_files:
+      - src/riskguard/riskguard.py
+      - src/riskguard/risk_level.py
+      - src/riskguard/policy.py
+      - src/riskguard/metrics.py
+    public_entry_files:
+      - src/riskguard/riskguard.py
+      - src/riskguard/risk_level.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_current_delivery.md
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_riskguard.py
+      - tests/test_live_safety_invariants.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   contracts:
     path: src/contracts
     scoped_agents: src/contracts/AGENTS.md
@@ -190,11 +270,27 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: runtime_contracts
-    law_dependencies: []
+    high_risk_files:
+      - src/contracts/settlement_semantics.py
+      - src/contracts/calibration_bins.py
+      - src/contracts/execution_price.py
+      - src/contracts/provenance_registry.py
+      - src/contracts/reality_contract.py
+    public_entry_files:
+      - src/contracts/settlement_semantics.py
+      - src/contracts/calibration_bins.py
+      - src/contracts/semantic_types.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_instrument_invariants.py
+      - tests/test_execution_price.py
+      - tests/test_calibration_bins_canonical.py
+      - tests/test_reality_contracts.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   control:
     path: src/control
     scoped_agents: src/control/AGENTS.md
@@ -202,11 +298,21 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: operator_control
-    law_dependencies: []
+    high_risk_files:
+      - src/control/control_plane.py
+      - src/control/gate_decision.py
+    public_entry_files:
+      - src/control/control_plane.py
+      - src/control/gate_decision.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_current_delivery.md
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_gate_decision.py
+      - tests/test_runtime_guards.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   supervisor_api:
     path: src/supervisor_api
     scoped_agents: src/supervisor_api/AGENTS.md
@@ -214,11 +320,19 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: supervisory_interface
-    law_dependencies: []
+    high_risk_files:
+      - src/supervisor_api/contracts.py
+    public_entry_files:
+      - src/supervisor_api/contracts.py
+    law_dependencies:
+      - docs/authority/zeus_current_delivery.md
+      - src/control/control_plane.py
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_supervisor_contracts.py
+      - tests/test_runtime_guards.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   observability:
     path: src/observability
     scoped_agents: src/observability/AGENTS.md
@@ -226,11 +340,20 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: monitoring_support
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - src/observability/status_summary.py
+      - src/observability/scheduler_health.py
+    public_entry_files:
+      - src/observability/status_summary.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_healthcheck.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   types:
     path: src/types
     scoped_agents: src/types/AGENTS.md
@@ -238,11 +361,25 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: shared_types
-    law_dependencies: []
+    high_risk_files:
+      - src/types/temperature.py
+      - src/types/market.py
+      - src/types/observation_atom.py
+      - src/types/metric_identity.py
+    public_entry_files:
+      - src/types/temperature.py
+      - src/types/market.py
+      - src/types/observation_atom.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_temperature.py
+      - tests/test_observation_atom.py
+      - tests/test_instrument_invariants.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   analysis:
     path: src/analysis
     scoped_agents: src/analysis/AGENTS.md
@@ -250,11 +387,16 @@ modules:
     priority: p2_remaining
     zone: source
     authority_role: analytical_support
-    law_dependencies: []
+    high_risk_files:
+      - src/analysis/__init__.py
+    public_entry_files:
+      - src/analysis/__init__.py
+    law_dependencies:
+      - docs/reference/modules/analysis.md
     current_fact_dependencies: []
     required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    graph_appendix_status: LOCAL_VERIFICATION_REQUIRED
+    archive_extraction_status: partial
   scripts:
     path: scripts
     scoped_agents: scripts/AGENTS.md
@@ -262,11 +404,25 @@ modules:
     priority: p2_remaining
     zone: scripts
     authority_role: operator_script_surface
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - scripts/topology_doctor.py
+      - scripts/backfill_obs_v2.py
+      - scripts/rebuild_calibration_pairs_canonical.py
+      - scripts/check_daemon_heartbeat.py
+    public_entry_files:
+      - scripts/topology_doctor.py
+      - scripts/backfill_obs_v2.py
+    law_dependencies:
+      - docs/authority/zeus_current_delivery.md
+      - architecture/script_manifest.yaml
+    current_fact_dependencies:
+      - docs/operations/current_source_validity.md
+    required_tests:
+      - tests/test_topology_doctor.py
+      - tests/test_tier_resolver.py
+      - tests/test_obs_v2_writer.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   tests:
     path: tests
     scoped_agents: tests/AGENTS.md
@@ -274,11 +430,24 @@ modules:
     priority: p2_remaining
     zone: tests
     authority_role: proof_surface
-    law_dependencies: []
+    high_risk_files:
+      - tests/test_topology_doctor.py
+      - tests/test_cross_module_invariants.py
+      - tests/test_cross_module_relationships.py
+      - tests/test_day0_runtime_observation_context.py
+    public_entry_files:
+      - tests/test_topology_doctor.py
+      - tests/test_cross_module_invariants.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/test_topology.yaml
     current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    required_tests:
+      - tests/test_topology_doctor.py
+      - tests/test_cross_module_invariants.py
+      - tests/test_cross_module_relationships.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   docs_system:
     path: docs
     scoped_agents: docs/AGENTS.md
@@ -286,11 +455,23 @@ modules:
     priority: p2_remaining
     zone: docs
     authority_role: docs_mesh
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - docs/AGENTS.md
+      - docs/README.md
+      - docs/operations/current_state.md
+      - docs/archive_registry.md
+    public_entry_files:
+      - docs/AGENTS.md
+      - docs/README.md
+    law_dependencies:
+      - architecture/docs_registry.yaml
+      - architecture/topology.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   topology_system:
     path: architecture
     scoped_agents: architecture/AGENTS.md
@@ -298,11 +479,25 @@ modules:
     priority: p2_remaining
     zone: architecture
     authority_role: machine_routing_kernel
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - architecture/topology.yaml
+      - architecture/docs_registry.yaml
+      - architecture/source_rationale.yaml
+      - architecture/test_topology.yaml
+      - architecture/script_manifest.yaml
+    public_entry_files:
+      - architecture/topology.yaml
+      - architecture/docs_registry.yaml
+    law_dependencies:
+      - docs/authority/zeus_current_delivery.md
+      - docs/authority/zeus_current_architecture.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+      - tests/test_structural_linter.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   code_review_graph:
     path: .code-review-graph
     scoped_agents: AGENTS.md
@@ -310,8 +505,19 @@ modules:
     priority: p2_remaining
     zone: derived_context
     authority_role: tracked_derived_context
-    law_dependencies: []
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: planned
-    archive_extraction_status: pending
+    high_risk_files:
+      - .code-review-graph/graph.db
+      - architecture/code_review_graph_protocol.yaml
+      - scripts/topology_doctor_code_review_graph.py
+    public_entry_files:
+      - .code-review-graph/graph.db
+      - architecture/code_review_graph_protocol.yaml
+    law_dependencies:
+      - architecture/code_review_graph_protocol.yaml
+      - docs/authority/zeus_current_delivery.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+    graph_appendix_status: TRACKED_AVAILABLE
+    archive_extraction_status: partial

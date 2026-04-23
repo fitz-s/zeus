@@ -33,6 +33,10 @@ surfaces that explain module behavior, hazards, and tests deeply enough for
 zero-context work. They do not outrank authority docs, machine manifests,
 current-fact surfaces, tests, or executable source.
 
+The first-wave books (`state`, `engine`, `data`) and the remaining module books
+now route through `modules/AGENTS.md`; use that router instead of guessing
+which module reference matters.
+
 ## File registry
 
 | File | Purpose |
