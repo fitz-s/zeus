@@ -1,3 +1,8 @@
+"""Validate advisory architecture gate workflow structure."""
+# Lifecycle: created=2026-04-14; last_reviewed=2026-04-23; last_reused=2026-04-23
+# Purpose: Check advisory gate workflow jobs, triggers, and forbidden external references.
+# Reuse: Run when authority/delivery boundary routing or advisory gate workflow policy changes.
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -46,7 +51,7 @@ REQUIRED_ENV_KEYS = {
 
 FORBIDDEN_EXTERNAL_REFERENCES = (
     "scripts/audit_architecture_alignment.py",
-    "docs/authority/zeus_openclaw_venus_delivery_boundary.md",
+    "docs/reports/authority_history/zeus_openclaw_venus_delivery_boundary.md",
 )
 
 

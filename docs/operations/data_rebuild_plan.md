@@ -100,7 +100,7 @@ Fix only the blocking defects (D1 WMO rounding, D3 schema idempotence, D15 inges
 ## 0.6 Dual-track refactor overlay (2026-04-16)
 
 This rebuild plan is now subordinate to the Dual-Track Metric Spine Refactor
-(`docs/authority/zeus_dual_track_architecture.md`,
+(`docs/authority/zeus_current_architecture.md`,
 `docs/operations/task_2026-04-16_dual_track_metric_spine/plan.md`). The
 letter-coded changes (A-N) remain in force for the high track, but the
 canonical product and eligibility grammar below apply to both tracks.

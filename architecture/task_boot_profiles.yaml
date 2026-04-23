@@ -95,7 +95,7 @@ profiles:
       - AGENTS.md
       - workspace_map.md
       - docs/reference/zeus_domain_model.md
-      - docs/authority/zeus_dual_track_architecture.md
+      - docs/authority/zeus_current_architecture.md
       - docs/operations/current_source_validity.md
       - docs/operations/known_gaps.md
       - architecture/source_rationale.yaml
@@ -115,7 +115,7 @@ profiles:
       - id: dual_track_separation
         question: "Does this high/low family preserve separate physical quantity and calibration identity?"
         evidence:
-          - docs/authority/zeus_dual_track_architecture.md
+          - docs/authority/zeus_current_architecture.md
     fatal_misreads:
       - daily_day0_hourly_forecast_sources_are_not_interchangeable
       - airport_station_not_city_settlement_station
@@ -189,7 +189,7 @@ profiles:
       - AGENTS.md
       - workspace_map.md
       - docs/reference/zeus_domain_model.md
-      - docs/authority/zeus_dual_track_architecture.md
+      - docs/authority/zeus_current_architecture.md
       - docs/operations/current_source_validity.md
       - docs/operations/current_data_state.md
       - architecture/source_rationale.yaml
@@ -208,7 +208,7 @@ profiles:
       - id: high_low_day0_causality
         question: "Does the task preserve high uses observed max floor and low uses observed min ceiling?"
         evidence:
-          - docs/authority/zeus_dual_track_architecture.md
+          - docs/authority/zeus_current_architecture.md
           - docs/reference/zeus_domain_model.md
     fatal_misreads:
       - daily_day0_hourly_forecast_sources_are_not_interchangeable
@@ -237,7 +237,7 @@ profiles:
       - AGENTS.md
       - workspace_map.md
       - docs/reference/zeus_domain_model.md
-      - docs/authority/zeus_dual_track_architecture.md
+      - docs/authority/zeus_current_architecture.md
       - docs/operations/current_data_state.md
       - docs/operations/current_source_validity.md
       - architecture/source_rationale.yaml
@@ -257,7 +257,7 @@ profiles:
       - id: strategy_key_and_dual_track
         question: "Does the change preserve strategy_key and HIGH/LOW calibration separation?"
         evidence:
-          - docs/authority/zeus_dual_track_architecture.md
+          - docs/authority/zeus_current_architecture.md
           - architecture/source_rationale.yaml
     fatal_misreads:
       - daily_day0_hourly_forecast_sources_are_not_interchangeable

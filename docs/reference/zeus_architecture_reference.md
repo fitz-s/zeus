@@ -131,7 +131,7 @@ Zeus is not a single-track daily-high system. The dual-track spine separates:
 
 The tracks share local-calendar-day geometry but not calibration family,
 observation field, physical quantity, or Day0 causality law. Current binding
-law is in `docs/authority/zeus_dual_track_architecture.md`.
+law is in `docs/authority/zeus_current_architecture.md`.
 
 ## Code And Topology Hotspots
 
@@ -159,6 +159,6 @@ manifests, and active packet plan.
 Where to go next:
 
 - Current law: `docs/authority/zeus_current_architecture.md`
-- Dual-track law: `docs/authority/zeus_dual_track_architecture.md`
+- Dual-track law: `docs/authority/zeus_current_architecture.md`
 - File ownership: `architecture/source_rationale.yaml`
 - Workspace routing: `architecture/docs_registry.yaml`, `workspace_map.md`

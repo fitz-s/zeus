@@ -331,7 +331,7 @@ cards:
     severity: critical
     sources:
       - AGENTS.md
-      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - docs/authority/zeus_current_architecture.md
       - architecture/data_rebuild_topology.yaml
       - .omx/context/packet8_data_rebuild_topology_closeout_2026-04-13.md
     failure_mode: >
@@ -390,7 +390,7 @@ cards:
     status: active_law
     severity: critical
     sources:
-      - docs/authority/zeus_k4_fix_pack_adr.md
+      - docs/reports/authority_history/zeus_k4_fix_pack_adr.md
       - git log K4.5 commits
     failure_mode: >
       Data rebuild scripts stamp rows authority='VERIFIED' after shallow checks,
@@ -777,7 +777,7 @@ cards:
     sources:
       - scripts/AGENTS.md
       - architecture/script_manifest.yaml
-      - docs/authority/zeus_packet_discipline.md
+      - docs/authority/zeus_current_delivery.md
     failure_mode: >
       Agents leave one-off scripts in scripts/ or create parallel tools instead
       of reusing/promoting existing long-lived scripts.
@@ -815,7 +815,7 @@ cards:
         - architecture/script_manifest.yaml
     downstream_blast_radius:
       - scripts/AGENTS.md
-      - docs/authority/zeus_packet_discipline.md
+      - docs/authority/zeus_current_delivery.md
     zero_context_digest: >
       Before creating a script, search manifest for an existing tool; delete or
       promote one-off scripts instead of leaving them behind.
@@ -825,7 +825,7 @@ cards:
     severity: critical
     sources:
       - AGENTS.md
-      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
     failure_mode: >
       Live execution, backtest evaluation, and shadow observation semantics are
@@ -867,7 +867,7 @@ cards:
         - src/main.py
         - src/engine/**
         - src/supervisor_api/**
-        - docs/authority/zeus_live_backtest_shadow_boundary.md
+        - docs/authority/zeus_current_architecture.md
     downstream_blast_radius:
       - src/control/control_plane.py
       - src/execution/executor.py
@@ -880,7 +880,7 @@ cards:
     status: active_law
     severity: high
     sources:
-      - docs/authority/zeus_k4_fix_pack_adr.md
+      - docs/reports/authority_history/zeus_k4_fix_pack_adr.md
       - git log K4.5 exact semantics commits
     failure_mode: >
       Tests assert only that rows or outputs exist, allowing wrong counts,

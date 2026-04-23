@@ -121,8 +121,8 @@ freshness.
 
 Use it as the compact current answer for data posture.
 
-For durable law, read `docs/authority/zeus_data_rebuild_adr.md` and
-`architecture/data_rebuild_topology.yaml`.
+For durable law, read `architecture/data_rebuild_topology.yaml` and
+`docs/authority/zeus_current_architecture.md`.
 
 For present-tense blockers, read `docs/operations/known_gaps.md`.
 

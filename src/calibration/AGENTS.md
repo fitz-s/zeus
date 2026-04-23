@@ -37,4 +37,4 @@ The critical design decision: `lead_days` is an **input feature**, not a bucket 
 - **Active routing**: `platt.py`, `manager.py`, `store.py` — these are on the live execution path. Changes require a governance packet.
 - **Shadow instrumentation**: `blocked_oos.py`, `effective_sample_size.py` — these collect evaluation facts but do NOT gate live execution. Their outputs are additive metrics in `status_summary`, never live blockers.
 - Day0 residual fact collection is shadow-only.
-- Promotion of any shadow metric to a live blocker requires: 30+ days of parallel data, explicit operator approval, and a governance packet per `docs/authority/zeus_live_backtest_shadow_boundary.md`.
+- Promotion of any shadow metric to a live blocker requires: 30+ days of parallel data, explicit operator approval, and a governance packet per `docs/authority/zeus_current_architecture.md`.

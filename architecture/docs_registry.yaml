@@ -170,24 +170,25 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: code_and_manifest
-- path: docs/authority/zeus_dual_track_architecture.md
-  doc_class: authority
+- path: docs/reports/authority_history/zeus_dual_track_architecture.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: dual-track architecture law
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted dual-track architecture evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_architecture.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/authority/zeus_change_control_constitution.md
   doc_class: authority
   default_read: false
@@ -206,114 +207,124 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: code_and_manifest
-- path: docs/authority/zeus_packet_discipline.md
-  doc_class: authority
+- path: docs/reports/authority_history/zeus_packet_discipline.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: packet discipline law
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted packet discipline evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/zeus_autonomy_gates.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/zeus_autonomy_gates.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: autonomy gate law
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted autonomy gate evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/zeus_live_backtest_shadow_boundary.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/zeus_live_backtest_shadow_boundary.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: live/backtest/shadow boundary law
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted live/backtest/shadow boundary evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_architecture.md
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/zeus_openclaw_venus_delivery_boundary.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/zeus_openclaw_venus_delivery_boundary.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: OpenClaw/Venus delivery boundary law
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted OpenClaw/Venus delivery boundary evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/zeus_data_rebuild_adr.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/zeus_data_rebuild_adr.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: data rebuild ADR
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted data rebuild ADR evidence
+  canonical_replaced_by:
+  - architecture/data_rebuild_topology.yaml
+  - docs/operations/current_data_state.md
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
-- path: docs/authority/zeus_k4_fix_pack_adr.md
-  doc_class: authority
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/reports/authority_history/zeus_k4_fix_pack_adr.md
+  doc_class: report
   default_read: false
   direct_reference_allowed: true
-  current_role: K4 fix-pack ADR
-  canonical_replaced_by: []
-  next_action: demote_after_extraction
-  lifecycle_state: durable
+  current_role: demoted K4 fix-pack ADR evidence
+  canonical_replaced_by:
+  - docs/authority/zeus_current_architecture.md
+  - docs/authority/zeus_current_delivery.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: stable
+  truth_profile: report_evidence
+  freshness_class: historical
   supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: code_and_manifest
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/reports/authority_history/task_2026-04-15_data_math_boundary_integration_note.md
   doc_class: report
   default_read: false

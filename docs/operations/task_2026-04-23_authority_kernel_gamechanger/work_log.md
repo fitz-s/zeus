@@ -67,6 +67,100 @@ Post-close review:
 
 - pending
 
+## P2 Side Authority Demotion/Merge
+
+Changed files:
+
+- `AGENTS.md`
+- `architecture/data_rebuild_topology.yaml`
+- `architecture/docs_registry.yaml`
+- `architecture/history_lore.yaml`
+- `architecture/self_check/authority_index.md`
+- `architecture/task_boot_profiles.yaml`
+- `architecture/test_topology.yaml`
+- `architecture/topology.yaml`
+- `docs/authority/AGENTS.md`
+- `docs/operations/current_data_state.md`
+- `docs/operations/current_state.md`
+- `docs/operations/data_rebuild_plan.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/reports/AGENTS.md`
+- `docs/reports/authority_history/zeus_autonomy_gates.md`
+- `docs/reports/authority_history/zeus_data_rebuild_adr.md`
+- `docs/reports/authority_history/zeus_dual_track_architecture.md`
+- `docs/reports/authority_history/zeus_k4_fix_pack_adr.md`
+- `docs/reports/authority_history/zeus_live_backtest_shadow_boundary.md`
+- `docs/reports/authority_history/zeus_openclaw_venus_delivery_boundary.md`
+- `docs/reports/authority_history/zeus_packet_discipline.md`
+- `docs/runbooks/tigge_cloud_download.md`
+- `scripts/check_advisory_gates.py`
+- `src/calibration/AGENTS.md`
+
+Summary:
+
+- moved seven side authority/ADR files to `docs/reports/authority_history/`
+- reclassified moved files as historical report evidence in `docs_registry.yaml`
+- reduced `docs/authority/AGENTS.md` to the 3+1 durable authority files
+- retargeted active routers/manifests/runbooks/check scripts to current core
+  authority or machine manifests
+- kept source/test code-comment references as historical/comment references;
+  no runtime Python behavior was changed
+
+Load-bearing preservation:
+
+| Demoted file | Preserved by |
+|---|---|
+| `zeus_packet_discipline.md` | `docs/authority/zeus_current_delivery.md` packet, closeout, waiver, evidence, script-disposal law |
+| `zeus_autonomy_gates.md` | `docs/authority/zeus_current_delivery.md` autonomy limits and team-mode law |
+| `zeus_dual_track_architecture.md` | `docs/authority/zeus_current_architecture.md` dual-track identity and `architecture/**` manifests/tests |
+| `zeus_live_backtest_shadow_boundary.md` | `docs/authority/zeus_current_architecture.md` live/backtest/shadow law |
+| `zeus_openclaw_venus_delivery_boundary.md` | `docs/authority/zeus_current_architecture.md` + `zeus_current_delivery.md` external boundary law |
+| `zeus_data_rebuild_adr.md` | `architecture/data_rebuild_topology.yaml`, `docs/operations/current_data_state.md`, current architecture/delivery |
+| `zeus_k4_fix_pack_adr.md` | current architecture/delivery plus historical report evidence |
+
+Reference classification:
+
+- Active routers/manifests/checks were retargeted.
+- Remaining `docs/authority/zeus_*` side-path hits are either in
+  `docs/reports/authority_history/`, historical operations packet evidence,
+  source/test/script comments, or this packet receipt's `moved_files` table.
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --history-lore --json` -> ok
+- `python scripts/topology_doctor.py --current-state-receipt-bound --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok with known advisory warning: `docs/operations/current_data_state.md` exceeds line budget; P3 owns current-fact thinning
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files scripts/check_advisory_gates.py --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P2 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P2 files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P2 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json` -> ok with advisory graph coverage warning for `scripts/check_advisory_gates.py` and known current-data line-budget warning
+- `find docs/authority -maxdepth 1 -type f -print` -> only `AGENTS.md`, `zeus_current_architecture.md`, `zeus_current_delivery.md`, `zeus_change_control_constitution.md`
+- `git diff --check -- <P2 files>` -> ok
+
+Pre-close review:
+
+- Critic: initial BLOCK when reviewing full worktree dirty state. Resolution:
+  staged only P2 files and re-reviewed `git diff --cached` scope. Re-review:
+  PASS. Staged P2 demotes seven side-authority files, retargets active refs,
+  and does not stage graph/state/artifact changes.
+- Verifier: PASS. Confirmed docs/history-lore/current-state checks pass,
+  `docs/authority/` contains only 3+1 durable files plus `AGENTS.md`, moved
+  files are report evidence, and remaining old-path refs are historical,
+  comments, or receipt evidence.
+
+Post-close review:
+
+- pending
+
+Next:
+
+- validate and commit P2
+
 ## P1 Core Authority Rewrite
 
 Changed files:

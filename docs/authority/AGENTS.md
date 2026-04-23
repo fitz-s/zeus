@@ -42,13 +42,6 @@ rollback doctrine, or historical governance evidence.
 | `zeus_current_architecture.md` | Current architecture law — truth ownership, lifecycle semantics, risk behavior, zone boundaries |
 | `zeus_current_delivery.md` | Current delivery law — authority order, planning lock, packet doctrine, completion protocol |
 | `zeus_change_control_constitution.md` | Deep packet governance rules (Chinese language) |
-| `zeus_packet_discipline.md` | Sunset-pending packet discipline law; merge into current delivery in authority-kernel P1/P2 |
-| `zeus_autonomy_gates.md` | Sunset-pending autonomy gate law; merge into current delivery in authority-kernel P1/P2 |
-| `zeus_openclaw_venus_delivery_boundary.md` | Sunset-pending Zeus/Venus/OpenClaw boundary law; merge into current delivery in authority-kernel P1/P2 |
-| `zeus_live_backtest_shadow_boundary.md` | Sunset-pending live/backtest/shadow boundary law; merge into current authority in authority-kernel P1/P2 |
-| `zeus_data_rebuild_adr.md` | Sunset-pending data rebuild ADR evidence; demote after core authority retarget in P2 |
-| `zeus_dual_track_architecture.md` | Sunset-pending dual-track law; merge into current architecture in authority-kernel P1/P2 |
-| `zeus_k4_fix_pack_adr.md` | Sunset-pending K4.5 fix-pack ADR evidence; demote in P2 |
 
 Historical architecture/design files live in `docs/reports/authority_history/`
 or the archive interface. They are evidence, not active law.

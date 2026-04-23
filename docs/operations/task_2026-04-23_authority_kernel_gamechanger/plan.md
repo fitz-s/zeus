@@ -3,7 +3,7 @@
 Date: 2026-04-23
 Branch: `data-improve`
 Classification: governance/authority
-Phase: P1 core authority rewrite
+Phase: P2 side authority demotion/merge
 
 ## Objective
 
@@ -82,6 +82,50 @@ Forbidden:
   demotion/promotion, and current-fact rules needed before P2 demotion.
 - `docs_registry.yaml` marks side authority files as sunset-pending via
   `next_action: demote_after_extraction` without moving them in P1.
+
+## P2 Scope
+
+Allowed:
+
+- side authority files moved from `docs/authority/` to
+  `docs/reports/authority_history/`
+- `docs/authority/AGENTS.md`
+- `docs/reports/AGENTS.md`
+- `architecture/docs_registry.yaml`
+- `architecture/self_check/authority_index.md`
+- `architecture/topology.yaml`
+- `architecture/test_topology.yaml`
+- `architecture/data_rebuild_topology.yaml`
+- `architecture/history_lore.yaml`
+- `architecture/task_boot_profiles.yaml`
+- `AGENTS.md`
+- `docs/operations/current_data_state.md`
+- `docs/operations/data_rebuild_plan.md`
+- `docs/reference/zeus_architecture_reference.md`
+- `docs/runbooks/tigge_cloud_download.md`
+- `src/calibration/AGENTS.md`
+- `scripts/check_advisory_gates.py`
+- `docs/operations/current_state.md`
+- this packet's `plan.md`, `work_log.md`, `receipt.json`
+
+Forbidden:
+
+- Python runtime behavior changes
+- `state/**`
+- `.code-review-graph/graph.db`
+- current city/source truth re-audit
+
+## P2 Acceptance
+
+- `docs/authority/` contains only `AGENTS.md`,
+  `zeus_current_architecture.md`, `zeus_current_delivery.md`, and
+  `zeus_change_control_constitution.md`.
+- Demoted files are visible under `docs/reports/authority_history/` and
+  classified as report evidence/history.
+- Active routers/manifests/check scripts no longer require the moved
+  `docs/authority/*` paths.
+- Remaining source/test/historical packet references are classified in the work
+  log as comments or historical evidence, not active authority.
 
 ## P0 Acceptance
 

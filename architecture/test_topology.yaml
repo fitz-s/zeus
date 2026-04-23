@@ -187,7 +187,7 @@ law_gate:
       - tests/test_backtest_settlement_value_outcome.py
       - tests/test_replay_time_provenance.py
     protects:
-      - docs/authority/zeus_live_backtest_shadow_boundary.md
+      - docs/authority/zeus_current_architecture.md
       - src/engine/replay.py
   STRATEGY_KEY:
     tests:

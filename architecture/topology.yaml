@@ -710,7 +710,7 @@ digest_profiles:
       - "scripts/AGENTS.md"
       - "tests/test_topology_doctor.py"
       - "scripts/topology_doctor.py"
-      - "docs/authority/zeus_packet_discipline.md"
+      - "docs/authority/zeus_current_delivery.md"
     forbidden_files:
       - "state/*.db"
       - ".claude/worktrees/**"
@@ -724,7 +724,7 @@ digest_profiles:
     downstream:
       - "architecture/script_manifest.yaml"
       - "scripts/AGENTS.md"
-      - "docs/authority/zeus_packet_discipline.md"
+      - "docs/authority/zeus_current_delivery.md"
     stop_conditions:
       - "Do not leave anonymous one-off probes in scripts/."
       - "Do not add a new script when an existing long_lived script can be extended."

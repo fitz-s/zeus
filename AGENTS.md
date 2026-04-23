@@ -232,7 +232,7 @@ Check:
   targeted code, targeted tests
 - K0/K1 truth or lifecycle work: `docs/authority/zeus_current_architecture.md`,
   `architecture/kernel_manifest.yaml`, targeted rationale entries
-- Dual-track work: `docs/authority/zeus_dual_track_architecture.md`
+- Dual-track work: `docs/authority/zeus_current_architecture.md`
 - Delivery/governance work: `docs/authority/zeus_current_delivery.md`,
   `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, active
   packet docs

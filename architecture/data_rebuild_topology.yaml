@@ -63,7 +63,7 @@ criteria:
     blocks_live_math_certification: true
   authority_verified_provenance_gate:
     status: target_not_certified
-    source: docs/authority/zeus_data_rebuild_adr.md
+    source: architecture/data_rebuild_topology.yaml
     protects:
       - src/types/observation_atom.py
       - src/data/ingestion_guard.py

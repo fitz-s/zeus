@@ -16,13 +16,13 @@ authority spine for high-risk zero-context work.
 6. `architecture/negative_constraints.yaml`
 7. `docs/authority/zeus_current_architecture.md`
 8. `docs/authority/zeus_current_delivery.md`
-9. `docs/authority/zeus_packet_discipline.md`
-10. `docs/authority/zeus_autonomy_gates.md`
-11. `docs/authority/zeus_live_backtest_shadow_boundary.md`
+9. `docs/authority/zeus_change_control_constitution.md` when deep governance applies
 
 ## Rule
 
-Reference docs explain domain and rationale. They do not override the authority order above unless a packet explicitly promotes a rule into machine-checkable law.
+Reference docs and reports explain domain, rationale, and history. They do not
+override the authority order above unless a packet explicitly promotes a rule
+into machine-checkable law.
 
 ## Current Topology Tool
 

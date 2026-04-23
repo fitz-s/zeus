@@ -7,7 +7,7 @@ local absolute paths, and dated progress diaries belong in evidence artifacts,
 not in this durable procedure.
 
 Authority status: operator guidance only. Data/version law lives in
-`docs/authority/zeus_dual_track_architecture.md`, machine manifests, tests, and
+`docs/authority/zeus_current_architecture.md`, machine manifests, tests, and
 the executable data pipeline.
 
 ## Operating Model
