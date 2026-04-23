@@ -43,7 +43,6 @@ def _load_registry_yaml() -> dict:
 class TestAllStrategyConstantsRegistered:
     """Every constant in kelly.py and market_fusion.py appears in provenance_registry.yaml."""
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_kelly_constants_in_registry(self):
         """Core Kelly sizing constant appears in registry."""
@@ -53,7 +52,6 @@ class TestAllStrategyConstantsRegistered:
             "Add a ProvenanceRecord for it."
         )
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_market_fusion_constants_in_registry(self):
         """TAIL_ALPHA_SCALE appears in registry under its namespaced key."""
@@ -64,7 +62,6 @@ class TestAllStrategyConstantsRegistered:
             f"Keys present: {sorted(k for k in registry if 'fusion' in k or 'alpha' in k.lower())}"
         )
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_registry_yaml_structure_when_present(self):
         """Every entry has required fields."""
@@ -75,7 +72,6 @@ class TestAllStrategyConstantsRegistered:
                 missing = required_fields - set(record.keys())
                 assert not missing, f"Registry entry '{name}' missing fields: {missing}"
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_in_memory_registry_populated(self):
         """REGISTRY loaded at module import contains expected keys."""

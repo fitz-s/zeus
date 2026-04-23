@@ -26,7 +26,36 @@
 | W0 packet open | closed | `ec78c2f` | skipped (doc-only, planning-lock GREEN) | 2026-04-23 |
 | T4.0 persistence design rev2 | closed | `9365b20` | surrogate critic CLEAR (Option E); con-nyx informed | 2026-04-23 |
 | T7.b AST-walk guard | closed | `beea8a9` | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
-| T1.a 15-file header wave | closed | pending | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
+| T1.a 15-file header wave | closed | `67b5908` | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
+| T1.b provenance_registry skipif cleanup | closed | pending | 4 stale `skipif(not REGISTRY_YAML.exists(), ...)` markers removed; 19/19 test_provenance_enforcement tests still pass | 2026-04-23 |
+
+## T1.b — execution notes (2026-04-23)
+
+Scope per plan: "content audit of `config/provenance_registry.yaml`
+(already exists at 516 lines) + remove redundant `skipif` markers in
+`test_provenance_enforcement.py`."
+
+Findings:
+- `config/provenance_registry.yaml` exists and is populated (≥ 516
+  lines, `kelly_mult` at L26, `market_fusion.TAIL_ALPHA_SCALE` present,
+  required fields `declared_target, data_basis, validated_at,
+  replacement_criteria` all present per registry shape).
+- All 4 tests in `TestAllStrategyConstantsRegistered` carry TWO
+  skipif markers:
+  1. `skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")` — **inaccurate today**: file exists. Removed by T1.b.
+  2. `skipif(not HAS_YAML, reason="PyYAML not installed")` — **legitimate environmental check**: PyYAML may be absent in minimal Python envs; kept.
+- L34 inside `_load_registry_yaml()` helper also references
+  `REGISTRY_YAML.exists()` — kept (legitimate fallback, returns empty
+  dict when file absent).
+
+Per memory rule L21, this is **REMOVING STALE SKIP MARKERS**, not
+"activating" tests — all 4 guarded tests already ran in the pre-T1.b
+baseline because both skip conditions evaluated False. The slice
+hardens the test against future regressions (if the registry file is
+deleted, tests will now fail loudly instead of silent-skipping).
+
+Regression evidence: `pytest -q tests/test_provenance_enforcement.py`
+→ `19 passed in 0.15s` (matches pre-T1.b baseline exactly).
 
 ## T1.a — execution notes (2026-04-23)
 

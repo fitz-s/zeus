@@ -115,7 +115,7 @@
     {
       "slice_id": "T1.a",
       "name": "provenance_header_wave_on_15_file_midstream_guardian_panel",
-      "commit": "pending",
+      "commit": "67b5908",
       "date": "2026-04-23",
       "critic_status": "self_verified_narrow_scope_zero_delta_vs_baseline",
       "planning_lock": "GREEN",
@@ -146,6 +146,26 @@
         "grep -l '^# Created:' on all 15 panel files → all 15 OK"
       ],
       "out_of_scope_full_suite_state": "pytest -q tests/ → 144 failed, 2079 passed, 90 skipped, 1 xfailed; failures attributable to pre-existing repo state and/or concurrent upstream data-readiness agent. Not a T1.a regression."
+    },
+    {
+      "slice_id": "T1.b",
+      "name": "stale_skipif_removal_in_test_provenance_enforcement",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_19_of_19_pass_after_skipif_removal",
+      "planning_lock": "GREEN",
+      "files_changed": [
+        "tests/test_provenance_enforcement.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "delta_language_per_L21": "REMOVING STALE SKIP MARKERS (not 'activating') — the 4 guarded tests already ran pre-T1.b because both skip conditions evaluated False; T1.b hardens the test against future regressions (if registry file is deleted, tests now fail loudly).",
+      "markers_removed": "4 @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason='Registry YAML not yet created') markers removed from TestAllStrategyConstantsRegistered class",
+      "markers_kept": "4 @pytest.mark.skipif(not HAS_YAML, reason='PyYAML not installed') markers kept — legitimate environmental check for minimal Python envs without PyYAML",
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_provenance_enforcement.py → 19 passed in 0.15s (matches pre-T1.b baseline)"
+      ],
+      "registry_content_audit_summary": "config/provenance_registry.yaml present at 516 lines; kelly_mult at L26; market_fusion.TAIL_ALPHA_SCALE present; required fields declared_target/data_basis/validated_at/replacement_criteria all present per schema; 8 kelly dynamic_kelly_mult cascade entries registered (ci_width > 0.10 → 0.7 / ci_width > 0.15 → 0.5 / lead_days >= 5 → 0.6 / lead_days >= 3 → 0.8, each as threshold + multiplier)."
     }
   ],
   "slices_in_review": [
