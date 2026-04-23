@@ -27,6 +27,10 @@ from src.contracts import (
     EdgeContext,
     Direction,
 )
+from src.contracts.execution_price import (
+    ExecutionPrice,
+    ExecutionPriceContractError,
+)
 from src.types import BinEdge
 
 logger = logging.getLogger(__name__)
@@ -345,6 +349,44 @@ def _live_order(
     from src.data.polymarket_client import PolymarketClient
 
     timeout = intent.timeout_seconds
+
+    # T5.a typed-boundary assertion (D3 defense-in-depth): construct
+    # ExecutionPrice from the pre-computed limit_price at the executor
+    # seam. ExecutionPrice.__post_init__ refuses non-finite or
+    # out-of-range values; with currency="probability_units" it also
+    # refuses values > 1.0. This is a NARROW STRUCTURAL GUARD only —
+    # not a Kelly-safety guarantee. The fee-deducted/Kelly-safe
+    # semantics are upstream evaluator's responsibility, so we use
+    # price_type="ask", fee_deducted=False here to avoid a semantic
+    # white lie at the executor seam (see T5.a critic review
+    # 2026-04-23: the guards fire identically for finite/nonneg/≤1
+    # regardless of price_type or fee_deducted). This only catches
+    # "malformed limit_price reached executor" regressions (NaN,
+    # negative, >1.0 prob), not fee-accounting bugs. Rejection reason
+    # is named "malformed_limit_price" to avoid implying Kelly-semantic
+    # violation.
+    try:
+        ExecutionPrice(
+            value=intent.limit_price,
+            price_type="ask",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+    except (ValueError, ExecutionPriceContractError) as exc:
+        logger.error(
+            "LIVE ORDER boundary check failed: limit_price=%r rejected by "
+            "ExecutionPrice contract: %s",
+            intent.limit_price,
+            exc,
+        )
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"malformed_limit_price: {exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+        )
 
     logger.info(
         "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
