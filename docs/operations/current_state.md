@@ -5,25 +5,24 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Authority Kernel Gamechanger
-- Active package source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
-- Status: Authority Kernel Gamechanger package closeout and post-close review complete
+- Mainline task: Authority Rehydration
+- Active package source: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
+- Status: P0 scaffold complete; P1 first-wave module books next
 
 ## Required evidence
 
-- `.omx/context/kernel-gamechanger-20260423T035846Z.md`
-- `.omx/plans/kernel-gamechanger-ralplan-2026-04-23.md`
-- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md`
-- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md`
-- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json`
+- `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/work_log.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
 
 ## Freeze point
 
-- Authority Kernel Gamechanger package is closed.
+- P0 scaffold landed routing and manifest skeleton only.
 - Do not modify runtime source, DB/state files, graph DB, current city/source
-  truth, archive bodies, or authority kernel files without a new packet.
+  truth, archive bodies, or the authority kernel unless a later packet phase
+  explicitly authorizes that scope.
 
 ## Current fact companions
 
@@ -51,9 +50,11 @@ Visible non-default packet evidence:
 - `docs/operations/task_2026-04-22_docs_truth_refresh/`
 - `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
 - `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/`
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/`
 - `docs/operations/task_2026-04-23_data_readiness_remediation/`
 
 ## Next action
 
-- Authority Kernel Gamechanger package is complete.
+- Land P1 first-wave dense module books and scoped router upgrades for
+  `state`, `engine`, and `data`.
 - Preserve unrelated dirty work and local archive inputs.

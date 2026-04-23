@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-23_authority_kernel_gamechanger/` | Active authority-kernel gamechanger packet |
+| `task_2026-04-23_authority_rehydration/` | Active authority rehydration packet |
 
 ### Packet Evidence
 
@@ -74,7 +74,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-21_docs_reclassification_reference_extraction/` | packet evidence | Closed docs reclassification/reference extraction packet |
 | `task_2026-04-22_docs_truth_refresh/` | packet evidence | Closed docs truth refresh / stale-reference purge packet |
 | `task_2026-04-23_guidance_kernel_semantic_boot/` | packet evidence | Closed guidance-kernel semantic boot refactor packet |
-| `task_2026-04-23_authority_kernel_gamechanger/` | active packet | Active authority-kernel gamechanger packet |
+| `task_2026-04-23_authority_kernel_gamechanger/` | packet evidence | Closed authority-kernel gamechanger packet |
+| `task_2026-04-23_authority_rehydration/` | active packet | Dense module reference / manifest rehydration packet |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
@@ -106,3 +107,6 @@ make a surface default-read unless `current_state.md` routes it.
   allows for the task at hand.
 - Current-fact surfaces must state Status, Last audited, Max staleness,
   Evidence packet, Receipt path, stale do-not-use policy, and refresh trigger.
+- Dense module rehydration packets may change routing, manifests, module books,
+  and scoped routers, but they must not silently widen into runtime/source
+  semantics without an explicit packet scope change.

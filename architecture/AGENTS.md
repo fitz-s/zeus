@@ -49,6 +49,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
 | `artifact_lifecycle.yaml` | Artifact classification and minimum work-record contract |
 | `context_budget.yaml` | Context budget and maintenance cadence for keeping entry maps/digests slim |
+| `module_manifest.yaml` | Machine registry for dense module books, module routers, and module-level law/current-fact/test links |
 | `context_pack_profiles.yaml` | Task-shaped context-pack profiles for generated agent work packets |
 | `task_boot_profiles.yaml` | Question-first semantic boot profiles for source/settlement/hourly/Day0/calibration/docs/graph tasks |
 | `fatal_misreads.yaml` | Machine-readable fatal semantic shortcut antibodies |

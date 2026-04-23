@@ -90,6 +90,24 @@ rules:
       - architecture/reference_replacement.yaml
       - architecture/docs_registry.yaml
     rationale: reference docs keep a human registry plus a replacement matrix.
+  - id: module_reference_router_registry
+    path_globs: ["docs/reference/modules/AGENTS.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/AGENTS.md
+      - docs/README.md
+      - architecture/topology.yaml
+      - architecture/docs_registry.yaml
+    rationale: the module-book router changes the docs mesh and must stay visible in top-level docs routing.
+  - id: module_reference_doc_registry
+    path_globs: ["docs/reference/modules/*.md"]
+    on_change: [added, deleted]
+    required_companions:
+      - docs/reference/AGENTS.md
+      - docs/reference/modules/AGENTS.md
+      - architecture/docs_registry.yaml
+      - architecture/module_manifest.yaml
+    rationale: module books need both docs registration and a machine module-manifest entry.
   - id: authority_doc_registry
     path_globs: ["docs/authority/*.md"]
     on_change: [added, deleted]
@@ -136,6 +154,15 @@ rules:
       - architecture/AGENTS.md
       - workspace_map.md
     rationale: new or removed architecture surfaces change root-level navigation.
+  - id: module_manifest_registry
+    path_globs: ["architecture/module_manifest.yaml"]
+    on_change: [added, modified, deleted]
+    required_companions:
+      - architecture/AGENTS.md
+      - workspace_map.md
+      - architecture/docs_registry.yaml
+      - docs/reference/AGENTS.md
+    rationale: the module manifest is the machine registry for the dense module-reference layer and must move with both architecture and docs routing.
   - id: tests_contracts_registry
     path_globs: ["tests/contracts/*.py"]
     on_change: [added, deleted]

@@ -1,0 +1,84 @@
+# Authority Rehydration Plan
+
+Date: 2026-04-23
+Branch: `data-improve`
+Classification: governance/reference/manifest
+Phase: P0 scaffold
+
+## Objective
+
+Rehydrate Zeus's cognition layer around dense module books, richer manifests,
+and module-aware routing while keeping the authority kernel small and the
+runtime/source semantics frozen unless a later phase explicitly expands scope.
+
+## Source Package
+
+- `/Users/leofitz/Downloads/zeus_authority_rehydration_package_2026-04-23`
+- `README.md`
+- `00_executive_ruling.md`
+- `02_authority_rehydration_strategy.md`
+- `03_module_doc_standard.md`
+- `07_topology_manifest_rewrite_plan.md`
+- `17_apply_order.md`
+- `patch_blueprints/p0_authority_rehydration_blueprint.md`
+
+## Phase Order
+
+- P0: scaffold packet, module manifest, and docs/topology routing
+- P1: first-wave module books for `state`, `engine`, and `data`
+- P2: remaining module books plus manifest enrichment
+- P3: topology doctor / context-pack support for the module layer
+- P4: archive and graph extraction into durable module/system docs
+
+## P0 Scope
+
+Allowed:
+
+- `AGENTS.md`
+- `workspace_map.md`
+- `architecture/AGENTS.md`
+- `architecture/topology.yaml`
+- `architecture/docs_registry.yaml`
+- `architecture/context_budget.yaml`
+- `architecture/map_maintenance.yaml`
+- `architecture/module_manifest.yaml`
+- `docs/README.md`
+- `docs/AGENTS.md`
+- `docs/reference/AGENTS.md`
+- `docs/reference/modules/AGENTS.md`
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/**`
+
+Forbidden:
+
+- `src/**`
+- `state/**`
+- `.code-review-graph/graph.db`
+- runtime DBs
+- current source/data semantics
+- broad `docs/authority/**` rewrites
+- archive bodies
+
+## P0 Acceptance
+
+- authority rehydration packet exists with plan, work log, and receipt
+- `architecture/module_manifest.yaml` exists in skeletal form only
+- docs routing recognizes `docs/reference/modules/` as dense reference
+- module books remain reference/cognition, not authority
+- topology doctor gaps are recorded as follow-up, not silently ignored
+
+## Verification
+
+- `python scripts/topology_doctor.py --docs --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files <P0 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --json`
+- `python scripts/topology_doctor.py --context-budget --json`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P0 files> --json`
+- `git diff --check -- <P0 files>`
+
+## Follow-on Notes
+
+- P1 must populate the first three module books and upgrade their scoped
+  `AGENTS.md` files into medium-density launchers.
+- P3 owns new topology-doctor enforcement lanes; P0 only makes the layer
+  routable.

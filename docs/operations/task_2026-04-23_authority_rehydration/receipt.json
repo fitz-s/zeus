@@ -1,0 +1,75 @@
+{
+  "task": "authority rehydration scaffold",
+  "packet": "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "docs/AGENTS.md",
+    "docs/reference/AGENTS.md",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/map_maintenance.yaml",
+    "architecture/module_manifest.yaml",
+    "docs/README.md",
+    "docs/AGENTS.md",
+    "docs/reference/AGENTS.md",
+    "docs/reference/modules/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    ".code-review-graph/graph.db",
+    "runtime DBs",
+    "current source/data semantics",
+    "docs/authority/** broad rewrites",
+    "archive bodies"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/map_maintenance.yaml",
+    "architecture/module_manifest.yaml",
+    "docs/README.md",
+    "docs/AGENTS.md",
+    "docs/reference/AGENTS.md",
+    "docs/reference/modules/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/receipt.json"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <P0 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P0 files> --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <P0 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P0 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P0 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "git diff --check -- <P0 files>"
+  ]
+}

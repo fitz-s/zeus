@@ -16,7 +16,8 @@ archives."
 | Directory | Purpose | Notes |
 |-----------|---------|-------|
 | `authority/` | Durable architecture and delivery law only | No packet docs, ADRs, or historical governance evidence |
-| `reference/` | Canonical durable references only | Concepts and orientation, not authority by themselves |
+| `reference/` | Canonical durable references only | Concepts, system references, and routing into dense module books |
+| `reference/modules/` | Dense module books | Module cognition layer; reference only, not law |
 | `operations/` | Live control pointer, current fact surfaces, active packets, package inputs, gap register | Current work routing |
 | `runbooks/` | Operator runbooks | Runtime support |
 | `reports/` | Generated diagnostic reports | Evidence only |
@@ -33,6 +34,7 @@ Historical governance files demoted from authority live under
 - `authority/zeus_current_architecture.md` - current architecture law
 - `authority/zeus_current_delivery.md` - current delivery law
 - `reference/zeus_domain_model.md` - short domain model
+- `reference/modules/AGENTS.md` - router for dense module books
 - `reference/zeus_architecture_reference.md` - canonical architecture reference anchor
 - `reference/zeus_market_settlement_reference.md` - canonical market/settlement reference anchor
 - `reference/zeus_data_and_replay_reference.md` - canonical data/replay reference anchor

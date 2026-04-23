@@ -37,7 +37,8 @@ Default navigation command:
 | `tests/` | Regression and law gates | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
 | `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
 | `docs/authority/` | Durable architecture and delivery law only | `docs/authority/AGENTS.md` |
-| `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and math references | `docs/reference/AGENTS.md` |
+| `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and module references | `docs/reference/AGENTS.md` |
+| `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets, package inputs, gap register | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/reports/` | Generated diagnostic reports | `docs/reports/AGENTS.md` |
@@ -67,6 +68,7 @@ Prefer these over prose when they exist:
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
 | `architecture/change_receipt_schema.yaml` | Route-receipt contract |
 | `architecture/docs_registry.yaml` | Docs classification and default-read registry |
+| `architecture/module_manifest.yaml` | Machine registry for module books, module routers, and module-level dependencies |
 | `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 | `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
@@ -77,6 +79,8 @@ Prefer these over prose when they exist:
 - `docs/archives/**` and local archive bundles
 - `.code-review-graph/graph.db` as if it were authority
 - `docs/reports/**` as if placement made them law
+- `docs/reference/modules/*.md` before a scoped router or module manifest says
+  which module actually matters
 - `.omx/context/**` and `.omc/**` runtime scratch
 - long reference docs unless the digest or packet routes you there
 

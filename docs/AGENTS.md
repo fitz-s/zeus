@@ -11,7 +11,8 @@ Keep the tracked docs surface thin and truthful:
 
 - active tracked docs live in declared subroots
 - `docs/reference/` is canonical-only; stale support docs must move to reports
-  or operations current-fact surfaces
+  or operations current-fact surfaces; dense module books live under
+  `docs/reference/modules/` and remain reference, not authority
 - `docs/authority/` is durable law only; packet docs, ADRs, and historical
   governance evidence must not remain there
 - visible historical protocol lives in `archive_registry.md`
@@ -32,7 +33,7 @@ body or bundle.
 | `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
 | `operations/known_gaps.md` | Active operational gap register |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
-| `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, and failure-mode references -> `reference/AGENTS.md` |
+| `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
@@ -48,6 +49,9 @@ body or bundle.
   routers or raw archive bodies.
 - Do not put current facts, dated audits, or stale support material in
   `docs/reference/`.
+- Dense module books may live under `docs/reference/modules/`, but they remain
+  descriptive reference surfaces and must not become packet diaries, current
+  fact sinks, or duplicate authority kernels.
 - Do not put packet-scoped docs, ADRs, rollback notes, or one-off governance
   doctrine in `docs/authority/`; route them to operations evidence, reports, or
   archive interfaces.

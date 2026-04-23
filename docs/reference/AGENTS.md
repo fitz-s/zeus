@@ -15,6 +15,8 @@ machine manifests, tests, and executable source.
 - `zeus_data_and_replay_reference.md` for data/replay concepts
 - `zeus_failure_modes_reference.md` for failure-class reviews
 - `zeus_math_spec.md` when math fact/spec context matters
+- `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
+  book route
 
 Current data/source facts live under operations current-fact surfaces, not in
 this directory. Dated analytical/support snapshots live under the reports
@@ -23,6 +25,11 @@ subroot.
 Replacement/deletion eligibility is now governed by
 `architecture/docs_registry.yaml` and packet evidence; do not recreate the old
 support-reference layer.
+
+Dense module books live under `docs/reference/modules/`. They are reference
+surfaces that explain module behavior, hazards, and tests deeply enough for
+zero-context work. They do not outrank authority docs, machine manifests,
+current-fact surfaces, tests, or executable source.
 
 ## File registry
 
@@ -34,6 +41,7 @@ support-reference layer.
 | `zeus_data_and_replay_reference.md` | Durable data/replay concepts and current-fact routing |
 | `zeus_failure_modes_reference.md` | Durable failure-mode and mitigation reference |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
+| `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
 
 ## Rules
 
@@ -43,4 +51,7 @@ support-reference layer.
   present-tense facts.
 - Use `docs/operations/current_data_state.md` and
   `docs/operations/current_source_validity.md` for current audited facts.
+- Do not treat module books as authority or current-fact surfaces; use them as
+  dense orientation after the scoped router or `architecture/module_manifest.yaml`
+  tells you which module matters.
 - Do not recreate a frozen support layer.

@@ -50,8 +50,12 @@ answer four questions quickly:
 The durable workspace kernel is:
 
 - machine manifests under `architecture/**`
+- `architecture/module_manifest.yaml` for the dense module-reference layer
 - scoped `AGENTS.md` routers
-- `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, and the active packet folder
+- `docs/reference/modules/**` for dense module books when a module router or
+  manifest sends you there
+- `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, and the
+  active packet folder
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
 
@@ -69,10 +73,12 @@ discovery modes are `opening_hunt`, `update_reaction`, and `day0_capture`.
 2. `workspace_map.md`
 3. scoped `AGENTS.md` for the directory you will touch
 4. relevant machine manifests
-5. `docs/operations/current_state.md`
-6. active packet docs if the task is live
-7. derived context engines as needed
-8. historical evidence only by explicit need
+5. `architecture/module_manifest.yaml` and the routed module book when the task
+   is module-sensitive
+6. `docs/operations/current_state.md`
+7. active packet docs if the task is live
+8. derived context engines as needed
+9. historical evidence only by explicit need
 
 If the read set grows beyond the budget in `architecture/context_budget.yaml`,
 narrow with `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
@@ -228,8 +234,12 @@ Check:
   `architecture/fatal_misreads.yaml`, the profile's current fact surfaces, then
   topology/graph and code
 - Source edits: scoped `src/**/AGENTS.md`, topology navigation/digest,
-  `architecture/source_rationale.yaml`, Code Review Graph status when present,
+  `architecture/source_rationale.yaml`, `architecture/module_manifest.yaml`,
+  routed module book when present, Code Review Graph status when present,
   targeted code, targeted tests
+- Module understanding / zero-context module review: scoped `AGENTS.md`,
+  `architecture/module_manifest.yaml`, `docs/reference/modules/AGENTS.md`, then
+  the specific module book
 - K0/K1 truth or lifecycle work: `docs/authority/zeus_current_architecture.md`,
   `architecture/kernel_manifest.yaml`, targeted rationale entries
 - Dual-track work: `docs/authority/zeus_current_architecture.md`

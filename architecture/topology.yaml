@@ -49,6 +49,12 @@ coverage_roots:
     zone: docs_reference
     authority_role: reference_only
     forbidden_misread: Reference docs are canonical durable references only; volatile current facts, dated audits, packet evidence, and support snapshots must not live here.
+  - path: "docs/reference/modules"
+    status: active
+    scope: scoped
+    zone: docs_reference
+    authority_role: reference_only
+    forbidden_misread: Module books are dense reference/cognition surfaces; they do not become authority, current facts, or packet status logs.
   - path: "docs/operations"
     status: active
     scope: scoped
@@ -423,6 +429,7 @@ registry_directories:
   - path: "tests"
   - path: "docs/authority"
   - path: "docs/reference"
+  - path: "docs/reference/modules"
   - path: "docs/operations"
   - path: "docs/runbooks"
   - path: "docs/reports"
@@ -450,7 +457,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md
+    - docs/operations/task_2026-04-23_authority_rehydration/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
@@ -458,6 +465,21 @@ docs_registry:
     Machine-readable docs classification and default-read registry. P0 seeds
     touched/current docs plus explicit parent entries; later packets may expand
     toward a full census.
+
+module_manifest:
+  path: architecture/module_manifest.yaml
+  rule: >
+    Machine registry for dense module books, scoped module routers, and
+    module-level law/current-fact/test dependencies. It routes; it does not
+    outrank authority or executable truth.
+
+module_reference_layer:
+  path: docs/reference/modules
+  router: docs/reference/modules/AGENTS.md
+  status: scaffolded
+  authority_note: >
+    Dense module books are reference-only cognition surfaces. They do not carry
+    packet status, current facts, or constitutional authority.
 
 runtime_artifact_inventory:
   path: docs/operations/runtime_artifact_inventory.md
@@ -479,6 +501,10 @@ docs_subroots:
     allow_non_markdown: false
   - path: "docs/reference"
     role: reference
+    requires_agents: true
+    allow_non_markdown: false
+  - path: "docs/reference/modules"
+    role: module_reference
     requires_agents: true
     allow_non_markdown: false
   - path: "docs/operations"

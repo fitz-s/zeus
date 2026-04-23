@@ -1,0 +1,247 @@
+schema_version: 1
+metadata:
+  created: "2026-04-23"
+  owner_packet: "authority rehydration P0 scaffold"
+  source_plan: "docs/operations/task_2026-04-23_authority_rehydration/plan.md"
+  purpose: >
+    Machine registry for dense module books, scoped module routers, and
+    module-level law/current-fact/test dependencies. This manifest routes the
+    cognition layer; it does not create a second authority plane.
+  status: skeletal
+
+placeholder_policy:
+  law_dependencies: "Populate in P1/P2 from active law and machine manifests."
+  current_fact_dependencies: "Populate only where a module genuinely depends on time-bound operational facts."
+  required_tests: "Populate with load-bearing current tests, not exhaustive catalogs."
+  graph_appendix_status: "Tracked-only placeholder until graph/context-pack support lands."
+  archive_extraction_status: "Tracked-only placeholder until archive extraction review lands."
+
+modules:
+  state:
+    path: src/state
+    scoped_agents: src/state/AGENTS.md
+    module_book: docs/reference/modules/state.md
+    priority: p1_first_wave
+    zone: source
+    authority_role: canonical_runtime_truth
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  engine:
+    path: src/engine
+    scoped_agents: src/engine/AGENTS.md
+    module_book: docs/reference/modules/engine.md
+    priority: p1_first_wave
+    zone: source
+    authority_role: orchestration_runtime
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  data:
+    path: src/data
+    scoped_agents: src/data/AGENTS.md
+    module_book: docs/reference/modules/data.md
+    priority: p1_first_wave
+    zone: source
+    authority_role: external_data_ingest
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  execution:
+    path: src/execution
+    scoped_agents: src/execution/AGENTS.md
+    module_book: docs/reference/modules/execution.md
+    priority: p2_remaining
+    zone: source
+    authority_role: live_execution
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  signal:
+    path: src/signal
+    scoped_agents: src/signal/AGENTS.md
+    module_book: docs/reference/modules/signal.md
+    priority: p2_remaining
+    zone: source
+    authority_role: signal_generation
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  calibration:
+    path: src/calibration
+    scoped_agents: src/calibration/AGENTS.md
+    module_book: docs/reference/modules/calibration.md
+    priority: p2_remaining
+    zone: source
+    authority_role: calibration_runtime
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  strategy:
+    path: src/strategy
+    scoped_agents: src/strategy/AGENTS.md
+    module_book: docs/reference/modules/strategy.md
+    priority: p2_remaining
+    zone: source
+    authority_role: strategy_identity
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  riskguard:
+    path: src/riskguard
+    scoped_agents: src/riskguard/AGENTS.md
+    module_book: docs/reference/modules/riskguard.md
+    priority: p2_remaining
+    zone: source
+    authority_role: risk_control
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  contracts:
+    path: src/contracts
+    scoped_agents: src/contracts/AGENTS.md
+    module_book: docs/reference/modules/contracts.md
+    priority: p2_remaining
+    zone: source
+    authority_role: runtime_contracts
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  control:
+    path: src/control
+    scoped_agents: src/control/AGENTS.md
+    module_book: docs/reference/modules/control.md
+    priority: p2_remaining
+    zone: source
+    authority_role: operator_control
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  supervisor_api:
+    path: src/supervisor_api
+    scoped_agents: src/supervisor_api/AGENTS.md
+    module_book: docs/reference/modules/supervisor_api.md
+    priority: p2_remaining
+    zone: source
+    authority_role: supervisory_interface
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  observability:
+    path: src/observability
+    scoped_agents: src/observability/AGENTS.md
+    module_book: docs/reference/modules/observability.md
+    priority: p2_remaining
+    zone: source
+    authority_role: monitoring_support
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  types:
+    path: src/types
+    scoped_agents: src/types/AGENTS.md
+    module_book: docs/reference/modules/types.md
+    priority: p2_remaining
+    zone: source
+    authority_role: shared_types
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  analysis:
+    path: src/analysis
+    scoped_agents: src/analysis/AGENTS.md
+    module_book: docs/reference/modules/analysis.md
+    priority: p2_remaining
+    zone: source
+    authority_role: analytical_support
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  scripts:
+    path: scripts
+    scoped_agents: scripts/AGENTS.md
+    module_book: docs/reference/modules/scripts.md
+    priority: p2_remaining
+    zone: scripts
+    authority_role: operator_script_surface
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  tests:
+    path: tests
+    scoped_agents: tests/AGENTS.md
+    module_book: docs/reference/modules/tests.md
+    priority: p2_remaining
+    zone: tests
+    authority_role: proof_surface
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  docs_system:
+    path: docs
+    scoped_agents: docs/AGENTS.md
+    module_book: docs/reference/modules/docs_system.md
+    priority: p2_remaining
+    zone: docs
+    authority_role: docs_mesh
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  topology_system:
+    path: architecture
+    scoped_agents: architecture/AGENTS.md
+    module_book: docs/reference/modules/topology_system.md
+    priority: p2_remaining
+    zone: architecture
+    authority_role: machine_routing_kernel
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending
+  code_review_graph:
+    path: .code-review-graph
+    scoped_agents: AGENTS.md
+    module_book: docs/reference/modules/code_review_graph.md
+    priority: p2_remaining
+    zone: derived_context
+    authority_role: tracked_derived_context
+    law_dependencies: []
+    current_fact_dependencies: []
+    required_tests: []
+    graph_appendix_status: planned
+    archive_extraction_status: pending

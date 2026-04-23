@@ -16,6 +16,23 @@ metadata:
     governance promotion metadata such as promotion_packet or
     blocking_authority.
 
+budget_classes:
+  authority_kernel:
+    role: first-read law and router surfaces
+    default_posture: keep thin and durable
+  module_boot_router:
+    role: medium-density launchers into dense module books
+    default_posture: route to one module and its hazards quickly
+  module_book:
+    role: dense module cognition layer
+    default_posture: dense by design, but bounded to one module and its proof surfaces
+  current_fact:
+    role: time-bound operational facts
+    default_posture: compact, receipt-bound, and expiry-aware
+  graph_appendix:
+    role: derived structural appendices
+    default_posture: optional and derived-only
+
 maintenance_cadence:
   run_after_completed_packets: 5
   trigger_if:
@@ -113,6 +130,20 @@ file_budgets:
     diet_target: >
       Keep as compact audited source-validity posture. Detailed dated audits
       belong in reports/artifacts.
+  - path: architecture/module_manifest.yaml
+    role: module_manifest_registry
+    max_lines: 320
+    enforcement: advisory
+    diet_target: >
+      Keep this as a machine registry and dependency index, not a prose
+      replacement for module books or source_rationale.
+  - path: docs/reference/modules/AGENTS.md
+    role: module_boot_router
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as a dense router into one concrete module book; do not let it turn
+      into a second reference index or packet diary.
   - path: docs/runbooks/tigge_cloud_download.md
     role: durable_operator_runbook
     max_lines: 120
