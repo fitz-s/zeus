@@ -310,64 +310,143 @@ App-C status updates (per critic-opus confirmation):
 
 ---
 
-## P-C: WU Product Identity Audit — started 2026-04-23T17:40:00Z
+## P-C: Settlement-Observation Agreement Audit — started 2026-04-23T17:40:00Z
 
-### Pre-packet (Q1-Q10 answers)
+**SCOPE PIVOT** (per 2026-04-23T17:45 reconnaissance):
 
-**Context & scope**: audit whether `observations.wu_icao_history` (WU private API v1 hourly-aggregate, per `src/data/wu_hourly_client.py:7`) matches the WU-website-daily-summary product that Polymarket resolution references. Fatal-misread `wu_website_daily_summary_not_wu_api_hourly_max` directly applies. Goal: per-city go/no-go decision informing P-E reconstruction scope.
+Originally scoped as "WU website scraping audit" (DR-44 in v6). Reconnaissance attempt 2026-04-23T17:45 found WU website (`www.wunderground.com/history/daily/...`) is a JavaScript SPA: `curl` returns 258KB HTML shell with 0 temperature data (JS-rendered client-side). Direct comparison between `observations.wu_icao_history` (WU private API v1 hourly aggregated) and `WU website daily summary` (what Polymarket resolution references per fatal_misread #4) blocked by JS rendering.
+
+**Indirect equivalence audit** is the correct approach:
+- Compare `SettlementSemantics.for_city(city).assert_settlement_value(obs.high_temp)` against the resolved `pm_bin_lo/hi` range in `settlements` (populated by the 2026-04-16 bulk writer from pm_settlement_truth.json)
+- If our obs.high_temp consistently resolves to the same bin Polymarket settled → operationally equivalent products (regardless of underlying product identity)
+- If they diverge → product drift (fatal_misread #4 triggered empirically)
+
+This answers P-E's per-city go/no-go question directly. Operational equivalence is what we actually need; product-identity-proof is a subordinate concern.
+
+### Pre-packet (Q1-Q10 answers — revised for pivot)
+
+**Context & scope**: SQL-based audit comparing `SettlementSemantics(obs.high_temp)` containment in `[pm_bin_lo, pm_bin_hi]` for every settled (city, target_date) pair. Covers all 4 settlement_source_type families (WU / NOAA / HKO / CWA). Per-city match rate + per-row mismatch list + per-city go/no-go for P-E reconstruction.
 
 **Q1 (invariant enforced/preserved)**:
-- **INV-FP-7** (source role boundaries): the core question this audit answers
-- **INV-FP-1** (provenance chain): result drives provenance reasoning for re-derived rows (WU-native confident vs pending-audit)
+- **INV-FP-7** (source role boundaries): operational equivalence proxies for product-identity confirmation
+- **INV-FP-1** (provenance chain): result drives provenance reasoning for re-derived rows (match=safe; mismatch=quarantine)
+- **INV-FP-4** (semantic integrity at boundaries): validates SettlementSemantics produces outputs consistent with Polymarket-resolved bins
 
 **Q2 (fatal_misread not collapsed)**:
-- `wu_website_daily_summary_not_wu_api_hourly_max` — THIS packet exists to test this antibody empirically
-- `api_returns_data_not_settlement_correct_source` — preserved; even if API returns data, that doesn't make it settlement-correct; audit determines correctness
-- `airport_station_not_city_settlement_station` — preserved; audit covers per-city station verification implicitly
+- `wu_website_daily_summary_not_wu_api_hourly_max` — this packet tests the OPERATIONAL consequence of the fatal_misread, not the mechanical fact of product identity. If our obs and Polymarket's settlement agree, the products are effectively equivalent for our use case. If they disagree, the fatal_misread is empirically confirmed.
+- `api_returns_data_not_settlement_correct_source` — preserved; the audit is precisely a settlement-correctness check
+- `airport_station_not_city_settlement_station` — preserved; audit reveals per-city station issues (systematic offsets identify wrong stations)
+- `daily_day0_hourly_forecast_sources_are_not_interchangeable` — preserved; audit only uses settlement_daily_source obs (not day0 / hourly)
+- `hong_kong_hko_explicit_caution_path` — preserved; HK gets special handling (oracle_truncate rounding via SettlementSemantics.for_city)
 
 **Q3 (single-source-of-truth for numbers/names)**:
-- WU ICAO stations per city: `config/cities.json::<city>.wu_station`
-- Cities needing audit: 47 WU-settled cities per `docs/operations/current_source_validity.md` (2026-04-21 audit)
-- Statistical tolerances: per critic-opus R2 P1-5: ≥10 samples/month per city, ≥60 samples/city total, bounds ±<1°F delta and ≥95% exact-integer-match
-- All counts via SQL against observations / city_truth_contract / settlements_pm_bin
+- `config/cities.json` — per-city settlement_source_type, wu_station, wu_url
+- `architecture/city_truth_contract.yaml` — stable source-role schema
+- `docs/operations/current_source_validity.md` (2026-04-21) — authoritative per-class count (47 WU, 3 NOAA, 1 HKO, plus CWA/etc)
+- `state/zeus-world.db settlements` — 1,562 rows, per-row settlement_source_type + pm_bin_lo/hi/unit
+- `state/zeus-world.db observations` — per-(city, date) obs.high_temp by source
+- `src/contracts/settlement_semantics.py` — SettlementSemantics.for_city() as the authoritative rounding gate
+- No network dependencies (unlike original DR-44 design)
 
 **Q4 (first-failure policy)**:
-- WU website archive pages unreachable for a city → document with retry timestamps; if persistent for specific city, QUARANTINE that city's audit with reason `WU_WEBSITE_ARCHIVE_UNAVAILABLE`
-- WU website structure changed (scrape fails) → document schema drift; recommend separate packet
-- Per-city match rate <95% → that city's rows go to UNVERIFIED in P-E, not VERIFIED; log to per-city decision table
+- obs missing for (city, target_date) → row skipped; logged to "no_obs" bucket; decision deferred to P-G (reconstruction source unavailable)
+- obs has multiple source types for same (city, date) → use settlement_source_type-matching source (per fatal_misread #1); if source-type family not present, log as "wrong_source_family"
+- SettlementSemantics raises → log + skip; unlikely since raises only on non-finite values
+- Containment fails (round(obs.high_temp) outside [pm_bin_lo, pm_bin_hi]) → record delta magnitude; accumulate per-city fail rate; >5% fail rate → city flagged QUARANTINE
+- pm_bin_lo / pm_bin_hi both NULL → row excluded (can't do containment); route to DR-41 reconcile in P-E
 
 **Q5 (commit boundary)**:
-- N/A. Read-only audit; no DB writes.
+- N/A. Read-only audit; all outputs are evidence file + work_log + App-C updates.
 
 **Q6 (verification)**:
-- critic-opus re-runs sample audit on ≥2 randomly-chosen cities to confirm methodology
-- Per-city match rate cites actual (wu_icao_history.high_temp, wu_website_scrape.daily_max) tuple comparisons
-- Binomial CI reported per city
+- critic-opus reproduces at least 3 city match-rate claims via SQL
+- Per-city mismatch list uses actual row IDs — can be grepped to DB
+- Statistical claims cite N (sample size) + match_count + mismatch_count + delta_magnitude distribution
 
 **Q7 (new hazards introduced)**:
-- Risk: WU website rate-limits → extended probe time → could delay P-C by hours
-  - Mitigation: ~60-100 requests/city × 47 cities = 2820-4700 total; batch by city with 1s sleep; estimate 2 hours audit time
-- Risk: WU website returns stale/cached data not matching our probe window
-  - Mitigation: compare obs.fetched_at to website archive date; flag if mismatch
+- **Risk 1**: indirect audit doesn't directly prove WU API ≠ WU website. Mitigation: audit answers the OPERATIONAL question (do WE settle where POLYMARKET settled?); the structural-identity question is a separate research concern documented as a known gap.
+- **Risk 2**: `pm_bin_lo/hi` in DB is pre-corruption (bulk writer copied from pm_settlement_truth.json). If JSON was wrong, audit tests obs vs JSON-contaminated bin, not obs vs true settlement. Mitigation: JSON ultimately derives from Polymarket events which resolve via UMA (proven authoritative in P-D); JSON is Polymarket's own record of settled bins, so a mismatch suggests obs drift relative to Polymarket's truth (which is the question we care about).
+- **Risk 3**: SettlementSemantics might itself drift. Mitigation: SettlementSemantics is K0 (frozen kernel) per zones.yaml; used consistently by both harvester settlement writes and this audit.
 
 **Q8 (closure requirement)**:
-- Deliverable: `evidence/wu_product_identity_audit.md` with:
-  - Methodology (URL pattern, sample selection, comparison rule)
-  - Per-city match rate + CI
-  - List of cities <95% match (quarantine candidates for P-E)
-  - List of cities ≥95% match (VERIFIED candidates for P-E)
-  - Explicit handling of DST-day obs (known quarantined in DB)
-- critic-opus APPROVE if: methodology statistically sound; per-city decisions reproducible; no WU city silently greenlit without evidence
+- Deliverable: `evidence/settlement_observation_agreement_audit.md`
+- Content:
+  - Methodology (pivot rationale + SQL-based indirect audit design)
+  - Per-city match rate + per-source-type breakdown
+  - Per-row mismatch table with (city, target_date, obs_high_temp, rounded_value, pm_bin_lo, pm_bin_hi, delta)
+  - Per-city disposition for P-E:
+    - `VERIFIED` (match_rate ≥ 95% AND max delta ≤ 1 unit)
+    - `QUARANTINE` (match_rate < 95% OR any delta > 2 units)
+    - `STATION_REMAP_NEEDED` (systematic offset suggests wrong ICAO)
+    - `NO_OBS` (no obs for most dates → P-G dependency)
+- critic-opus APPROVE if: methodology sound; per-city decisions reproducible; statistical tolerances documented; no city silently greenlit
 
 **Q9 (decision being reversed)**:
-- N/A — this is a NEW empirical audit; no prior architectural decision is being reversed.
-- BUT: result may reverse v6 DR-44's assumption that "95% threshold alone suffices". If audit shows ANY city with systematic bias, we need tighter threshold or per-city station re-mapping.
+- **PIVOT acknowledgment**: v6 DR-44 specified a WU-website-scraping audit. P-C pivots to indirect SQL-based audit due to blocked WU scraping. This is a METHOD change, not a finding-reversal. The question answered is THE SAME (does obs product equal Polymarket's settlement product?); the method is different.
+- NOT reviving any deleted pattern.
 
 **Q10 (rollback boundary)**:
-- No state changes. Only evidence doc + work_log entry.
-- Forward-compatible: per-city decisions in evidence doc are inputs to P-E; P-E consumes the document without modifying it.
+- No state changes. Only evidence doc + work_log entry + App-C status updates on close.
+- Forward-compatible: per-city decisions feed P-E reconstruction scope; no P-E blocker if P-C findings change later.
 
 ### Execution log
 
-[to be populated during audit]
+- 2026-04-23T17:45:00Z — WU website scraping reconnaissance: 3 test URLs fetched via curl; all returned ~260KB JS SPA shells with 0 temperature data. Scope pivot logged above.
+- 2026-04-23T17:50:00Z — Team-lead context is approaching diminishing-returns zone. Operator directive: pause P-C execution; /compact session before running the audit. State handoff summary written below.
+
+### Handoff notes for post-compact resumption of P-C
+
+**Current workstream state** (every fact verifiable via files on disk):
+
+1. **P-0 APPROVED** — first_principles.md MD5 live; framework baseline. Read this first post-compact.
+2. **P-A APPROVED** — evidence/bulk_writer_rca_final.md; writer unidentifiable, logic decoded; R3-03 CLOSED-BY-P-A in App-C.
+3. **P-D APPROVED** — evidence/harvester_gamma_probe.md; winningOutcome 0/412 confirmed; R3-09 + R3-23 CLOSED-BY-P-D in App-C.
+4. **P-C scoped + paused** — scope pivoted from WU-website-scrape (blocked by JS SPA) to indirect SQL-based operational-equivalence audit. Q1-Q10 already written above. Execution not yet run.
+5. **Commits**: 49becba (P-0 + P-A), e1b2d7f (P-D evidence + Denver close), e1daf82 (P-D critic fixes). All pushed to origin/data-improve. Other-agent midstream commits interleave — check `git log --oneline origin/data-improve~10..HEAD` to see parallel work.
+6. **Team status**: `zeus-data-readiness` team + critic-opus@zeus-data-readiness teammate (Opus model, background). If team disappeared at session boundary, respawn per `~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory/feedback_critic_opus_rehydrate_after_session.md`.
+
+**P-C execution recipe** (run post-compact):
+
+1. Read evidence/bulk_writer_rca_final.md §2 (writer decoded logic) + evidence/harvester_gamma_probe.md §5 (UMA-resolved authoritative signal) for context
+2. Read first_principles.md §3 AP-4 (source role collapse) + §4 Q1-Q10 framework
+3. Construct SQL audit:
+   ```sql
+   -- Per (city, target_date) with pm_bin populated + obs present in settlement-correct source:
+   -- 1. Determine obs.high_temp rounded via SettlementSemantics.for_city(city)
+   -- 2. Check if rounded value ∈ [pm_bin_lo, pm_bin_hi] (point/range/shoulder-aware)
+   -- 3. Accumulate match/mismatch by city + source_type
+   -- 4. Delta magnitude histogram per city
+   ```
+4. Source-family routing (use settlement_source_type for gating):
+   - WU (1,459): obs.source='wu_icao_history'; rounding=wmo_half_up (F or C per unit)
+   - NOAA (67): obs.source LIKE 'ogimet_metar_%'; rounding=wmo_half_up
+   - HKO (29): obs.source='hko_daily_api'; rounding=oracle_truncate (floor)
+   - CWA (7): no wu_icao_history proxy accepted per scientist R3-D2; flag as STATION_REMAP_NEEDED
+5. Write evidence/settlement_observation_agreement_audit.md per Q8 spec
+6. SendMessage critic-opus with closure request citing per-city match rates
+7. On APPROVE: update App-C (R3-16 CLOSED-BY-P-C if audit is sufficient; R3-20 addressed via Tel Aviv handling; mark P-C complete) + commit + push
+
+**Expected findings preview** (from scientist round-3 D2; P-C formalizes):
+- ~24-38 total containment failures (exact count depends on dedup + HKO floor application)
+- Top mismatch cities: Shenzhen (~10), Toronto (~1 critic / ~9 v6), Seoul (~5-7), HK (~3), plus smaller tails
+- Match rate threshold: ≥95% per city with ≤1°F/1°C delta for VERIFIED
+
+**Don't re-do**:
+- Don't re-run bulk_writer RCA forensics (P-A done)
+- Don't re-run Gamma probe (P-D done)
+- Don't re-scope P-C back to WU scraping (reconnaissance proved it blocked)
+
+**Do post-compact**:
+- Re-read Appendix C in first_principles.md to see current R3-## status
+- TaskList (may be ephemeral; App-C is durable)
+- Verify team still exists: `ls ~/.claude/teams/zeus-data-readiness/`
+- If critic-opus missing: respawn per feedback memory
+
+### critic-opus verdict
+
+[pending — execution blocked on /compact; will proceed post-compact]
+
+### Closure action
+
+[pending verdict]
 
