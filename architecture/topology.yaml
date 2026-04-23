@@ -445,6 +445,7 @@ active_operations_registry:
   required_labels:
     - Active package source
     - Active execution packet
+    - Receipt-bound source
     - Required evidence
     - Next action
   surface_prefix: docs/operations/

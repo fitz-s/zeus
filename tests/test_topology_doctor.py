@@ -125,6 +125,13 @@ def test_cli_json_parity_for_semantic_bootstrap_command():
     )
 
 
+def test_cli_json_parity_for_current_state_candidate_command():
+    receipt = "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
+    payload = run_cli_json(["current-state", "--from-receipt", receipt, "--json"])
+
+    assert payload == topology_doctor.build_current_state_candidate(receipt)
+
+
 def test_cli_json_parity_for_impact_command():
     args = [
         "impact",
@@ -1097,6 +1104,73 @@ def test_docs_mode_rejects_current_state_missing_required_anchor(tmp_path):
     issues = topology_doctor._check_active_operations_registry(topology)
 
     assert any(issue.code == "operations_current_state_missing_anchor" for issue in issues)
+
+
+def test_current_state_receipt_bound_passes_current_packet():
+    result = topology_doctor.run_current_state_receipt_bound()
+
+    assert_topology_ok(result)
+
+
+def test_current_state_receipt_bound_rejects_missing_receipt(monkeypatch, tmp_path):
+    root = tmp_path
+    current = root / "docs" / "operations" / "current_state.md"
+    packet = root / "docs" / "operations" / "task_2026-04-23_test" / "plan.md"
+    current.parent.mkdir(parents=True)
+    packet.parent.mkdir(parents=True)
+    packet.write_text("# Plan\n", encoding="utf-8")
+    current.write_text(
+        "- Active package source: `docs/operations/task_2026-04-23_test/plan.md`\n"
+        "- Active execution packet: `docs/operations/task_2026-04-23_test/plan.md`\n"
+        "- Receipt-bound source: `docs/operations/task_2026-04-23_test/receipt.json`\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    topology = {
+        "active_operations_registry": {
+            "current_state": "docs/operations/current_state.md",
+            "surface_prefix": "docs/operations/",
+        }
+    }
+
+    issues = topology_doctor._check_current_state_receipt_bound(topology)
+
+    assert any(issue.code == "current_state_receipt_missing" for issue in issues)
+
+
+def test_current_state_receipt_bound_rejects_packet_mismatch(monkeypatch, tmp_path):
+    root = tmp_path
+    packet_dir = root / "docs" / "operations" / "task_2026-04-23_test"
+    packet_dir.mkdir(parents=True)
+    (packet_dir / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    (packet_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "task": "test",
+                "packet": "docs/operations/task_2026-04-23_other/plan.md",
+                "changed_files": ["docs/operations/current_state.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = root / "docs" / "operations" / "current_state.md"
+    current.write_text(
+        "- Active package source: `docs/operations/task_2026-04-23_test/plan.md`\n"
+        "- Active execution packet: `docs/operations/task_2026-04-23_test/plan.md`\n"
+        "- Receipt-bound source: `docs/operations/task_2026-04-23_test/receipt.json`\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    topology = {
+        "active_operations_registry": {
+            "current_state": "docs/operations/current_state.md",
+            "surface_prefix": "docs/operations/",
+        }
+    }
+
+    issues = topology_doctor._check_current_state_receipt_bound(topology)
+
+    assert any(issue.code == "current_state_receipt_mismatch" for issue in issues)
 
 
 def test_docs_mode_rejects_dated_market_fact_in_config_agents(monkeypatch):

@@ -230,3 +230,53 @@ Pre-close review:
 Next:
 
 - commit Phase 2, then run post-close review before Phase 3
+
+## Phase 3 Receipt-Bound Current State
+
+Changed files:
+
+- `docs/operations/current_state.md`
+- `architecture/docs_registry.yaml`
+- `architecture/topology.yaml`
+- `architecture/topology_schema.yaml`
+- `scripts/topology_doctor.py`
+- `scripts/topology_doctor_cli.py`
+- `scripts/topology_doctor_docs_checks.py`
+- `tests/test_topology_doctor.py`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md`
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json`
+
+Summary:
+
+- added `Receipt-bound source` to `current_state.md` and topology required
+  labels
+- changed docs registry freshness for `current_state.md` to packet-bound
+- added topology_doctor receipt-bound checks for active packet/receipt mismatch,
+  missing receipt, runtime-local active source, and receipt coverage
+- added `current-state --from-receipt` generated candidate output
+
+Verification:
+
+- `python scripts/topology_doctor.py --current-state-receipt-bound --json` -> ok
+- `python scripts/topology_doctor.py current-state --from-receipt docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <Phase 3 files> --json` -> ok
+- `python scripts/topology_doctor.py --planning-lock --changed-files <Phase 3 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --json` -> ok
+- `python scripts/topology_doctor.py --work-record --changed-files <Phase 3 files> --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <Phase 3 files> --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <Phase 3 files> --plan-evidence docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/plan.md --work-record-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/work_log.md --receipt-path docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json --json` -> ok
+- `python -m pytest -q tests/test_topology_doctor.py -k 'current_state_receipt or current_state_candidate or docs_mode_rejects_current_state_missing_required_anchor or docs_registry'` -> 12 passed
+- `git diff --check -- <Phase 3 files>` -> ok
+
+Pre-close review:
+
+- Critic: pass. Phase 3 adds receipt-bound validation and candidate generation
+  without changing runtime behavior or semantic boot/source truth contracts.
+- Verifier: pass. `current_state.md` active packet, receipt source, and receipt
+  packet field now have a machine-checkable consistency path.
+
+Next:
+
+- commit Phase 3, then run post-close review before Phase 4

@@ -326,6 +326,19 @@ def _current_state_operation_paths(text: str, surface_prefix: str) -> set[str]:
     return _docs_checks().current_state_operation_paths(sys.modules[__name__], text, surface_prefix)
 
 
+def _check_current_state_receipt_bound(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_current_state_receipt_bound(sys.modules[__name__], topology)
+
+
+def build_current_state_candidate(receipt_path: str) -> dict[str, Any]:
+    return _docs_checks().build_current_state_candidate(sys.modules[__name__], receipt_path)
+
+
+def run_current_state_receipt_bound() -> StrictResult:
+    issues = _check_current_state_receipt_bound(load_topology())
+    return StrictResult(ok=not issues, issues=issues)
+
+
 def _check_active_operations_registry(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _docs_checks().check_active_operations_registry(sys.modules[__name__], topology)
 
