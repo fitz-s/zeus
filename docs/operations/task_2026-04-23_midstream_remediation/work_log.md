@@ -29,7 +29,59 @@
 | T1.a 15-file header wave | closed | `67b5908` | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
 | T1.b provenance_registry skipif cleanup | closed | `4943d0d` | 4 stale `skipif(not REGISTRY_YAML.exists(), ...)` markers removed; 19/19 test_provenance_enforcement tests still pass | 2026-04-23 |
 | T3.1 execute_discovery_phase 5-caller env kwarg fix | closed | `716bfdd` | 6 TypeError failures → pass (2 day0_runtime + 2 discovery_phase_entry_path + 2 discovery_phase_records); zero new failures; delta-direction on 3 modified files: 28F→22F, 166P→172P | 2026-04-23 |
-| T3.3 position_current ALTER TABLE canonical-column backfill | closed | pending | surrogate critic (code-reviewer@opus) CLEAR; fixes test_kernel_schema_adds_token_identity_columns; planning-lock GREEN; delta: -1 failure, 0 new failures; INV-14 runtime enforcement preserved per grep of direct-SQL writers | 2026-04-23 |
+| T3.3 position_current ALTER TABLE canonical-column backfill | closed | `36f0189` | surrogate critic (code-reviewer@opus) CLEAR; fixes test_kernel_schema_adds_token_identity_columns; planning-lock GREEN; delta: -1 failure, 0 new failures; INV-14 runtime enforcement preserved per grep of direct-SQL writers | 2026-04-23 |
+| T3.2 canonical_projection fixture patch | closed | pending | one-line category fix (Fitz C1); `test_architecture_contracts.py` 9F→1F; surrogate critic CLEAR; con-nyx dispatched; remaining 1F is unrelated `_Logger.warning` AttributeError | 2026-04-23 |
+| T3.2b canonical schema alignment antibody | closed | pending | plan AST-walk premise vacuous (no dict builders in projection.py); pivoted to 3 structural-alignment tests; 3/3 pass; surrogate critic CLEAR with regex hardening polish adopted | 2026-04-23 |
+
+## T3.2 — execution notes (2026-04-23)
+
+Scope: add `"temperature_metric": "high"` to `_canonical_projection()`
+helper at `tests/test_architecture_contracts.py:125-157`. One line,
+resolves ≥5 failing tests via single category patch (Fitz C1).
+
+Pre-T3.2 state (test_architecture_contracts.py, post-T3.3): ~9 failures
+with `ValueError: projection missing fields: ['temperature_metric']`.
+
+Post-T3.2: **1 failed / 70 passed / 22 skipped**. Remaining failure is
+`test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent`
+→ `AttributeError: '_Logger' object has no attribute 'warning'` at
+`src/engine/cycle_runtime.py:291`. Unrelated to fixture drift.
+
+Surrogate critic (code-reviewer@opus): CLEAR. Confirmed `_canonical_event()`
+correctly NOT patched — `CANONICAL_POSITION_EVENT_COLUMNS` does not
+include `temperature_metric`. Fitz C1 compliance on "one fixture × five
+callers = one patch" verified.
+
+## T3.2b — execution notes (2026-04-23)
+
+**Plan-premise correction (third in this packet):** fix-plan v2 T3.2b
+scope was "AST-walk `src/state/projection.py` builders". Grep-verified
+`src/state/projection.py` has ZERO dict-returning functions — all
+functions return `None`, `tuple`, `set`, or raise. The AST-walk target
+is vacuous.
+
+Pivoted to structural-alignment antibodies that catch the drift
+category responsible for T3.2 failures:
+- Test 1: `temperature_metric in CANONICAL_POSITION_CURRENT_COLUMNS`
+  (Python-tuple drift)
+- Test 2: kernel SQL CREATE TABLE declares `temperature_metric` (SQL
+  migration drift)
+- Test 3: every `CANONICAL_POSITION_CURRENT_COLUMNS` entry appears in
+  kernel SQL CREATE TABLE (constant ↔ schema alignment) — the real
+  category-immunity antibody per Fitz C1
+
+New file `tests/test_canonical_position_current_schema_alignment.py`
+passes 3/3. Carries dated provenance header per CLAUDE.md rule.
+
+Surrogate critic adopted: regex hardening from `\n\)\s*;` to `\)\s*;`
+(drops `\n` anchor for robustness against future migration reformatting).
+
+Critic flagged 3 low-severity future-slice antibody targets (F1-F3):
+- `CANONICAL_POSITION_EVENT_COLUMNS` three-way drift (test ↔ ledger ↔ kernel SQL)
+- `LifecyclePhase` Python enum ↔ `phase` CHECK constraint
+- `event_type` scatter without central Python enum
+
+All noted for potential future slices — not blocking T3.2b.
 
 ## T3.3 — execution notes (2026-04-23)
 

@@ -154,6 +154,7 @@ def _canonical_projection() -> dict:
         "order_id": None,
         "order_status": None,
         "updated_at": "2026-04-03T00:00:00Z",
+        "temperature_metric": "high",
     }
 
 

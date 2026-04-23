@@ -202,7 +202,7 @@
     {
       "slice_id": "T3.3",
       "name": "position_current_alter_table_canonical_column_backfill",
-      "commit": "pending",
+      "commit": "36f0189",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_CLEAR_approve_for_commit",
       "planning_lock": "GREEN",
@@ -227,6 +227,46 @@
         "sqlite3 :memory: + apply_architecture_kernel_schema → 31 canonical columns, zero missing, zero extra (confirms bootstrap itself is correct; fix is legacy-migration path only)"
       ],
       "out_of_scope_remaining": "test_apply_architecture_kernel_schema_bootstraps_fresh_db still fails on _canonical_projection() fixture missing 'temperature_metric' — T3.2 scope, not T3.3. Orthogonal to my change."
+    },
+    {
+      "slice_id": "T3.2",
+      "name": "canonical_projection_fixture_one_line_category_fix",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_CLEAR_plus_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/** not planning-lock territory)",
+      "files_changed": [
+        "tests/test_architecture_contracts.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "fix_summary": "Added '\"temperature_metric\": \"high\",' to _canonical_projection() helper at L125-157. One line. Resolves ≥5 tests via Fitz C1 category patch.",
+      "delta_on_test_architecture_contracts": "~9 failures → 1 failure (remaining _Logger.warning AttributeError unrelated to fixture drift)"
+    },
+    {
+      "slice_id": "T3.2b",
+      "name": "canonical_schema_alignment_antibody_with_plan_pivot",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_CLEAR_regex_polish_adopted",
+      "planning_lock": "GREEN (new tests/* file only)",
+      "files_changed": [
+        "tests/test_canonical_position_current_schema_alignment.py",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction": "Plan T3.2b scope 'AST-walk src/state/projection.py builders' was vacuous — projection.py has zero dict-returning functions (verified via full read). Pivoted to 3 structural-alignment antibodies covering constant/schema drift, which is the actual drift category responsible for T3.2 failures.",
+      "antibody_tests": [
+        "test_canonical_position_current_columns_includes_temperature_metric",
+        "test_kernel_sql_position_current_declares_temperature_metric",
+        "test_canonical_constants_match_kernel_sql_position_current_columns"
+      ],
+      "critic_polish_adopted": "Regex tightened from r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\n\\)\\s*;' to r'CREATE TABLE IF NOT EXISTS position_current\\s*\\((.*?)\\)\\s*;' — drops the \\n anchor for robustness against future migration reformatting.",
+      "future_drift_targets_flagged_by_critic": [
+        "F1: CANONICAL_POSITION_EVENT_COLUMNS three-way drift (tests/test_architecture_contracts.py:22-41 ↔ src/state/ledger.py:22-40 ↔ architecture/2026_04_02_architecture_kernel.sql:5-68)",
+        "F2: LifecyclePhase Python enum (src/state/lifecycle_manager.py:9-32) ↔ phase CHECK constraint (architecture/2026_04_02_architecture_kernel.sql:84-94)",
+        "F3: event_type vocabulary scatter across src/state/db.py, src/riskguard/riskguard.py, tests — no central Python enum"
+      ]
     }
   ],
   "slices_in_review": [
