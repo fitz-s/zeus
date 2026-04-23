@@ -25,7 +25,36 @@
 |---|---|---|---|---|
 | W0 packet open | closed | `ec78c2f` | skipped (doc-only, planning-lock GREEN) | 2026-04-23 |
 | T4.0 persistence design rev2 | closed | `9365b20` | surrogate critic CLEAR (Option E); con-nyx informed | 2026-04-23 |
-| T7.b AST-walk guard | closed | pending | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
+| T7.b AST-walk guard | closed | `beea8a9` | 1/1 pass on first run; zero pre-state violators (grep-verified) | 2026-04-23 |
+| T1.a 15-file header wave | closed | pending | narrow-scope regression 19/344/34/1 matches pre-T1a baseline exactly (zero delta from comment-only change); verified via git stash | 2026-04-23 |
+
+## T1.a — execution notes (2026-04-23)
+
+Prepended a 3-line dated provenance header to each file in the
+15-file midstream guardian panel. Created dates retrieved via
+`git log --follow --reverse --format=%cs -- <file> | head -1`.
+Authority basis uniform across the panel: "midstream verdict v2
+2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a
+midstream guardian panel)". Per-test specific INV references remain
+inside each file's own module docstring (unchanged).
+
+Regression verdict (L28 delta-direction, not absolute counts):
+- **narrow scope (15 panel files)**: `.venv/bin/python -m pytest -q
+  <15 files>` → `19 failed, 344 passed, 34 skipped, 1 xfailed` —
+  matches the pre-T1.a baseline documented in the midstream trust
+  verdict (K2 findings). **Zero delta.** Confirms comment-only change
+  had no test-behavior impact.
+- **full-suite probe**: `.venv/bin/python -m pytest -q tests/` →
+  `144 failed, 2079 passed, 90 skipped, 1 xfailed`. Out-of-scope for
+  T1.a closure — these failures exist independently of the 15-file
+  panel and are attributable to pre-existing repo state and/or the
+  concurrent upstream data-readiness agent. Noted for context; not a
+  T1.a regression.
+
+Files changed: 15 test files (3-line header prepend each), plus this
+work_log.md + receipt.json. `tests/AGENTS.md` is also modified in the
+tree but is **not mine** (co-tenant's work); NOT staged for this
+commit.
 
 ## T4.0 — PROPOSAL notes (2026-04-23, rev2)
 

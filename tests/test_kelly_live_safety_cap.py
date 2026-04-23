@@ -1,3 +1,6 @@
+# Created: 2026-04-11
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Relationship tests for P1 — $5 Live Safety Cap.
 
 Cross-module property under test:

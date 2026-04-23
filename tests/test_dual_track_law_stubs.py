@@ -1,3 +1,6 @@
+# Created: 2026-04-16
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Enforcement stubs for Dual-Track Metric Spine invariants (INV-18..INV-22)
 and negative constraints (NC-11..NC-15).
 
