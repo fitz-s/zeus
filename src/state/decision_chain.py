@@ -549,3 +549,57 @@ def query_learning_surface_summary(
         "execution": execution_summary,
         "by_strategy": by_strategy,
     }
+
+
+def load_entry_evidence(
+    conn,
+    runtime_trade_id: str,
+):
+    """Load the entry-time DecisionEvidence envelope from position_events.
+
+    T4.2-Phase1 (D4 audit-only read side, pairs with T4.1b write side at
+    ``src/engine/lifecycle_events.py``): scans the canonical event stream
+    for the earliest ``ENTRY_ORDER_POSTED`` event on ``runtime_trade_id``,
+    extracts the ``decision_evidence_envelope`` key from its parsed
+    ``details`` payload, and rehydrates via
+    ``DecisionEvidence.from_json``.
+
+    Returns None when any of:
+    - No ``ENTRY_ORDER_POSTED`` event exists for this trade_id (position
+      predates canonical emission; legacy pre-T4.1b entry).
+    - The event exists but its payload lacks ``decision_evidence_envelope``
+      (e.g. the ``src/execution/exit_lifecycle.py`` legacy-backfill path
+      emits ``decision_evidence_reason`` sentinel instead).
+    - Payload is malformed or the envelope fails from_json validation
+      (``UnknownContractVersionError`` / ``ValueError``).
+
+    T4.2-Phase1 callers treat None as "skip symmetry audit" — the
+    asymmetry signal is only meaningful when both entry and exit evidence
+    exist. Legacy positions and backfilled events have known-missing
+    evidence by design, distinguishable via the reason sentinel when
+    needed (T4.2-Phase2 exit gate will use the sentinel to separate
+    ``missing-because-legacy`` from ``missing-because-bug``).
+    """
+    from src.contracts.decision_evidence import (
+        DecisionEvidence,
+        UnknownContractVersionError,
+    )
+    from src.state.db import query_position_events
+
+    events = query_position_events(conn, runtime_trade_id, limit=50)
+    for event in events:
+        if event.get("event_type") != "ENTRY_ORDER_POSTED":
+            continue
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        envelope = details.get("decision_evidence_envelope")
+        if not isinstance(envelope, str) or not envelope:
+            # ENTRY_ORDER_POSTED without envelope = legacy-backfill or
+            # pre-T4.1b; absence is informative (skip audit).
+            return None
+        try:
+            return DecisionEvidence.from_json(envelope)
+        except (ValueError, UnknownContractVersionError):
+            return None
+    return None

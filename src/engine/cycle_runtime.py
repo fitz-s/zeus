@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.config import get_mode
-from src.contracts.decision_evidence import DecisionEvidence
+from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
@@ -28,6 +28,31 @@ CANONICAL_STRATEGY_KEYS = {
     "center_buy",
     "opening_inertia",
 }
+
+
+# T4.2-Phase1 2026-04-23 (D4 audit-only): exit triggers whose statistical
+# burden (2 consecutive negative cycles, no FDR correction) is weaker than
+# the entry-side burden (bootstrap CI + BH-FDR). DecisionEvidence symmetry
+# audit fires on these and only these.
+#
+# Excluded triggers and their rationale:
+# - SETTLEMENT_IMMINENT / WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
+#   FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
+#   driven by market-mechanics or risk-layer mandates, not statistical
+#   inference. Symmetry with a statistical entry burden is not a coherent
+#   question.
+# - DAY0_OBSERVATION_REVERSAL — single-cycle observation-authority exit
+#   fired when Day0 forward-edge drops below threshold while
+#   day0_active=True. It does NOT use a consecutive_confirmations gate,
+#   so the Phase1 weak-exit evidence template (sample_size=2,
+#   consecutive_confirmations=2) would misrepresent its actual burden and
+#   pollute the Phase1 audit_log_false_positive_rate metric. Phase3 may
+#   introduce an observation-grade evidence variant; out of Phase1 scope.
+_D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
+    "EDGE_REVERSAL",
+    "BUY_NO_EDGE_EXIT",
+    "BUY_NO_NEAR_EXIT",
+})
 
 
 def _resolve_strategy_key(decision) -> str:
@@ -641,6 +666,80 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
+                # T4.2-Phase1 2026-04-23 (D4 audit-only symmetry check):
+                # for the three statistically-asymmetric exit triggers
+                # (EDGE_REVERSAL, BUY_NO_EDGE_EXIT, BUY_NO_NEAR_EXIT —
+                # each uses 2 consecutive cycles with no FDR vs entry's
+                # bootstrap CI + BH-FDR), load the entry evidence
+                # envelope (written by T4.1b on ENTRY_ORDER_POSTED),
+                # construct the current exit evidence reflecting the
+                # weak 2-cycle burden, and call
+                # DecisionEvidence.assert_symmetric_with. On
+                # EvidenceAsymmetryError, emit a structured JSON warning
+                # log so Phase1 can measure audit_log_false_positive_rate
+                # over the 7-day gate to T4.2-Phase2. NEVER blocks the
+                # exit. Force-majeure triggers (SETTLEMENT_IMMINENT /
+                # WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
+                # FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME /
+                # DAY0_OBSERVATION_REVERSAL) skip — symmetry does not
+                # apply to non-statistical exits.
+                if pos.exit_trigger in _D4_ASYMMETRIC_EXIT_TRIGGERS and conn is not None:
+                    try:
+                        from src.state.decision_chain import load_entry_evidence
+                        entry_evidence = load_entry_evidence(conn, pos.trade_id)
+                        if entry_evidence is not None:
+                            exit_evidence = DecisionEvidence(
+                                evidence_type="exit",
+                                statistical_method="consecutive_confirmation",
+                                sample_size=2,
+                                # no FDR on exit — confidence_level=1.0 is
+                                # a contract-satisfying placeholder per
+                                # __post_init__ (0, 1] bound; the semantic
+                                # "no alpha" is expressed by
+                                # fdr_corrected=False below.
+                                confidence_level=1.0,
+                                fdr_corrected=False,
+                                consecutive_confirmations=2,
+                            )
+                            try:
+                                exit_evidence.assert_symmetric_with(entry_evidence)
+                            except EvidenceAsymmetryError as asym:
+                                deps.logger.warning(
+                                    "exit_evidence_asymmetry "
+                                    + json.dumps(
+                                        {
+                                            "trigger": pos.exit_trigger,
+                                            "trade_id": pos.trade_id,
+                                            "entry_evidence_envelope": entry_evidence.to_json(),
+                                            "exit_evidence_envelope": exit_evidence.to_json(),
+                                            "error": str(asym),
+                                            "timestamp": deps._utcnow().isoformat(),
+                                        },
+                                        sort_keys=True,
+                                    )
+                                )
+                                summary["exit_evidence_asymmetry_audit"] = (
+                                    summary.get("exit_evidence_asymmetry_audit", 0) + 1
+                                )
+                    except Exception as audit_exc:
+                        # Audit MUST NOT block the exit. Emit the same
+                        # `<key> + json.dumps({...}, sort_keys=True)` shape
+                        # as the asymmetry path so Phase2's FP-rate
+                        # aggregator has one parse path, not two.
+                        deps.logger.warning(
+                            "exit_evidence_audit_skipped "
+                            + json.dumps(
+                                {
+                                    "trade_id": pos.trade_id,
+                                    "reason": str(audit_exc),
+                                    "timestamp": deps._utcnow().isoformat(),
+                                },
+                                sort_keys=True,
+                            )
+                        )
+                        summary["exit_evidence_audit_skipped"] = (
+                            summary.get("exit_evidence_audit_skipped", 0) + 1
+                        )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
