@@ -179,17 +179,23 @@ def _build_expected_source_by_city() -> dict[str, str]:
 def _build_allowed_sources_by_city() -> dict[str, frozenset[str]]:
     """ALL legitimate source tags per city (primary + documented fallbacks).
 
-    Tier 1 (WU_ICAO): primary ``wu_icao_history`` + Ogimet fallback
-    ``ogimet_metar_<icao>``. The fallback exists because WU's historical
-    archive has known upstream gaps on DST-spring-forward days (verified
-    2026-04-22: KORD 2024-03-10 returned 2 observations instead of 23).
-    Ogimet mirrors raw NOAA METAR for the same station and fills the gap.
-    Rows written with either source are equally authoritative — both
-    ultimately trace to the settlement station's METAR report.
+    Tier 1 (WU_ICAO):
+      - primary: ``wu_icao_history``
+      - Ogimet fallback: ``ogimet_metar_<icao>`` — fills WU DST-day upstream
+        gaps (verified 2026-04-22: KORD 2024-03-10 returned 2 observations
+        instead of 23). Ogimet mirrors NOAA METAR for the same station.
+      - Meteostat bulk fallback: ``meteostat_bulk_<icao>`` — fills sparse
+        stations where WU + Ogimet are both slow/scarce (verified 2026-04-22
+        for ZGSZ/DNMM/WIHH/VILK/MPMG; subagent research). Free static CDN
+        CSV; parallel-safe; no rate limit; lags real-time by weeks-months.
+
+    All three sources trace to the same physical settlement station's
+    observations (WU, Ogimet, and Meteostat all consume NOAA/national-met-
+    service METAR/SYNOP feeds; they differ in mirror latency and coverage).
 
     Tier 2 (OGIMET_METAR) and Tier 3 (HKO_NATIVE) have single-source sets
     (no documented fallback path exists for HKO; Ogimet cities ARE the
-    fallback).
+    fallback for Tier 2).
     """
     from src.config import cities_by_name as _cbn
     allowed: dict[str, frozenset[str]] = {}
@@ -199,6 +205,7 @@ def _build_allowed_sources_by_city() -> dict[str, frozenset[str]]:
             allowed[name] = frozenset({
                 "wu_icao_history",
                 _ogimet_source_for_icao(icao),
+                f"meteostat_bulk_{icao.lower()}",
             })
         elif tier is Tier.OGIMET_METAR:
             allowed[name] = frozenset({EXPECTED_SOURCE_BY_CITY[name]})
