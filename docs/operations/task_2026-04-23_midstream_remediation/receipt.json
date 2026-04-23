@@ -67,7 +67,50 @@
     "W4": ["T2.g", "T5.d", "T6.4", "N1.2", "T3.4-observe"],
     "W5": ["T4.2-Phase2", "T6.1", "T6.2", "N1.1"]
   },
-  "slices_closed": [],
+  "slices_closed": [
+    {
+      "slice_id": "W0",
+      "name": "packet_open",
+      "commit": "ec78c2f",
+      "date": "2026-04-23",
+      "critic_status": "skipped_doc_only",
+      "planning_lock": "GREEN",
+      "files_changed": [
+        "docs/operations/current_state.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ]
+    }
+  ],
+  "slices_in_review": [
+    {
+      "slice_id": "T4.0",
+      "name": "persistence_design_doc_rev2",
+      "status": "design_doc_rev2_ready_for_commit",
+      "files_changed": [
+        "docs/operations/task_2026-04-23_midstream_remediation/T4_persistence.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "factual_correction_to_plan": "fix-plan v2 T4.0 premise 'decision_log keyed on decision_snapshot_id, no migration' is factually wrong; grep-verified decision_log schema at src/state/db.py:528-536 has no decision_snapshot_id column.",
+      "rev1_critic_findings_integrated": {
+        "surrogate_critic": "code-reviewer@opus, read-only review 2026-04-23",
+        "F1_HIGH": "evaluator.py:724,1307 were wrong sites (FDR filter); real handoff uses EdgeDecision at evaluator.py:753,778,803,815,832,842,866,882,901,912",
+        "F2_MED": "db.py:2320,2468 are VALUES-tuple entries; actual INSERTs at L2325,L2473",
+        "F3_HIGH": "Atomicity claim between trade_decisions INSERT and position_events append is wrong; cycle_runtime.py:1115-1140 explicitly documents the split (SAVEPOINT sp_candidate_* for trade_decisions, with conn: sub-transaction for append_many_and_project). Torn-state window exists today for adjacent columns.",
+        "missed_option_E": "piggyback on existing ENTRY_ORDER_POSTED.payload_json (col 17 NOT NULL TEXT, verified); atomic with canonical append; no schema migration; no INV-07 expansion"
+      },
+      "rev2_recommendation": "Option E — write DecisionEvidence as nested 'decision_evidence' key inside the existing ENTRY_ORDER_POSTED payload_json. Structurally superior per Fitz C1 (category immunity).",
+      "contract_version_tag": "adopted — {contract_version: 1, fields: {...}}",
+      "planning_lock_required_for_T4_1": true,
+      "open_questions_for_con_nyx": [
+        "idempotency when ENTRY_ORDER_POSTED is retried — key on decision_id?",
+        "helper location: decision_chain.py vs new decision_evidence_persistence.py?",
+        "does query_position_events accept runtime_trade_id or position_id?"
+      ]
+    }
+  ],
   "tests_evidence": [
     ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json",
     ".venv/bin/python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/work_log.md --json",
