@@ -356,7 +356,7 @@
     {
       "slice_id": "T1.d",
       "name": "phase_n_skip_audit_test_dual_track_law_stubs",
-      "commit": "pending_doc_only",
+      "commit": "979eb3b",
       "date": "2026-04-23",
       "critic_status": "self_verified_audit_only",
       "planning_lock": "N/A (no code edits, doc-only audit)",
@@ -368,6 +368,32 @@
       "classification_single_stub": "KEEP_LEGITIMATE \u2014 INV-16 partial enforcement coded at src/engine/evaluator.py:922-944 (Day0 LOW causality gate) but NC-12 full multi-surface enforcement (Platt + calibration pairs + bin lookup + settlement identity) awaits Phase-7 v2 substrate rebuild; v2 tables currently empty per midstream trust verdict, so no mixed-row dataset exists to test against today",
       "other_11_tests_status": "all active with Phase-9B/9C/10E activation markers; no other skip/xfail found",
       "memory_L21_note": "neither 'activate' nor 'extend' applies \u2014 enforcement target dataset does not exist today; verdict is 'document and defer'"
+    },
+    {
+      "slice_id": "T1.e",
+      "name": "currency_ci_audit_script_plus_registry",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_COMMENT_D1_D2_D3_fixed_in_slice",
+      "planning_lock": "GREEN (architecture/** + scripts/**)",
+      "files_changed": [
+        "scripts/test_currency_audit.py (new)",
+        "architecture/test_topology.yaml (categories.midstream_guardian_panel nested key)",
+        "architecture/script_manifest.yaml (enforcement class entry)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "surrogate_critic_findings_integrated": {
+        "D1_MEDIUM_fixed": "empty-panel silent-pass guard added via len(panel) == 0 SystemExit",
+        "D2_LOW_fixed": "YAML parse error wrapped in try/except SystemExit",
+        "D3_LOW_fixed": "nested under categories: for topology_doctor convention consistency (inherits existing-file validation from topology_doctor_test_checks.py:24 and topology_doctor_registry_checks.py:126)",
+        "D4_LOW_deferred": "regex passes semantically-bogus dates (0000-00-00, etc.) \u2014 acceptable for T1.e scope (header-strip detection); future slice could add recency bounds"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python scripts/test_currency_audit.py \u2192 OK: all 15 midstream guardian panel files carry dated provenance headers (exit 0)",
+        ".venv/bin/python scripts/test_currency_audit.py --json \u2192 {panel_size: 15, missing_count: 0, missing: {}}",
+        "planning-lock check GREEN for architecture/** + scripts/** changes"
+      ]
     }
   ],
   "slices_in_review": [

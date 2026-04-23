@@ -36,7 +36,61 @@
 | T7.a test_fdr_family_key_is_canonical activation | closed | N/A (no code change) | **slice already done pre-session**: test at L189 is unskipped and passing 1/1; plan's "skip at L67" citation was wrong (L70 is a different test, `test_no_high_low_mix_in_platt_or_bins`, NC-12 territory for T1.d); test body already covers INV-22 scope separation, determinism, metric discrimination | 2026-04-23 |
 | T2.d/e/f SelectionFamilySubstrate fixes | **PARTIAL — deferred** | none (reverted) | Plan fix (replace `monkeypatch.setattr(evaluator_module, "Day0Signal", ...)` with `monkeypatch.setattr("src.signal.day0_router.Day0Router.route", ...)`) is directionally correct BUT insufficient: tests still fail on upstream DT#7 boundary-day gate at `evaluator.py:777` (`boundary_ambiguous_refuses_signal(v2_snapshot_meta)`) — new code path added after test fixture was written. Fixing requires either (a) populating v2 ensemble_snapshots with `boundary_ambiguous=0` row in test setup, or (b) additional monkeypatch on `_read_v2_snapshot_metadata`. Reverted my local fix to avoid committing half-work. Flagged as a new slice T2.d.1 (v2 snapshot fixture setup) for follow-up. | 2026-04-23 |
 | T2.a/T2.b R14 quarantine test fixture updates | closed | `c4ee26a` | tests were stale vs current source law (`peak_window_max_v1` now quarantined per `src/contracts/ensemble_snapshot_provenance.py:87,102`); updated 2 tests in `tests/test_calibration_bins_canonical.py` to iterate `CANONICAL_DATA_VERSIONS` / reflect new partition; 2/2 targets pass, 40/40 file regression; surrogate critic CLEAR with independent grep + 2 corroborating test-suite verification | 2026-04-23 |
-| T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | pending | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
+| T1.d Phase-N skip audit in test_dual_track_law_stubs | closed | `979eb3b` | audit complete; 1 skip marker found (L70 `test_no_high_low_mix_in_platt_or_bins` NC-12/INV-16) classified **KEEP_LEGITIMATE** — INV-16 Day0 LOW causality enforcement IS coded at `src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt + calibration pairs + bin lookup + settlement identity) and full enforcement awaits Phase-7 v2 substrate rebuild (currently empty); no other skip markers in file — all other 11 tests are active with Phase-9B/9C/10E activation markers | 2026-04-23 |
+| T1.e currency-CI audit script + registry | closed | pending | new `scripts/test_currency_audit.py` reads `architecture/test_topology.yaml::categories.midstream_guardian_panel` (nested per surrogate-critic D3 fix) + `architecture/script_manifest.yaml` registration; 15/15 panel files green on dry-run; D1 (empty-panel silent-pass) + D2 (YAML parse traceback) + D3 (sibling-vs-nested) fixes applied before commit; surrogate critic COMMENT verdict with 4 findings, 2 addressed in-slice | 2026-04-23 |
+
+## T1.e — execution notes (2026-04-23)
+
+Three files changed:
+- NEW `scripts/test_currency_audit.py` — CI-time guard reading the
+  panel list from `architecture/test_topology.yaml::categories.midstream_guardian_panel`,
+  scanning each file's first 12 lines for the three canonical
+  provenance markers (`# Created:`, `# Last reused/audited:`,
+  `# Authority basis:`). Exits 0 if every file carries all 3
+  markers; exits 1 with missing-marker list otherwise. Supports
+  `--verbose` and `--json` flags.
+- `architecture/test_topology.yaml` — new `categories.midstream_guardian_panel:`
+  key (nested under existing `categories:` per surrogate-critic D3
+  feedback; inherits topology_doctor existing-file validation for free).
+- `architecture/script_manifest.yaml` — register the new script as
+  `class: enforcement` with canonical command.
+
+Planning-lock GREEN (architecture/** + scripts/**, both under
+planning-lock per delivery.md §5).
+
+### Surrogate critic findings (code-reviewer@opus) integrated
+
+Verdict: COMMENT (non-blocking; core enforcement works). 4 findings:
+
+- **D1 (MEDIUM, fixed)**: empty-panel silent-pass regression risk
+  → added `len(panel) == 0` guard raising SystemExit.
+- **D2 (LOW, fixed)**: malformed YAML threw raw ParserError
+  → wrapped in try/except raising clean SystemExit.
+- **D3 (LOW, fixed)**: original placement at top-level sibling to
+  `categories:` broke topology_doctor convention (both
+  `topology_doctor_test_checks.py:24` and
+  `topology_doctor_registry_checks.py:126` iterate
+  `topology.get("categories")`)
+  → nested under `categories:` + script updated to read from
+  `data.get("categories").get("midstream_guardian_panel")`.
+- **D4 (LOW, deferred)**: regex passes semantic bogus values (e.g.
+  `# Created: 0000-00-00`). Acceptable for T1.e scope (header-strip
+  detection). Future T1.f/g could add recency bounds.
+
+Critic's positive observations preserved: script eats its own
+dogfood (dated provenance header on the audit itself), JSON shape is
+clean, `_yaml_bootstrap` reuse + defensive `sys.path.insert` is more
+CWD-robust than peer-script convention.
+
+### Regression evidence
+
+- `.venv/bin/python scripts/test_currency_audit.py` → `OK: all 15
+  midstream guardian panel files carry dated provenance headers.`
+  Exit 0.
+- `.venv/bin/python scripts/test_currency_audit.py --json` →
+  `{"panel_size": 15, "missing_count": 0, "missing": {}}`.
+- Full pytest regression not required — script is pure addition, no
+  existing test touched.
 
 ## T1.d — audit notes (2026-04-23)
 

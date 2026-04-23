@@ -175,6 +175,38 @@ categories:
   stale_obsolete: []
   reverse_antibody_dangerous: []
 
+  # Midstream guardian panel — the 15 test files whose invariant-protection
+  # role depends on current test-currency (dated provenance header + recent
+  # passing-run evidence). Registered by T1.e of the midstream remediation
+  # packet (docs/operations/task_2026-04-23_midstream_remediation/plan.md).
+  # Enforced in CI via scripts/test_currency_audit.py.
+  #
+  # Per operator directive and /Users/leofitz/CLAUDE.md §"File-header
+  # provenance rule": a test in this panel without a dated provenance
+  # header AND recent passing-run evidence is UNTRUSTED and cannot be
+  # cited as protection for any invariant. T1.a (commit 67b5908) landed
+  # the initial headers on all 15 files; T1.e guards the guarantee.
+  #
+  # Nested under `categories:` (not top-level) so topology_doctor_test_checks.py
+  # and topology_doctor_registry_checks.py inherit existing-file validation
+  # over this panel for free.
+  midstream_guardian_panel:
+    - tests/test_dual_track_law_stubs.py
+    - tests/test_cross_module_invariants.py
+    - tests/test_architecture_contracts.py
+    - tests/test_live_safety_invariants.py
+    - tests/test_provenance_enforcement.py
+    - tests/test_kelly_cascade_bounds.py
+    - tests/test_kelly_live_safety_cap.py
+    - tests/test_execution_price.py
+    - tests/test_ensemble_signal.py
+    - tests/test_calibration_bins_canonical.py
+    - tests/test_alpha_target_coherence.py
+    - tests/test_fdr.py
+    - tests/test_entry_exit_symmetry.py
+    - tests/test_day0_exit_gate.py
+    - tests/test_platt.py
+
 law_gate:
   WMO_ROUNDING:
     tests:

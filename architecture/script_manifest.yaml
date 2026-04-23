@@ -66,7 +66,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: Repeatable repo policy, topology, or contract enforcement is needed.
     do_not_use_when: The task is a one-off investigation or migration probe.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: blocking_or_policy_check
@@ -84,7 +84,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: Repeatable read-only diagnosis is needed without mutating canonical truth.
     do_not_use_when: The output would authorize live changes or write canonical DB truth.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: diagnostic_non_promotion
@@ -102,7 +102,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: Operators need a repeatable runtime support or health command.
     do_not_use_when: The task is a data repair, migration, or strategy diagnostic.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: operator_runtime_support
@@ -120,7 +120,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: Shadow observation artifacts must be written through the declared shadow lane.
     do_not_use_when: The output would place trades, mutate lifecycle truth, or promote diagnostics.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: shadow_observation_write
@@ -139,7 +139,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: A repeatable ETL/backfill writes declared world-data targets.
     do_not_use_when: The task is exploratory or lacks a packet-reviewed write target.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: world_data_write
@@ -159,7 +159,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: A repeatable diagnostic report artifact is needed for non-promotion evidence.
     do_not_use_when: The report would become live authority or replace typed runtime truth.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: report_artifact_non_promotion
@@ -178,7 +178,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: A packet-approved repair needs an explicit dry-run/apply boundary.
     do_not_use_when: The repair is exploratory, unreviewed, or lacks target DB metadata.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: repair_write
@@ -215,7 +215,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: A repeatable config artifact must be generated from declared inputs.
     do_not_use_when: The generated config cannot be reviewed before promotion.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: config_generation
@@ -235,7 +235,7 @@ class_defaults:
     lifecycle: long_lived
     reuse_when: A narrow reusable repo utility is needed.
     do_not_use_when: The utility would become hidden authority or mutate truth.
-    canonical_command: "python scripts/{script}"
+    canonical_command: "python3 scripts/{script}"
     delete_policy: retain_until_superseded
     status: active
     authority_scope: utility
@@ -390,7 +390,7 @@ scripts:
     apply_flag: "--apply"
     target_db: state/zeus-world.db
     required_tests: [tests/test_b070_control_overrides_history_v2.py]
-  migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
+  migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python3 scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
   migrate_to_isolated_dbs.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
   nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--mode", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
@@ -413,6 +413,7 @@ scripts:
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
   semantic_linter.py: {class: enforcement}
+  test_currency_audit.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/test_currency_audit.py", reason: "T1.e midstream guardian panel dated-header audit; reads architecture/test_topology.yaml::midstream_guardian_panel and validates each listed file carries Created/Last reused audited/Authority basis markers per ~/CLAUDE.md file-header provenance rule"}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
   topology_doctor_cli.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py as CLI facade}
   topology_doctor_closeout.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for compiled closeout lane}
@@ -441,6 +442,6 @@ scripts:
   venus_autonomy_gate.py: {class: runtime_support}
   venus_sensing_report.py: {class: runtime_support}
   verify_truth_surfaces.py: {class: diagnostic}
-  oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
-  bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
+  oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
+  bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
   code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}
