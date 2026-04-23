@@ -231,7 +231,7 @@
     {
       "slice_id": "T3.2",
       "name": "canonical_projection_fixture_one_line_category_fix",
-      "commit": "pending",
+      "commit": "566a48f",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_CLEAR_plus_con_nyx_dispatched",
       "planning_lock": "GREEN (tests/** not planning-lock territory)",
@@ -246,7 +246,7 @@
     {
       "slice_id": "T3.2b",
       "name": "canonical_schema_alignment_antibody_with_plan_pivot",
-      "commit": "pending",
+      "commit": "566a48f",
       "date": "2026-04-23",
       "critic_status": "surrogate_code_reviewer_opus_CLEAR_regex_polish_adopted",
       "planning_lock": "GREEN (new tests/* file only)",
@@ -267,6 +267,21 @@
         "F2: LifecyclePhase Python enum (src/state/lifecycle_manager.py:9-32) ↔ phase CHECK constraint (architecture/2026_04_02_architecture_kernel.sql:84-94)",
         "F3: event_type vocabulary scatter across src/state/db.py, src/riskguard/riskguard.py, tests — no central Python enum"
       ]
+    },
+    {
+      "slice_id": "T7.a",
+      "name": "test_fdr_family_key_is_canonical_activation_verified_already_done",
+      "commit": "pending_doc_only",
+      "date": "2026-04-23",
+      "critic_status": "no_code_change_to_review",
+      "planning_lock": "N/A (no source/test edits)",
+      "files_changed": [
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_four": "Plan T7.a said 'remove pytest.skip at tests/test_dual_track_law_stubs.py:67'. Verified: L67 is a comment; L70 is a skip inside `test_no_high_low_mix_in_platt_or_bins` (a different test, NC-12 territory for T1.d). `test_fdr_family_key_is_canonical` is at L189 and has NO skip decorators.",
+      "verification_evidence": "pytest -q tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical → 1 passed in 0.03s. Test body covers: hypothesis vs edge family ID scope separation (L213), determinism within scope (L216-217), metric discrimination HIGH != LOW (L220-223). All INV-22 canonicality properties enforced.",
+      "residual_flagged": "The pytest.skip at tests/test_dual_track_law_stubs.py:70 inside test_no_high_low_mix_in_platt_or_bins is NC-12 / INV-16 Phase-7 enforcement — belongs to T1.d audit, not T7.a."
     }
   ],
   "slices_in_review": [

@@ -31,7 +31,38 @@
 | T3.1 execute_discovery_phase 5-caller env kwarg fix | closed | `716bfdd` | 6 TypeError failures → pass (2 day0_runtime + 2 discovery_phase_entry_path + 2 discovery_phase_records); zero new failures; delta-direction on 3 modified files: 28F→22F, 166P→172P | 2026-04-23 |
 | T3.3 position_current ALTER TABLE canonical-column backfill | closed | `36f0189` | surrogate critic (code-reviewer@opus) CLEAR; fixes test_kernel_schema_adds_token_identity_columns; planning-lock GREEN; delta: -1 failure, 0 new failures; INV-14 runtime enforcement preserved per grep of direct-SQL writers | 2026-04-23 |
 | T3.2 canonical_projection fixture patch | closed | pending | one-line category fix (Fitz C1); `test_architecture_contracts.py` 9F→1F; surrogate critic CLEAR; con-nyx dispatched; remaining 1F is unrelated `_Logger.warning` AttributeError | 2026-04-23 |
-| T3.2b canonical schema alignment antibody | closed | pending | plan AST-walk premise vacuous (no dict builders in projection.py); pivoted to 3 structural-alignment tests; 3/3 pass; surrogate critic CLEAR with regex hardening polish adopted | 2026-04-23 |
+| T3.2b canonical schema alignment antibody | closed | `566a48f` | plan AST-walk premise vacuous (no dict builders in projection.py); pivoted to 3 structural-alignment tests; 3/3 pass; surrogate critic CLEAR with regex hardening polish adopted | 2026-04-23 |
+| T3.2 canonical_projection fixture patch | closed | `566a48f` | one-line category fix bundled in same commit as T3.2b per slice-pairing rationale | 2026-04-23 |
+| T7.a test_fdr_family_key_is_canonical activation | closed | N/A (no code change) | **slice already done pre-session**: test at L189 is unskipped and passing 1/1; plan's "skip at L67" citation was wrong (L70 is a different test, `test_no_high_low_mix_in_platt_or_bins`, NC-12 territory for T1.d); test body already covers INV-22 scope separation, determinism, metric discrimination | 2026-04-23 |
+
+## T7.a — verification notes (2026-04-23)
+
+Fourth plan-premise correction in this packet. Plan said:
+> "Activate `test_fdr_family_key_is_canonical` — remove `pytest.skip` at
+> `tests/test_dual_track_law_stubs.py:67` + verify body matches
+> `make_hypothesis_family_id` + `make_edge_family_id` signatures"
+
+Reality (grep-verified 2026-04-23):
+- Line 67 is a comment (`# NC-12 / INV-16`).
+- Line 70 is `pytest.skip("pending: enforced in Phase 7 rebuild")` inside
+  `test_no_high_low_mix_in_platt_or_bins` (a DIFFERENT test, NC-12 /
+  INV-16 enforcement for Phase 7). That stub is T1.d territory.
+- `test_fdr_family_key_is_canonical` is at L189 with no skip decorators
+  and a full body covering:
+  - hypothesis vs edge family ID scope separation
+  - determinism within each scope
+  - metric discrimination (HIGH ≠ LOW family IDs per S4 R9 P10B)
+- Verified passing: `pytest -q tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical`
+  → `1 passed in 0.03s`.
+
+Slice scope is satisfied without code changes. Receipt documents the
+verified-already-done state. Per memory rule L21, "activate" was the
+wrong verb in the plan — the test was already active. This is being
+recorded as CLOSED with NO-OP commit (this work_log + receipt update
+only).
+
+The residual `test_no_high_low_mix_in_platt_or_bins` skip stub is
+flagged for T1.d closure.
 
 ## T3.2 — execution notes (2026-04-23)
 
