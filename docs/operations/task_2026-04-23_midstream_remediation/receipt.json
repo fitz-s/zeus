@@ -618,7 +618,7 @@
     {
       "slice_id": "T5.b",
       "name": "tick_size_typed_contract_plus_exit_path_nan_closure",
-      "commit": "pending",
+      "commit": "c5c916b",
       "date": "2026-04-23",
       "critic_status": "self_verified_straightforward_typed_contract_replacement_pattern_proven_in_T5a_surrogate_skipped_con_nyx_dispatched",
       "planning_lock": "GREEN on 4 files (src/contracts/tick_size.py + src/execution/executor.py + src/contracts/semantic_types.py + tests/test_tick_size.py)",
@@ -646,6 +646,43 @@
         ".venv/bin/python -m pytest -q tests/test_tick_size.py tests/test_executor.py tests/test_execution_price.py tests/test_executor_typed_boundary.py tests/test_entry_exit_symmetry.py tests/test_decision_evidence_entry_emission.py tests/test_exit_evidence_audit.py -> 108 passed, 1 skipped, 1 xfailed",
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/contracts/tick_size.py src/execution/executor.py src/contracts/semantic_types.py tests/test_tick_size.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}",
         "git stash verification: pre-T5.b source + same 6-file regression = 85 passed (identical to post-T5.b's 108 minus 23 new-test passes) -> ZERO delta"
+      ]
+    },
+    {
+      "slice_id": "T5.c",
+      "name": "neg_risk_sdk_passthrough_audit_not_typed_contract",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_verification_driven_skip_decision_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/* only)",
+      "resolution": "SKIP typed contract + ship SDK-passthrough audit antibody (operator-directed A+B combo)",
+      "files_changed": [
+        "tests/test_neg_risk_passthrough.py (new, 4 tests in 2 classes)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_twelve": "Plan row T5.c proposed NEW src/contracts/neg_risk.py typed flag; qualified 'may reduce to typed passthrough' pending py-clob-client behavior verification. Verification result: reduction confirmed. (a) py-clob-client auto-detects neg_risk per token via ClobClient.get_neg_risk at client.py:441-448 with in-memory cache; (b) create_order consumes auto-fallback at client.py:517-520 and :572-575 (if caller supplies options.neg_risk use it, else SDK auto-detects); (c) grep of Zeus src/ for neg_risk/negRisk/NegRisk returns ZERO hits; (d) weather markets are conceptually neg-risk (city-date bins mutually exclusive) BUT semantic resolution happens entirely at SDK + on-chain exchange-contract layer; (e) a NegRiskMarket(bool) wrapper with no invariants adds zero guard beyond the type annotation — violates Fitz K<<N ('don't add structure for problems that don't exist').",
+      "audit_design": {
+        "class_1_SDK_contract": [
+          "test_clob_client_exposes_get_neg_risk_method — ClobClient.get_neg_risk(token_id) exists",
+          "test_partial_create_order_options_exposes_neg_risk_field — PartialCreateOrderOptions.neg_risk Optional[bool] field exists"
+        ],
+        "class_2_zeus_passthrough_assumption": [
+          "test_no_neg_risk_string_literals_in_zeus_src — grep-style scan for neg_risk/negRisk/NegRisk in all src/**/*.py returns zero; any future literal reference auto-signals T5.c promotion",
+          "test_no_partial_create_order_options_override_pattern — scan src/ for PartialCreateOrderOptions import/instantiation returns zero; the only vector for explicit neg_risk override"
+        ]
+      },
+      "failure_signal_semantics": "If any of the 4 assertions fires in a future run, the passthrough assumption is broken. Actions: (1) investigate whether SDK changed contract (classes 1/2a) or Zeus added override paths (classes 2b/2c); (2) promote T5.c from skip-plus-audit to a real typed-contract slice modeling the concept; (3) update these tests to the new contract shape.",
+      "regression_delta_direction_L28": {
+        "narrow_audit_test_post_T5_c": "pytest tests/test_neg_risk_passthrough.py -> 4 passed in 0.41s",
+        "delta_from_source_change": "N/A — test-only addition, zero source code mutation",
+        "new_test_count": 4
+      },
+      "conditional_gate_accounting": "T5.c resolves to SKIP with audit — plan had T5.c as 1 of 4 T5 slices (alongside T5.a, T5.b, T5.d) on the CONDITIONAL gate dependency chain. Skip means T5 gate denominator effectively becomes 3 (T5.a + T5.b + T5.d) rather than 4, since the plan's original T5.c implementation was never required given SDK passthrough already solves the problem.",
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_neg_risk_passthrough.py -> 4 passed in 0.41s",
+        "grep -rn 'neg_risk|negRisk|NegRisk' src/ scripts/ -> zero hits (verified before writing audit)",
+        "SDK reference: .venv/lib/python3.14/site-packages/py_clob_client/client.py:441-448,517-533,572-575 (get_neg_risk + create_order auto-detection paths)"
       ]
     }
   ],
