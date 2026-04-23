@@ -463,13 +463,13 @@ Every round-3 review finding with its anti-pattern classification and target pac
 | R3-11 | critic P0-4, scientist D2 | AP-12 (count unstable) | P-E reconstruction (single canonical containment script) | PENDING |
 | R3-12 | critic P0-5, scientist D3 | AP-14 (type-incompatible fabrication) | P-E / P-G DST handling | PENDING |
 | R3-13 | critic P0-6, scientist D1 | AP-12, AP-13 (partition fails to sum, missing category) | P-E reconstruction (full partition SQL) | PENDING |
-| R3-14 | architect P1-1, critic P1-6 | AP-15 (deferred verification) | P-E / P-F (EXPECTED_UNIT_FOR_CITY single-source) | PENDING |
+| R3-14 | architect P1-1, critic P1-6 | AP-15 (deferred verification) | P-E / P-F | **PARTIALLY-ADDRESSED-BY-P-F** (2026-04-23; 2 `pc_audit_1unit_drift` rows quarantined; full "EXPECTED_UNIT_FOR_CITY single-source" closure requires P-E re-derivation evidence for all 1482 VERIFIED rows) |
 | R3-15 | architect P1-2, scientist D6 | AP-15 + INV-FP-3/INV-06 | P-B schema → P-E | **PARTIALLY-CLOSED-BY-P-B** (2026-04-23; `provenance_json` is the vehicle; P-E writers embed `decision_time_snapshot_id`; full closure at P-E) |
 | R3-16 | architect P1-3, critic P1-5 | AP-15 (statistical claims weak) | P-C WU audit | **CLOSED-BY-P-C** (2026-04-23; critic-opus APPROVE; operational-equivalence 97.78% over 1,444 WU rows; fatal_misread `wu_website_daily_summary_not_wu_api_hourly_max` stays active as invariant anchor per NH-C5) |
-| R3-17 | architect P1-4, critic P1-2 | cross-packet coordination (gate_f_data_backfill step 8) | P-F hard quarantine (re-check first) | PENDING |
+| R3-17 | architect P1-4, critic P1-2 | cross-packet coordination (gate_f_data_backfill step 8) | P-F hard quarantine | **CLOSED-BY-P-F** (2026-04-23; 74 rows hard-quarantined with enumerable reasons; critic-opus POST-EXECUTION APPROVE) |
 | R3-18 | architect P1-6 | AP-15 (trigger body unspecified) | P-B schema | **CLOSED-BY-P-B** (2026-04-23; `settlements_authority_monotonic` trigger specified, deployed, 4+1 case validated including critic-opus false-positive probe that proved `json_extract` robustness over `LIKE`) |
 | R3-19 | architect P1-7 | AP-15 (NC-13 enforcement deferred) | P-B schema / P-E | PENDING |
-| R3-20 | critic P1-1 | AP-4 (source role collapse — Shape B per §3) | P-C WU audit → P-G reframe → P-E | **ADDRESSED-BY-P-C-REFRAMED-BY-P-G-CLOSES-IN-P-E** (2026-04-23; P-G SQL proof of disjoint date-ranges per source_type for HK/Taipei/Tel Aviv shows these are source-handoff history, NOT mislabels; relabel retired; P-E decides backfill-or-QUARANTINE per row; critic-opus APPROVE on the reframe) |
+| R3-20 | critic P1-1 | AP-4 (source role collapse — Shape B per §3) | P-C → P-G → P-F → P-E | **QUARANTINED-BY-P-F; CLOSES-IN-P-E** (2026-04-23 trail: P-C detected label↔collector mismatch empirically; P-G reframed as source-handoff history via disjoint date-ranges; P-F quarantined 27 AP-4 rows with `pc_audit_source_role_collapse_no_source_correct_obs_available` reason; P-E decides backfill-or-keep-QUARANTINED per row) |
 | R3-21 | scientist D4 | AP-15 (market identity lost) | **P-G** | **RESOLVED-BY-P-G** (2026-04-23; critic-opus POST-EXECUTION APPROVE; Gamma probe confirmed 5 "duplicates" are HIGH/LOW metric-identity collisions, NOT JSON duplicates; DELETE 5 wrong-metric rows; P-E re-inserts HIGH-market winners using JSON EARLY entries 1513/1520/1517/1530/1532) |
 | R3-22 | scientist D5 | AP-1 (obs_v2 corrupt rows) | P-G pre-existing corrections | PENDING |
 | R3-23 | scientist D7 | AP-1 (Denver orphan) | P-D extension §9.1 (Gamma probe: 250-event scan, 0 Denver matches → synthetic orphan) → P-G DELETE | **CLOSED-BY-P-D** (2026-04-23; Denver not in Gamma; P-G to DELETE in execution phase) |
@@ -478,9 +478,10 @@ Every round-3 review finding with its anti-pattern classification and target pac
 **Packet coverage summary**:
 - P-A: R3-03, R3-05 (partial)
 - P-D: R3-09, R3-23 (closed), R3-21 (routed to P-G)
-- P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; reframed in P-G; closes at P-E)
+- P-C: R3-16 (CLOSED-BY-P-C), R3-20 (addressed; reframed in P-G; quarantined in P-F; closes at P-E)
 - P-G: R3-21 (RESOLVED-BY-P-G), R3-20 (REFRAMED; closes at P-E)
 - P-B: R3-01 (CLOSED-BY-P-B), R3-06 (CLOSED-BY-P-B), R3-18 (CLOSED-BY-P-B), R3-15 (PARTIALLY-CLOSED; full at P-E)
+- P-F: R3-17 (CLOSED-BY-P-F), R3-20 (QUARANTINED; closes at P-E), R3-14 (PARTIAL; closes at P-E)
 - P-G: R3-22, R3-23 (partial)
 - P-B: R3-01, R3-06, R3-07, R3-10, R3-15, R3-18, R3-19
 - P-F: R3-14, R3-17
