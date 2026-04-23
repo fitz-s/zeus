@@ -675,6 +675,89 @@ NH-B3 + NH-B4 endorsed for first_principles.md §8. Critic-opus notes "healthy c
 - 2026-04-23T18:36:00Z — Added §8 rule 13 (NH-B3 SQL RAISE single-string) + rule 14 (NH-B4 snapshot hash asymmetry) to first_principles.md.
 - 2026-04-23T18:38:00Z — P-B formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C + P-G + P-B all complete. Gate to **P-F (hard quarantine)** opens. P-F uses new `provenance_json` column + `settlements_authority_monotonic` trigger to explicitly QUARANTINE the ~30 hard-quarantine rows (HK WU 2, Taipei NOAA 12, Tel Aviv WU 13) plus any additional rows flagged by P-C disposition table that P-F decides belong to QUARANTINE track rather than P-E reconstruction.
 
+---
+
+## P-F: Hard Quarantine — started 2026-04-23T18:38:00Z; PRE-REVIEW APPROVE 2026-04-23; executed 2026-04-23T18:39:11Z
+
+### Pre-packet evidence gathering
+
+Built quarantine mapping from `pc_agreement_audit_postPG.json` + P-C §6.4 enumerable reasons + P-G scope clarifications. 74 rows partitioned into 6 closed reasons:
+
+| reason_id | rows |
+|---|---:|
+| pc_audit_source_role_collapse_no_source_correct_obs_available | 27 (HK WU 2 + Taipei NOAA 12 + Tel Aviv WU 13) |
+| pc_audit_shenzhen_drift_nonreproducible | 26 (whole-bucket per critic caveat) |
+| pc_audit_dst_spring_forward_bin_mismatch | 7 (2026-03-08: Atlanta/Chicago/Dallas/Miami/NYC/Seattle F + Toronto C) |
+| pc_audit_station_remap_needed_no_cwa_collector | 7 (Taipei CWA Mar 16-22) |
+| pc_audit_seoul_station_drift_2026-03_through_2026-04 | 5 (Seoul WU 5 specific dates) |
+| pc_audit_1unit_drift | 2 (KL 2026-04-10 + Cape Town 2026-04-15) |
+| **sum** | **74** |
+
+Mapping persisted: `evidence/pf_quarantine_mapping.json`.
+
+### Pre-review status (2026-04-23)
+
+**APPROVE** — zero blocking findings. All 5 pre-verify items PASS (reason-set closure, row arithmetic 27+26+7+7+5+2=74, V→Q trigger safety via WHEN-clause walkthrough, json_set preservation empirically proven via rollback-only test, Toronto 2026-03-08 row-level quarantine endorsed). 4 non-blocking R-F1/R-F2/R-F3/R-F4 recommendations.
+
+### Execution (2026-04-23T18:39:11Z)
+
+Applied R-F1 (full-population preservation sweep) + R-F2 (explicit state machine fresh/noop/partial) to the runner. R-F3/R-F4 stylistic, not applied.
+
+```
+18:39:11Z  WAL checkpoint + cp → state/zeus-world.db.pre-pf_2026-04-23 (md5 d954523f...)
+18:39:16Z  state classify: 74 VERIFIED match / 0 QUARANTINED → state=fresh
+18:39:16Z  BEGIN IMMEDIATE
+18:39:16Z  74 single-row UPDATEs (each rowcount=1; ROLLBACK if not)
+18:39:16Z  post-counts: 1482 VERIFIED + 74 QUARANTINED = 1556 ✓
+18:39:16Z  per-reason partition verified: {27,26,7,7,5,2}=74 ✓
+18:39:16Z  R-F1 sweep: 74/74 rows carry both P-A retrofit + quarantine keys ✓
+18:39:16Z  COMMIT
+```
+
+Zero ROLLBACKs. Zero IntegrityErrors (trigger correctly allows V→Q). Post-pytest identical to baseline (9 passed + 7 subtests).
+
+Sample post-mutation row (Toronto 2026-03-08):
+```
+authority=QUARANTINED
+$.writer=unregistered_bulk_writer_2026-04-16      (P-A retrofit preserved)
+$.quarantine_reason=pc_audit_dst_spring_forward_bin_mismatch  (P-F added)
+$.quarantined_by_packet=P-F                       (P-F added)
+```
+
+Deliverables:
+- `evidence/pf_quarantine_plan.md` (147 lines, MD5 `8696034da5b608268a5fad4cf8a642ab`)
+- `evidence/pf_execution_log.md` (80 lines, MD5 `edb8c283ea4a47d3d8c6e302f4f7e499`)
+- `evidence/pf_quarantine_mapping.json` (371 lines, MD5 `1e9731da42ccbb166fc2de73b49ff56e`)
+- `evidence/scripts/pf_mark_quarantine.py` (289 lines, MD5 `0029172d2a57ba80d03746518c856ab9`)
+
+### Closure request → critic-opus (post-execution)
+
+- 2026-04-23T18:45:00Z — SendMessage with MD5s + 5 reproducibility commands + R3-## status requests (R3-17 CLOSED-BY-P-F; R3-20 QUARANTINED-BY-P-F progress; R3-14 partial).
+
+### Critic-opus final verdict (2026-04-23)
+
+**APPROVE** with ZERO findings. Every one of 5 requested verifications reproduces exactly. R-F1 full-population sweep confirms preservation on ALL 74 rows (not just sample). Per-reason partition exact (27/26/7/7/5/2=74). Non-targeted rows unchanged (HK HKO 29 still VERIFIED; London WU 56 still VERIFIED). Sample row (Toronto 2026-03-08) confirms both P-A retrofit + P-F quarantine keys coexist via `json_set` nesting.
+
+R3-## decisions endorsed:
+- R3-17: CLOSED-BY-P-F (74 rows materialized; P-E starts from clean V/Q split)
+- R3-20: QUARANTINED-BY-P-F; CLOSES-IN-P-E (13 Tel Aviv WU + 2 HK WU + 12 Taipei NOAA quarantined with source_role_collapse reason)
+- R3-14: PARTIALLY-ADDRESSED-BY-P-F (2 1unit-drift rows; full closure at P-E)
+
+Critic meta-observations:
+- Artifact hygiene improving across packets (P-G `.db.db.` fixed in P-B; P-F uses correct path from start)
+- Evidence discipline holding at 100% reproduction rate across 7 packets
+- **P-E heads-up** (critic guidance for the next packet):
+  1. Every INSERT must call `SettlementSemantics.assert_settlement_value()` before stamping VERIFIED
+  2. Every INSERT must populate all 4 INV-14 identity fields (schema permits NULL; P-E code path must not)
+  3. provenance_json on each INSERT must include `decision_time_snapshot_id` referencing obs.fetched_at (INV-FP-3 / INV-06)
+  4. Transaction boundary per-batch or per-city, NOT monolithic 1482 INSERTs (backpressure + crash recovery)
+  5. P-E needs explicit relationship tests BEFORE implementation (Fitz Constraint): the cross-module invariant is "obs row → SettlementSemantics → settlement row's (value, winning_bin, provenance) is self-consistent"
+
+### Closure action
+
+- 2026-04-23T18:50:00Z — Applied App-C updates (R3-17 → CLOSED-BY-P-F; R3-20 → QUARANTINED-BY-P-F; R3-14 → PARTIALLY-ADDRESSED-BY-P-F).
+- 2026-04-23T18:52:00Z — P-F formally closed. Per P-0 §6 dependency graph: P-A + P-D + P-C + P-G + P-B + P-F all complete. Gate to **P-E ∥ P-H final parallel pair** opens. P-E is the biggest remaining packet: DELETE+INSERT all 1556 rows with full INV-14 identity + decision_time_snapshot_id + source-correct obs evidence. P-H is the harvester atomicity refactor (feature-flagged, parallel-safe).
+
 ### Handoff notes for post-compact resumption of P-C
 
 **Current workstream state** (every fact verifiable via files on disk):
