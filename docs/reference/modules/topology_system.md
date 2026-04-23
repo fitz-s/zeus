@@ -75,16 +75,16 @@ This is the machine kernel beneath human authority docs. It should stay primary 
 - Current-state/doc registry drift lets packet history masquerade as live guidance.
 
 ## 14. Historical failures and lessons
-- [Archive evidence] `zeus-architecture-deep-map.md` shows how much richer system memory once existed than today's compressed manifests provide.
+- [Archive evidence] `docs/archives/work_packets/branches/data-improve/topology/zeus-architecture-deep-map.md` shows how much richer system memory once existed than today's compressed manifests provide.
 - [Archive evidence] Authority-governance restructuring materials prove that cleaning surfaces without rehydrating context creates a new failure mode: a tidy but cognitively hollow repo.
 
 ## 15. Code graph high-impact nodes
 - `scripts/topology_doctor.py` and helpers are the operational heart of the topology system.
-- The next missing node is `architecture/module_manifest.yaml`, which should exist but does not yet.
+- `architecture/module_manifest.yaml` is now a high-impact routing node and should be reviewed that way.
 
 ## 16. Likely modification routes
 - Any manifest or topology doctor change should be packeted, tested, and paired with docs updates.
-- Module-book support should be added here before broad module rehydration lands.
+- Module-book support now routes through this module and should stay warning-first until a later packet explicitly promotes stricter enforcement.
 
 ## 17. Planning-lock triggers
 - Any change under `architecture/**` or `scripts/topology_doctor*.py`.

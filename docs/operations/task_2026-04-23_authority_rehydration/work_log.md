@@ -229,3 +229,42 @@ Verification:
 Next:
 
 - land P4 archive and graph extraction closeout
+
+## P4 Archive Extraction And Closeout
+
+Changed files:
+
+- `architecture/history_lore.yaml`
+- `docs/archive_registry.md`
+- `docs/reference/modules/contracts.md`
+- `docs/reference/modules/execution.md`
+- `docs/reference/modules/strategy.md`
+- `docs/reference/modules/topology_system.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/plan.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/work_log.md`
+- `docs/operations/task_2026-04-23_authority_rehydration/receipt.json`
+
+Summary:
+
+- normalized archive evidence paths inside the active module references that
+  were already carrying historical lessons
+- added an explicit archive extraction ledger to `docs/archive_registry.md`
+- promoted three durable archive lessons into `architecture/history_lore.yaml`
+  without promoting archive bodies into ambient context
+- closed the authority rehydration packet with current_state pointing to a
+  complete P0-P4 program
+
+Verification:
+
+- `python scripts/topology_doctor.py --docs --json` -> ok
+- `python scripts/topology_doctor.py --context-budget --json` -> ok with advisory warnings: `architecture/history_lore.yaml` and `docs/archive_registry.md` exceed their current budget baselines
+- `git grep -n "docs/archives/" docs AGENTS.md workspace_map.md architecture || true` -> inspected; archive references remain explicit archive-evidence citations or archive-policy surfaces
+- `python scripts/topology_doctor.py --work-record --changed-files <P4 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json` -> ok
+- `python scripts/topology_doctor.py --change-receipts --changed-files <P4 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json` -> ok
+- `python scripts/topology_doctor.py closeout --changed-files <P4 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json` -> ok with advisory warnings: stale Code Review Graph head and minor context-budget overflow on archive/history surfaces
+- `git diff --check -- <P4 files>` -> ok
+
+Next:
+
+- packet complete

@@ -79,8 +79,8 @@ Derived but economically central. Strategy code must stay downstream of contract
 - Strategy naming masks economically different bet types under one label.
 
 ## 14. Historical failures and lessons
-- [Archive evidence] `reports/strategy_failure_analysis.md` found structural rather than purely statistical reasons for center_buy and shoulder_sell failures.
-- [Archive evidence] `findings/p10_adversarial_findings.md` is useful as a stress-test lens: how can an apparently valid strategy fail under adversarial but realistic assumptions?
+- [Archive evidence] `docs/archives/reports/strategy_failure_analysis.md` found structural rather than purely statistical reasons for center_buy and shoulder_sell failures.
+- [Archive evidence] `docs/archives/findings/p10_adversarial_findings.md` is useful as a stress-test lens: how can an apparently valid strategy fail under adversarial but realistic assumptions?
 
 ## 15. Code graph high-impact nodes
 - `src/strategy/market_analysis.py` and `market_fusion.py` likely bridge signal/calibration outputs into evaluator decisions.

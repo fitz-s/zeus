@@ -1,5 +1,5 @@
 {
-  "task": "authority rehydration topology and context-pack support",
+  "task": "authority rehydration archive extraction and closeout",
   "packet": "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
@@ -9,16 +9,14 @@
     "AGENTS.md",
     "workspace_map.md",
     "architecture/AGENTS.md",
-    "architecture/script_manifest.yaml",
-    "architecture/module_manifest.yaml",
-    "docs/authority/zeus_current_architecture.md",
+    "docs/archive_registry.md",
+    "architecture/history_lore.yaml",
     "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
-    "scripts/topology_doctor.py",
-    "scripts/topology_doctor_cli.py",
-    "scripts/topology_doctor_context_pack.py",
-    "tests/test_topology_doctor.py",
+    "architecture/history_lore.yaml",
+    "docs/archive_registry.md",
+    "docs/reference/modules/*.md",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
     "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
@@ -34,25 +32,24 @@
     "archive bodies"
   ],
   "changed_files": [
-    "scripts/topology_doctor.py",
-    "scripts/topology_doctor_cli.py",
-    "scripts/topology_doctor_context_pack.py",
-    "tests/test_topology_doctor.py",
+    "architecture/history_lore.yaml",
+    "docs/archive_registry.md",
+    "docs/reference/modules/contracts.md",
+    "docs/reference/modules/execution.md",
+    "docs/reference/modules/strategy.md",
+    "docs/reference/modules/topology_system.md",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
     "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
     "docs/operations/task_2026-04-23_authority_rehydration/receipt.json"
   ],
   "tests_evidence": [
-    "pytest -q tests/test_topology_doctor.py",
     "python scripts/topology_doctor.py --docs --json",
-    "python scripts/topology_doctor.py --module-books --json",
-    "python scripts/topology_doctor.py --module-manifest --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --json",
-    "python -m py_compile scripts/topology_doctor*.py",
-    "python scripts/topology_doctor.py --work-record --changed-files <P3 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <P3 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <P3 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
-    "git diff --check -- <P3 files>"
+    "python scripts/topology_doctor.py --context-budget --json",
+    "git grep -n \"docs/archives/\" docs AGENTS.md workspace_map.md architecture || true",
+    "python scripts/topology_doctor.py --work-record --changed-files <P4 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P4 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P4 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "git diff --check -- <P4 files>"
   ]
 }
