@@ -1,5 +1,5 @@
 {
-  "task": "authority kernel gamechanger P0 authority decontamination",
+  "task": "authority kernel gamechanger P1 core authority rewrite",
   "packet": "docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md",
   "route_source": "ralplan",
   "route_evidence": [
@@ -11,86 +11,51 @@
     "AGENTS.md",
     "workspace_map.md",
     "architecture/AGENTS.md",
+    "docs/authority/AGENTS.md",
     "docs/authority/zeus_current_architecture.md",
     "docs/authority/zeus_current_delivery.md",
     "architecture/docs_registry.yaml",
     "architecture/topology.yaml",
-    "docs/authority/AGENTS.md",
-    "docs/operations/AGENTS.md",
-    "docs/reports/AGENTS.md"
+    "docs/operations/AGENTS.md"
   ],
   "allowed_files": [
+    "docs/authority/zeus_current_architecture.md",
+    "docs/authority/zeus_current_delivery.md",
+    "docs/authority/zeus_change_control_constitution.md",
+    "architecture/docs_registry.yaml",
     "docs/operations/current_state.md",
-    "docs/operations/AGENTS.md",
-    "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md",
     "docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md",
-    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json",
-    "docs/authority/AGENTS.md",
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "workspace_map.md",
-    "architecture/docs_registry.yaml",
-    "architecture/topology.yaml",
-    "docs/reports/AGENTS.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_boundary_integration_note.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_delivery_constitution.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md",
-    "docs/runbooks/task_2026-04-15_data_math_operator_runbook.md"
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json"
   ],
   "changed_files": [
+    "docs/authority/zeus_current_architecture.md",
+    "docs/authority/zeus_current_delivery.md",
+    "docs/authority/zeus_change_control_constitution.md",
+    "architecture/docs_registry.yaml",
     "docs/operations/current_state.md",
-    "docs/operations/AGENTS.md",
-    "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md",
     "docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md",
-    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json",
-    "docs/authority/AGENTS.md",
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "workspace_map.md",
-    "architecture/docs_registry.yaml",
-    "architecture/topology.yaml",
-    "docs/reports/AGENTS.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_boundary_integration_note.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_delivery_constitution.md",
-    "docs/reports/authority_history/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md",
-    "docs/runbooks/task_2026-04-15_data_math_operator_runbook.md"
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json"
   ],
   "forbidden_files": [
     "src/**",
     "state/**",
     ".code-review-graph/graph.db",
     "runtime/data/source implementation",
-    "current city/source truth audit"
-  ],
-  "moved_files": [
-    {
-      "from": "docs/authority/task_2026-04-15_data_math_boundary_integration_note.md",
-      "to": "docs/reports/authority_history/task_2026-04-15_data_math_boundary_integration_note.md",
-      "new_role": "historical report evidence"
-    },
-    {
-      "from": "docs/authority/task_2026-04-15_data_math_delivery_constitution.md",
-      "to": "docs/reports/authority_history/task_2026-04-15_data_math_delivery_constitution.md",
-      "new_role": "historical report evidence"
-    },
-    {
-      "from": "docs/authority/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md",
-      "to": "docs/reports/authority_history/task_2026-04-15_data_math_failure_tree_and_rollback_doctrine.md",
-      "new_role": "historical report evidence"
-    }
+    "current city/source truth audit",
+    "side authority file moves"
   ],
   "tests_evidence": [
     "python scripts/topology_doctor.py --docs --json",
     "python scripts/topology_doctor.py --current-state-receipt-bound --json",
     "python scripts/topology_doctor.py --context-budget --json",
-    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P0 files> --json",
-    "python scripts/topology_doctor.py --planning-lock --changed-files <P0 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json",
-    "python scripts/topology_doctor.py --work-record --changed-files <P0 files> --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --json",
-    "python scripts/topology_doctor.py --change-receipts --changed-files <P0 files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
-    "python scripts/topology_doctor.py closeout --changed-files <P0 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
-    "find docs/authority -maxdepth 1 -name 'task_2026-04-15*' -print",
-    "git diff --check -- <P0 files>"
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <P1 files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <P1 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <P1 files> --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P1 files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P1 files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
+    "rg -n \"zeus_packet_discipline|zeus_autonomy_gates|zeus_dual_track_architecture|zeus_live_backtest_shadow_boundary|zeus_openclaw_venus_delivery_boundary\" docs/authority/zeus_current_architecture.md docs/authority/zeus_current_delivery.md",
+    "git diff --check -- <P1 files>"
   ]
 }
