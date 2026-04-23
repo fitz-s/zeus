@@ -75,6 +75,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-22_docs_truth_refresh/` | packet evidence | Closed docs truth refresh / stale-reference purge packet |
 | `task_2026-04-23_guidance_kernel_semantic_boot/` | packet evidence | Closed guidance-kernel semantic boot refactor packet |
 | `task_2026-04-23_authority_kernel_gamechanger/` | active packet | Active authority-kernel gamechanger packet |
+| `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |

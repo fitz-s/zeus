@@ -113,11 +113,16 @@ Pre-close review:
 
 Post-close review:
 
-- pending
+- Critic: PASS. P0-P3 objectives are complete through `9140990`; no
+  `state/**`, `.code-review-graph/**`, runtime Python, or script behavior
+  changes were committed. `src/calibration/AGENTS.md` was scoped guidance only.
+- Verifier: PASS. Confirmed authority folder is clean 3+1, side authority is
+  historical report evidence, current-fact surfaces are receipt/expiry-bound
+  and under budget, and remaining dirty files are outside this packet scope.
 
 Next:
 
-- commit P3 current-fact hardening, then run post-close review
+- package closed
 
 ## P2 Side Authority Demotion/Merge
 
