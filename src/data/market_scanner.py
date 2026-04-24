@@ -664,3 +664,55 @@ def _parse_temp_range(question: str) -> tuple[Optional[float], Optional[float]]:
         return val, val
 
     return None, None
+
+
+# S2.4 (2026-04-23, data-readiness-tail NH-E1 hardening): STRICT parser for
+# canonical bin labels emitted by `src/execution/harvester.py::_canonical_bin_label`.
+# Uses `re.fullmatch` so the ENTIRE input must match one of the 4 canonical
+# shapes; trailing garbage / prefix garbage / unicode-shoulders are rejected.
+#
+# Use this for ROUND-TRIP verification (label emitted by writer must survive
+# a strict reparse) and for any caller that receives a canonical label from
+# within-system serialization. Do NOT use this for free-form Polymarket market
+# questions — those need the tolerant `_parse_temp_range` above.
+#
+# Motivation (NH-E1 / closure-banner rule 15): P-E's critic-opus discovered
+# that `re.search` on unanchored patterns silently accepts near-canonical but
+# semantically-broken labels (e.g. "17°Cfoo" parses as 17.0 point bin, leaking
+# trailing garbage into settlement authority).
+_CANONICAL_BIN_LABEL_FULLMATCH = [
+    # "X-Y°F" or "X-Y°C" — finite bounded range
+    (re.compile(r"(-?\d+)-(-?\d+)°([FfCc])"),
+     lambda m: (float(m.group(1)), float(m.group(2)))),
+    # "X°F or below" / "X°C or below" — left-shoulder
+    (re.compile(r"(-?\d+)°([FfCc])\s+or\s+below"),
+     lambda m: (None, float(m.group(1)))),
+    # "X°F or higher" / "X°C or higher" — right-shoulder
+    (re.compile(r"(-?\d+)°([FfCc])\s+or\s+higher"),
+     lambda m: (float(m.group(1)), None)),
+    # "X°C" / "X°F" — point bin
+    (re.compile(r"(-?\d+)°([FfCc])"),
+     lambda m: (float(m.group(1)), float(m.group(1)))),
+]
+
+
+def _parse_canonical_bin_label(label: str) -> Optional[tuple[Optional[float], Optional[float]]]:
+    """Strict parser for canonical bin labels.
+
+    Returns (low, high) tuple on exact match against one of 4 canonical shapes
+    ("X-Y°F", "X°F or below", "X°F or higher", "X°F"). Returns None if the
+    input does NOT fully match any canonical shape — including near-matches
+    with trailing/leading garbage, unicode shoulders (≥/≤), or float/non-integer
+    degree values.
+
+    This is the NH-E1 antibody companion to `_canonical_bin_label` in
+    `src/execution/harvester.py`: every label that function emits MUST
+    round-trip through this parser, and no non-canonical label can.
+    """
+    if not isinstance(label, str):
+        return None
+    for pattern, extractor in _CANONICAL_BIN_LABEL_FULLMATCH:
+        m = pattern.fullmatch(label)
+        if m:
+            return extractor(m)
+    return None

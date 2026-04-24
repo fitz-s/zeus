@@ -134,6 +134,7 @@ categories:
     - tests/test_phase4_6_cities_drift.py
     - tests/test_phase4_foundation.py
     - tests/test_phase4_ingest.py
+    - tests/test_parse_canonical_bin_label.py
     - tests/test_phase4_platt_v2.py
     - tests/test_phase4_rebuild.py
     - tests/test_phase5_fixpack.py
