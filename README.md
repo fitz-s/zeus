@@ -1,12 +1,10 @@
 # Zeus
 
-**Zeus is an agent-managed quantitative trading system for weather-settlement prediction markets on Polymarket.**
+**Agent-managed quantitative trading system for weather-settlement prediction markets on Polymarket.**
 
-It is not a generic weather dashboard, a public trading bot, a plug-and-play forecasting library, or a cleaned-up academic demo. Zeus is a research and operations system built around a harder problem:
+Zeus preserves the full causal chain from market contract semantics through source truth, forecast signal, calibrated probability, execution, monitoring, settlement, and learning — while keeping dual-track (high/low temperature) identity separated end-to-end.
 
-> preserving the causal chain from market contract semantics to source truth, forecast signal, calibrated probability, execution, monitoring, settlement, and learning — while keeping a dual-track (high/low temperature) identity separated end-to-end.
-
-The system trades **discrete settlement contracts**, not continuous temperatures. A correct model of Zeus starts with the venue contract: city, local date, unit, bin topology, shoulder bins, source text, rounding or containment rule, and settlement authority. Forecast accuracy matters only after those semantic obligations are pinned down.
+The system trades **discrete settlement contracts**. Everything starts with the venue contract: city, local date, temperature metric, unit, bin topology, shoulder bins, source text, rounding rule, and settlement authority. Forecast probability is meaningful only after these semantic obligations are pinned.
 
 ---
 
@@ -30,17 +28,7 @@ contract semantics
   -> learning (without hindsight leakage)
 ```
 
-The system is designed around the fact that most catastrophic failures in this domain are not syntax errors. They are **semantic category errors**:
-
-* using the wrong settlement source;
-* treating an airport station as the city settlement station without proof;
-* mixing daily-high and daily-low tracks;
-* confusing Day0 live monitoring with final settlement truth;
-* using historical hourly data as if it were settlement data;
-* applying the wrong bin, shoulder, rounding, or containment semantics;
-* allowing backtest, shadow, or report surfaces to outrank canonical runtime truth.
-
-Zeus therefore treats **contract semantics, source provenance, lifecycle truth, and risk control** as first-class runtime objects — not advisory documentation, but executable contracts with blocking tests.
+The hardest failures in this domain are **semantic category errors** — using the wrong settlement source, mixing high/low tracks, confusing Day0 monitoring with final settlement, or applying wrong bin semantics. Zeus therefore treats **contract semantics, source provenance, lifecycle truth, and risk control** as first-class runtime objects with executable contracts and blocking tests.
 
 ---
 
@@ -279,29 +267,22 @@ World data can be shared because it is objective. Decision data must be tagged s
 
 ## Current status
 
-This branch is an active data-improvement and source-provenance branch. Current work has focused on settlement reconstruction, provenance hardening, high/low identity separation, data-readiness audit surfaces, runtime safety gates, and agent boot surfaces.
-
-Some capabilities are intentionally gated, dormant, or incomplete. For current posture, read `docs/operations/current_data_state.md`, `docs/operations/current_source_validity.md`, and `docs/operations/known_gaps.md`. These are current-fact surfaces that expire and must be refreshed before present-tense claims.
+Active branch: data-improvement and source-provenance hardening. Current posture is tracked in `docs/operations/current_data_state.md`, `docs/operations/current_source_validity.md`, and `docs/operations/known_gaps.md`.
 
 ---
 
 ## What to review
 
-A useful review should judge Zeus on these questions:
+Key review questions:
 
 1. Does the system preserve correct contract semantics from market text through probability and settlement?
-2. Are source roles separated correctly: settlement, Day0 monitoring, historical hourly, and forecast-skill?
+2. Are source roles separated: settlement, Day0 monitoring, historical hourly, and forecast-skill?
 3. Does provenance make settlement and calibration rows re-auditable?
 4. Are high and low temperature tracks structurally separated?
 5. Does the execution lifecycle distinguish entry, active position, Day0 window, exit intent, economic closure, settlement, void, and quarantine?
 6. Do risk states actually constrain behavior?
 7. Are live, backtest, and shadow boundaries enforced?
-8. Do agent-management rules prevent authority drift, stale-context edits, and local whack-a-mole patches?
-9. Are current-fact surfaces clearly separated from durable architecture law?
-10. Does the topology system enforce registry parity, zone boundaries, and planning locks?
-11. Are known gaps explicit enough to prevent false confidence?
-
-A less useful review would treat the repo as a turnkey product and judge it mainly on installation smoothness. Zeus is not trying to be a public package.
+8. Does the topology system enforce registry parity, zone boundaries, and planning locks?
 
 ---
 
@@ -373,39 +354,12 @@ Some runtime paths require local databases, venue credentials, provider data, or
 
 ---
 
-## Safety and non-goals
+## Disclaimer
 
 Zeus is not financial advice and does not guarantee profitability.
 
-Non-goals:
-
-* making Zeus a one-command public trading bot;
-* hiding known gaps to look finished;
-* replacing source provenance with generic weather API availability;
-* allowing AI agents to override runtime law;
-* treating backtest or shadow evidence as live promotion by default;
-* optimizing forecast accuracy while ignoring settlement semantics.
+Runtime state, credentials, raw vendor data, and derived caches are excluded from the public tree by design. Committed examples are scrubbed and clearly labeled.
 
 ---
 
-## Data and public-surface policy
-
-Runtime state, credentials, local telemetry, raw vendor captures, full settlement corpora, and derived review caches are intentionally excluded from the public tree.
-
-Reviewable examples may be committed when they are scrubbed, small enough to inspect, clearly labeled as examples, not required to reconstruct private trading state, and not presented as current source truth unless backed by a fresh current-fact surface.
-
-The absence of raw data or local DB files from the repository is intentional and should not be read as absence of system design.
-
----
-
-## Review stance
-
-Zeus is best evaluated as an agent-managed quant system under active maturation.
-
-The central question is not whether every subsystem is already final. The central question is whether the system's architecture correctly protects the money path:
-
-```text
-market contract -> source truth -> probability -> execution -> settlement -> learning
-```
-
-That is the standard this repository is built around.
+Zeus is evaluated on whether the architecture correctly protects the money path: `contract → source → probability → execution → settlement → learning`.
