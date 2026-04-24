@@ -1,0 +1,85 @@
+{
+  "task": "P1.4 legacy settlement evidence-only finalization policy planning",
+  "packet": "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md"
+  ],
+  "packet_status": "planning_active",
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+    "docs/operations/known_gaps.md",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
+    "architecture/AGENTS.md",
+    "architecture/city_truth_contract.yaml",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "docs/reference/modules/scripts.md",
+    "docs/reference/modules/tests.md"
+  ],
+  "allowed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json"
+  ],
+  "future_implementation_allowed_files": [
+    "scripts/verify_truth_surfaces.py",
+    "tests/test_truth_surface_health.py"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".code-review-graph/graph.db",
+    "src/**",
+    "src/state/**",
+    "src/calibration/**",
+    "src/engine/**",
+    "src/execution/**",
+    "docs/authority/**",
+    "architecture/** except architecture/topology.yaml and architecture/docs_registry.yaml companion registry updates named above",
+    "production DBs",
+    "generated runtime JSON",
+    "graph artifacts"
+  ],
+  "changed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json"
+  ],
+  "planned_semantics": [
+    "legacy settlements remain evidence-only for exact replay/training until market identity and finalization policy are proven",
+    "city/date is not a market identity and cannot imply market_slug, condition_id, token identity, rule version, or dual-track coverage",
+    "P1.4 future implementation may add read-only readiness blockers for legacy settlement market identity, finalization policy, incomplete values, and evidence-only status",
+    "P1.4 must not mutate production DBs, populate settlements_v2, add schema/view DDL, or rewire calibration/replay/live consumers"
+  ],
+  "tests_evidence": [
+    "planning packet only; closeout gates recorded in work_log.md"
+  ],
+  "known_red_context": [
+    "navigation reports pre-existing global docs/source/history-lore issues",
+    "Code Review Graph is derived context and may be stale",
+    "state/daemon-heartbeat.json and state/status_summary.json are dirty runtime artifacts and are forbidden for this packet",
+    "docs/operations/current_data_state.md calls settlements canonical-authority-grade for current data posture, but P1.4 preserves the narrower forensic exact-replay/training ruling: legacy settlements remain evidence-only until market identity and finalization policy are proven"
+  ]
+}
