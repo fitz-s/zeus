@@ -163,6 +163,86 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         )
 
 
+def _create_legacy_settlements_table(conn):
+    columns = [
+        "id INTEGER PRIMARY KEY",
+        "city TEXT",
+        "target_date TEXT",
+        "market_slug TEXT",
+        "winning_bin TEXT",
+        "settlement_value REAL",
+        "settlement_source TEXT",
+        "settlement_source_type TEXT",
+        "settled_at TEXT",
+        "authority TEXT",
+        "unit TEXT",
+        "temperature_metric TEXT",
+        "provenance_json TEXT",
+    ]
+    conn.execute(
+        f"""
+        CREATE TABLE settlements (
+            {", ".join(columns)}
+        )
+        """
+    )
+
+
+def _add_legacy_settlement_alias_columns(conn):
+    for column in (
+        "source_url",
+        "source_page",
+        "finalized_at",
+        "finalization_policy",
+        "revision_policy",
+        "late_update_policy",
+        "market_rule_version",
+        "settlement_rule_version",
+        "oracle_transform",
+    ):
+        conn.execute(f"ALTER TABLE settlements ADD COLUMN {column} TEXT")
+
+
+def _insert_legacy_settlement(
+    conn,
+    *,
+    market_slug="market-slug",
+    settlement_value=72.0,
+    winning_bin="72F",
+    unit="F",
+    temperature_metric="high",
+    provenance_json='{"source":"wu","payload_hash":"hash","rounding_rule":"wmo_half_up"}',
+    settlement_source="https://www.wunderground.com/history/daily/us/ny/new-york/KNYC",
+    settlement_source_type="WU",
+    settled_at="2026-04-23T19:50:34+00:00",
+    authority="VERIFIED",
+):
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(settlements)").fetchall()]
+    values = {
+        "city": "NYC",
+        "target_date": "2026-04-23",
+        "market_slug": market_slug,
+        "winning_bin": winning_bin,
+        "settlement_value": settlement_value,
+        "settlement_source": settlement_source,
+        "settlement_source_type": settlement_source_type,
+        "settled_at": settled_at,
+        "authority": authority,
+        "unit": unit,
+        "temperature_metric": temperature_metric,
+        "provenance_json": provenance_json,
+    }
+    insert_columns = [column for column in values if column in columns]
+    placeholders = ", ".join("?" for _ in insert_columns)
+    conn.execute(
+        f"""
+        INSERT INTO settlements ({", ".join(insert_columns)})
+        VALUES ({placeholders})
+        """,
+        [values[column] for column in insert_columns],
+    )
+
+
 class TestTrainingReadinessP0:
     """P0: forensic data-readiness checks are read-only and fail closed."""
 
@@ -513,6 +593,169 @@ class TestTrainingReadinessP0:
         check = report["checks"]["settlements_v2.market_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
+
+    def test_training_readiness_ignores_absent_legacy_settlements_table(self, tmp_path):
+        db_path = tmp_path / "no-legacy-settlements-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert not {
+            "settlements.legacy_market_identity_missing",
+            "settlements.legacy_finalization_policy_missing",
+            "settlements.legacy_value_incomplete",
+            "settlements.legacy_evidence_only",
+        } & _blocker_codes(report)
+        assert report["checks"]["settlements.legacy_evidence_only"]["status"] == "PASS"
+
+    def test_training_readiness_fails_when_legacy_settlements_lack_market_identity(self, tmp_path):
+        db_path = tmp_path / "legacy-missing-market-identity-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn, market_slug=None)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_market_identity_missing" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_market_identity_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_legacy_finalization_contract_is_absent(self, tmp_path):
+        db_path = tmp_path / "legacy-missing-finalization-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_finalization_policy_missing" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_finalization_policy_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_rejects_ad_hoc_legacy_finalization_aliases(self, tmp_path):
+        db_path = tmp_path / "legacy-ad-hoc-finalization-alias-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _add_legacy_settlement_alias_columns(conn)
+        _insert_legacy_settlement(conn)
+        conn.execute(
+            """
+            UPDATE settlements
+            SET source_url = settlement_source,
+                source_page = settlement_source,
+                finalized_at = settled_at,
+                finalization_policy = 'synthetic-policy',
+                revision_policy = 'synthetic-revision-policy',
+                late_update_policy = 'synthetic-late-update-policy',
+                market_rule_version = 'synthetic-market-rule-v1',
+                settlement_rule_version = 'synthetic-settlement-rule-v1',
+                oracle_transform = 'synthetic-transform'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "settlements.legacy_finalization_policy_missing" in blockers
+        check = report["checks"]["settlements.legacy_finalization_policy_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_legacy_value_evidence_is_incomplete(self, tmp_path):
+        db_path = tmp_path / "legacy-incomplete-value-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(
+            conn,
+            settlement_value=None,
+            winning_bin="",
+            unit=None,
+            provenance_json="{}",
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_value_incomplete" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_value_complete"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_does_not_count_quarantined_legacy_value_gaps(self, tmp_path):
+        db_path = tmp_path / "legacy-quarantined-value-gap-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(
+            conn,
+            authority="QUARANTINED",
+            settlement_value=None,
+            winning_bin=None,
+            unit=None,
+            provenance_json='{"source":"wu","rounding_rule":"wmo_half_up"}',
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_value_incomplete" not in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_value_complete"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
+
+    def test_training_readiness_reports_legacy_evidence_only_when_v2_is_empty(self, tmp_path):
+        db_path = tmp_path / "legacy-evidence-only-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM settlements_v2")
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_evidence_only" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_evidence_only"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_closed_on_legacy_finalization_even_when_v2_identity_is_ready(self, tmp_path):
+        db_path = tmp_path / "legacy-complete-evidence-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert report["ready"] is False
+        assert "settlements.legacy_finalization_policy_missing" in blockers
+        assert "settlements.legacy_market_identity_missing" not in blockers
+        assert "settlements.legacy_value_incomplete" not in blockers
+        assert "settlements.legacy_evidence_only" not in blockers
+        assert report["checks"]["settlements.legacy_finalization_policy_present"]["count"] == 1
 
     def test_training_readiness_fails_when_market_identity_columns_are_missing(self, tmp_path):
         db_path = tmp_path / "missing-market-identity-columns-world.db"
@@ -906,7 +1149,7 @@ class TestSettlementFreshness:
     def test_settlement_freshness(self):
         """Latest settlement activity must be within 48h.
 
-        Checks decision_log settlement artifacts and calibration_pairs,
+        Checks decision_log settlement artifacts and calibration_pairs_v2,
         not the deprecated legacy settlements table.
         """
         conn = get_connection()
@@ -914,12 +1157,13 @@ class TestSettlementFreshness:
             "SELECT MAX(timestamp) FROM decision_log WHERE mode = 'settlement'"
         ).fetchone()[0]
 
+        calibration_table = "calibration_pairs_v2"
         max_cal_target = conn.execute(
-            "SELECT MAX(target_date) FROM calibration_pairs"
+            f"SELECT MAX(target_date) FROM {calibration_table}"
         ).fetchone()[0]
 
         assert max_settled is not None or max_cal_target is not None, (
-            "No settlement activity found in decision_log or calibration_pairs"
+            "No settlement activity found in decision_log or calibration_pairs_v2"
         )
 
         if max_settled:
@@ -947,7 +1191,7 @@ def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monke
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
@@ -991,7 +1235,7 @@ def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypa
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'US-South', '2099-04-07', '76-77°F',
+            'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'Dallas', '2099-04-07', '76-77°F',
             'buy_no', 'F', 1.18, 1.28, 1.18, 0.92, 0.55,
             'snap-1', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-07T10:58:44.847407+00:00'
@@ -1035,7 +1279,7 @@ def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shado
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
