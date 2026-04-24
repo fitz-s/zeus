@@ -734,11 +734,49 @@
       ]
     },
     {
-      "slice_id": "S2.3",
-      "name": "data_readiness_tail_sha256_rollback_snapshot_sidecars",
+      "slice_id": "REOPEN-1",
+      "name": "forecasts_schema_alter_fix_urgent_live_failure_closed",
       "commit": "pending",
       "date": "2026-04-23",
-      "critic_status": "self_verified_three_antibody_probes_pass_critic_opus_dispatched_surrogate_pending",
+      "critic_status": "critic_opus_forensic_triage_CONFIRMED_finding_C1_capital_risk_HIGH_surrogate_dispatch_pending",
+      "planning_lock": "GREEN (src/state/db.py + tests/test_forecasts_schema_alignment.py + architecture/test_topology.yaml) using midstream plan.md as plan-evidence",
+      "live_failure_closed": "state/scheduler_jobs_health.json::k2_forecasts_daily FAILED every 30 min since 2026-04-23T13:30 with 'table forecasts has no column named rebuild_run_id'",
+      "root_cause_analysis": "src/data/forecasts_append.py:256-262 INSERTs 14 columns including rebuild_run_id + data_source_version. src/state/db.py:653-668 CREATE TABLE forecasts declared only 12 columns. Legacy zeus-world.db predates the writer adding those two columns; CREATE TABLE IF NOT EXISTS no-ops on existing table so columns never got added. Same mechanical pattern as T3.3 position_current.",
+      "plan_premise_correction_twelve": "Critic-opus forensic-audit finding C1 originally cited src/state/db.py:209 as rebuild_run_id declaration. Grep-verified: L209 is rebuild_run_id on observations (L150-223 block). Actual forecasts CREATE starts at L653. Forecasts table was correctly consistent with live DB (both had 13 cols); drift is WRITER-SIDE. Fix ADD to declaration + ALTER path. Correction applied inline.",
+      "files_changed": [
+        "src/state/db.py (2 new columns on CREATE TABLE forecasts + new ALTER TABLE loop after existing trade_decisions ALTER)",
+        "tests/test_forecasts_schema_alignment.py (NEW — 5 structural-alignment antibodies mirroring T3.2b pattern)",
+        "architecture/test_topology.yaml (registered test via isolate-and-restore; zero co-tenant scope bleed)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "antibody_tests_new": [
+        "test_fresh_db_forecasts_has_rebuild_run_id_and_data_source_version",
+        "test_legacy_db_forecasts_is_migrated_by_alter_path",
+        "test_alter_path_is_idempotent_on_already_migrated_db",
+        "test_writer_insert_columns_are_declared_by_init_schema (STRUCTURAL ALIGNMENT — Fitz K<<N antibody)",
+        "test_writer_insert_columns_include_rebuild_run_id_sanity_check"
+      ],
+      "category_immunity_fitz_k_lt_n_score": "0.9/1.0 — structural-alignment antibody makes writer-schema drift CATEGORY impossible at CI time for forecasts. 0.1 gap: test is forecasts-scoped, not a repo-wide panel.",
+      "live_db_migration_required_but_out_of_slice": "daemon restart OR manual init_schema one-off needed to apply ALTER on running state/zeus-world.db. NOT performed by this slice per Zeus runtime-safety convention. Once applied: next 07:30 UTC k2_forecasts_daily tick will succeed; forecasts row count populates; B3 calibration substrate path unblocks.",
+      "isolate_and_restore_pattern_used_for_test_topology_yaml": "cotenant was dirty with +58 line test_trust_policy section. Pattern: cp to tmp, git checkout HEAD, re-apply my 1-line via Edit tool, commit with clean isolated diff, post-commit cp restores cotenant state unstaged. Per memory rule 'Git scope bleed'.",
+      "regression_evidence_L28": {
+        "narrow": "pytest -q tests/test_forecasts_schema_alignment.py -> 5 passed in 0.05s",
+        "broad_2_file": "pytest -q tests/test_architecture_contracts.py tests/test_forecasts_schema_alignment.py -> 1 failed (pre-existing T3.2 _Logger.warning harness gap), 75 passed, 22 skipped. Zero new failures from this slice.",
+        "delta": "+5 passes from new test file; zero new failures"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_forecasts_schema_alignment.py -> 5 passed in 0.05s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/db.py tests/test_forecasts_schema_alignment.py architecture/test_topology.yaml --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok:true, issues:[]}",
+        ".venv/bin/python scripts/topology_doctor.py --map-maintenance --changed-files src/state/db.py tests/test_forecasts_schema_alignment.py architecture/test_topology.yaml --map-maintenance-mode precommit --json -> {ok:true, issues:[]}"
+      ]
+    },
+    {
+      "slice_id": "S2.3",
+      "name": "data_readiness_tail_sha256_rollback_snapshot_sidecars",
+      "commit": "a29fd5b",
+      "date": "2026-04-23",
+      "critic_status": "surrogate_code_reviewer_opus_APPROVE_WITH_CONDITIONS_G7_oserror_addressed_inline_critic_opus_dispatched",
       "planning_lock": "GREEN on 4-file core (scripts/snapshot_checksum.py + architecture/script_manifest.yaml + .gitignore + state/*.sha256) using midstream plan.md as plan-evidence",
       "authority_basis_doc": "docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md",
       "authority_basis_section": "closure banner item 5 (SHA-256 for rollback snapshot hashes; MD5 is collision-broken)",
