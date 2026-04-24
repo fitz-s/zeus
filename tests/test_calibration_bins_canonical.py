@@ -1,5 +1,9 @@
-# Created: 2026-04-14
-# Last reused/audited: 2026-04-23
+# Lifecycle: created=2026-04-14; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: R1-R13 relationship + unit tests for canonical-bin calibration
+#          refactor (bin_source discriminator, authority filter, INV-14 spine).
+# Reuse: Referenced by regression suite; touched 2026-04-24 for M3
+#        CANONICAL_DATA_VERSIONS → CANONICAL_ENSEMBLE_DATA_VERSIONS
+#        symbol rename in test_R13 (assertions unchanged).
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """R1–R13 relationship + unit tests for the canonical-bin calibration refactor.
 
@@ -764,19 +768,19 @@ def test_R14_quarantine_allows_replacement_tag():
     peak-window tag is now explicitly quarantined (superseded by
     `tigge_mx2t6_local_calendar_day_max_v1` canonical-day semantics). The
     positive allowlist at L141 also rejects anything outside
-    CANONICAL_DATA_VERSIONS, so the only versions that pass the full
+    CANONICAL_ENSEMBLE_DATA_VERSIONS, so the only versions that pass the full
     `assert_data_version_allowed` two-stage check are the canonical
     dual-track high/low versions.
     """
     from src.contracts.ensemble_snapshot_provenance import (
-        CANONICAL_DATA_VERSIONS,
+        CANONICAL_ENSEMBLE_DATA_VERSIONS,
         assert_data_version_allowed,
         is_quarantined,
     )
-    assert len(CANONICAL_DATA_VERSIONS) >= 2, (
+    assert len(CANONICAL_ENSEMBLE_DATA_VERSIONS) >= 2, (
         "Expected at least the high and low track canonical data_versions"
     )
-    for dv in sorted(CANONICAL_DATA_VERSIONS):
+    for dv in sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS):
         assert not is_quarantined(dv), dv
         assert_data_version_allowed(dv)  # must not raise
 

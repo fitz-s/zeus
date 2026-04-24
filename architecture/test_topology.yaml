@@ -148,6 +148,7 @@ categories:
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
+    - tests/test_canonical_data_versions_namespace.py
     - tests/test_harvester_high_calibration_v2_route.py
     - tests/test_harvester_metric_identity.py
     - tests/test_ingest_grib_law5_antibody.py

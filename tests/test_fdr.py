@@ -1,5 +1,9 @@
-# Created: 2026-03-30
-# Last reused/audited: 2026-04-23
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
+#          substrate boundary-gate + Day0 causal-day edge case coverage.
+# Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
+#        CANONICAL_DATA_VERSIONS → CANONICAL_ENSEMBLE_DATA_VERSIONS comment
+#        rename (no assertion change).
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for FDR (Benjamini-Hochberg) filter.
 
@@ -63,7 +67,7 @@ def _seed_ensemble_snapshots_v2_row(
     physical_quantity='mx2t6_local_calendar_day_max',
     observation_field='high_temp',
     data_version='tigge_mx2t6_local_calendar_day_max_v1') per INV-14
-    identity spine + CANONICAL_DATA_VERSIONS allowlist at
+    identity spine + CANONICAL_ENSEMBLE_DATA_VERSIONS allowlist at
     src/contracts/ensemble_snapshot_provenance.py. Members are a plain
     4-member array matching the test's FakeEns.member_maxes shape.
     """

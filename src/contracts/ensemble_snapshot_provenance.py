@@ -65,9 +65,79 @@ from typing import Iterable
 
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
-CANONICAL_DATA_VERSIONS: frozenset[str] = frozenset({
+CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,
+})
+
+# M3 (2026-04-24): deprecation alias. The historical name
+# ``CANONICAL_DATA_VERSIONS`` applied only to ``ensemble_snapshots_v2``
+# writers/readers — it was never observation-level or settlement-level.
+# The rename makes the domain explicit and leaves space for parallel
+# observation/settlement allowlists below. Keep the alias for one
+# release cycle so external callers migrate; drop via a cleanup slice
+# once all consumers reference the renamed set.
+CANONICAL_DATA_VERSIONS: frozenset[str] = CANONICAL_ENSEMBLE_DATA_VERSIONS
+
+# Module-level identity guard (con-nyx T2-S4 NICE-TO-HAVE #3): fail at
+# import time if a future edit silently broadens the alias to a
+# different set (e.g., union with settlement/observation). Runtime-
+# only test coverage would miss an import by the daemon before tests
+# run.
+assert CANONICAL_DATA_VERSIONS is CANONICAL_ENSEMBLE_DATA_VERSIONS, (
+    "CANONICAL_DATA_VERSIONS deprecation alias must stay object-identical "
+    "to CANONICAL_ENSEMBLE_DATA_VERSIONS; semantic divergence would let "
+    "non-ensemble data_versions bypass the ensemble write gate via the "
+    "legacy symbol."
+)
+
+# M3 (2026-04-24): parallel allowlists for the two other canonical
+# truth surfaces. Each set is scaffolding — the constants are defined
+# so that future writers/readers can cite them; no current consumer
+# asserts against these sets yet. Promote one consumer at a time via
+# a dedicated slice that wires the assertion into the respective
+# writer contract (see `CANONICAL_ENSEMBLE_DATA_VERSIONS` usage at
+# ``assert_data_version_allowed`` below for the pattern).
+#
+# Observation data_version catalog (observation_instants_v2 writer at
+# ``src/data/observation_instants_v2_writer.py``).
+#
+# AUTHORITY TIERS (con-nyx T2-S4 finding 1, 2026-04-24):
+#   - PRODUCTION-GROUNDED: ``v1.wu-native`` (verified via grep of
+#     ``src/state/schema/v2_schema.py::338,344,365`` +
+#     ``src/data/observation_instants_v2_writer.py::154``). Live DB has
+#     1,813,662 rows carrying this value.
+#   - ASPIRATIONAL: ``v1.hko-native``, ``v1.ogimet-native``,
+#     ``v1.meteostat-native``, ``v1.openmeteo-native`` — no production
+#     writer or reader cites these today outside this allowlist. They
+#     follow the ``v1.<source>-native`` convention + reflect known-planned
+#     source paths, but they are not authority-verified.
+#
+# Before wiring a writer contract (``assert_observation_data_version_
+# allowed``) against this set, VERIFY the target entry has an actual
+# source writer. Do not treat set membership alone as proof the
+# source is live. Fitz Constraint #4 applies: inherited classification
+# without provenance is UNVERIFIED until re-validated.
+CANONICAL_OBSERVATION_DATA_VERSIONS: frozenset[str] = frozenset({
+    "v1.wu-native",         # PRODUCTION-GROUNDED (1.8M rows live)
+    "v1.hko-native",         # ASPIRATIONAL — verify before consumer wiring
+    "v1.ogimet-native",      # ASPIRATIONAL
+    "v1.meteostat-native",   # ASPIRATIONAL
+    "v1.openmeteo-native",   # ASPIRATIONAL
+})
+
+# Settlement data_version catalog (harvester live-write path at
+# ``src/execution/harvester.py::_HARVESTER_LIVE_DATA_VERSION``).
+# Settlement data_version is source-scoped, not metric-scoped — a HIGH
+# WU-origin settlement row carries ``wu_icao_history_v1`` regardless of
+# whether it derives from the HIGH or LOW metric identity (metric
+# identity lives in the separate INV-14 columns). Enumerate from the
+# harvester writer's dispatch dict.
+CANONICAL_SETTLEMENT_DATA_VERSIONS: frozenset[str] = frozenset({
+    "wu_icao_history_v1",
+    "hko_daily_api_v1",
+    "ogimet_metar_v1",
+    "cwa_no_collector_v0",
 })
 
 
@@ -138,11 +208,11 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
             f"Use tigge_mx2t6_local_calendar_day_max_v1 (high track canonical, "
             f"Phase 4+) instead.{ctx}"
         )
-    if data_version not in CANONICAL_DATA_VERSIONS:
+    if data_version not in CANONICAL_ENSEMBLE_DATA_VERSIONS:
         ctx = f" (context={context})" if context else ""
         raise DataVersionQuarantinedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
-            f"is not in the canonical allowlist {sorted(CANONICAL_DATA_VERSIONS)}. "
+            f"is not in the canonical allowlist {sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS)}. "
             f"Only canonical dual-track versions are permitted in ensemble_snapshots_v2.{ctx}"
         )
 

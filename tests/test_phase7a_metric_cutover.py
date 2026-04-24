@@ -455,7 +455,7 @@ class TestR_BO_BackfillDataVersionContract:
 
         _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
                                temperature_metric="high", range_label="80-84")
-        # Insert snapshot with a NON-canonical data_version (not in _CANONICAL_DATA_VERSIONS)
+        # Insert snapshot with a NON-canonical data_version (not in CANONICAL_ENSEMBLE_DATA_VERSIONS)
         conn.execute(
             """
             INSERT INTO ensemble_snapshots_v2
