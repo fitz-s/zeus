@@ -93,6 +93,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-20_workspace_authority_reconstruction/` | packet evidence | Workspace-authority reconstruction execution packet |
 | `task_2026-04-21_gate_f_data_backfill/` | packet evidence | Local Gate F data backfill packet present on disk |
 | `task_2026-04-22_orphan_artifact_cleanup/` | packet evidence | Cleanup of stale root scratch files and inactive workbook artifacts |
+| `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation packet (test-currency + D3/D4/D6 antibody wave + data-readiness-tail follow-ups); includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
+| `task_2026-04-23_live_harvester_enablement_dr33/` | packet evidence | DR-33-A live-harvester enablement packet (code-only scaffold behind ZEUS_HARVESTER_LIVE_ENABLED default OFF) |
+| `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
+| `zeus_world_data_forensic_audit_package_2026-04-23/` | package input | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
 

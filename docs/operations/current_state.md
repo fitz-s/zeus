@@ -8,6 +8,7 @@ Role: single live control pointer for the repo.
 - Mainline task: **Midstream Remediation + Data-Readiness-Tail CONDITIONAL-ACHIEVED 2026-04-24**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_midstream_remediation/receipt.json`
+- Post-audit handoff (zero-context cold-start doc for next session): `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
 - Status: CONDITIONAL milestone materially reached. Midstream 36-slice
   workbook: T1+T2+T3+T4+T5+T7+N1.2 all CLOSED or applied. Data-readiness
   tail: S2.1/S2.2/S2.3/S2.4/S2.5/S3.1/REOPEN-1/REOPEN-2/DR-33-B all
