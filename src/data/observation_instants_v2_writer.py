@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-04-24
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
 """Typed writer for observation_instants_v2 with A1/A2/A6 enforcement.
@@ -44,14 +44,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from src.data.tier_resolver import (
+    SOURCE_ROLE_FALLBACK_EVIDENCE,
+    SOURCE_ROLE_HISTORICAL_HOURLY,
     Tier,
     allowed_sources_for_city,
-    expected_source_for_city,
+    source_role_assessment_for_city_source,
     tier_for_city,
 )
 
@@ -81,6 +83,10 @@ _ALLOWED_TIME_BASIS: frozenset[str] = frozenset(
 )
 
 _ALLOWED_TEMP_UNITS: frozenset[str] = frozenset({"F", "C"})
+
+_CAUSALITY_OK = "OK"
+_CAUSALITY_RUNTIME_ONLY_FALLBACK = "RUNTIME_ONLY_FALLBACK"
+_CAUSALITY_REQUIRES_SOURCE_REAUDIT = "REQUIRES_SOURCE_REAUDIT"
 
 
 class InvalidObsV2RowError(ValueError):
@@ -270,16 +276,54 @@ _INSERT_SQL = """
         temp_current, running_max, running_min, delta_rate_per_h,
         temp_unit, station_id, observation_count, raw_response,
         source_file, imported_at, authority, data_version,
-        provenance_json
+        provenance_json, training_allowed, causality_status, source_role
     ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?
     )
 """
 
 
+def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
+    """Return explicit source-role fields for the INSERT tuple.
+
+    ``ObsV2Row`` construction has already enforced non-empty provenance and
+    the A2 per-city source allowlist. This function binds the accepted row to
+    the frozen P1.1 registry so SQLite defaults cannot promote fallback rows.
+    """
+    assessment = source_role_assessment_for_city_source(
+        row.city,
+        row.source,
+        has_provenance=True,
+    )
+
+    if assessment.training_allowed:
+        if assessment.source_role != SOURCE_ROLE_HISTORICAL_HOURLY:
+            raise InvalidObsV2RowError(
+                f"P1.2 violation (city={row.city}, source={row.source}): "
+                f"training-eligible row has source_role={assessment.source_role!r}."
+            )
+        return 1, _CAUSALITY_OK, assessment.source_role
+
+    if assessment.source_role == SOURCE_ROLE_FALLBACK_EVIDENCE:
+        if assessment.reason == "hko_requires_fresh_audit":
+            return 0, _CAUSALITY_REQUIRES_SOURCE_REAUDIT, assessment.source_role
+        return 0, _CAUSALITY_RUNTIME_ONLY_FALLBACK, assessment.source_role
+
+    raise InvalidObsV2RowError(
+        f"P1.2 violation (city={row.city}, source={row.source}): "
+        "row passed writer validation but source-role assessment is not "
+        f"insertable: role={assessment.source_role!r}, "
+        f"training_allowed={assessment.training_allowed!r}, "
+        f"reason={assessment.reason!r}."
+    )
+
+
 def _row_to_tuple(row: ObsV2Row) -> tuple[Any, ...]:
     """Serialize an ObsV2Row into the parameter tuple matching _INSERT_SQL."""
+    training_allowed, causality_status, source_role = (
+        _derive_insert_source_fields(row)
+    )
     return (
         row.city,
         row.target_date,
@@ -306,6 +350,9 @@ def _row_to_tuple(row: ObsV2Row) -> tuple[Any, ...]:
         row.authority,
         row.data_version,
         row.provenance_json,
+        training_allowed,
+        causality_status,
+        source_role,
     )
 
 

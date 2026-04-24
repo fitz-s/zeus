@@ -2,7 +2,8 @@
 
 Date: 2026-04-24
 Branch: `data-improve`
-Status: planning-only packet for observation_instants_v2 writer provenance gates
+Status: implementation active after planning freeze `e498b0d` received
+post-close critic/verifier PASS
 
 ## Task
 

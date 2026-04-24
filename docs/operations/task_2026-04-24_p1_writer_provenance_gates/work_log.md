@@ -9,6 +9,8 @@ Changed files:
 - `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
 - `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
 - `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `src/data/observation_instants_v2_writer.py`
+- `tests/test_obs_v2_writer.py`
 
 Summary:
 - Closed the live pointer over P1.1 and rotated active operations routing to
@@ -73,9 +75,41 @@ Verification:
 - After the fact-reset work-log update, reran `planning-lock`, `work-record`,
   `change-receipts`, `current-state-receipt-bound`, `map-maintenance`, and
   `git diff --check`; all passed for the same five-file planning set.
+- P1.2 planning commit `e498b0d` pushed to `origin/data-improve`. Post-close
+  third-party critic and verifier both passed, freezing the plan for
+  implementation.
+- Implementation ralplan checks completed: architect approved writer-local
+  derivation with stable `ObsV2Row`; test-engineer required additional positive
+  persistence coverage for Tier-2 primary Ogimet and WU Meteostat fallback.
+- Test-first red run: `.venv/bin/python -m pytest tests/test_obs_v2_writer.py
+  tests/test_hk_rejects_vhhh_source.py -q` failed 5 new persistence assertions,
+  proving the writer still relied on DB defaults (`source_role=NULL`,
+  fallback/HKO `training_allowed=1`, `causality_status='OK'`).
+- Implemented writer-local derivation in
+  `src/data/observation_instants_v2_writer.py`: INSERT now explicitly writes
+  `training_allowed`, `causality_status`, and `source_role` from the P1.1
+  registry without changing `ObsV2Row` constructor or caller scripts.
+- Green verification:
+  `.venv/bin/python -m py_compile src/data/observation_instants_v2_writer.py
+  scripts/backfill_obs_v2.py scripts/fill_obs_v2_dst_gaps.py
+  scripts/fill_obs_v2_meteostat.py scripts/hko_ingest_tick.py` passed;
+  `.venv/bin/python -m pytest tests/test_obs_v2_writer.py
+  tests/test_hk_rejects_vhhh_source.py tests/test_tier_resolver.py -q`
+  passed (78 tests);
+  `.venv/bin/python -m pytest tests/test_backfill_scripts_match_live_config.py
+  -q` passed (8 tests).
+- Implementation topology gates passed for the seven-file implementation set:
+  `planning-lock`, `work-record`, `change-receipts`,
+  `current-state-receipt-bound`, `map-maintenance`, `freshness-metadata`, and
+  `git diff --check`.
+- Code Review Graph status remains derived-red: missing ignore guard, stale
+  graph head, and partial coverage for the touched writer/test files. Per
+  root AGENTS, graph output is derived context only and does not override the
+  scoped gates, packet receipt, source rationale, or tests.
+- Pre-close critic and verifier both passed. Critic found the writer-local
+  derivation narrow and consistent with P1.1; verifier confirmed receipt/diff
+  consistency, green tests, topology gates, and derived-red graph recording.
 
 Next:
-- Run final critic/verifier check on the fixed packet.
-- Commit and push scoped planning files only.
-- Run post-close third-party critic/verifier on the pushed plan commit before
-  implementation.
+- Commit and push scoped implementation files only.
+- Run post-close third-party critic/verifier before freezing the next packet.

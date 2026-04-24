@@ -1,10 +1,12 @@
 {
-  "task": "P1.2 observation_instants_v2 writer provenance gates ralplan",
+  "task": "P1.2 observation_instants_v2 writer provenance gates implementation",
   "packet": "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md"
   ],
+  "planning_commit": "e498b0dc7f1adf184e94b952bea9a441a8ab7c20",
+  "post_close_review": "planning commit received critic/verifier PASS before implementation",
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",
@@ -27,7 +29,10 @@
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json"
+    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
+    "src/data/observation_instants_v2_writer.py",
+    "tests/test_obs_v2_writer.py",
+    "tests/test_hk_rejects_vhhh_source.py"
   ],
   "future_implementation_allowed_files": [
     "src/data/observation_instants_v2_writer.py",
@@ -56,7 +61,9 @@
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json"
+    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
+    "src/data/observation_instants_v2_writer.py",
+    "tests/test_obs_v2_writer.py"
   ],
   "tests_evidence": [
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md"

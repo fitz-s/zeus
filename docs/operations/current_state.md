@@ -5,11 +5,12 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: **Post-audit P1.2 writer provenance gates ralplan — active 2026-04-24**
+- Mainline task: **Post-audit P1.2 writer provenance gates implementation — active 2026-04-24**
 - Active package source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
-- Status: planning-only; P1.1 is closed and post-close reviewed.
+- Status: implementation active inside plan freeze `e498b0d`; P1.1 is closed
+  and P1.2 planning received post-close critic/verifier PASS.
 
 ## Required evidence
 
@@ -19,9 +20,10 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Current freeze: P1.2 is planning-only until architect/critic/verifier review
-  closes, the plan packet is committed and pushed, and post-close review
-  passes. Runtime/source implementation starts only after that freeze.
+- Current freeze: P1.2 implementation may change only the writer-local code,
+  scoped writer tests, and active-packet closeout bookkeeping listed in the
+  receipt. Schema, DB rows, source registry, caller constructors/scripts,
+  calibration/replay consumers, authority docs, and architecture remain frozen.
 
 ## Current fact companions
 
@@ -36,8 +38,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Finish P1.2 ralplan: complete critic/verifier review, apply fixes if any,
-  then commit and push scoped planning files only.
-- After push, run the required third-party critic/verifier pass before
-  treating P1.2 as frozen for implementation.
+- Commit and push scoped P1.2 implementation files only.
+- After push, run the required third-party post-close critic/verifier before
+  closing P1.2 or freezing the next packet.
 - Preserve unrelated dirty work and concurrent in-flight edits.

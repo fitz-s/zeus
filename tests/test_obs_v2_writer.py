@@ -1,5 +1,6 @@
-# Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Pin observation_instants_v2 writer provenance and source-role semantics.
+# Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
 # Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
 #                  migration-iter3.md L119-120); step2 Phase 0 file #9.
 """Antibody A1 (missing provenance) + A2 (source-tier consistency) for the
@@ -20,7 +21,12 @@ from src.data.observation_instants_v2_writer import (
     ObsV2Row,
     insert_rows,
 )
-from src.data.tier_resolver import Tier, tier_for_city
+from src.data.tier_resolver import (
+    SOURCE_ROLE_FALLBACK_EVIDENCE,
+    SOURCE_ROLE_HISTORICAL_HOURLY,
+    Tier,
+    tier_for_city,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 
 
@@ -50,6 +56,24 @@ def _minimal_valid_kwargs(**overrides) -> dict:
 
 def _make_row(**overrides) -> ObsV2Row:
     return ObsV2Row(**_minimal_valid_kwargs(**overrides))
+
+
+def _source_semantics(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    source: str,
+) -> tuple[str | None, int | None, str | None]:
+    row = conn.execute(
+        """
+        SELECT source_role, training_allowed, causality_status
+        FROM observation_instants_v2
+        WHERE city=? AND source=?
+        """,
+        (city, source),
+    ).fetchone()
+    assert row is not None, f"missing row for city={city!r}, source={source!r}"
+    return row
 
 
 # ----------------------------------------------------------------------
@@ -284,6 +308,88 @@ def test_insert_rows_round_trip_preserves_provenance(mem_db):
     parsed = json.loads(prov)
     assert parsed["tier"] == "WU_ICAO"
     assert parsed["icao"] == "KORD"
+
+
+def test_insert_rows_round_trip_primary_wu_persists_source_role_training_ok(mem_db):
+    row = _make_row()
+    insert_rows(mem_db, [row])
+
+    assert _source_semantics(mem_db, city=row.city, source=row.source) == (
+        SOURCE_ROLE_HISTORICAL_HOURLY,
+        1,
+        "OK",
+    )
+
+
+def test_insert_rows_round_trip_primary_ogimet_city_persists_source_role_training_ok(
+    mem_db,
+):
+    row = _make_row(
+        city="Moscow",
+        source="ogimet_metar_uuww",
+        timezone_name="Europe/Moscow",
+        local_timestamp="2024-01-15T17:00:00+03:00",
+        utc_timestamp="2024-01-15T14:00:00+00:00",
+        utc_offset_minutes=180,
+        station_id="UUWW",
+        provenance_json=json.dumps({"tier": "OGIMET_METAR", "station": "UUWW"}),
+    )
+    insert_rows(mem_db, [row])
+
+    assert _source_semantics(mem_db, city=row.city, source=row.source) == (
+        SOURCE_ROLE_HISTORICAL_HOURLY,
+        1,
+        "OK",
+    )
+
+
+@pytest.mark.parametrize(
+    "fallback_source",
+    ["ogimet_metar_kord", "meteostat_bulk_kord"],
+)
+def test_insert_rows_round_trip_wu_fallback_persists_runtime_only_source_role(
+    mem_db,
+    fallback_source,
+):
+    row = _make_row(
+        source=fallback_source,
+        provenance_json=json.dumps(
+            {"tier": "WU_ICAO", "fallback": fallback_source, "station": "KORD"}
+        ),
+    )
+    insert_rows(mem_db, [row])
+
+    assert _source_semantics(mem_db, city=row.city, source=row.source) == (
+        SOURCE_ROLE_FALLBACK_EVIDENCE,
+        0,
+        "RUNTIME_ONLY_FALLBACK",
+    )
+
+
+def test_insert_rows_round_trip_hko_persists_source_reaudit_status(mem_db):
+    row = ObsV2Row(
+        **_minimal_valid_kwargs(
+            city="Hong Kong",
+            source="hko_hourly_accumulator",
+            authority="ICAO_STATION_NATIVE",
+            data_version="v1.hk-accumulator.forward",
+            provenance_json=json.dumps({"tier": "HKO_NATIVE", "station": "HKO"}),
+            station_id="HKO",
+            timezone_name="Asia/Hong_Kong",
+            local_timestamp="2024-01-15T22:00:00+08:00",
+            utc_timestamp="2024-01-15T14:00:00+00:00",
+            utc_offset_minutes=480,
+            time_basis="hourly_accumulator",
+            temp_unit="C",
+        )
+    )
+    insert_rows(mem_db, [row])
+
+    assert _source_semantics(mem_db, city=row.city, source=row.source) == (
+        SOURCE_ROLE_FALLBACK_EVIDENCE,
+        0,
+        "REQUIRES_SOURCE_REAUDIT",
+    )
 
 
 def test_view_stays_empty_until_zeus_meta_flips(mem_db):

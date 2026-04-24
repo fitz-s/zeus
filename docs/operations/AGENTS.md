@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-24_p1_writer_provenance_gates/` | Active P1.2 writer provenance gates ralplan packet |
+| `task_2026-04-24_p1_writer_provenance_gates/` | Active P1.2 writer provenance gates implementation packet |
 
 ### Packet Evidence
 
@@ -103,7 +103,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
 | `task_2026-04-24_p0_data_audit_containment/` | packet evidence | Closed P0 post-audit containment packet for read-only training-readiness blockers and legacy-hourly static lint |
 | `task_2026-04-24_p1_source_role_registry/` | packet evidence | Closed P1.1 source-role registry packet (plan `2424264`, implementation `af7dd52`; post-close critic/verifier PASS) |
-| `task_2026-04-24_p1_writer_provenance_gates/` | active packet | P1.2 writer provenance gates ralplan packet; planning-only until plan review closes |
+| `task_2026-04-24_p1_writer_provenance_gates/` | active packet | P1.2 writer provenance gates implementation packet; plan freeze `e498b0d` post-close critic/verifier PASS |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
