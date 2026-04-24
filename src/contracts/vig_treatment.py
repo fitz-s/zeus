@@ -123,6 +123,19 @@ class VigTreatment:
                 f"needed impute, source should be 'none'."
             )
 
+        # T6.3-hardening (con-nyx post-edit finding b): each entry in
+        # imputed_bins MUST correspond to a raw_market_prices position that
+        # was zero pre-impute. Otherwise a direct dataclass construction
+        # (bypassing from_raw) could lie about which bins were imputed.
+        # This closes a new silent-failure category: bogus provenance claims.
+        for i in self.imputed_bins:
+            if self.raw_market_prices[i] != 0.0:
+                raise ValueError(
+                    f"VigTreatment.imputed_bins includes index {i} but "
+                    f"raw_market_prices[{i}]={self.raw_market_prices[i]} "
+                    f"is non-zero. Imputation only applies to zero bins."
+                )
+
         # Complete-market vectors devig to sum-to-1. Sparse-imputed vectors
         # keep mixed observed+prior values and defer normalization to caller.
         if not self.imputed_bins:
@@ -186,6 +199,17 @@ class VigTreatment:
 
         if sibling_snapshot is None:
             # Complete-market devig path (backwards-compatible behavior).
+            # T6.3-hardening (con-nyx post-edit finding j): if caller supplied
+            # imputation_source != "none" but forgot sibling_snapshot, raise
+            # instead of silently resetting source to "none". This closes a
+            # caller-intent-vs-implementation drift silent-failure category.
+            if imputation_source != "none":
+                raise ValueError(
+                    f"VigTreatment.from_raw: imputation_source="
+                    f"{imputation_source!r} declared but sibling_snapshot is "
+                    f"None. Provide sibling_snapshot (even a zero-vector) or "
+                    f"leave imputation_source='none'."
+                )
             vig_factor = float(np.sum(raw_market_prices))
             if vig_factor <= 0.0:
                 raise ValueError(
