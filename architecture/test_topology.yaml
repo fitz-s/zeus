@@ -148,6 +148,7 @@ categories:
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
     - tests/test_settlements_authority_trigger.py
+    - tests/test_settlements_unique_migration.py
     - tests/test_settlements_verified_row_integrity.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
