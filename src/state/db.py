@@ -855,20 +855,27 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
 
     # P-B authority-monotonic trigger (INV-FP-5 enforcement).
     # Reactivation contract: QUARANTINED->VERIFIED requires a top-level JSON key
-    # `reactivated_by` with a non-null value in provenance_json. Substring LIKE
-    # is intentionally avoided to prevent false-positive matches on keys like
-    # "not_reactivated_by". CREATE TRIGGER IF NOT EXISTS is idempotent.
+    # `reactivated_by` that is a non-empty text value in provenance_json.
+    # Substring LIKE is intentionally avoided to prevent false-positive matches
+    # on keys like "not_reactivated_by". DROP + CREATE (not CREATE IF NOT EXISTS)
+    # because S2.1 (2026-04-23 data-readiness-tail) extended the WHEN clause to
+    # reject presence-only bypasses (reactivated_by=false / 0 / "" / {} / [])
+    # — IF NOT EXISTS would silently retain the weaker v1 predicate on any DB
+    # that had it. Idempotency preserved via DROP IF EXISTS.
     try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_authority_monotonic")
         conn.execute(
             """
-            CREATE TRIGGER IF NOT EXISTS settlements_authority_monotonic
+            CREATE TRIGGER settlements_authority_monotonic
             BEFORE UPDATE OF authority ON settlements
             WHEN (OLD.authority = 'VERIFIED' AND NEW.authority = 'UNVERIFIED')
               OR (OLD.authority = 'QUARANTINED' AND NEW.authority = 'VERIFIED'
                   AND (NEW.provenance_json IS NULL
-                       OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL))
+                       OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL
+                       OR json_type(NEW.provenance_json, '$.reactivated_by') != 'text'
+                       OR length(json_extract(NEW.provenance_json, '$.reactivated_by')) = 0))
             BEGIN
-                SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED missing provenance_json.reactivated_by');
+                SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED requires provenance_json.reactivated_by to be a non-empty text value');
             END;
             """
         )

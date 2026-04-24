@@ -146,6 +146,7 @@ categories:
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
+    - tests/test_settlements_authority_trigger.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
     - tests/test_shadow_boundary.py

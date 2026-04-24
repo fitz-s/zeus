@@ -734,9 +734,60 @@
       ]
     },
     {
+      "slice_id": "S2.1",
+      "name": "data_readiness_tail_reactivated_by_value_validation_in_trigger",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_11_antibodies_pass_critic_opus_plus_surrogate_dispatch_pending",
+      "planning_lock": "GREEN on 3 files (src/state/db.py + tests/test_settlements_authority_trigger.py + architecture/test_topology.yaml) using midstream plan.md as plan-evidence",
+      "authority_basis": "data-readiness workstream closure banner item 4 — settlements_authority_monotonic reactivated_by validation beyond presence-only",
+      "pre_s21_vulnerability": "Trigger WHEN clause checked only `json_extract(..., '$.reactivated_by') IS NULL`. Values that satisfy IS NOT NULL but are semantically empty (boolean false, integer 0, empty string, JSON object {}, JSON array []) all passed the gate, allowing QUARANTINED -> VERIFIED transitions with no accountable operator identity.",
+      "post_s21_contract": "WHEN clause extended: in addition to IS NULL, rejects `json_type != 'text'` (blocks false/0/object/array) AND `length == 0` (blocks empty string). Only a non-empty text value satisfies reactivation gate. Trigger dropped and recreated via DROP IF EXISTS + CREATE (not CREATE IF NOT EXISTS) so legacy DBs with v1 trigger get the hardened v2.",
+      "files_changed": [
+        "src/state/db.py (trigger WHEN clause extended; DROP+CREATE pattern replaces CREATE IF NOT EXISTS; rationale comment added)",
+        "tests/test_settlements_authority_trigger.py (NEW — 11 antibodies across 4 classes)",
+        "architecture/test_topology.yaml (registered under useful_regression via isolate-and-restore; zero co-tenant scope bleed)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "antibody_tests": {
+        "rejection_bypasses_closed_by_s21": [
+          "test_reactivation_rejected_when_reactivated_by_is_false",
+          "test_reactivation_rejected_when_reactivated_by_is_integer_zero",
+          "test_reactivation_rejected_when_reactivated_by_is_empty_string",
+          "test_reactivation_rejected_when_reactivated_by_is_object",
+          "test_reactivation_rejected_when_reactivated_by_is_array"
+        ],
+        "backward_compat_pre_s21_protections_still_hold": [
+          "test_reactivation_rejected_when_reactivated_by_missing",
+          "test_reactivation_rejected_when_reactivated_by_is_null",
+          "test_reactivation_rejected_when_provenance_json_null"
+        ],
+        "acceptance_path_must_still_work": [
+          "test_reactivation_accepted_when_reactivated_by_is_non_empty_text",
+          "test_verified_to_unverified_always_rejected"
+        ],
+        "idempotency": [
+          "test_trigger_drop_and_recreate_is_idempotent"
+        ]
+      },
+      "category_immunity_fitz_k_lt_n_score": "1.0/1.0 — complete category closure. The 5 presence-only bypass classes (false, 0, empty-string, object, array) are now structurally impossible; only non-empty text satisfies the gate. This is exactly the Fitz 'make the category impossible, not just the instance' pattern: not 15 patches in 15 call sites, but one trigger predicate that makes the wrong caller unable to succeed.",
+      "live_db_migration_required_but_out_of_slice": "daemon restart OR manual init_schema one-off applies DROP+CREATE to running state/zeus-world.db. Pre-S2.1 trigger remains active until then. NOT performed by this slice.",
+      "isolate_and_restore_pattern": "architecture/test_topology.yaml co-tenant-dirty with test_trust_policy section; used cp-to-tmp + git-checkout-HEAD + Edit-tool + commit + cp-tmp-back pattern. Clean isolated 1-line hunk in commit diff.",
+      "regression_evidence_L28": {
+        "narrow": "pytest -q tests/test_settlements_authority_trigger.py -> 11 passed in 0.10s",
+        "delta": "+11 passes from new test file; no existing test touched; delta = 0 new failures"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_settlements_authority_trigger.py -> 11 passed in 0.10s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/db.py tests/test_settlements_authority_trigger.py architecture/test_topology.yaml --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> GREEN",
+        ".venv/bin/python scripts/topology_doctor.py --map-maintenance --changed-files src/state/db.py tests/test_settlements_authority_trigger.py architecture/test_topology.yaml --map-maintenance-mode precommit --json -> GREEN"
+      ]
+    },
+    {
       "slice_id": "REOPEN-1",
       "name": "forecasts_schema_alter_fix_urgent_live_failure_closed",
-      "commit": "pending",
+      "commit": "619b278",
       "date": "2026-04-23",
       "critic_status": "critic_opus_forensic_triage_CONFIRMED_finding_C1_capital_risk_HIGH_surrogate_dispatch_pending",
       "planning_lock": "GREEN (src/state/db.py + tests/test_forecasts_schema_alignment.py + architecture/test_topology.yaml) using midstream plan.md as plan-evidence",
