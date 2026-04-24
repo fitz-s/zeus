@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+from src.contracts.execution_price import polymarket_fee
+
 
 @dataclass(frozen=True)
 class HoldValue:
@@ -138,10 +140,20 @@ class HoldValue:
             "not yet wired" per T6.4-minimal scope.
 
         When hours_to_settlement is None (unavailable), time_cost
-        collapses to 0.0 — caller should treat that as a soft
-        conservative default rather than an authority gap; the exit
-        path's INCOMPLETE_EXIT_CONTEXT gate handles hard authority
-        failures before this factory is called.
+        collapses to 0.0. IMPORTANT (con-nyx post-edit finding c):
+        "collapse" is NOT "conservative against D6" — it makes net_value
+        HIGHER (less cost deducted), which makes the exit EV gate hold
+        MORE positions. This is an authority gap at that call site:
+        under flag ON + hours=None, T6.4 silently degrades to pre-T6.4
+        behavior for the time-cost component. Callers MUST surface this
+        via an applied_validations breadcrumb so monitor summaries catch
+        the degradation; see src/state/portfolio.py _buy_yes_exit /
+        _buy_no_exit "hold_value_hours_unknown_time_cost_zero" tag.
+
+        Note on capital_locked semantic (con-nyx finding b): uses
+        shares × best_bid (mark-to-market exit notional), NOT entry
+        notional (size_usd). Entry is sunk cost; locked capital is
+        what you'd release by exiting now, which tracks mark-to-market.
 
         Args:
             shares: notional share count (size_usd / entry_price).
@@ -166,10 +178,6 @@ class HoldValue:
                 f"correlation_crowding must be >= 0 (crowding is a COST, "
                 f"not a bonus); got {correlation_crowding}"
             )
-
-        # Import locally to avoid circular dependency
-        # (hold_value → execution_price → … → hold_value).
-        from src.contracts.execution_price import polymarket_fee
 
         gross_value = float(shares) * float(current_p_posterior)
 

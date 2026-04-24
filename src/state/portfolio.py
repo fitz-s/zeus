@@ -555,6 +555,12 @@ class Position:
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
             if hold_value_exit_costs_enabled():
                 applied.append("hold_value_exit_costs_enabled")
+                if hours_to_settlement is None or hours_to_settlement < 0.0:
+                    # T6.4-hardening (con-nyx finding c): authority gap —
+                    # time_cost collapses to 0.0, silently degrading D6
+                    # protection at this call site. Surface via breadcrumb
+                    # so monitor summaries can count these occurrences.
+                    applied.append("hold_value_hours_unknown_time_cost_zero")
                 hold_value = HoldValue.compute_with_exit_costs(
                     shares=shares,
                     current_p_posterior=current_p_posterior,
@@ -611,6 +617,8 @@ class Position:
             shares = self.size_usd / self.entry_price
             if hold_value_exit_costs_enabled():
                 applied.append("hold_value_exit_costs_enabled")
+                if hours_to_settlement is None or hours_to_settlement < 0.0:
+                    applied.append("hold_value_hours_unknown_time_cost_zero")
                 hold_value = HoldValue.compute_with_exit_costs(
                     shares=shares,
                     current_p_posterior=current_p_posterior,
@@ -673,6 +681,8 @@ class Position:
                 shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
                     applied.append("hold_value_exit_costs_enabled")
+                    if hours_to_settlement is None or hours_to_settlement < 0.0:
+                        applied.append("hold_value_hours_unknown_time_cost_zero")
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,
@@ -736,6 +746,8 @@ class Position:
                 shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
                     applied.append("hold_value_exit_costs_enabled")
+                    if hours_to_settlement is None or hours_to_settlement < 0.0:
+                        applied.append("hold_value_hours_unknown_time_cost_zero")
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,

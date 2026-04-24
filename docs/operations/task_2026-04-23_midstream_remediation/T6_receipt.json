@@ -119,6 +119,35 @@
     "closed_minimal_with_phase2_deferred": ["T6.4"],
     "blocked": ["T6.1", "T6.2"]
   },
+  "t6_4_pre_flag_flip_checklist": {
+    "owner": "operator (before flipping feature_flags.HOLD_VALUE_EXIT_COSTS=true)",
+    "items_remaining_unenforced_by_code": [
+      {
+        "id": "currency_verify_polymarket_fee",
+        "source": "con-nyx T6.4 post-edit finding (a)",
+        "action": "Re-verify Polymarket fee schedule at https://docs.polymarket.com/trading/fees against `src/contracts/execution_price.py:130 polymarket_fee` formula `rate × p × (1-p)` with fee_rate=0.05. Record verification date in T6.4 receipt addendum. Currently last-verified 2026-03 (per git log on execution_price.py)."
+      },
+      {
+        "id": "replay_receipt_precondition",
+        "source": "con-nyx T6.4 post-edit finding (j)",
+        "action": "Operator confirms T6.3-followup-1 production-corpus bootstrap-CI + should_exit delta audit has been executed AND accepted before flipping HOLD_VALUE_EXIT_COSTS=true. Current state: flag-note at config/settings.json:147 documents the prerequisite in prose; code does NOT enforce file-existence. A future hardening slice could add a file-presence assertion inside hold_value_exit_costs_enabled() pointing at docs/operations/.../T6.3-followup-1_replay_receipt.json; deferred for operator policy decision."
+      }
+    ]
+  },
+  "t6_4_hardening_con_nyx_post_edit": {
+    "commit": "pending (this session)",
+    "scope": "Third T6.4 hardening pass addressing con-nyx post-edit review of commit 96fd850 (which was timed just before commit 6b4455f; 6b4455f already covered con-nyx's hurdle-bounds portion of finding (j)). This commit closes the remaining CONDITIONAL (c) hours=None D6-bypass + cheap NICEs (b) docstring + (d) flag-OFF parity antibody + (h) local-import cleanup + (i) fee_rate two-source-of-truth coupling.",
+    "changes": [
+      "CONDITIONAL (c) hours=None authority-gap breadcrumb: when flag ON and hours_to_settlement is None or <0, _buy_yes_exit + _buy_no_exit now append 'hold_value_hours_unknown_time_cost_zero' to applied_validations. Surfaces the D6-bypass via monitor summary counts instead of silent degradation. 3 new tests lock the behavior at both buy_yes/buy_no paths + regression guard that breadcrumb does NOT fire when hours is valid.",
+      "NICE (b) capital_locked semantic docstring: hold_value.py compute_with_exit_costs docstring clarified — mark-to-market (shares × best_bid) is D6-correct over entry notional (size_usd) because entry is sunk cost; what's actually locked is the exit value you'd release by closing now.",
+      "NICE (d) flag-OFF parity antibody: test_flag_off_parity_with_pre_t64_bare_math exercises _buy_yes_exit with flag OFF and asserts the decision matches the pre-T6.4 bare-math `sell_value <= hold_gross` formula inline. Belt-and-suspenders against silent regression in flag-OFF preservation path.",
+      "NICE (h) local-import cleanup: polymarket_fee import moved to module-level in hold_value.py. Verified no circular dependency (execution_price does not import hold_value). Cleaner, eliminates per-call import-cache lookup.",
+      "NICE (i) fee_rate coupling antibody: test_fee_rate_config_matches_polymarket_fee_default pins config.exit.fee_rate == polymarket_fee.__defaults__ at CI time. Drift in either source is caught before deploy."
+    ],
+    "tests_added": 5,
+    "regression": "24 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 19; +5 hardening tests).",
+    "con_nyx_findings_deferred_to_pre_flag_flip_checklist": ["a (currency verify)", "j remaining (replay-receipt enforcement)"]
+  },
   "t6_4_hardening_landed_inline": {
     "commit": "pending (this session)",
     "scope": "Close surrogate post-edit 2 HIGH + 2 MEDIUM findings before operator flag flip.",
